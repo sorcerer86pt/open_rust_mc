@@ -128,7 +128,23 @@ impl NuclideData {
                 detail: format!("cannot read /{nuclide_name}/reactions/{rxn_name}/{label}/xs: {e}"),
             })?;
 
-            let xs_interp = interpolate_to_grid(&energy_grids[t_idx], &xs_raw, &union);
+            let e_grid = &energy_grids[t_idx];
+            let n_grid = e_grid.len();
+            let n_xs = xs_raw.len();
+
+            // Handle threshold reactions: xs array may be shorter than energy grid.
+            // The xs values correspond to the LAST n_xs points of the energy grid.
+            // Below threshold, cross-section is zero.
+            let xs_full = if n_xs < n_grid {
+                let mut full = vec![0.0_f64; n_grid];
+                let offset = n_grid - n_xs;
+                full[offset..].copy_from_slice(&xs_raw);
+                full
+            } else {
+                xs_raw
+            };
+
+            let xs_interp = interpolate_to_grid(e_grid, &xs_full, &union);
             xs_per_temp.push(xs_interp);
         }
 
