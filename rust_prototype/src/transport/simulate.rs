@@ -56,6 +56,9 @@ pub trait XsProvider {
     fn fission_energy_dist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
         None
     }
+
+    /// Apply URR probability table sampling to cross-sections.
+    fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
 }
 
 /// Simple constant cross-section provider for testing.
@@ -143,9 +146,15 @@ pub fn run_eigenvalue<XS: XsProvider>(
                 let material = &materials[mat_idx];
 
                 // Look up microscopic cross-sections for each nuclide
+                // Apply URR probability table sampling if in the URR range
+                let urr_xi = rng.uniform(); // single random number for consistent band sampling
                 let micro_xs: Vec<MicroXs> = material.nuclides
                     .iter()
-                    .map(|nuc| xs_provider.lookup(nuc.xs_kernel_idx, particle.energy))
+                    .map(|nuc| {
+                        let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+                        xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+                        xs
+                    })
                     .collect();
 
                 let micro_totals: Vec<f64> = micro_xs.iter().map(|x| x.total).collect();

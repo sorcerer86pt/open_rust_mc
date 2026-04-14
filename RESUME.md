@@ -7,8 +7,8 @@ Paste this as your first message:
 ```
 Read C:\Users\fog\madman_svd_experiment\CLAUDE.md then continue working on open_rust_mc. 
 
-Current state: pure Rust Monte Carlo engine gets k_eff=1.006 +/- 0.001 on Godiva
-(OpenMC gets 0.99857). Gap = ~800 pcm. Repo: https://github.com/sorcerer86pt/open_rust_mc
+Current state: pure Rust Monte Carlo engine gets k_eff=1.007 +/- 0.001 on Godiva
+(OpenMC gets 0.99857). Gap = ~850 pcm. Repo: https://github.com/sorcerer86pt/open_rust_mc
 
 Completed physics:
 - Energy-dependent nu-bar (total = prompt + delayed) from HDF5
@@ -18,11 +18,13 @@ Completed physics:
 - Anisotropic scattering angular distributions (tabular CDF from HDF5)
 - Data-driven fission energy spectrum (continuous tabulated from HDF5)
 - Proper two-body kinematics for all inelastic channels
+- URR probability tables (20-band sampling, multiply_smooth + absolute)
 
-Next task: close the remaining ~800 pcm gap:
-1. URR probability tables (~100-500 pcm)
-2. Free gas thermal scattering (negligible for fast Godiva)
-3. Interpolated angular distributions (currently nearest-energy, not interpolated)
+Remaining ~850 pcm gap from OpenMC likely from:
+- Interpolated (vs nearest-energy) angular/energy distributions
+- Energy-dependent inelastic angular distributions
+- Free gas thermal scattering (small for fast Godiva)
+- SVD reconstruction accuracy in resonance region
 
 Working directory: C:\Users\fog\madman_svd_experiment
 Rust project: C:\Users\fog\madman_svd_experiment\rust_prototype

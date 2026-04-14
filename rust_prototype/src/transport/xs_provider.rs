@@ -6,7 +6,7 @@
 //! product instead of binary-searching a table.
 
 use crate::decompose;
-use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData};
+use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData, UrrProbabilityTables};
 use crate::kernel::SvdKernel;
 use crate::physics::collision::MicroXs;
 use crate::transport::simulate::XsProvider;
@@ -39,6 +39,8 @@ pub struct NuclideKernels {
     pub elastic_angle: Option<AngularDistribution>,
     /// Fission energy distribution for prompt neutrons.
     pub fission_energy_dist: Option<EnergyDistribution>,
+    /// URR probability tables.
+    pub urr_tables: Option<UrrProbabilityTables>,
 }
 
 /// A discrete inelastic level with its cross-section kernel and Q-value.
@@ -103,6 +105,33 @@ impl NuclideKernels {
     pub fn discrete_level_info(&self) -> Vec<DiscreteLevelInfo> {
         self.discrete_levels.iter().map(|l| l.info.clone()).collect()
     }
+
+    /// Apply URR probability table factors to a MicroXs if the energy is in the URR.
+    ///
+    /// When `multiply_smooth=true`, the URR factors multiply the smooth XS values.
+    /// A random number `xi` selects the probability band for consistent sampling.
+    pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
+        let urr = match &self.urr_tables {
+            Some(u) if u.in_range(energy) => u,
+            _ => return,
+        };
+
+        let factors = urr.sample(energy, xi);
+
+        if urr.multiply_smooth {
+            // Multiply smooth XS by URR factors
+            xs.elastic *= factors.elastic;
+            xs.fission *= factors.fission;
+            xs.capture *= factors.capture;
+        } else {
+            // Replace smooth XS with absolute URR values
+            xs.elastic = factors.elastic;
+            xs.fission = factors.fission;
+            xs.capture = factors.capture;
+        }
+        // Recompute total from partials for consistency
+        xs.total = xs.elastic + xs.inelastic + xs.n2n + xs.n3n + xs.fission + xs.capture;
+    }
 }
 
 /// Cross-section provider backed by SVD-compressed kernels.
@@ -161,6 +190,10 @@ impl XsProvider for SvdXsProvider {
 
     fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
+    }
+
+    fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
+        self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
     }
 }
 
@@ -262,6 +295,20 @@ pub fn load_nuclide(
                  ang.energies.len(), ang.center_of_mass);
     }
 
+    // Load URR probability tables (use temp_idx to pick the right temperature)
+    // The common temp labels sorted are: ["250K", "294K", "600K", "900K", "1200K", "2500K"]
+    // temp_idx=1 corresponds to "294K" which is room temperature
+    let temp_labels = ["250K", "294K", "600K", "900K", "1200K", "2500K"];
+    let urr_temp = temp_labels.get(temp_idx).unwrap_or(&"294K");
+    let urr_tables = hdf5_reader::read_urr_tables(h5_path, urr_temp).unwrap_or(None);
+    if let Some(ref u) = urr_tables {
+        println!("    URR: {} energies, {} bands, range {:.0}–{:.0} eV, multiply_smooth={}",
+                 u.energies.len(), u.n_bands,
+                 u.energies.first().unwrap_or(&0.0),
+                 u.energies.last().unwrap_or(&0.0),
+                 u.multiply_smooth);
+    }
+
     let elastic = build_reaction_kernel(h5_path, 2, svd_rank, temp_idx);
     if elastic.is_some() { println!("    MT=2 (elastic): loaded"); }
 
@@ -289,5 +336,6 @@ pub fn load_nuclide(
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,
+        urr_tables,
     }
 }

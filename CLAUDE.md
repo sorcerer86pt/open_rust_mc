@@ -29,10 +29,10 @@ eigenvalue simulations end-to-end.
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
 - Each nuclide needs its own SVD basis — not a problem, bases are small
 
-## Current State: k_eff = 1.006 +/- 0.001 (Godiva, real ENDF data)
+## Current State: k_eff = 1.007 +/- 0.001 (Godiva, real ENDF data)
 
-OpenMC gets 0.99857. We get 1.006 +/- 0.001. Gap = ~800 pcm from OpenMC.
-Delta from experiment = 616 pcm. MC uncertainty = 138 pcm.
+OpenMC gets 0.99857. We get 1.007 +/- 0.001. Gap = ~850 pcm from OpenMC.
+Delta from experiment = 700 pcm. MC uncertainty = 100 pcm (120 batches, 15k particles).
 
 ### Implemented (Priority 1 from previous round)
 
@@ -70,15 +70,15 @@ Delta from experiment = 616 pcm. MC uncertainty = 138 pcm.
 - U-235: 20 incident energies, U-238: 25 incident energies
 - Impact: ~4000 pcm (from 0.965 up to 1.006) — critical correction
 
+**7. URR probability tables (DONE)**
+- Reads probability tables from HDF5: energy grid + [N_E, 6, N_bands] table
+- Handles both `multiply_smooth=true` (factors) and `false` (absolute XS)
+- U-234: 26 energies, 1.5-100 keV; U-235: 19 energies, 2.25-25 keV; U-238: 18 energies, 20-149 keV
+- Impact: ~100-200 pcm improvement
+
 ## What Needs Fixing (Physics Gaps vs OpenMC)
 
-### Priority 1 — Close the remaining ~800 pcm gap
-
-**7. Unresolved Resonance Range (URR) probability tables**
-- Currently: ignored (use average cross-sections)
-- OpenMC: samples from probability tables in the URR (2.25 keV - 25 keV for U-235)
-- Impact: ~100-500 pcm (affects self-shielding in the URR)
-- HDF5 path: `{nuclide}/urr/{temp}/table`
+### Priority 1 — Close the remaining ~850 pcm gap
 
 ### Priority 2 — Refinement
 
@@ -225,11 +225,12 @@ Extract to `data/endfb-vii.1-hdf5/`. Key files:
 | Godiva dk (fission SVD k=4) | 6.9 pcm |
 | Godiva dk (all rxn SVD k=4) | 3.7 pcm |
 | PWR pin cell dk (SVD k=5) | 59.7 pcm |
-| Our Rust Godiva k_eff | 1.006 +/- 0.001 |
+| Our Rust Godiva k_eff | 1.007 +/- 0.001 |
 | OpenMC Godiva k_eff | 0.99857 |
-| Gap from OpenMC | ~800 pcm |
-| Gap from experiment | 616 pcm |
+| Gap from OpenMC | ~850 pcm |
+| Gap from experiment | ~700 pcm |
 | History: const nu-bar | 0.994 (coincidental) |
 | History: + E-dep nu-bar | 1.059 (+6500 pcm) |
 | History: + aniso scatter | 0.965 (-9400 pcm) |
 | History: + data fission | 1.006 (+4100 pcm) |
+| History: + URR tables | 1.007 (stat. consistent) |

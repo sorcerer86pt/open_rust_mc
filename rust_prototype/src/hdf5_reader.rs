@@ -714,6 +714,200 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
     Ok(None)
 }
 
+/// Unresolved Resonance Range (URR) probability tables.
+///
+/// In the URR, cross-sections fluctuate statistically around the average.
+/// The probability table captures these fluctuations as a set of "bands"
+/// (discrete realizations). Each band has consistent cross-section factors
+/// for all reaction channels.
+pub struct UrrProbabilityTables {
+    /// Energy grid for the URR (eV), sorted ascending.
+    pub energies: Vec<f64>,
+    /// Number of probability bands (typically 20).
+    pub n_bands: usize,
+    /// Cumulative probabilities: [n_energy][n_bands].
+    pub cum_prob: Vec<Vec<f64>>,
+    /// Cross-section factors for total: [n_energy][n_bands].
+    pub total_factor: Vec<Vec<f64>>,
+    /// Cross-section factors for elastic: [n_energy][n_bands].
+    pub elastic_factor: Vec<Vec<f64>>,
+    /// Cross-section factors for fission: [n_energy][n_bands].
+    pub fission_factor: Vec<Vec<f64>>,
+    /// Cross-section factors for capture: [n_energy][n_bands].
+    pub capture_factor: Vec<Vec<f64>>,
+    /// Whether to multiply by smooth (average) cross-sections.
+    pub multiply_smooth: bool,
+}
+
+/// Sampled URR cross-section multipliers for one collision.
+#[derive(Debug, Clone, Copy)]
+pub struct UrrFactors {
+    pub total: f64,
+    pub elastic: f64,
+    pub fission: f64,
+    pub capture: f64,
+}
+
+impl UrrProbabilityTables {
+    /// Check if the given energy is within the URR range.
+    #[inline]
+    pub fn in_range(&self, energy: f64) -> bool {
+        if self.energies.is_empty() { return false; }
+        energy >= self.energies[0] && energy <= *self.energies.last().unwrap_or(&0.0)
+    }
+
+    /// Sample URR factors at a given energy.
+    ///
+    /// Returns cross-section multipliers if `multiply_smooth=true`,
+    /// or absolute cross-sections if `multiply_smooth=false`.
+    pub fn sample(&self, energy: f64, xi: f64) -> UrrFactors {
+        let n_e = self.energies.len();
+        if n_e == 0 {
+            return UrrFactors { total: 1.0, elastic: 1.0, fission: 1.0, capture: 1.0 };
+        }
+
+        // Find energy bracket
+        let idx = match self.energies.binary_search_by(|e| {
+            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => i,
+            Err(i) => if i > 0 { i - 1 } else { 0 },
+        };
+        let idx = idx.min(n_e - 1);
+
+        // Find the probability band using cumulative probability
+        let cum = &self.cum_prob[idx];
+        let mut band = 0;
+        for (j, &cp) in cum.iter().enumerate() {
+            if xi <= cp {
+                band = j;
+                break;
+            }
+            band = j;
+        }
+
+        UrrFactors {
+            total: self.total_factor[idx][band],
+            elastic: self.elastic_factor[idx][band],
+            fission: self.fission_factor[idx][band],
+            capture: self.capture_factor[idx][band],
+        }
+    }
+}
+
+/// Read URR probability tables from HDF5.
+///
+/// Data is at: `{nuclide}/urr/{temp}/`
+/// - `energy`: [N_E] energy grid
+/// - `table`: [N_E, 6, N_bands] probability tables
+///   Channel 0: cumulative probability
+///   Channel 1: total XS factor
+///   Channel 2: elastic XS factor
+///   Channel 3: fission XS factor
+///   Channel 4: capture XS factor
+///   Channel 5: heating (unused)
+pub fn read_urr_tables(path: &Path, temp_label: &str) -> Result<Option<UrrProbabilityTables>> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root groups: {e}"),
+    })?
+    .into_iter()
+    .next()
+    .ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no nuclide group found".into(),
+    })?;
+
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let urr = match nuc.group("urr") {
+        Ok(g) => g,
+        Err(_) => return Ok(None), // No URR data
+    };
+
+    let temp_group = match urr.group(temp_label) {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+
+    // Read attributes
+    let attrs = temp_group.attrs().unwrap_or_default();
+    let multiply_smooth = matches!(
+        attrs.get("multiply_smooth"),
+        Some(hdf5_pure::AttrValue::I64(1))
+    );
+
+    // Read energy grid
+    let energy_ds = match temp_group.dataset("energy") {
+        Ok(ds) => ds,
+        Err(_) => return Ok(None),
+    };
+    let energies = energy_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read urr energy: {e}"),
+    })?;
+    let n_e = energies.len();
+
+    // Read table: shape [N_E, 6, N_bands]
+    let table_ds = match temp_group.dataset("table") {
+        Ok(ds) => ds,
+        Err(_) => return Ok(None),
+    };
+    let table_shape = table_ds.shape().unwrap_or_default();
+    let table_raw = table_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read urr table: {e}"),
+    })?;
+
+    if table_shape.len() != 3 || table_shape[0] as usize != n_e || table_shape[1] != 6 {
+        return Ok(None);
+    }
+    let n_bands = table_shape[2] as usize;
+    let n_channels = 6_usize;
+
+    // Parse the 3D table: element at [e, c, b] = raw[e * 6 * n_bands + c * n_bands + b]
+    let mut cum_prob = Vec::with_capacity(n_e);
+    let mut total_factor = Vec::with_capacity(n_e);
+    let mut elastic_factor = Vec::with_capacity(n_e);
+    let mut fission_factor = Vec::with_capacity(n_e);
+    let mut capture_factor = Vec::with_capacity(n_e);
+
+    for e in 0..n_e {
+        let base = e * n_channels * n_bands;
+        let prob: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 0 * n_bands + b]).collect();
+        let total: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 1 * n_bands + b]).collect();
+        let elastic: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 2 * n_bands + b]).collect();
+        let fission: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 3 * n_bands + b]).collect();
+        let capture: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 4 * n_bands + b]).collect();
+
+        cum_prob.push(prob);
+        total_factor.push(total);
+        elastic_factor.push(elastic);
+        fission_factor.push(fission);
+        capture_factor.push(capture);
+    }
+
+    Ok(Some(UrrProbabilityTables {
+        energies,
+        n_bands,
+        cum_prob,
+        total_factor,
+        elastic_factor,
+        fission_factor,
+        capture_factor,
+        multiply_smooth,
+    }))
+}
+
 /// Read the angular distribution for a specific reaction from HDF5.
 ///
 /// Angular data is at: `{nuclide}/reactions/reaction_{MT}/product_0/distribution_0/angle/`
