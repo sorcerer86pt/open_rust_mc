@@ -185,6 +185,273 @@ impl NuclideData {
     }
 }
 
+/// Tabulated nu-bar (average neutrons per fission) as a function of energy.
+pub struct NuBarTable {
+    /// Energy grid in eV, sorted ascending.
+    pub energies: Vec<f64>,
+    /// Nu-bar values at each energy point.
+    pub values: Vec<f64>,
+}
+
+impl NuBarTable {
+    /// Interpolate nu-bar at a given energy (linear interpolation).
+    pub fn lookup(&self, energy: f64) -> f64 {
+        let n = self.energies.len();
+        if n == 0 { return 2.43; } // fallback
+        if n == 1 { return self.values[0]; }
+        if energy <= self.energies[0] { return self.values[0]; }
+        if energy >= self.energies[n - 1] { return self.values[n - 1]; }
+
+        // Binary search
+        let idx = match self.energies.binary_search_by(|e| {
+            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => return self.values[i],
+            Err(i) => i,
+        };
+
+        let i = idx - 1;
+        let frac = (energy - self.energies[i]) / (self.energies[i + 1] - self.energies[i]);
+        self.values[i] + frac * (self.values[i + 1] - self.values[i])
+    }
+}
+
+/// Discrete inelastic level info (for MT=51-91).
+#[derive(Debug, Clone)]
+pub struct DiscreteLevelInfo {
+    /// ENDF MT number (51-91).
+    pub mt: u32,
+    /// Q-value in eV (negative = excitation energy).
+    pub q_value: f64,
+    /// Threshold energy in eV: E_threshold = |Q| * (A+1)/A.
+    pub threshold: f64,
+}
+
+/// Read total nu-bar (neutron yield) from fission reaction products.
+///
+/// Total nu-bar = sum of all neutron product yields (prompt + delayed).
+/// OpenMC stores each neutron product under reaction_018/product_N with
+/// `@particle = "neutron"`. The yield dataset has shape [2, N] (tabulated)
+/// or shape [1] (constant).
+pub fn read_nu_bar(path: &Path) -> Result<NuBarTable> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root groups: {e}"),
+    })?
+    .into_iter()
+    .next()
+    .ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no nuclide group found".into(),
+    })?;
+
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let rxn_group = nuc.group("reactions").and_then(|r| r.group("reaction_018"));
+    let rxn_group = match rxn_group {
+        Ok(g) => g,
+        Err(_) => return Ok(NuBarTable { energies: vec![], values: vec![] }),
+    };
+
+    // Collect all neutron product yield tables (prompt + delayed)
+    let subgroups = rxn_group.groups().unwrap_or_default();
+    let mut prompt_table: Option<NuBarTable> = None;
+    let mut delayed_constants: Vec<f64> = Vec::new();
+
+    for product_name in &subgroups {
+        if !product_name.starts_with("product_") { continue; }
+
+        let product = match rxn_group.group(product_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        let attrs = product.attrs().unwrap_or_default();
+
+        let is_neutron = matches!(
+            attrs.get("particle"),
+            Some(hdf5_pure::AttrValue::String(s)) if s == "neutron"
+        );
+        if !is_neutron { continue; }
+
+        let is_prompt = matches!(
+            attrs.get("emission_mode"),
+            Some(hdf5_pure::AttrValue::String(s)) if s == "prompt"
+        );
+
+        let yield_ds = match product.dataset("yield") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
+
+        let shape = yield_ds.shape().unwrap_or_default();
+        let raw = match yield_ds.read_f64() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+
+        if is_prompt {
+            // Prompt neutron yield — the main tabulated table
+            if shape.len() == 2 && shape[0] == 2 {
+                let n = shape[1] as usize;
+                if raw.len() >= 2 * n {
+                    prompt_table = Some(NuBarTable {
+                        energies: raw[..n].to_vec(),
+                        values: raw[n..2 * n].to_vec(),
+                    });
+                }
+            } else if shape.len() == 1 && shape[0] == 1 {
+                prompt_table = Some(NuBarTable {
+                    energies: vec![1e-5, 20.0e6],
+                    values: vec![raw[0], raw[0]],
+                });
+            }
+        } else {
+            // Delayed neutron group — usually constant yield
+            if shape.len() == 2 && shape[0] == 2 {
+                let n = shape[1] as usize;
+                if raw.len() >= 2 * n {
+                    // Use average of tabulated values
+                    let sum: f64 = raw[n..2 * n].iter().sum();
+                    delayed_constants.push(sum / n as f64);
+                }
+            } else if shape.len() == 1 && shape[0] == 1 {
+                delayed_constants.push(raw[0]);
+            }
+        }
+    }
+
+    match prompt_table {
+        Some(mut table) => {
+            // Add delayed neutron yield to the prompt table
+            let delayed_total: f64 = delayed_constants.iter().sum();
+            if delayed_total > 0.0 {
+                for v in &mut table.values {
+                    *v += delayed_total;
+                }
+            }
+            Ok(table)
+        }
+        None => Ok(NuBarTable { energies: vec![], values: vec![] }),
+    }
+}
+
+/// Read the atomic weight ratio from the HDF5 nuclide file.
+pub fn read_awr(path: &Path) -> Result<f64> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root groups: {e}"),
+    })?
+    .into_iter()
+    .next()
+    .ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no nuclide group found".into(),
+    })?;
+
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let attrs = nuc.attrs().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read attributes: {e}"),
+    })?;
+
+    if let Some(hdf5_pure::AttrValue::F64(awr)) = attrs.get("atomic_weight_ratio") {
+        Ok(*awr)
+    } else {
+        Err(SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "missing atomic_weight_ratio attribute".into(),
+        })
+    }
+}
+
+/// Discover discrete inelastic levels (MT=51-91) and read their Q-values.
+///
+/// Returns a sorted list of levels with Q-values and thresholds.
+pub fn read_discrete_levels(path: &Path, awr: f64) -> Result<Vec<DiscreteLevelInfo>> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root groups: {e}"),
+    })?
+    .into_iter()
+    .next()
+    .ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no nuclide group found".into(),
+    })?;
+
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let reactions = match nuc.group("reactions") {
+        Ok(g) => g,
+        Err(_) => return Ok(vec![]),
+    };
+
+    let rxn_names = reactions.groups().unwrap_or_default();
+
+    let mut levels = Vec::new();
+    for name in &rxn_names {
+        // Parse MT number from "reaction_051" etc.
+        let mt: u32 = match name.strip_prefix("reaction_").and_then(|s| s.parse().ok()) {
+            Some(mt) if (51..=91).contains(&mt) => mt,
+            _ => continue,
+        };
+
+        let rxn = match reactions.group(name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        let attrs = rxn.attrs().unwrap_or_default();
+        let q_value = if let Some(hdf5_pure::AttrValue::F64(q)) = attrs.get("Q_value") {
+            *q
+        } else {
+            continue; // no Q-value — skip
+        };
+
+        // Threshold: E_threshold = |Q| * (A+1)/A for endothermic reactions
+        let threshold = if q_value < 0.0 {
+            (-q_value) * (awr + 1.0) / awr
+        } else {
+            0.0
+        };
+
+        levels.push(DiscreteLevelInfo { mt, q_value, threshold });
+    }
+
+    // Sort by MT number (which corresponds to ascending excitation energy)
+    levels.sort_by_key(|l| l.mt);
+    Ok(levels)
+}
+
 /// Linear interpolation of (x_src, y_src) onto x_dst.
 /// Both x_src and x_dst must be sorted ascending.
 fn interpolate_to_grid(x_src: &[f64], y_src: &[f64], x_dst: &[f64]) -> Vec<f64> {

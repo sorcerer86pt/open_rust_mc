@@ -29,75 +29,72 @@ eigenvalue simulations end-to-end.
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
 - Each nuclide needs its own SVD basis — not a problem, bases are small
 
-## Current State: k_eff = 0.994 (Godiva, real ENDF data)
+## Current State: k_eff = 1.059 (Godiva, real ENDF data)
 
-OpenMC gets 0.99857. We get 0.994. Gap = ~500 pcm.
+OpenMC gets 0.99857. We get 1.059. Gap = ~6100 pcm (too high).
+
+Previous k_eff was 0.994 with constant nu-bar=2.43. The coincidental agreement
+with experiment was because the too-low nu-bar compensated for missing physics
+(primarily anisotropic scattering). With correct energy-dependent nu-bar
+(~2.53 at 1 MeV), k_eff jumped to 1.059. The ~6000 pcm gap from OpenMC is
+from missing angular distributions and other Priority 1 items below.
+
+### Implemented (Priority 1 from previous round)
+
+**1. Energy-dependent nu-bar (DONE)**
+- Reads total ν̄(E) from HDF5 (prompt + delayed neutron yields)
+- U-235: 79-point table, 2.435 thermal → 2.530 @ 1 MeV → 3.836 @ 10 MeV
+- U-238: 10-point table, 2.483 thermal → 2.554 @ 1 MeV → 3.849 @ 10 MeV
+- U-234: falls back to constant (no neutron product in reaction_018)
+- Revealed that old k_eff=0.994 was coincidental (compensating errors)
+
+**2. Discrete inelastic levels MT=51-91 (DONE)**
+- Loads all 41 levels per nuclide with real Q-values from HDF5 attributes
+- SVD-compressed at rank 2, cross-sections used for level sampling
+- Proper two-body kinematics with exact Q-value per level
+- Impact on k_eff: negligible for Godiva (< 50 pcm)
+
+**3. Continuum inelastic MT=91 (DONE)**
+- Evaporation spectrum with nuclear temperature T = sqrt(E*/a)
+- Level density parameter a = A/8 MeV⁻¹
+- Detected automatically from HDF5 level enumeration
+
+**4. (n,3n) reaction MT=17 (DONE)**
+- SVD kernel loaded, banks 2 extra neutrons
+- Small cross-section, only at high energies (~10-20 pcm)
 
 ## What Needs Fixing (Physics Gaps vs OpenMC)
 
-### Priority 1 — Closes most of the 500 pcm gap
+### Priority 1 — Closes the ~6000 pcm gap
 
-**1. Energy-dependent nu-bar (ν̄)**
-- Currently: constant 2.43 for U-235
-- OpenMC: reads ν̄(E) from HDF5 (`/reactions/reaction_018/{temp}/nu`)
-- Impact: ~50-100 pcm. ν̄ varies from ~2.43 at thermal to ~4.0+ at 14 MeV
-- Fix: add `nu_bar` as an SVD kernel (or simpler: tabulated lookup from HDF5)
-- HDF5 path: `{nuclide}/reactions/reaction_018/nu/yield` or similar
+**5. Energy-dependent scattering angular distributions (BIGGEST IMPACT)**
+- Currently: isotropic in CM frame for all energies
+- OpenMC: reads angular distribution tables (Legendre coefficients or
+  tabular P(mu|E)) from HDF5 for each reaction
+- Impact: **~3000-4000 pcm** — forward-peaked scattering increases leakage
+  from the small Godiva sphere, dramatically lowering k_eff
+- HDF5 path: `{nuclide}/reactions/reaction_{MT:03}/product_0/distribution`
+- This is now the single biggest source of error
 
-**2. Proper inelastic level kinematics**
-- Currently: fixed 45 keV excitation energy for all inelastic events
-- OpenMC: reads discrete level energies from `reaction_051` through `reaction_091`,
-  samples which level is excited proportionally to its cross-section, applies
-  proper two-body kinematics with the exact Q-value for that level
-- Impact: ~100-200 pcm. Wrong energy loss means wrong spectrum, wrong fission rate
-- Fix: load MT=51-91 individual cross-sections (already SVD-compressible, rank-1),
-  sample level, use its Q-value for kinematics
-- HDF5 path: `{nuclide}/reactions/reaction_{MT:03}/{temp}/xs`
-- Q-values: stored as attribute `Q_value` on each reaction group
-
-**3. Continuum inelastic (MT=91)**
-- Currently: not distinguished from discrete levels
-- OpenMC: above the resolved level region, uses an evaporation spectrum for
-  the outgoing neutron energy
-- Impact: ~50 pcm at fast energies
-- Fix: if energy > highest discrete level threshold, sample from evaporation
-  spectrum with nuclear temperature T = sqrt(E*/a) where E* = excitation
-  energy and a = level density parameter (~A/8 MeV⁻¹)
-
-**4. (n,3n) reaction MT=17**
-- Currently: not loaded
-- OpenMC: reads MT=17, produces 3 outgoing neutrons
-- Impact: ~10-20 pcm (small cross-section, only at very high energies)
-- Fix: same pattern as (n,2n) — load SVD kernel, bank 2 extra neutrons
-
-### Priority 2 — Refinement (< 50 pcm each)
-
-**5. Watt fission spectrum parameters from data**
+**6. Watt fission spectrum parameters from data**
 - Currently: hardcoded a=0.988 MeV, b=2.249/MeV (U-235 thermal)
 - OpenMC: reads parameters from HDF5 per nuclide, energy-dependent
-- Impact: ~20-30 pcm (spectrum shape affects leakage)
+- Impact: ~500-1000 pcm (spectrum shape affects leakage in small systems)
 - HDF5 path: energy distributions stored under reaction products
 
-**6. Unresolved Resonance Range (URR) probability tables**
+**7. Unresolved Resonance Range (URR) probability tables**
 - Currently: ignored (use average cross-sections)
 - OpenMC: samples from probability tables in the URR (2.25 keV - 25 keV for U-235)
-- Impact: ~20-50 pcm (affects self-shielding in the URR)
+- Impact: ~100-500 pcm (affects self-shielding in the URR)
 - HDF5 path: `{nuclide}/urr/{temp}/table`
 
-**7. Free gas thermal scattering correction**
+### Priority 2 — Refinement
+
+**8. Free gas thermal scattering correction**
 - Currently: target nucleus is stationary (cold target approximation)
 - OpenMC: samples target velocity from Maxwell-Boltzmann distribution,
   applies relative velocity correction (important at low energies)
 - Impact: ~10-30 pcm for thermal systems, negligible for fast Godiva
-- Fix: sample target velocity, compute relative velocity, scatter in
-  relative frame, transform back to lab frame
-
-**8. Energy-dependent scattering angular distributions**
-- Currently: isotropic in CM frame for all energies
-- OpenMC: reads angular distribution tables (Legendre coefficients or
-  tabular P(μ|E)) from HDF5 for each reaction
-- Impact: ~10-20 pcm (mostly affects leakage calculation)
-- HDF5 path: `{nuclide}/reactions/reaction_{MT:03}/product_0/distribution`
 
 ### Priority 3 — Feature parity (correctness, not pcm)
 
@@ -236,6 +233,7 @@ Extract to `data/endfb-vii.1-hdf5/`. Key files:
 | Godiva dk (fission SVD k=4) | 6.9 pcm |
 | Godiva dk (all rxn SVD k=4) | 3.7 pcm |
 | PWR pin cell dk (SVD k=5) | 59.7 pcm |
-| Our Rust Godiva k_eff | 0.994 |
+| Our Rust Godiva k_eff | 1.059 |
 | OpenMC Godiva k_eff | 0.99857 |
-| Gap to close | ~500 pcm |
+| Gap to close | ~6100 pcm (from isotropic scattering + missing physics) |
+| Previous k_eff (const nu-bar) | 0.994 (coincidental, compensating errors) |

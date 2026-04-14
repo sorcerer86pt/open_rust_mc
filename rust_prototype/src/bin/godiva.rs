@@ -84,10 +84,14 @@ fn main() {
                 elastic: None,
                 inelastic: None,
                 n2n: None,
+                n3n: None,
                 fission: None,
                 capture: None,
                 awr: *awr,
-                nu_bar: *nu_bar,
+                nu_bar_const: *nu_bar,
+                nu_bar_table: None,
+                discrete_levels: vec![],
+                has_continuum_inelastic: false,
             });
         } else {
             nuclide_kernels.push(xs_provider::load_nuclide(
@@ -147,7 +151,7 @@ fn main() {
     println!("\nRunning eigenvalue simulation...\n");
     let t1 = Instant::now();
 
-    let (results, k_final) = simulate::run_eigenvalue(
+    let (results, _k_final) = simulate::run_eigenvalue(
         &config, &surfaces, &cells, &materials, &xs_provider,
     );
 

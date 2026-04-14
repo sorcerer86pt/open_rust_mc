@@ -11,7 +11,8 @@
 use crate::geometry::{self, Vec3};
 use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
-use crate::physics::collision::{self, CollisionOutcome, MicroXs};
+use crate::hdf5_reader::DiscreteLevelInfo;
+use crate::physics::collision::{self, CollisionOutcome, InelasticData, MicroXs};
 use crate::transport::material::Material;
 use crate::transport::particle::{FissionBank, FissionSite, Particle};
 use crate::transport::rng::Rng;
@@ -29,6 +30,22 @@ pub struct SimConfig {
 pub trait XsProvider {
     /// Get microscopic cross-sections for a nuclide at a given energy.
     fn lookup(&self, nuclide_idx: usize, energy: f64) -> MicroXs;
+
+    /// Get discrete inelastic level info for a nuclide.
+    /// Returns empty slices by default (no detailed inelastic).
+    fn discrete_level_info(&self, _nuclide_idx: usize) -> Vec<DiscreteLevelInfo> {
+        vec![]
+    }
+
+    /// Look up cross-sections for each discrete level at the given energy.
+    fn discrete_level_xs(&self, _nuclide_idx: usize, _energy: f64) -> Vec<f64> {
+        vec![]
+    }
+
+    /// Whether the nuclide has continuum inelastic (MT=91).
+    fn has_continuum_inelastic(&self, _nuclide_idx: usize) -> bool {
+        false
+    }
 }
 
 /// Simple constant cross-section provider for testing.
@@ -185,10 +202,27 @@ pub fn run_eigenvalue<XS: XsProvider>(
                             rng.uniform(),
                         );
 
+                        // Build inelastic data for this nuclide
+                        let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+                        let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+                        let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+                        let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+
+                        let inelastic_data = if !level_info.is_empty() {
+                            Some(InelasticData {
+                                levels: &level_info,
+                                level_xs: &level_xs,
+                                has_continuum: has_cont,
+                            })
+                        } else {
+                            None
+                        };
+
                         // Process collision
                         let outcome = collision::process_collision(
                             &mut particle,
                             &micro_xs[nuc_idx],
+                            inelastic_data.as_ref(),
                             &mut rng,
                         );
 
@@ -226,7 +260,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
             k_count += 1;
         }
 
-        let k_avg = if k_count > 0 { k_sum / k_count as f64 } else { k_batch };
+        let _k_avg = if k_count > 0 { k_sum / k_count as f64 } else { k_batch };
         let active = if batch > config.inactive { " *" } else { "" };
         println!(
             "  Batch {batch:>4}: k={k_batch:.5}  collisions={collisions}  \
@@ -278,7 +312,7 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell]) -> Vec<Fission
 fn normalize_fission_bank(bank: &FissionBank, n: usize, batch: u32) -> Vec<FissionSite> {
     if bank.is_empty() {
         // No fissions — recycle with default source
-        let mut rng = Rng::new(batch as u64 + 999, 0);
+        let _rng = Rng::new(batch as u64 + 999, 0);
         return (0..n)
             .map(|_| FissionSite {
                 pos: Vec3::new(0.0, 0.0, 0.0),
@@ -335,6 +369,7 @@ mod tests {
                 elastic: 4.0,
                 inelastic: 0.0,
                 n2n: 0.0,
+                n3n: 0.0,
                 fission: 1.2,
                 capture: 0.1,
                 nu_bar: 2.43,

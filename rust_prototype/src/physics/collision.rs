@@ -1,16 +1,15 @@
 //! Collision processing — determine what happens when a neutron hits a nucleus.
 //!
 //! At each collision:
-//!   1. Sample which nuclide is hit (proportional to N_i · σ_t,i)
-//!   2. Sample which reaction occurs (proportional to σ_x / σ_t)
+//!   1. Sample which nuclide is hit (proportional to N_i · sigma_t,i)
+//!   2. Sample which reaction occurs (proportional to sigma_x / sigma_t)
 //!   3. Process the reaction: scatter, absorb, or fission
 
+use crate::hdf5_reader::DiscreteLevelInfo;
 use crate::transport::particle::{FissionSite, Particle};
 use crate::transport::rng::Rng;
-use crate::geometry::Vec3;
 
 /// Cross-section data for a nuclide at a specific energy.
-/// These would be looked up via the SVD kernel in production.
 #[derive(Debug, Clone, Copy)]
 pub struct MicroXs {
     /// Total cross-section (barns). From MT=1, or sum of all partials.
@@ -21,14 +20,26 @@ pub struct MicroXs {
     pub inelastic: f64,
     /// (n,2n) reaction (MT=16). Produces 2 outgoing neutrons.
     pub n2n: f64,
+    /// (n,3n) reaction (MT=17). Produces 3 outgoing neutrons.
+    pub n3n: f64,
     /// Fission (MT=18).
     pub fission: f64,
     /// Radiative capture (MT=102).
     pub capture: f64,
-    /// Average neutrons per fission (nu-bar).
+    /// Average neutrons per fission (nu-bar), energy-dependent.
     pub nu_bar: f64,
     /// Atomic weight ratio (A / neutron mass).
     pub awr: f64,
+}
+
+/// Additional per-nuclide data needed for detailed inelastic scattering.
+pub struct InelasticData<'a> {
+    /// Discrete level info (MT=51-91) with Q-values and thresholds.
+    pub levels: &'a [DiscreteLevelInfo],
+    /// Cross-sections for each discrete level at the current energy.
+    pub level_xs: &'a [f64],
+    /// Whether continuum inelastic (MT=91) is included.
+    pub has_continuum: bool,
 }
 
 /// Outcome of processing a collision.
@@ -44,21 +55,22 @@ pub enum CollisionOutcome {
 
 /// Process a collision for a particle.
 ///
-/// Returns the outcome and modifies the particle state in-place
-/// (new energy, direction for scattering; killed for absorption/fission).
+/// `inelastic_data` provides discrete level information for proper inelastic
+/// kinematics. If `None`, falls back to the simplified single-level model.
 pub fn process_collision(
     particle: &mut Particle,
     xs: &MicroXs,
+    inelastic_data: Option<&InelasticData<'_>>,
     rng: &mut Rng,
 ) -> CollisionOutcome {
     particle.n_collisions += 1;
 
-    // Sample reaction type: elastic / fission / capture
-    // (simplified — a full implementation would include inelastic, (n,2n), etc.)
     let xi = rng.uniform() * xs.total;
+    let mut cum = 0.0;
 
-    if xi < xs.elastic {
-        // Elastic scattering
+    // Elastic scattering
+    cum += xs.elastic;
+    if xi < cum {
         let (new_energy, new_dir) = super::scatter::elastic_scatter(
             particle.energy,
             particle.dir,
@@ -67,41 +79,72 @@ pub fn process_collision(
         );
         particle.energy = new_energy;
         particle.dir = new_dir;
-        CollisionOutcome::Scatter
-    } else if xi < xs.elastic + xs.inelastic {
-        // Inelastic scattering — level excitation model
-        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
-            particle.energy,
-            particle.dir,
-            xs.awr,
-            rng,
-        );
-        particle.energy = new_energy;
-        particle.dir = new_dir;
-        CollisionOutcome::Scatter
-    } else if xi < xs.elastic + xs.inelastic + xs.n2n {
-        // (n,2n) reaction — neutron is absorbed, 2 neutrons emitted.
-        // Bank one fission-like site (the other neutron continues as scatter).
-        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
-            particle.energy,
-            particle.dir,
-            xs.awr,
-            rng,
-        );
-        particle.energy = new_energy;
-        particle.dir = new_dir;
+        return CollisionOutcome::Scatter;
+    }
 
-        // Bank the second neutron as a fission-like site
+    // Inelastic scattering
+    cum += xs.inelastic;
+    if xi < cum {
+        let q_value = sample_inelastic_level(particle.energy, xs.awr, inelastic_data, rng);
+        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
+            particle.energy,
+            particle.dir,
+            xs.awr,
+            q_value,
+            rng,
+        );
+        particle.energy = new_energy;
+        particle.dir = new_dir;
+        return CollisionOutcome::Scatter;
+    }
+
+    // (n,2n) reaction
+    cum += xs.n2n;
+    if xi < cum {
         let e2 = sample_evaporation_energy(particle.energy, rng);
         let site = FissionSite {
             pos: particle.pos,
             energy: e2,
             weight: particle.weight,
         };
-        CollisionOutcome::Fission { sites: vec![site] }
-        // Note: particle stays alive (one neutron continues, one is banked)
-    } else if xi < xs.elastic + xs.inelastic + xs.n2n + xs.fission {
-        // Fission
+        // Primary neutron continues with reduced energy
+        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
+            particle.energy,
+            particle.dir,
+            xs.awr,
+            -particle.energy * 0.1, // approximate Q for (n,2n)
+            rng,
+        );
+        particle.energy = new_energy;
+        particle.dir = new_dir;
+        return CollisionOutcome::Fission { sites: vec![site] };
+    }
+
+    // (n,3n) reaction
+    cum += xs.n3n;
+    if xi < cum {
+        let e2 = sample_evaporation_energy(particle.energy, rng);
+        let e3 = sample_evaporation_energy(particle.energy, rng);
+        let sites = vec![
+            FissionSite { pos: particle.pos, energy: e2, weight: particle.weight },
+            FissionSite { pos: particle.pos, energy: e3, weight: particle.weight },
+        ];
+        // Primary neutron continues with reduced energy
+        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
+            particle.energy,
+            particle.dir,
+            xs.awr,
+            -particle.energy * 0.2, // approximate Q for (n,3n)
+            rng,
+        );
+        particle.energy = new_energy;
+        particle.dir = new_dir;
+        return CollisionOutcome::Fission { sites };
+    }
+
+    // Fission
+    cum += xs.fission;
+    if xi < cum {
         let n_neutrons = fission_yield(xs.nu_bar, particle.weight, rng);
         let mut sites = Vec::with_capacity(n_neutrons);
 
@@ -115,12 +158,72 @@ pub fn process_collision(
         }
 
         particle.kill();
-        CollisionOutcome::Fission { sites }
-    } else {
-        // Capture (absorption)
-        particle.kill();
-        CollisionOutcome::Absorption
+        return CollisionOutcome::Fission { sites };
     }
+
+    // Capture (absorption)
+    particle.kill();
+    CollisionOutcome::Absorption
+}
+
+/// Sample which discrete inelastic level is excited and return its Q-value.
+///
+/// If discrete level data is available, sample proportionally to each level's
+/// cross-section. If the selected level is continuum (MT=91), sample from an
+/// evaporation spectrum instead (handled by returning a special large-negative Q).
+fn sample_inelastic_level(
+    energy: f64,
+    awr: f64,
+    inelastic_data: Option<&InelasticData<'_>>,
+    rng: &mut Rng,
+) -> f64 {
+    let data = match inelastic_data {
+        Some(d) if !d.levels.is_empty() && !d.level_xs.is_empty() => d,
+        _ => return -45_000.0, // fallback: ~45 keV excitation
+    };
+
+    // Sum cross-sections for levels that are energetically accessible
+    let mut xs_sum = 0.0;
+    let mut accessible = Vec::new();
+    for (i, level) in data.levels.iter().enumerate() {
+        if i < data.level_xs.len() && energy > level.threshold && data.level_xs[i] > 0.0 {
+            xs_sum += data.level_xs[i];
+            accessible.push((i, data.level_xs[i]));
+        }
+    }
+
+    if accessible.is_empty() || xs_sum <= 0.0 {
+        return -45_000.0; // fallback
+    }
+
+    // Sample proportionally to cross-section
+    let xi = rng.uniform() * xs_sum;
+    let mut cum = 0.0;
+    for &(idx, xs) in &accessible {
+        cum += xs;
+        if xi < cum {
+            let level = &data.levels[idx];
+            if level.mt == 91 && data.has_continuum {
+                // Continuum inelastic: compute effective Q from evaporation model
+                // E* = E_cm - S_n (neutron separation energy)
+                // Use evaporation temperature: T = sqrt(E*/a), a ~ A/8
+                let a_param = awr / 8.0; // level density parameter (MeV^-1)
+                let e_cm_mev = energy * awr / ((awr + 1.0) * 1.0e6); // CM energy in MeV
+                let e_excitation = e_cm_mev.max(0.1); // minimum excitation
+                let temp_mev = (e_excitation / a_param).sqrt();
+                // Sample outgoing CM energy from Maxwellian: E = -T * ln(xi1*xi2)
+                let e_out_mev = -temp_mev * (rng.uniform() * rng.uniform()).ln();
+                let e_out_mev = e_out_mev.min(e_cm_mev * 0.9); // can't exceed available
+                // Effective Q = -(E_cm - E_out) * (A+1)/A in eV
+                let q_eff = -(e_cm_mev - e_out_mev) * 1.0e6;
+                return q_eff;
+            }
+            return level.q_value;
+        }
+    }
+
+    // Shouldn't reach here, but return last level's Q
+    data.levels[accessible.last().map_or(0, |&(i, _)| i)].q_value
 }
 
 /// Determine the number of fission neutrons to bank.
@@ -138,36 +241,26 @@ fn fission_yield(nu_bar: f64, weight: f64, rng: &mut Rng) -> usize {
     }
 }
 
-/// Sample an evaporation spectrum for (n,2n) secondary neutrons.
+/// Sample an evaporation spectrum for (n,xn) secondary neutrons.
 ///
-/// P(E') ∝ E' · exp(-E'/T) where T ≈ E_incident / 10 (nuclear temperature).
+/// P(E') ~ E' * exp(-E'/T) where T ~ E_incident / 10 (nuclear temperature).
 fn sample_evaporation_energy(incident_energy: f64, rng: &mut Rng) -> f64 {
-    let temp = incident_energy / 10.0; // nuclear temperature ~E/10
-    // Sample: E = -T * ln(xi1 * xi2) (Maxwellian)
+    let temp = incident_energy / 10.0;
     let e = -temp * (rng.uniform() * rng.uniform()).ln();
     e.min(incident_energy).max(1e-5)
 }
 
 /// Sample fission neutron energy from a Watt spectrum.
 ///
-/// P(E) ∝ exp(-E/a) · sinh(sqrt(b·E))
+/// P(E) ~ exp(-E/a) * sinh(sqrt(b*E))
 /// Using Cranberg parameters for U-235 thermal fission:
 ///   a = 0.988 MeV, b = 2.249 /MeV
 fn sample_fission_energy(_incident_energy: f64, rng: &mut Rng) -> f64 {
-    // Watt spectrum parameters for U-235 (in eV)
     let a = 988_000.0; // 0.988 MeV in eV
     let b = 2.249e-6;  // 2.249 /MeV in /eV
 
-    // Rejection sampling from the Watt distribution
     loop {
-        // Sample from exponential: E' = -a * ln(xi1)
         let e_prime = -a * rng.uniform().ln();
-        // Accept with probability sinh(sqrt(b*E')) / cosh(sqrt(b*E'))
-        let arg = (b * e_prime).sqrt();
-        let accept_prob = (arg.exp() - (-arg).exp()) / (2.0 * arg.cosh());
-
-        // Simplified: for typical energies, acceptance rate is high
-        // Full Watt sampling: E = E' + (a²·b/4) + (2·xi2 - 1)·sqrt(a²·b·E'/4)
         let term = a * a * b / 4.0;
         let xi2 = rng.uniform();
         let e = e_prime + term + (2.0 * xi2 - 1.0) * (a * a * b * e_prime).sqrt() / 2.0;
@@ -181,6 +274,7 @@ fn sample_fission_energy(_incident_energy: f64, rng: &mut Rng) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::Vec3;
 
     #[test]
     fn fission_yield_averages_correctly() {
@@ -189,7 +283,6 @@ mod tests {
         let n = 100_000;
         let total: usize = (0..n).map(|_| fission_yield(nu_bar, 1.0, &mut rng)).sum();
         let avg = total as f64 / n as f64;
-        // Should be close to nu_bar
         assert!((avg - nu_bar).abs() < 0.02, "avg={avg}, expected ~{nu_bar}");
     }
 
@@ -199,7 +292,7 @@ mod tests {
         for _ in 0..1000 {
             let e = sample_fission_energy(1.0e6, &mut rng);
             assert!(e > 0.0);
-            assert!(e < 20.0e6); // should be < 20 MeV
+            assert!(e < 20.0e6);
         }
     }
 
@@ -208,9 +301,10 @@ mod tests {
         let mut rng = Rng::new(42, 1);
         let xs = MicroXs {
             total: 10.0,
-            elastic: 10.0, // 100% elastic
+            elastic: 10.0,
             inelastic: 0.0,
             n2n: 0.0,
+            n3n: 0.0,
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
@@ -222,7 +316,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
     }
@@ -235,8 +329,9 @@ mod tests {
             elastic: 0.0,
             inelastic: 0.0,
             n2n: 0.0,
+            n3n: 0.0,
             fission: 0.0,
-            capture: 10.0, // 100% capture
+            capture: 10.0,
             nu_bar: 0.0,
             awr: 235.0,
         };
@@ -246,7 +341,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
     }
@@ -259,7 +354,8 @@ mod tests {
             elastic: 0.0,
             inelastic: 0.0,
             n2n: 0.0,
-            fission: 10.0, // 100% fission
+            n3n: 0.0,
+            fission: 10.0,
             capture: 0.0,
             nu_bar: 2.43,
             awr: 235.0,
@@ -270,7 +366,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, &mut rng);
         match outcome {
             CollisionOutcome::Fission { sites } => {
                 assert!(!sites.is_empty());
@@ -283,5 +379,43 @@ mod tests {
             _ => panic!("expected fission"),
         }
         assert!(!p.is_alive());
+    }
+
+    #[test]
+    fn inelastic_with_discrete_levels() {
+        let mut rng = Rng::new(42, 1);
+        let xs = MicroXs {
+            total: 10.0,
+            elastic: 0.0,
+            inelastic: 10.0,
+            n2n: 0.0,
+            n3n: 0.0,
+            fission: 0.0,
+            capture: 0.0,
+            nu_bar: 0.0,
+            awr: 235.0,
+        };
+        let levels = vec![
+            DiscreteLevelInfo { mt: 51, q_value: -76.8, threshold: 77.1 },
+            DiscreteLevelInfo { mt: 52, q_value: -13040.0, threshold: 13095.5 },
+            DiscreteLevelInfo { mt: 53, q_value: -46200.0, threshold: 46396.6 },
+        ];
+        let level_xs = vec![0.5, 0.3, 0.2];
+        let data = InelasticData {
+            levels: &levels,
+            level_xs: &level_xs,
+            has_continuum: false,
+        };
+
+        let mut p = Particle::new(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            1.0e6,
+            0,
+        );
+        let outcome = process_collision(&mut p, &xs, Some(&data), &mut rng);
+        assert!(matches!(outcome, CollisionOutcome::Scatter));
+        assert!(p.is_alive());
+        assert!(p.energy < 1.0e6); // should have lost energy
     }
 }

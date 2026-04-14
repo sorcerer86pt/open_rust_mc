@@ -1,8 +1,9 @@
 //! Scattering kinematics — elastic and inelastic.
 //!
 //! Elastic: free-gas model, isotropic in center-of-mass frame.
-//! Inelastic: level excitation model — neutron loses a fixed excitation
-//! energy Q to the nucleus, then scatters isotropically in CM frame.
+//! Inelastic: level excitation model — neutron loses excitation energy Q
+//! to the nucleus, then scatters isotropically in CM frame.
+//! Q-value is now passed in from the caller (read from nuclear data).
 
 use crate::geometry::Vec3;
 use crate::transport::rng::Rng;
@@ -28,7 +29,7 @@ pub fn elastic_scatter(
     let mu_lab = if awr > 1.0 + 1e-10 {
         (1.0 + awr * mu_cm) / (1.0 + 2.0 * awr * mu_cm + awr * awr).sqrt()
     } else {
-        // Hydrogen special case (A≈1): mu_lab = sqrt((1+mu_cm)/2)
+        // Hydrogen special case (A~1): mu_lab = sqrt((1+mu_cm)/2)
         ((1.0 + mu_cm) * 0.5).max(0.0).sqrt()
     };
 
@@ -39,62 +40,81 @@ pub fn elastic_scatter(
 /// Inelastic scattering via the level excitation model.
 ///
 /// The neutron excites the nucleus to a discrete energy level, losing
-/// excitation energy Q. After excitation, scattering is isotropic in
+/// excitation energy |Q|. After excitation, scattering is isotropic in
 /// the CM frame of the excited system.
 ///
-/// For heavy nuclei (A >> 1), the outgoing energy in the lab frame is
-/// approximately:
-///   E' ≈ E - Q*(A+1)/A
-/// where Q is the excitation energy of the first level.
-///
-/// Typical first excited level energies:
-///   U-235: ~0.046 MeV (46 keV)
-///   U-238: ~0.045 MeV (45 keV)
-///   Pu-239: ~0.008 MeV (8 keV)
+/// `q_value` is in eV, negative for excitation (endothermic).
+/// Proper two-body kinematics with the exact Q-value.
 pub fn inelastic_scatter(
     energy: f64,
     dir: Vec3,
     awr: f64,
+    q_value: f64,
     rng: &mut Rng,
 ) -> (f64, Vec3) {
-    // Approximate first excited level energy for actinides (~45 keV)
-    // A proper implementation reads these from the nuclear data file.
-    let q_excitation = 45_000.0; // eV
+    // Threshold check: inelastic is only possible if E > |Q|*(A+1)/A
+    let threshold = if q_value < 0.0 {
+        (-q_value) * (awr + 1.0) / awr
+    } else {
+        0.0
+    };
 
-    // Threshold check: inelastic is only possible if E > Q*(A+1)/A
-    let threshold = q_excitation * (awr + 1.0) / awr;
     if energy < threshold {
-        // Below threshold — fall back to elastic
         return elastic_scatter(energy, dir, awr, rng);
     }
 
-    // Available CM energy after excitation
-    let e_cm = energy * awr / (awr + 1.0) - q_excitation;
-    if e_cm <= 0.0 {
+    // Two-body kinematics in the center-of-mass frame
+    // E_cm = E_lab * A / (A+1)
+    let e_cm = energy * awr / (awr + 1.0);
+
+    // Available kinetic energy in CM after excitation: E_cm + Q
+    let e_cm_out = e_cm + q_value;
+    if e_cm_out <= 0.0 {
         return elastic_scatter(energy, dir, awr, rng);
     }
 
     // Isotropic scattering in CM frame
     let mu_cm = 2.0 * rng.uniform() - 1.0;
 
-    // Lab-frame outgoing energy (two-body kinematics with Q-value)
-    let e_out_cm = e_cm; // kinetic energy in CM after excitation
-    let v_cm = (2.0 * e_out_cm / awr).sqrt(); // CM-frame neutron speed (arb. units)
-    let v_lab_cm = (2.0 * energy * awr / ((awr + 1.0) * (awr + 1.0))).sqrt(); // CM velocity
+    // CM velocity of the system (in sqrt-energy units)
+    // v_cm_system = sqrt(E / (A+1)^2) * (A+1) ... simplified:
+    // We use the standard two-body lab energy formula:
+    // E_lab_out = E_cm_out * [(1+A*mu)^2 + A^2*(1-mu^2)] / (1+A)^2
+    // More precisely: E' = E_cm_out/(A+1)^2 * (1 + A^2 + 2*A*mu_cm) + E/(A+1)^2
+    // But the exact formula from OpenMC is:
+    //
+    // v_n = sqrt(2 * E_cm_out / A_cm)  (neutron speed in CM after collision)
+    // v_cm = sqrt(2 * E / (A+1)^2)     (CM system speed in lab)
+    // E_lab_out = 0.5 * (v_n^2 + v_cm^2 + 2*v_n*v_cm*mu_cm)
 
-    // Lab energy via velocity addition
-    let new_energy = 0.5 * (v_cm * v_cm + v_lab_cm * v_lab_cm
-        + 2.0 * v_cm * v_lab_cm * mu_cm);
+    let a_plus_1 = awr + 1.0;
 
-    // Scale to correct units: E' ≈ E - Q*(A+1)/A + correction
-    // Simplified but physically motivated:
-    let new_energy = (energy - q_excitation * (awr + 1.0) / awr).max(1e-5);
+    // Neutron speed in CM after collision (in energy-equivalent units)
+    // KE_neutron_cm = E_cm_out * A/(A+1) for the neutron share
+    // Actually for the outgoing channel with Q-value:
+    // The neutron gets fraction A/(A+1) of the available CM energy
+    let e_neutron_cm = e_cm_out * awr / a_plus_1;
+    let v_n = (2.0 * e_neutron_cm).sqrt();
 
-    // Isotropic direction in lab (reasonable approximation for heavy nuclei)
-    let mu_lab = 2.0 * rng.uniform() - 1.0;
+    // CM system speed in lab frame
+    let v_cm_sys = (2.0 * energy / (a_plus_1 * a_plus_1)).sqrt();
+
+    // Lab frame energy via velocity addition
+    let e_lab_out = 0.5 * (v_n * v_n + v_cm_sys * v_cm_sys + 2.0 * v_n * v_cm_sys * mu_cm);
+
+    // Clamp to physical bounds
+    let e_lab_out = e_lab_out.max(1e-5);
+
+    // Lab scattering cosine
+    let mu_lab = if v_n + v_cm_sys > 1e-20 {
+        (v_cm_sys + v_n * mu_cm) / (v_n * v_n + v_cm_sys * v_cm_sys + 2.0 * v_n * v_cm_sys * mu_cm).sqrt()
+    } else {
+        2.0 * rng.uniform() - 1.0
+    };
+    let mu_lab = mu_lab.clamp(-1.0, 1.0);
+
     let new_dir = rotate_direction(dir, mu_lab, rng);
-
-    (new_energy, new_dir)
+    (e_lab_out, new_dir)
 }
 
 /// Rotate a direction vector by a polar angle (given by its cosine)
@@ -175,17 +195,17 @@ mod tests {
         let mut rng = Rng::new(42, 1);
         let e0 = 1.0e6; // 1 MeV (above threshold)
         let awr = 235.0;
+        let q = -45_000.0; // 45 keV excitation
 
         let mut elastic_sum = 0.0;
         let mut inelastic_sum = 0.0;
         let n = 10_000;
         for _ in 0..n {
             let (e_el, _) = elastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, &mut Rng::new(42, 1));
-            let (e_in, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, &mut rng);
+            let (e_in, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, &mut rng);
             elastic_sum += e_el;
             inelastic_sum += e_in;
         }
-        // Inelastic should lose more energy on average
         let avg_inelastic = inelastic_sum / n as f64;
         let avg_elastic = elastic_sum / n as f64;
         assert!(avg_inelastic < avg_elastic,
@@ -197,9 +217,31 @@ mod tests {
         let mut rng = Rng::new(42, 1);
         let e0 = 1000.0; // 1 keV — below 45 keV threshold
         let awr = 235.0;
-        let (e_new, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, &mut rng);
-        // Should behave like elastic — for A=235 the max energy loss is
-        // ~1.7% per collision, so e_new should be close to e0.
+        let q = -45_000.0;
+        let (e_new, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, &mut rng);
         assert!(e_new > e0 * 0.95, "e_new={e_new}, e0={e0}");
+    }
+
+    #[test]
+    fn inelastic_with_real_q_values() {
+        let mut rng = Rng::new(42, 1);
+        let e0 = 1.0e6; // 1 MeV
+        let awr = 235.0;
+
+        // Test different Q-values (U-235 discrete levels)
+        let q_values = [-76.8, -13_040.0, -46_200.0, -103_000.0, -293_000.0];
+        let mut prev_avg = e0;
+        for &q in &q_values {
+            let mut sum = 0.0;
+            let n = 1000;
+            for _ in 0..n {
+                let (e_out, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, &mut rng);
+                sum += e_out;
+            }
+            let avg = sum / n as f64;
+            // Larger |Q| should give more energy loss on average
+            assert!(avg < prev_avg, "Q={q}: avg={avg} should be < {prev_avg}");
+            prev_avg = avg;
+        }
     }
 }
