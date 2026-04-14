@@ -7,20 +7,22 @@ Paste this as your first message:
 ```
 Read C:\Users\fog\madman_svd_experiment\CLAUDE.md then continue working on open_rust_mc. 
 
-Current state: pure Rust Monte Carlo engine gets k_eff=1.059 on Godiva (OpenMC gets 0.99857). 
-Gap is ~6100 pcm from missing anisotropic scattering + other physics.
-Repo: https://github.com/sorcerer86pt/open_rust_mc
+Current state: pure Rust Monte Carlo engine gets k_eff=1.006 +/- 0.001 on Godiva
+(OpenMC gets 0.99857). Gap = ~800 pcm. Repo: https://github.com/sorcerer86pt/open_rust_mc
 
-Completed: energy-dependent nu-bar, discrete inelastic levels (MT=51-91),
-continuum inelastic (MT=91), (n,3n) MT=17, proper two-body kinematics.
-The k_eff increased from 0.994 to 1.059 because the old constant nu-bar=2.43
-was too low for the fast Godiva spectrum (~2.53 needed), and the coincidental
-agreement with experiment was from compensating errors.
+Completed physics:
+- Energy-dependent nu-bar (total = prompt + delayed) from HDF5
+- Discrete inelastic levels (MT=51-91) with real Q-values
+- Continuum inelastic (MT=91) evaporation spectrum
+- (n,3n) MT=17
+- Anisotropic scattering angular distributions (tabular CDF from HDF5)
+- Data-driven fission energy spectrum (continuous tabulated from HDF5)
+- Proper two-body kinematics for all inelastic channels
 
-Next task: close the physics gap by implementing new Priority 1 items from CLAUDE.md:
-1. Anisotropic scattering angular distributions (biggest impact: ~3000-4000 pcm)
-2. Energy-dependent Watt fission spectrum parameters (~500-1000 pcm)
-3. URR probability tables (~100-500 pcm)
+Next task: close the remaining ~800 pcm gap:
+1. URR probability tables (~100-500 pcm)
+2. Free gas thermal scattering (negligible for fast Godiva)
+3. Interpolated angular distributions (currently nearest-energy, not interpolated)
 
 Working directory: C:\Users\fog\madman_svd_experiment
 Rust project: C:\Users\fog\madman_svd_experiment\rust_prototype

@@ -6,6 +6,7 @@
 //! Q-value is now passed in from the caller (read from nuclear data).
 
 use crate::geometry::Vec3;
+use crate::hdf5_reader::AngularDistribution;
 use crate::transport::rng::Rng;
 
 /// Elastic scattering: compute new energy and direction.
@@ -35,6 +36,38 @@ pub fn elastic_scatter(
 
     let new_dir = rotate_direction(dir, mu_lab, rng);
     (new_energy.max(1e-11), new_dir) // floor at ~0 eV
+}
+
+/// Elastic scattering with optional anisotropic angular distribution.
+///
+/// If `angle_dist` is provided, samples mu from the tabulated distribution
+/// (which may be in the CM frame). Otherwise falls back to isotropic in CM.
+pub fn elastic_scatter_aniso(
+    energy: f64,
+    dir: Vec3,
+    awr: f64,
+    angle_dist: Option<&AngularDistribution>,
+    rng: &mut Rng,
+) -> (f64, Vec3) {
+    // Sample cosine of scattering angle in center-of-mass frame
+    let mu_cm = match angle_dist {
+        Some(dist) if dist.center_of_mass => dist.sample_mu(energy, rng),
+        _ => 2.0 * rng.uniform() - 1.0, // isotropic fallback
+    };
+
+    // Convert to lab frame energy
+    let alpha = ((awr - 1.0) / (awr + 1.0)).powi(2);
+    let new_energy = energy * 0.5 * ((1.0 + alpha) + (1.0 - alpha) * mu_cm);
+
+    // Lab-frame scattering cosine
+    let mu_lab = if awr > 1.0 + 1e-10 {
+        (1.0 + awr * mu_cm) / (1.0 + 2.0 * awr * mu_cm + awr * awr).sqrt()
+    } else {
+        ((1.0 + mu_cm) * 0.5).max(0.0).sqrt()
+    };
+
+    let new_dir = rotate_direction(dir, mu_lab, rng);
+    (new_energy.max(1e-11), new_dir)
 }
 
 /// Inelastic scattering via the level excitation model.

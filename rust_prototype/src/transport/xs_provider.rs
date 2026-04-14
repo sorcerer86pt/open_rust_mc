@@ -6,7 +6,7 @@
 //! product instead of binary-searching a table.
 
 use crate::decompose;
-use crate::hdf5_reader::{self, DiscreteLevelInfo, NuBarTable, NuclideData};
+use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData};
 use crate::kernel::SvdKernel;
 use crate::physics::collision::MicroXs;
 use crate::transport::simulate::XsProvider;
@@ -35,6 +35,10 @@ pub struct NuclideKernels {
     pub discrete_levels: Vec<DiscreteLevel>,
     /// Whether continuum inelastic (MT=91) is present.
     pub has_continuum_inelastic: bool,
+    /// Angular distribution for elastic scattering (MT=2).
+    pub elastic_angle: Option<AngularDistribution>,
+    /// Fission energy distribution for prompt neutrons.
+    pub fission_energy_dist: Option<EnergyDistribution>,
 }
 
 /// A discrete inelastic level with its cross-section kernel and Q-value.
@@ -150,6 +154,14 @@ impl XsProvider for SvdXsProvider {
     fn has_continuum_inelastic(&self, nuclide_idx: usize) -> bool {
         self.nuclides[nuclide_idx].has_continuum_inelastic
     }
+
+    fn elastic_angular_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::AngularDistribution> {
+        self.nuclides[nuclide_idx].elastic_angle.as_ref()
+    }
+
+    fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
+    }
 }
 
 /// Build an SVD kernel for one reaction of one nuclide from HDF5 data.
@@ -237,6 +249,19 @@ pub fn load_nuclide(
         println!("    Discrete levels: {loaded_count}/{n_levels} loaded (continuum={has_continuum})");
     }
 
+    // Load fission energy distribution
+    let fission_energy_dist = hdf5_reader::read_fission_energy_dist(h5_path).unwrap_or(None);
+    if let Some(ref d) = fission_energy_dist {
+        println!("    Fission spectrum: {} incident energies", d.energies.len());
+    }
+
+    // Load elastic angular distribution
+    let elastic_angle = hdf5_reader::read_angular_distribution(h5_path, 2).unwrap_or(None);
+    if let Some(ref ang) = elastic_angle {
+        println!("    Elastic angular dist: {} energies, CM={}",
+                 ang.energies.len(), ang.center_of_mass);
+    }
+
     let elastic = build_reaction_kernel(h5_path, 2, svd_rank, temp_idx);
     if elastic.is_some() { println!("    MT=2 (elastic): loaded"); }
 
@@ -262,5 +287,7 @@ pub fn load_nuclide(
         nu_bar_table,
         discrete_levels,
         has_continuum_inelastic: has_continuum,
+        elastic_angle,
+        fission_energy_dist,
     }
 }

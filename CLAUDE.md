@@ -29,15 +29,10 @@ eigenvalue simulations end-to-end.
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
 - Each nuclide needs its own SVD basis — not a problem, bases are small
 
-## Current State: k_eff = 1.059 (Godiva, real ENDF data)
+## Current State: k_eff = 1.006 +/- 0.001 (Godiva, real ENDF data)
 
-OpenMC gets 0.99857. We get 1.059. Gap = ~6100 pcm (too high).
-
-Previous k_eff was 0.994 with constant nu-bar=2.43. The coincidental agreement
-with experiment was because the too-low nu-bar compensated for missing physics
-(primarily anisotropic scattering). With correct energy-dependent nu-bar
-(~2.53 at 1 MeV), k_eff jumped to 1.059. The ~6000 pcm gap from OpenMC is
-from missing angular distributions and other Priority 1 items below.
+OpenMC gets 0.99857. We get 1.006 +/- 0.001. Gap = ~800 pcm from OpenMC.
+Delta from experiment = 616 pcm. MC uncertainty = 138 pcm.
 
 ### Implemented (Priority 1 from previous round)
 
@@ -63,24 +58,21 @@ from missing angular distributions and other Priority 1 items below.
 - SVD kernel loaded, banks 2 extra neutrons
 - Small cross-section, only at high energies (~10-20 pcm)
 
+**5. Anisotropic scattering angular distributions (DONE)**
+- Reads tabular mu/cdf distributions from HDF5 with offsets attribute
+- Samples scattering cosine from energy-dependent CDF in CM frame
+- U-235: 49 energies, U-234: 53 energies, U-238: 38 energies
+- Impact: ~9400 pcm (from 1.059 down to 0.965) — massive
+
+**6. Data-driven fission energy spectrum (DONE)**
+- Reads continuous tabulated outgoing energy distributions from HDF5
+- Replaces hardcoded Watt spectrum (a=0.988, b=2.249)
+- U-235: 20 incident energies, U-238: 25 incident energies
+- Impact: ~4000 pcm (from 0.965 up to 1.006) — critical correction
+
 ## What Needs Fixing (Physics Gaps vs OpenMC)
 
-### Priority 1 — Closes the ~6000 pcm gap
-
-**5. Energy-dependent scattering angular distributions (BIGGEST IMPACT)**
-- Currently: isotropic in CM frame for all energies
-- OpenMC: reads angular distribution tables (Legendre coefficients or
-  tabular P(mu|E)) from HDF5 for each reaction
-- Impact: **~3000-4000 pcm** — forward-peaked scattering increases leakage
-  from the small Godiva sphere, dramatically lowering k_eff
-- HDF5 path: `{nuclide}/reactions/reaction_{MT:03}/product_0/distribution`
-- This is now the single biggest source of error
-
-**6. Watt fission spectrum parameters from data**
-- Currently: hardcoded a=0.988 MeV, b=2.249/MeV (U-235 thermal)
-- OpenMC: reads parameters from HDF5 per nuclide, energy-dependent
-- Impact: ~500-1000 pcm (spectrum shape affects leakage in small systems)
-- HDF5 path: energy distributions stored under reaction products
+### Priority 1 — Close the remaining ~800 pcm gap
 
 **7. Unresolved Resonance Range (URR) probability tables**
 - Currently: ignored (use average cross-sections)
@@ -233,7 +225,11 @@ Extract to `data/endfb-vii.1-hdf5/`. Key files:
 | Godiva dk (fission SVD k=4) | 6.9 pcm |
 | Godiva dk (all rxn SVD k=4) | 3.7 pcm |
 | PWR pin cell dk (SVD k=5) | 59.7 pcm |
-| Our Rust Godiva k_eff | 1.059 |
+| Our Rust Godiva k_eff | 1.006 +/- 0.001 |
 | OpenMC Godiva k_eff | 0.99857 |
-| Gap to close | ~6100 pcm (from isotropic scattering + missing physics) |
-| Previous k_eff (const nu-bar) | 0.994 (coincidental, compensating errors) |
+| Gap from OpenMC | ~800 pcm |
+| Gap from experiment | 616 pcm |
+| History: const nu-bar | 0.994 (coincidental) |
+| History: + E-dep nu-bar | 1.059 (+6500 pcm) |
+| History: + aniso scatter | 0.965 (-9400 pcm) |
+| History: + data fission | 1.006 (+4100 pcm) |

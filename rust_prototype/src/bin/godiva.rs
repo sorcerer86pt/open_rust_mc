@@ -92,6 +92,8 @@ fn main() {
                 nu_bar_table: None,
                 discrete_levels: vec![],
                 has_continuum_inelastic: false,
+                elastic_angle: None,
+                fission_energy_dist: None,
             });
         } else {
             nuclide_kernels.push(xs_provider::load_nuclide(

@@ -227,6 +227,85 @@ pub struct DiscreteLevelInfo {
     pub threshold: f64,
 }
 
+/// Tabular angular distribution for scattering — mu(cosine) vs energy.
+pub struct AngularDistribution {
+    /// Energy grid (eV) at which distributions are tabulated.
+    pub energies: Vec<f64>,
+    /// Per-energy distribution: (mu, cdf) pairs for inverse CDF sampling.
+    pub distributions: Vec<TabularMuDist>,
+    /// Whether the distribution is in the center-of-mass frame.
+    pub center_of_mass: bool,
+}
+
+/// Tabular mu distribution at a single energy — for inverse CDF sampling.
+pub struct TabularMuDist {
+    /// Cosine values, sorted ascending.
+    pub mu: Vec<f64>,
+    /// Cumulative distribution function values, sorted ascending [0, 1].
+    pub cdf: Vec<f64>,
+}
+
+impl AngularDistribution {
+    /// Sample the scattering cosine mu at a given energy.
+    pub fn sample_mu(&self, energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
+        if self.energies.is_empty() {
+            return 2.0 * rng.uniform() - 1.0; // isotropic fallback
+        }
+
+        // Find energy bracket
+        let n = self.energies.len();
+        let idx = if energy <= self.energies[0] {
+            0
+        } else if energy >= self.energies[n - 1] {
+            n - 1
+        } else {
+            match self.energies.binary_search_by(|e| {
+                e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
+            }) {
+                Ok(i) => i,
+                Err(i) => if i > 0 { i - 1 } else { 0 },
+            }
+        };
+
+        // Sample from the distribution at this energy index
+        self.distributions[idx].sample(rng)
+    }
+}
+
+impl TabularMuDist {
+    /// Sample mu using inverse CDF method.
+    fn sample(&self, rng: &mut crate::transport::rng::Rng) -> f64 {
+        let xi = rng.uniform();
+        let n = self.cdf.len();
+        if n < 2 {
+            return 2.0 * rng.uniform() - 1.0;
+        }
+
+        // Binary search on CDF
+        let idx = match self.cdf.binary_search_by(|c| {
+            c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => i,
+            Err(i) => if i > 0 { i - 1 } else { 0 },
+        };
+
+        let idx = idx.min(n - 2);
+        let cdf_lo = self.cdf[idx];
+        let cdf_hi = self.cdf[idx + 1];
+        let mu_lo = self.mu[idx];
+        let mu_hi = self.mu[idx + 1];
+
+        if (cdf_hi - cdf_lo).abs() < 1e-15 {
+            return mu_lo;
+        }
+
+        // Linear interpolation within the CDF bracket
+        let frac = (xi - cdf_lo) / (cdf_hi - cdf_lo);
+        let mu = mu_lo + frac * (mu_hi - mu_lo);
+        mu.clamp(-1.0, 1.0)
+    }
+}
+
 /// Read total nu-bar (neutron yield) from fission reaction products.
 ///
 /// Total nu-bar = sum of all neutron product yields (prompt + delayed).
@@ -450,6 +529,327 @@ pub fn read_discrete_levels(path: &Path, awr: f64) -> Result<Vec<DiscreteLevelIn
     // Sort by MT number (which corresponds to ascending excitation energy)
     levels.sort_by_key(|l| l.mt);
     Ok(levels)
+}
+
+/// Tabular outgoing energy distribution — for fission spectrum sampling.
+pub struct EnergyDistribution {
+    /// Incident energy grid (eV).
+    pub energies: Vec<f64>,
+    /// Per-energy outgoing energy distribution (E_out, cdf) for inverse CDF sampling.
+    pub distributions: Vec<TabularEnergyDist>,
+}
+
+/// Tabular outgoing energy distribution at a single incident energy.
+pub struct TabularEnergyDist {
+    /// Outgoing energies (eV), sorted ascending.
+    pub e_out: Vec<f64>,
+    /// CDF values, sorted ascending [0, 1].
+    pub cdf: Vec<f64>,
+}
+
+impl EnergyDistribution {
+    /// Sample an outgoing energy at a given incident energy.
+    pub fn sample(&self, incident_energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
+        if self.energies.is_empty() {
+            return incident_energy; // fallback
+        }
+
+        let n = self.energies.len();
+        let idx = if incident_energy <= self.energies[0] {
+            0
+        } else if incident_energy >= self.energies[n - 1] {
+            n - 1
+        } else {
+            match self.energies.binary_search_by(|e| {
+                e.partial_cmp(&incident_energy).unwrap_or(std::cmp::Ordering::Less)
+            }) {
+                Ok(i) => i,
+                Err(i) => if i > 0 { i - 1 } else { 0 },
+            }
+        };
+
+        self.distributions[idx].sample(rng)
+    }
+}
+
+impl TabularEnergyDist {
+    fn sample(&self, rng: &mut crate::transport::rng::Rng) -> f64 {
+        let xi = rng.uniform();
+        let n = self.cdf.len();
+        if n < 2 {
+            return self.e_out.first().copied().unwrap_or(1.0e6);
+        }
+
+        let idx = match self.cdf.binary_search_by(|c| {
+            c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => i,
+            Err(i) => if i > 0 { i - 1 } else { 0 },
+        };
+
+        let idx = idx.min(n - 2);
+        let cdf_lo = self.cdf[idx];
+        let cdf_hi = self.cdf[idx + 1];
+        let e_lo = self.e_out[idx];
+        let e_hi = self.e_out[idx + 1];
+
+        if (cdf_hi - cdf_lo).abs() < 1e-15 {
+            return e_lo;
+        }
+
+        let frac = (xi - cdf_lo) / (cdf_hi - cdf_lo);
+        (e_lo + frac * (e_hi - e_lo)).max(1e-5)
+    }
+}
+
+/// Read the fission energy distribution for the prompt neutron product.
+pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution>> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root groups: {e}"),
+    })?
+    .into_iter()
+    .next()
+    .ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no nuclide group found".into(),
+    })?;
+
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let rxn = match nuc.group("reactions").and_then(|r| r.group("reaction_018")) {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+
+    // Find the prompt neutron product
+    let subgroups = rxn.groups().unwrap_or_default();
+    for product_name in &subgroups {
+        if !product_name.starts_with("product_") { continue; }
+
+        let product = match rxn.group(product_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        let attrs = product.attrs().unwrap_or_default();
+        let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
+        let is_prompt = matches!(attrs.get("emission_mode"), Some(hdf5_pure::AttrValue::String(s)) if s == "prompt");
+        if !is_neutron || !is_prompt { continue; }
+
+        // Navigate to distribution_0/energy/
+        let dist = match product.group("distribution_0") {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let edist = match dist.group("energy") {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        // Read energy grid (incident energies)
+        let energy_ds = match edist.dataset("energy") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
+        let energies = energy_ds.read_f64().unwrap_or_default();
+        if energies.is_empty() { continue; }
+
+        // Read distribution dataset [3, N_total]
+        let dist_ds = match edist.dataset("distribution") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
+        let dist_shape = dist_ds.shape().unwrap_or_default();
+        let dist_raw = dist_ds.read_f64().unwrap_or_default();
+
+        if dist_shape.len() != 2 || dist_shape[0] != 3 { continue; }
+        let n_total = dist_shape[1] as usize;
+
+        // Read offsets attribute
+        let dist_attrs = dist_ds.attrs().unwrap_or_default();
+        let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else {
+            let per_e = n_total / energies.len();
+            (0..energies.len()).map(|i| i * per_e).collect()
+        };
+
+        // Parse per-energy distributions
+        let e_out_values = &dist_raw[..n_total];
+        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+
+        let n_energies = energies.len();
+        let mut distributions = Vec::with_capacity(n_energies);
+        for i in 0..n_energies {
+            let start = offsets.get(i).copied().unwrap_or(0);
+            let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+
+            if start >= end || start >= n_total {
+                distributions.push(TabularEnergyDist {
+                    e_out: vec![1e5, 2e6],
+                    cdf: vec![0.0, 1.0],
+                });
+                continue;
+            }
+
+            distributions.push(TabularEnergyDist {
+                e_out: e_out_values[start..end].to_vec(),
+                cdf: cdf_values[start..end].to_vec(),
+            });
+        }
+
+        return Ok(Some(EnergyDistribution { energies, distributions }));
+    }
+
+    Ok(None)
+}
+
+/// Read the angular distribution for a specific reaction from HDF5.
+///
+/// Angular data is at: `{nuclide}/reactions/reaction_{MT}/product_0/distribution_0/angle/`
+/// - `energy`: [N_E] energy grid
+/// - `mu`: [3, N_total] packed (mu, pdf, cdf) data
+///
+/// The `mu` dataset has an `offsets` attribute indicating where each energy's
+/// distribution starts in the packed array.
+pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularDistribution>> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root groups: {e}"),
+    })?
+    .into_iter()
+    .next()
+    .ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no nuclide group found".into(),
+    })?;
+
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    // Check if this reaction is in center-of-mass frame
+    let rxn_name = format!("reaction_{mt:03}");
+    let reactions = match nuc.group("reactions") {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    let rxn = match reactions.group(&rxn_name) {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    let rxn_attrs = rxn.attrs().unwrap_or_default();
+    let center_of_mass = matches!(
+        rxn_attrs.get("center_of_mass"),
+        Some(hdf5_pure::AttrValue::I64(1))
+    );
+
+    // Navigate to product_0/distribution_0/angle/
+    let product = match rxn.group("product_0") {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    let dist = match product.group("distribution_0") {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    let angle = match dist.group("angle") {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+
+    // Read energy grid
+    let energy_ds = match angle.dataset("energy") {
+        Ok(ds) => ds,
+        Err(_) => return Ok(None),
+    };
+    let energies = energy_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read angle/energy: {e}"),
+    })?;
+    let n_energies = energies.len();
+    if n_energies == 0 {
+        return Ok(None);
+    }
+
+    // Read mu dataset
+    let mu_ds = match angle.dataset("mu") {
+        Ok(ds) => ds,
+        Err(_) => return Ok(None),
+    };
+    let mu_shape = mu_ds.shape().unwrap_or_default();
+    let mu_raw = mu_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read angle/mu: {e}"),
+    })?;
+
+    if mu_shape.len() != 2 || mu_shape[0] != 3 {
+        return Ok(None);
+    }
+    let n_total = mu_shape[1] as usize;
+
+    // Try to read offsets attribute from mu dataset
+    let mu_attrs = mu_ds.attrs().unwrap_or_default();
+    let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("offsets") {
+        arr.iter().map(|&v| v as usize).collect()
+    } else if let Some(hdf5_pure::AttrValue::I64(v)) = mu_attrs.get("offsets") {
+        vec![*v as usize]
+    } else {
+        // No offsets attribute — try uniform distribution
+        // Each energy gets n_total / n_energies points
+        let per_e = n_total / n_energies;
+        (0..n_energies).map(|i| i * per_e).collect()
+    };
+
+    // Parse per-energy distributions
+    // mu_raw is stored as [3, N_total] in row-major: first N_total values are row 0 (mu),
+    // next N_total are row 1 (pdf), next N_total are row 2 (cdf)
+    let mu_values = &mu_raw[..n_total];
+    let _pdf_values = &mu_raw[n_total..2 * n_total];
+    let cdf_values = &mu_raw[2 * n_total..3 * n_total];
+
+    let mut distributions = Vec::with_capacity(n_energies);
+    for i in 0..n_energies {
+        let start = offsets.get(i).copied().unwrap_or(0);
+        let end = offsets.get(i + 1).copied().unwrap_or(n_total);
+        let end = end.min(n_total);
+
+        if start >= end || start >= n_total {
+            // Empty distribution — isotropic
+            distributions.push(TabularMuDist {
+                mu: vec![-1.0, 1.0],
+                cdf: vec![0.0, 1.0],
+            });
+            continue;
+        }
+
+        let mu_slice = mu_values[start..end].to_vec();
+        let cdf_slice = cdf_values[start..end].to_vec();
+        distributions.push(TabularMuDist { mu: mu_slice, cdf: cdf_slice });
+    }
+
+    Ok(Some(AngularDistribution {
+        energies,
+        distributions,
+        center_of_mass,
+    }))
 }
 
 /// Linear interpolation of (x_src, y_src) onto x_dst.

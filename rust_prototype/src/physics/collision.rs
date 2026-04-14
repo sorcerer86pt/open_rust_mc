@@ -5,7 +5,7 @@
 //!   2. Sample which reaction occurs (proportional to sigma_x / sigma_t)
 //!   3. Process the reaction: scatter, absorb, or fission
 
-use crate::hdf5_reader::DiscreteLevelInfo;
+use crate::hdf5_reader::{AngularDistribution, DiscreteLevelInfo, EnergyDistribution};
 use crate::transport::particle::{FissionSite, Particle};
 use crate::transport::rng::Rng;
 
@@ -57,10 +57,14 @@ pub enum CollisionOutcome {
 ///
 /// `inelastic_data` provides discrete level information for proper inelastic
 /// kinematics. If `None`, falls back to the simplified single-level model.
+/// `elastic_angle` provides anisotropic scattering angular distribution.
+/// `fission_edist` provides the fission outgoing energy spectrum from HDF5.
 pub fn process_collision(
     particle: &mut Particle,
     xs: &MicroXs,
     inelastic_data: Option<&InelasticData<'_>>,
+    elastic_angle: Option<&AngularDistribution>,
+    fission_edist: Option<&EnergyDistribution>,
     rng: &mut Rng,
 ) -> CollisionOutcome {
     particle.n_collisions += 1;
@@ -71,10 +75,11 @@ pub fn process_collision(
     // Elastic scattering
     cum += xs.elastic;
     if xi < cum {
-        let (new_energy, new_dir) = super::scatter::elastic_scatter(
+        let (new_energy, new_dir) = super::scatter::elastic_scatter_aniso(
             particle.energy,
             particle.dir,
             xs.awr,
+            elastic_angle,
             rng,
         );
         particle.energy = new_energy;
@@ -149,7 +154,10 @@ pub fn process_collision(
         let mut sites = Vec::with_capacity(n_neutrons);
 
         for _ in 0..n_neutrons {
-            let fission_energy = sample_fission_energy(particle.energy, rng);
+            let fission_energy = match fission_edist {
+                Some(dist) => dist.sample(particle.energy, rng),
+                None => sample_fission_energy(particle.energy, rng),
+            };
             sites.push(FissionSite {
                 pos: particle.pos,
                 energy: fission_energy,
@@ -316,7 +324,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
     }
@@ -341,7 +349,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
     }
@@ -366,7 +374,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, &mut rng);
         match outcome {
             CollisionOutcome::Fission { sites } => {
                 assert!(!sites.is_empty());
@@ -413,7 +421,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, Some(&data), &mut rng);
+        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy

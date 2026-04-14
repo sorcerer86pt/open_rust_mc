@@ -11,7 +11,7 @@
 use crate::geometry::{self, Vec3};
 use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
-use crate::hdf5_reader::DiscreteLevelInfo;
+use crate::hdf5_reader::{AngularDistribution, DiscreteLevelInfo, EnergyDistribution};
 use crate::physics::collision::{self, CollisionOutcome, InelasticData, MicroXs};
 use crate::transport::material::Material;
 use crate::transport::particle::{FissionBank, FissionSite, Particle};
@@ -45,6 +45,16 @@ pub trait XsProvider {
     /// Whether the nuclide has continuum inelastic (MT=91).
     fn has_continuum_inelastic(&self, _nuclide_idx: usize) -> bool {
         false
+    }
+
+    /// Get the elastic scattering angular distribution (if available).
+    fn elastic_angular_dist(&self, _nuclide_idx: usize) -> Option<&AngularDistribution> {
+        None
+    }
+
+    /// Get the fission energy distribution (if available).
+    fn fission_energy_dist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
+        None
     }
 }
 
@@ -218,11 +228,17 @@ pub fn run_eigenvalue<XS: XsProvider>(
                             None
                         };
 
+                        // Get elastic angular distribution and fission spectrum for this nuclide
+                        let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+                        let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+
                         // Process collision
                         let outcome = collision::process_collision(
                             &mut particle,
                             &micro_xs[nuc_idx],
                             inelastic_data.as_ref(),
+                            elastic_angle,
+                            fission_edist,
                             &mut rng,
                         );
 
