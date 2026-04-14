@@ -59,12 +59,14 @@ pub enum CollisionOutcome {
 /// kinematics. If `None`, falls back to the simplified single-level model.
 /// `elastic_angle` provides anisotropic scattering angular distribution.
 /// `fission_edist` provides the fission outgoing energy spectrum from HDF5.
+/// `temperature` is the cell temperature in Kelvin for free gas scattering.
 pub fn process_collision(
     particle: &mut Particle,
     xs: &MicroXs,
     inelastic_data: Option<&InelasticData<'_>>,
     elastic_angle: Option<&AngularDistribution>,
     fission_edist: Option<&EnergyDistribution>,
+    temperature: f64,
     rng: &mut Rng,
 ) -> CollisionOutcome {
     particle.n_collisions += 1;
@@ -80,6 +82,7 @@ pub fn process_collision(
             particle.dir,
             xs.awr,
             elastic_angle,
+            temperature,
             rng,
         );
         particle.energy = new_energy;
@@ -324,7 +327,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, None, None, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
     }
@@ -349,7 +352,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, None, None, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
     }
@@ -374,7 +377,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, None, None, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
         match outcome {
             CollisionOutcome::Fission { sites } => {
                 assert!(!sites.is_empty());
@@ -421,7 +424,7 @@ mod tests {
             1.0e6,
             0,
         );
-        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, &mut rng);
+        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy

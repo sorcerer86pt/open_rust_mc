@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 faer = "0.22"
 hdf5-pure = "0.1"
+rayon = "1"
 ndarray = "0.16"
 ndarray-npy = "0.9"
 clap = { version = "4", features = ["derive"] }

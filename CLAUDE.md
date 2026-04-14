@@ -22,8 +22,8 @@ eigenvalue simulations end-to-end.
 ### Performance (validated)
 - CPU: 8-13x faster than table lookup (3-5 ns/pt vs 40 ns/pt)
 - GPU: 2.6-2.8x on RTX A1000 (laptop), expected better on 3080/A100
-- Data loading + SVD decompose: ~800 ms for 3 nuclides
-- Full Godiva eigenvalue (80 batches, 10k particles): 2.4 seconds
+- Data loading + SVD decompose: ~6 s for 3 nuclides (with all physics data)
+- Full Godiva eigenvalue (80 batches, 10k particles): 633 ms (rayon parallel)
 
 ### Cross-isotope sharing (investigated, negative result)
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
@@ -121,7 +121,11 @@ Delta from experiment = **16 pcm** (< 0.2 sigma). 150 batches, 20k particles.
   loop yet (need to integrate)
 - **HDF5 file is re-read per reaction** — should load once and extract
   all reactions in a single pass
-- **No rayon parallelism yet** — transport loop is single-threaded
+
+### Recently completed architecture improvements
+- **Rayon parallel transport** — 8.7x speedup (633 ms vs 5540 ms for Godiva)
+- **Free gas thermal scattering** — Maxwell-Boltzmann target velocity
+  sampling below 400*kT threshold (important for thermal systems)
 
 ## File Layout
 

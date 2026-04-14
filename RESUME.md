@@ -19,12 +19,15 @@ Completed physics:
 - Data-driven fission energy spectrum (continuous tabulated from HDF5)
 - Proper two-body kinematics for all inelastic channels
 - URR probability tables (20-band sampling, multiply_smooth + absolute)
+- Stochastic interpolation between energy bins for all distributions
+- Free gas thermal scattering (Maxwell-Boltzmann target velocity)
+- Rayon parallel transport (8.7x speedup)
 
-Remaining ~850 pcm gap from OpenMC likely from:
-- Interpolated (vs nearest-energy) angular/energy distributions
-- Energy-dependent inelastic angular distributions
-- Free gas thermal scattering (small for fast Godiva)
-- SVD reconstruction accuracy in resonance region
+Remaining work:
+- S(alpha,beta) thermal scattering (critical for PWR pin cell)
+- Single-pass HDF5 loading (currently re-reads per reaction)
+- Event-based transport + BVH integration
+- Photon transport, depletion
 
 Working directory: C:\Users\fog\madman_svd_experiment
 Rust project: C:\Users\fog\madman_svd_experiment\rust_prototype

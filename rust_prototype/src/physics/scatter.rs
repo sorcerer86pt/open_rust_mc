@@ -38,28 +38,40 @@ pub fn elastic_scatter(
     (new_energy.max(1e-11), new_dir) // floor at ~0 eV
 }
 
-/// Elastic scattering with optional anisotropic angular distribution.
+/// Elastic scattering with optional anisotropic angular distribution
+/// and free gas thermal scattering correction.
 ///
-/// If `angle_dist` is provided, samples mu from the tabulated distribution
-/// (which may be in the CM frame). Otherwise falls back to isotropic in CM.
+/// If `angle_dist` is provided, samples mu from the tabulated distribution.
+/// If `temperature > 0`, applies the free gas thermal model: sample target
+/// velocity from Maxwell-Boltzmann, scatter in relative frame.
+/// For fast neutrons (E >> kT), the cold target approximation is used.
 pub fn elastic_scatter_aniso(
     energy: f64,
     dir: Vec3,
     awr: f64,
     angle_dist: Option<&AngularDistribution>,
+    temperature: f64,
     rng: &mut Rng,
 ) -> (f64, Vec3) {
-    // Sample cosine of scattering angle in center-of-mass frame
+    // Boltzmann constant in eV/K
+    const K_BOLTZMANN: f64 = 8.617_333e-5;
+    let kt = K_BOLTZMANN * temperature;
+
+    // Use free gas model when neutron energy is comparable to thermal energy
+    // Threshold: E < 400 * kT (OpenMC uses a similar cutoff)
+    if temperature > 0.0 && energy < 400.0 * kt {
+        return free_gas_scatter(energy, dir, awr, kt, angle_dist, rng);
+    }
+
+    // Cold target approximation (fast neutrons)
     let mu_cm = match angle_dist {
         Some(dist) if dist.center_of_mass => dist.sample_mu(energy, rng),
-        _ => 2.0 * rng.uniform() - 1.0, // isotropic fallback
+        _ => 2.0 * rng.uniform() - 1.0,
     };
 
-    // Convert to lab frame energy
     let alpha = ((awr - 1.0) / (awr + 1.0)).powi(2);
     let new_energy = energy * 0.5 * ((1.0 + alpha) + (1.0 - alpha) * mu_cm);
 
-    // Lab-frame scattering cosine
     let mu_lab = if awr > 1.0 + 1e-10 {
         (1.0 + awr * mu_cm) / (1.0 + 2.0 * awr * mu_cm + awr * awr).sqrt()
     } else {
@@ -67,6 +79,83 @@ pub fn elastic_scatter_aniso(
     };
 
     let new_dir = rotate_direction(dir, mu_lab, rng);
+    (new_energy.max(1e-11), new_dir)
+}
+
+/// Free gas thermal scattering: target nucleus has thermal motion.
+///
+/// 1. Sample target velocity from Maxwell-Boltzmann
+/// 2. Compute relative velocity
+/// 3. Scatter in the center-of-mass frame of the relative motion
+/// 4. Transform back to lab frame
+fn free_gas_scatter(
+    energy: f64,
+    dir: Vec3,
+    awr: f64,
+    kt: f64,
+    angle_dist: Option<&AngularDistribution>,
+    rng: &mut Rng,
+) -> (f64, Vec3) {
+    // Neutron speed (proportional to sqrt(2*E/m), m=1)
+    let v_n = (2.0 * energy).sqrt();
+
+    // Target speed from Maxwell-Boltzmann: P(v) ~ v^2 * exp(-A*v^2/(2*kT))
+    // Sample using: v_target = sqrt(2*kT/A) * chi(3) where chi(3) is chi-distribution
+    // Simplified: v_t = sqrt(-2*kT/A * ln(xi1)) for the magnitude (Maxwellian speed)
+    let sigma = (kt / awr).sqrt(); // thermal speed parameter
+    // Sample speed from Maxwell distribution using Box-Muller for 3 components
+    let vx = sigma * (-2.0 * rng.uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
+    let vy = sigma * (-2.0 * rng.uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
+    let vz = sigma * (-2.0 * rng.uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
+
+    // Target velocity vector (in the same units as neutron speed)
+    let v_target = Vec3::new(vx, vy, vz);
+
+    // Neutron velocity vector
+    let v_neutron = dir * v_n;
+
+    // Relative velocity
+    let v_rel = v_neutron - v_target;
+    let v_rel_mag = v_rel.length();
+
+    if v_rel_mag < 1e-20 {
+        return (energy, dir); // no relative motion
+    }
+
+    // Relative energy: E_rel = 0.5 * mu_reduced * v_rel^2
+    // where mu_reduced = A/(A+1) (reduced mass in neutron mass units)
+    let mu_reduced = awr / (awr + 1.0);
+    let e_rel = 0.5 * mu_reduced * v_rel_mag * v_rel_mag;
+
+    // Sample scattering angle in CM frame
+    let mu_cm = match angle_dist {
+        Some(dist) if dist.center_of_mass => dist.sample_mu(e_rel, rng),
+        _ => 2.0 * rng.uniform() - 1.0,
+    };
+
+    // CM velocity (velocity of the center of mass in lab frame)
+    let v_cm = (v_neutron + v_target * awr) * (1.0 / (1.0 + awr));
+
+    // Neutron velocity in CM frame before collision
+    let v_n_cm_dir = v_rel.normalized();
+    let _v_n_cm_mag = v_rel_mag / (1.0 + awr);
+    // Actually: v_n_cm = v_rel * A/(A+1), and after elastic collision magnitude is preserved
+
+    // After elastic collision in CM: speed is preserved, direction changes
+    let new_v_n_cm_dir = rotate_direction(v_n_cm_dir, mu_cm, rng);
+    let v_n_cm_after = new_v_n_cm_dir * (v_rel_mag * awr / (1.0 + awr));
+
+    // Transform back to lab frame
+    let v_n_lab = v_n_cm_after + v_cm;
+    let v_n_lab_mag = v_n_lab.length();
+
+    if v_n_lab_mag < 1e-20 {
+        return (1e-11, dir);
+    }
+
+    let new_energy = 0.5 * v_n_lab_mag * v_n_lab_mag; // E = 0.5 * m * v^2, m=1
+    let new_dir = v_n_lab * (1.0 / v_n_lab_mag);
+
     (new_energy.max(1e-11), new_dir)
 }
 

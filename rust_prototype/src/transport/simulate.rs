@@ -5,8 +5,10 @@
 //!   2. Transport each neutron until absorption or leakage
 //!   3. Collect fission sites into the fission bank
 //!   4. k_eff = (fission bank size) / (source bank size)
-//!   5. Normalize the fission bank → new source bank
+//!   5. Normalize the fission bank -> new source bank
 //!   6. Repeat
+
+use rayon::prelude::*;
 
 use crate::geometry::{self, Vec3};
 use crate::geometry::cell::{Cell, CellFill};
@@ -27,37 +29,31 @@ pub struct SimConfig {
 /// Cross-section provider trait — abstracts over SVD kernel vs table lookup.
 ///
 /// The transport loop doesn't care how cross-sections are obtained.
-pub trait XsProvider {
+/// Must be Send + Sync for rayon parallel transport.
+pub trait XsProvider: Send + Sync {
     /// Get microscopic cross-sections for a nuclide at a given energy.
     fn lookup(&self, nuclide_idx: usize, energy: f64) -> MicroXs;
 
-    /// Get discrete inelastic level info for a nuclide.
-    /// Returns empty slices by default (no detailed inelastic).
     fn discrete_level_info(&self, _nuclide_idx: usize) -> Vec<DiscreteLevelInfo> {
         vec![]
     }
 
-    /// Look up cross-sections for each discrete level at the given energy.
     fn discrete_level_xs(&self, _nuclide_idx: usize, _energy: f64) -> Vec<f64> {
         vec![]
     }
 
-    /// Whether the nuclide has continuum inelastic (MT=91).
     fn has_continuum_inelastic(&self, _nuclide_idx: usize) -> bool {
         false
     }
 
-    /// Get the elastic scattering angular distribution (if available).
     fn elastic_angular_dist(&self, _nuclide_idx: usize) -> Option<&AngularDistribution> {
         None
     }
 
-    /// Get the fission energy distribution (if available).
     fn fission_energy_dist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
         None
     }
 
-    /// Apply URR probability table sampling to cross-sections.
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
 }
 
@@ -83,7 +79,172 @@ pub struct BatchResult {
     pub collisions: u32,
 }
 
-/// Run a k-eigenvalue simulation.
+/// Per-particle transport result for parallel reduction.
+struct ParticleResult {
+    fission_sites: Vec<FissionSite>,
+    leakage: u32,
+    absorptions: u32,
+    fissions: u32,
+    collisions: u32,
+}
+
+/// Transport a single particle to completion.
+fn transport_particle<XS: XsProvider>(
+    site: &FissionSite,
+    batch: u64,
+    particle_idx: u64,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Material],
+    xs_provider: &XS,
+) -> ParticleResult {
+    let mut rng = Rng::for_particle(batch, particle_idx);
+    let mut result = ParticleResult {
+        fission_sites: Vec::new(),
+        leakage: 0,
+        absorptions: 0,
+        fissions: 0,
+        collisions: 0,
+    };
+
+    let (u, v, w) = rng.isotropic_direction();
+    let dir = Vec3::new(u, v, w);
+
+    let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
+    let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
+
+    let max_collisions = 1000;
+    while particle.is_alive() && particle.n_collisions < max_collisions {
+        let cell = &cells[particle.cell_idx];
+
+        let mat_idx = match cell.fill {
+            CellFill::Material(m) => m as usize,
+            CellFill::Void | CellFill::Universe(_) => {
+                particle.kill();
+                result.leakage += 1;
+                break;
+            }
+        };
+
+        if mat_idx >= materials.len() {
+            particle.kill();
+            result.leakage += 1;
+            break;
+        }
+
+        let material = &materials[mat_idx];
+
+        // Look up microscopic cross-sections with URR sampling
+        let urr_xi = rng.uniform();
+        let micro_xs: Vec<MicroXs> = material.nuclides
+            .iter()
+            .map(|nuc| {
+                let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+                xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+                xs
+            })
+            .collect();
+
+        let micro_totals: Vec<f64> = micro_xs.iter().map(|x| x.total).collect();
+        let macro_total = material.macro_total(&micro_totals);
+
+        if macro_total <= 0.0 {
+            particle.kill();
+            result.leakage += 1;
+            break;
+        }
+
+        let dist_collision = rng.exponential(macro_total);
+
+        let trace = geometry::ray::trace_step(
+            particle.pos,
+            particle.dir,
+            particle.cell_idx,
+            surfaces,
+            cells,
+        );
+
+        match trace {
+            Some(hit) if hit.distance < dist_collision => {
+                particle.advance(hit.distance + 1e-10);
+
+                let bc = surfaces[hit.surface_idx].boundary_condition();
+                match bc {
+                    BoundaryCondition::Vacuum => {
+                        particle.kill();
+                        result.leakage += 1;
+                    }
+                    BoundaryCondition::Reflective => {
+                        let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                        let d = particle.dir;
+                        particle.dir = d - n * (2.0 * d.dot(n));
+                    }
+                    BoundaryCondition::Transmission => {
+                        if let Some(next) = hit.next_cell_idx {
+                            particle.cell_idx = next;
+                        } else {
+                            particle.kill();
+                            result.leakage += 1;
+                        }
+                    }
+                }
+            }
+            _ => {
+                particle.advance(dist_collision);
+                result.collisions += 1;
+
+                let nuc_idx = material.sample_nuclide(
+                    &micro_totals,
+                    macro_total,
+                    rng.uniform(),
+                );
+
+                let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+                let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+                let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+                let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+
+                let inelastic_data = if !level_info.is_empty() {
+                    Some(InelasticData {
+                        levels: &level_info,
+                        level_xs: &level_xs,
+                        has_continuum: has_cont,
+                    })
+                } else {
+                    None
+                };
+
+                let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+                let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+
+                let outcome = collision::process_collision(
+                    &mut particle,
+                    &micro_xs[nuc_idx],
+                    inelastic_data.as_ref(),
+                    elastic_angle,
+                    fission_edist,
+                    cell.temperature,
+                    &mut rng,
+                );
+
+                match outcome {
+                    CollisionOutcome::Scatter => {}
+                    CollisionOutcome::Absorption => {
+                        result.absorptions += 1;
+                    }
+                    CollisionOutcome::Fission { sites } => {
+                        result.fissions += 1;
+                        result.fission_sites.extend(sites);
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Run a k-eigenvalue simulation with rayon parallel transport.
 ///
 /// Returns per-batch results and the final k_eff estimate.
 pub fn run_eigenvalue<XS: XsProvider>(
@@ -95,7 +256,6 @@ pub fn run_eigenvalue<XS: XsProvider>(
 ) -> (Vec<BatchResult>, f64) {
     let n = config.particles_per_batch as usize;
 
-    // Initial source: uniform in the first material cell
     let mut source_bank = initial_source(n, surfaces, cells);
 
     let mut results = Vec::with_capacity(config.batches as usize);
@@ -103,172 +263,33 @@ pub fn run_eigenvalue<XS: XsProvider>(
     let mut k_count = 0_u32;
 
     for batch in 1..=config.batches {
+        // Parallel transport: each particle runs independently
+        let particle_results: Vec<ParticleResult> = source_bank
+            .par_iter()
+            .enumerate()
+            .map(|(i, site)| {
+                transport_particle(
+                    site, batch as u64, i as u64,
+                    surfaces, cells, materials, xs_provider,
+                )
+            })
+            .collect();
+
+        // Reduce: merge per-particle results
         let mut fission_bank = FissionBank::new();
         let mut leakage = 0_u32;
         let mut absorptions = 0_u32;
         let mut fissions = 0_u32;
         let mut collisions = 0_u32;
 
-        // Transport each source particle
-        for (i, site) in source_bank.iter().enumerate() {
-            let mut rng = Rng::for_particle(batch as u64, i as u64);
-
-            let (u, v, w) = rng.isotropic_direction();
-            let dir = Vec3::new(u, v, w);
-
-            let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells)
-                .unwrap_or(0);
-
-            let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
-
-            // Transport loop for this particle
-            let max_collisions = 1000;
-            while particle.is_alive() && particle.n_collisions < max_collisions {
-                let cell = &cells[particle.cell_idx];
-
-                // Get material for this cell
-                let mat_idx = match cell.fill {
-                    CellFill::Material(m) => m as usize,
-                    CellFill::Void | CellFill::Universe(_) => {
-                        // Void or universe — particle leaks or needs nested lookup
-                        particle.kill();
-                        leakage += 1;
-                        break;
-                    }
-                };
-
-                if mat_idx >= materials.len() {
-                    particle.kill();
-                    leakage += 1;
-                    break;
-                }
-
-                let material = &materials[mat_idx];
-
-                // Look up microscopic cross-sections for each nuclide
-                // Apply URR probability table sampling if in the URR range
-                let urr_xi = rng.uniform(); // single random number for consistent band sampling
-                let micro_xs: Vec<MicroXs> = material.nuclides
-                    .iter()
-                    .map(|nuc| {
-                        let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
-                        xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
-                        xs
-                    })
-                    .collect();
-
-                let micro_totals: Vec<f64> = micro_xs.iter().map(|x| x.total).collect();
-                let macro_total = material.macro_total(&micro_totals);
-
-                if macro_total <= 0.0 {
-                    // No interaction possible — transport to boundary
-                    particle.kill();
-                    leakage += 1;
-                    break;
-                }
-
-                // Sample distance to collision
-                let dist_collision = rng.exponential(macro_total);
-
-                // Find distance to nearest surface
-                let trace = geometry::ray::trace_step(
-                    particle.pos,
-                    particle.dir,
-                    particle.cell_idx,
-                    surfaces,
-                    cells,
-                );
-
-                match trace {
-                    Some(hit) if hit.distance < dist_collision => {
-                        // Surface crossing before collision
-                        particle.advance(hit.distance + 1e-10);
-
-                        let bc = surfaces[hit.surface_idx].boundary_condition();
-                        match bc {
-                            BoundaryCondition::Vacuum => {
-                                particle.kill();
-                                leakage += 1;
-                            }
-                            BoundaryCondition::Reflective => {
-                                // Reflect: reverse the normal component of direction
-                                let n = surfaces[hit.surface_idx].normal_at(particle.pos);
-                                let d = particle.dir;
-                                particle.dir = d - n * (2.0 * d.dot(n));
-                                // Stay in the same cell (reflected back)
-                            }
-                            BoundaryCondition::Transmission => {
-                                // Cross into the next cell
-                                if let Some(next) = hit.next_cell_idx {
-                                    particle.cell_idx = next;
-                                } else {
-                                    // Lost particle — couldn't find next cell
-                                    particle.kill();
-                                    leakage += 1;
-                                }
-                            }
-                        }
-                    }
-                    _ => {
-                        // Collision before surface
-                        particle.advance(dist_collision);
-                        collisions += 1;
-
-                        // Sample which nuclide
-                        let nuc_idx = material.sample_nuclide(
-                            &micro_totals,
-                            macro_total,
-                            rng.uniform(),
-                        );
-
-                        // Build inelastic data for this nuclide
-                        let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
-                        let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
-                        let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
-                        let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
-
-                        let inelastic_data = if !level_info.is_empty() {
-                            Some(InelasticData {
-                                levels: &level_info,
-                                level_xs: &level_xs,
-                                has_continuum: has_cont,
-                            })
-                        } else {
-                            None
-                        };
-
-                        // Get elastic angular distribution and fission spectrum for this nuclide
-                        let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
-                        let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
-
-                        // Process collision
-                        let outcome = collision::process_collision(
-                            &mut particle,
-                            &micro_xs[nuc_idx],
-                            inelastic_data.as_ref(),
-                            elastic_angle,
-                            fission_edist,
-                            &mut rng,
-                        );
-
-                        match outcome {
-                            CollisionOutcome::Scatter => {}
-                            CollisionOutcome::Absorption => {
-                                absorptions += 1;
-                            }
-                            CollisionOutcome::Fission { sites } => {
-                                fissions += 1;
-                                for site in sites {
-                                    fission_bank.push(site);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        for pr in particle_results {
+            fission_bank.sites.extend(pr.fission_sites);
+            leakage += pr.leakage;
+            absorptions += pr.absorptions;
+            fissions += pr.fissions;
+            collisions += pr.collisions;
         }
 
-        // Compute k_eff for this batch
         let k_batch = fission_bank.len() as f64 / n as f64;
 
         let result = BatchResult {
@@ -285,7 +306,6 @@ pub fn run_eigenvalue<XS: XsProvider>(
             k_count += 1;
         }
 
-        let _k_avg = if k_count > 0 { k_sum / k_count as f64 } else { k_batch };
         let active = if batch > config.inactive { " *" } else { "" };
         println!(
             "  Batch {batch:>4}: k={k_batch:.5}  collisions={collisions}  \
@@ -294,7 +314,6 @@ pub fn run_eigenvalue<XS: XsProvider>(
 
         results.push(result);
 
-        // Prepare source for next batch: sample from fission bank
         source_bank = normalize_fission_bank(&fission_bank, n, batch);
     }
 
@@ -307,7 +326,6 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell]) -> Vec<Fission
     let mut rng = Rng::new(0, 0);
     let mut sites = Vec::with_capacity(n);
 
-    // Find the bounding box of the first material cell
     let cell = cells.iter().find(|c| matches!(c.fill, CellFill::Material(_)));
     let aabb = cell.map(|c| c.aabb).unwrap_or(crate::geometry::Aabb::new(
         Vec3::new(-10.0, -10.0, -10.0),
@@ -320,11 +338,10 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell]) -> Vec<Fission
         let z = aabb.min.z + rng.uniform() * (aabb.max.z - aabb.min.z);
         let pos = Vec3::new(x, y, z);
 
-        // Check if point is in any material cell
         if geometry::ray::find_cell(pos, surfaces, cells).is_some() {
             sites.push(FissionSite {
                 pos,
-                energy: 1.0e6, // 1 MeV initial guess
+                energy: 1.0e6,
                 weight: 1.0,
             });
         }
@@ -336,8 +353,6 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell]) -> Vec<Fission
 /// Normalize fission bank to N particles for the next generation.
 fn normalize_fission_bank(bank: &FissionBank, n: usize, batch: u32) -> Vec<FissionSite> {
     if bank.is_empty() {
-        // No fissions — recycle with default source
-        let _rng = Rng::new(batch as u64 + 999, 0);
         return (0..n)
             .map(|_| FissionSite {
                 pos: Vec3::new(0.0, 0.0, 0.0),
@@ -362,7 +377,6 @@ mod tests {
     use super::*;
     use crate::geometry::cell::{self, CellId};
 
-    /// Run a mini Godiva simulation with constant cross-sections.
     #[test]
     fn godiva_eigenvalue_smoke_test() {
         let surfaces = vec![
@@ -383,11 +397,10 @@ mod tests {
         ];
 
         let mut heu = Material::new("HEU", 294.0);
-        heu.add_nuclide(0.048, 0); // U-235 atom density (atoms/barn-cm)
+        heu.add_nuclide(0.048, 0);
 
         let materials = vec![heu];
 
-        // Approximate U-235 cross-sections at ~1 MeV
         let xs_provider = ConstantXs {
             xs: vec![MicroXs {
                 total: 7.0,
@@ -413,9 +426,6 @@ mod tests {
         );
 
         assert_eq!(results.len(), 10);
-        // k_eff should be roughly around 1.0 for a critical system
-        // With constant XS and simplified physics, it won't be exact,
-        // but it should be in a reasonable range (0.5 - 2.0)
         assert!(k_final > 0.3 && k_final < 3.0,
                 "k_final = {k_final} — out of reasonable range");
         println!("\n  Godiva smoke test: k_final = {k_final:.4}");
