@@ -29,10 +29,10 @@ eigenvalue simulations end-to-end.
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
 - Each nuclide needs its own SVD basis — not a problem, bases are small
 
-## Current State: k_eff = 1.007 +/- 0.001 (Godiva, real ENDF data)
+## Current State: k_eff = 1.00016 +/- 0.00080 (Godiva, real ENDF data)
 
-OpenMC gets 0.99857. We get 1.007 +/- 0.001. Gap = ~850 pcm from OpenMC.
-Delta from experiment = 700 pcm. MC uncertainty = 100 pcm (120 batches, 15k particles).
+OpenMC gets 0.99857. We get 1.00016 +/- 0.00080. Gap = ~160 pcm from OpenMC.
+Delta from experiment = **16 pcm** (< 0.2 sigma). 150 batches, 20k particles.
 
 ### Implemented (Priority 1 from previous round)
 
@@ -225,12 +225,12 @@ Extract to `data/endfb-vii.1-hdf5/`. Key files:
 | Godiva dk (fission SVD k=4) | 6.9 pcm |
 | Godiva dk (all rxn SVD k=4) | 3.7 pcm |
 | PWR pin cell dk (SVD k=5) | 59.7 pcm |
-| Our Rust Godiva k_eff | 1.007 +/- 0.001 |
+| Our Rust Godiva k_eff | 1.00016 +/- 0.00080 |
 | OpenMC Godiva k_eff | 0.99857 |
-| Gap from OpenMC | ~850 pcm |
-| Gap from experiment | ~700 pcm |
+| Gap from OpenMC | ~160 pcm |
+| Gap from experiment | **16 pcm** |
 | History: const nu-bar | 0.994 (coincidental) |
 | History: + E-dep nu-bar | 1.059 (+6500 pcm) |
 | History: + aniso scatter | 0.965 (-9400 pcm) |
 | History: + data fission | 1.006 (+4100 pcm) |
-| History: + URR tables | 1.007 (stat. consistent) |
+| History: + URR + interp | 1.000 (-600 pcm) |

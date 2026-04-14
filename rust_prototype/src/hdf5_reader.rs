@@ -247,28 +247,45 @@ pub struct TabularMuDist {
 
 impl AngularDistribution {
     /// Sample the scattering cosine mu at a given energy.
+    ///
+    /// Uses stochastic interpolation between adjacent energy bins:
+    /// the lower bin is selected with probability (1-f) and the upper
+    /// bin with probability f, where f is the interpolation fraction.
     pub fn sample_mu(&self, energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
         if self.energies.is_empty() {
             return 2.0 * rng.uniform() - 1.0; // isotropic fallback
         }
 
-        // Find energy bracket
         let n = self.energies.len();
-        let idx = if energy <= self.energies[0] {
-            0
-        } else if energy >= self.energies[n - 1] {
-            n - 1
-        } else {
-            match self.energies.binary_search_by(|e| {
-                e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
-            }) {
-                Ok(i) => i,
-                Err(i) => if i > 0 { i - 1 } else { 0 },
-            }
+        if energy <= self.energies[0] {
+            return self.distributions[0].sample(rng);
+        }
+        if energy >= self.energies[n - 1] {
+            return self.distributions[n - 1].sample(rng);
+        }
+
+        // Find energy bracket
+        let idx = match self.energies.binary_search_by(|e| {
+            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => return self.distributions[i].sample(rng), // exact match
+            Err(i) => if i > 0 { i - 1 } else { 0 },
         };
 
-        // Sample from the distribution at this energy index
-        self.distributions[idx].sample(rng)
+        if idx + 1 >= n {
+            return self.distributions[idx].sample(rng);
+        }
+
+        // Stochastic interpolation: choose lower or upper bin probabilistically
+        let e_lo = self.energies[idx];
+        let e_hi = self.energies[idx + 1];
+        let frac = (energy - e_lo) / (e_hi - e_lo);
+
+        if rng.uniform() < frac {
+            self.distributions[idx + 1].sample(rng)
+        } else {
+            self.distributions[idx].sample(rng)
+        }
     }
 }
 
@@ -549,26 +566,42 @@ pub struct TabularEnergyDist {
 
 impl EnergyDistribution {
     /// Sample an outgoing energy at a given incident energy.
+    ///
+    /// Uses stochastic interpolation between adjacent incident energy bins.
     pub fn sample(&self, incident_energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
         if self.energies.is_empty() {
-            return incident_energy; // fallback
+            return incident_energy;
         }
 
         let n = self.energies.len();
-        let idx = if incident_energy <= self.energies[0] {
-            0
-        } else if incident_energy >= self.energies[n - 1] {
-            n - 1
-        } else {
-            match self.energies.binary_search_by(|e| {
-                e.partial_cmp(&incident_energy).unwrap_or(std::cmp::Ordering::Less)
-            }) {
-                Ok(i) => i,
-                Err(i) => if i > 0 { i - 1 } else { 0 },
-            }
+        if incident_energy <= self.energies[0] {
+            return self.distributions[0].sample(rng);
+        }
+        if incident_energy >= self.energies[n - 1] {
+            return self.distributions[n - 1].sample(rng);
+        }
+
+        let idx = match self.energies.binary_search_by(|e| {
+            e.partial_cmp(&incident_energy).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => return self.distributions[i].sample(rng),
+            Err(i) => if i > 0 { i - 1 } else { 0 },
         };
 
-        self.distributions[idx].sample(rng)
+        if idx + 1 >= n {
+            return self.distributions[idx].sample(rng);
+        }
+
+        // Stochastic interpolation
+        let e_lo = self.energies[idx];
+        let e_hi = self.energies[idx + 1];
+        let frac = (incident_energy - e_lo) / (e_hi - e_lo);
+
+        if rng.uniform() < frac {
+            self.distributions[idx + 1].sample(rng)
+        } else {
+            self.distributions[idx].sample(rng)
+        }
     }
 }
 
@@ -1007,7 +1040,6 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
         vec![*v as usize]
     } else {
         // No offsets attribute — try uniform distribution
-        // Each energy gets n_total / n_energies points
         let per_e = n_total / n_energies;
         (0..n_energies).map(|i| i * per_e).collect()
     };

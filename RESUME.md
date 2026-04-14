@@ -7,8 +7,8 @@ Paste this as your first message:
 ```
 Read C:\Users\fog\madman_svd_experiment\CLAUDE.md then continue working on open_rust_mc. 
 
-Current state: pure Rust Monte Carlo engine gets k_eff=1.007 +/- 0.001 on Godiva
-(OpenMC gets 0.99857). Gap = ~850 pcm. Repo: https://github.com/sorcerer86pt/open_rust_mc
+Current state: pure Rust Monte Carlo engine gets k_eff=1.00016 +/- 0.00080 on Godiva
+(OpenMC gets 0.99857). Gap = 16 pcm from experiment. Repo: https://github.com/sorcerer86pt/open_rust_mc
 
 Completed physics:
 - Energy-dependent nu-bar (total = prompt + delayed) from HDF5
