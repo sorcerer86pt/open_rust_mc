@@ -185,6 +185,231 @@ impl NuclideData {
     }
 }
 
+/// Cached HDF5 file reader for a single nuclide.
+///
+/// Opens the file once, pre-reads the energy grids and unionized grid,
+/// then provides fast access for reading individual reactions and metadata.
+/// Eliminates redundant file opens and energy grid unionization.
+pub struct NuclideFileReader {
+    /// The opened HDF5 file (kept alive for the Group references).
+    file: hdf5_pure::File,
+    /// Nuclide name (e.g., "U235").
+    pub nuclide_name: String,
+    /// Temperature labels, sorted ascending (e.g., ["250K", "294K", ...]).
+    pub temp_labels: Vec<String>,
+    /// Temperatures in Kelvin.
+    pub temperatures: Vec<f64>,
+    /// Per-temperature energy grids.
+    pub energy_grids: Vec<Vec<f64>>,
+    /// Unionized energy grid.
+    pub union_grid: Vec<f64>,
+}
+
+impl NuclideFileReader {
+    /// Open a nuclide HDF5 file and preload the energy grids.
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("{e}"),
+        })?;
+
+        let root = file.root();
+        let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
+
+        let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("{e}"),
+        })?;
+
+        let energy_group = nuc.group("energy").map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot open energy group: {e}"),
+        })?;
+
+        let mut temp_labels = energy_group.datasets().unwrap_or_default();
+        temp_labels.retain(|l| parse_temp_kelvin(l).is_some_and(|t| t > 0.0));
+        temp_labels.sort_by(|a, b| {
+            let va = parse_temp_kelvin(a).unwrap_or(0.0);
+            let vb = parse_temp_kelvin(b).unwrap_or(0.0);
+            va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let temperatures: Vec<f64> = temp_labels.iter()
+            .filter_map(|l| parse_temp_kelvin(l))
+            .collect();
+
+        let mut energy_grids = Vec::with_capacity(temp_labels.len());
+        for label in &temp_labels {
+            let ds = energy_group.dataset(label).map_err(|e| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: format!("cannot read energy/{label}: {e}"),
+            })?;
+            energy_grids.push(ds.read_f64().map_err(|e| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: format!("cannot read energy/{label} data: {e}"),
+            })?);
+        }
+
+        let mut union_grid: Vec<f64> = energy_grids.iter().flatten().copied().collect();
+        union_grid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        union_grid.dedup();
+
+        Ok(Self { file, nuclide_name, temp_labels, temperatures, energy_grids, union_grid })
+    }
+
+    /// Read a single reaction's cross-section data using the cached grids.
+    pub fn read_reaction(&self, mt: u32) -> Result<NuclideData> {
+        let root = self.file.root();
+        let nuc = root.group(&self.nuclide_name).map_err(|e| SvdError::Hdf5 {
+            path: self.nuclide_name.clone(),
+            detail: format!("{e}"),
+        })?;
+
+        let rxn_name = format!("reaction_{mt:03}");
+        let reactions = nuc.group("reactions").map_err(|e| SvdError::Hdf5 {
+            path: self.nuclide_name.clone(),
+            detail: format!("cannot open reactions: {e}"),
+        })?;
+        let rxn = reactions.group(&rxn_name).map_err(|e| SvdError::Hdf5 {
+            path: self.nuclide_name.clone(),
+            detail: format!("cannot open {rxn_name}: {e}"),
+        })?;
+
+        let mut xs_per_temp = Vec::with_capacity(self.temp_labels.len());
+        for (t_idx, label) in self.temp_labels.iter().enumerate() {
+            let temp_group = rxn.group(label).map_err(|e| SvdError::Hdf5 {
+                path: self.nuclide_name.clone(),
+                detail: format!("cannot open {rxn_name}/{label}: {e}"),
+            })?;
+            let xs_ds = temp_group.dataset("xs").map_err(|e| SvdError::Hdf5 {
+                path: self.nuclide_name.clone(),
+                detail: format!("cannot read {rxn_name}/{label}/xs: {e}"),
+            })?;
+            let xs_raw = xs_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+                path: self.nuclide_name.clone(),
+                detail: format!("cannot read {rxn_name}/{label}/xs data: {e}"),
+            })?;
+
+            let e_grid = &self.energy_grids[t_idx];
+            let n_grid = e_grid.len();
+            let n_xs = xs_raw.len();
+
+            let xs_full = if n_xs < n_grid {
+                let mut full = vec![0.0_f64; n_grid];
+                let offset = n_grid - n_xs;
+                full[offset..].copy_from_slice(&xs_raw);
+                full
+            } else {
+                xs_raw
+            };
+
+            let xs_interp = interpolate_to_grid(e_grid, &xs_full, &self.union_grid);
+            xs_per_temp.push(xs_interp);
+        }
+
+        Ok(NuclideData {
+            temperatures: self.temperatures.clone(),
+            temp_labels: self.temp_labels.clone(),
+            energies: self.union_grid.clone(),
+            xs_per_temp,
+            mt,
+        })
+    }
+
+    /// Read the AWR attribute.
+    pub fn awr(&self) -> Result<f64> {
+        let root = self.file.root();
+        let nuc = root.group(&self.nuclide_name).map_err(|e| SvdError::Hdf5 {
+            path: self.nuclide_name.clone(),
+            detail: format!("{e}"),
+        })?;
+        let attrs = nuc.attrs().map_err(|e| SvdError::Hdf5 {
+            path: self.nuclide_name.clone(),
+            detail: format!("cannot read attrs: {e}"),
+        })?;
+        if let Some(hdf5_pure::AttrValue::F64(awr)) = attrs.get("atomic_weight_ratio") {
+            Ok(*awr)
+        } else {
+            Err(SvdError::Hdf5 {
+                path: self.nuclide_name.clone(),
+                detail: "missing atomic_weight_ratio".into(),
+            })
+        }
+    }
+
+    /// Read nu-bar (total neutron yield) from fission products.
+    pub fn nu_bar(&self) -> Result<NuBarTable> {
+        let root = self.file.root();
+        let nuc = root.group(&self.nuclide_name).map_err(|e| SvdError::Hdf5 {
+            path: self.nuclide_name.clone(),
+            detail: format!("{e}"),
+        })?;
+        let rxn = match nuc.group("reactions").and_then(|r| r.group("reaction_018")) {
+            Ok(g) => g,
+            Err(_) => return Ok(NuBarTable { energies: vec![], values: vec![] }),
+        };
+        read_nu_bar_from_group(&rxn)
+    }
+
+    /// Read discrete inelastic levels.
+    pub fn discrete_levels(&self, awr: f64) -> Vec<DiscreteLevelInfo> {
+        let root = self.file.root();
+        let nuc = match root.group(&self.nuclide_name) {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        let reactions = match nuc.group("reactions") {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        let rxn_names = reactions.groups().unwrap_or_default();
+
+        let mut levels = Vec::new();
+        for name in &rxn_names {
+            let mt: u32 = match name.strip_prefix("reaction_").and_then(|s| s.parse().ok()) {
+                Some(mt) if (51..=91).contains(&mt) => mt,
+                _ => continue,
+            };
+            let rxn = match reactions.group(name) {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            let attrs = rxn.attrs().unwrap_or_default();
+            let q_value = if let Some(hdf5_pure::AttrValue::F64(q)) = attrs.get("Q_value") {
+                *q
+            } else { continue };
+            let threshold = if q_value < 0.0 { (-q_value) * (awr + 1.0) / awr } else { 0.0 };
+            levels.push(DiscreteLevelInfo { mt, q_value, threshold });
+        }
+        levels.sort_by_key(|l| l.mt);
+        levels
+    }
+
+    /// Read angular distribution for a reaction.
+    pub fn angular_distribution(&self, mt: u32) -> Option<AngularDistribution> {
+        read_angular_dist_from_file(&self.file, &self.nuclide_name, mt)
+    }
+
+    /// Read fission energy distribution.
+    pub fn fission_energy_dist(&self) -> Option<EnergyDistribution> {
+        read_fission_edist_from_file(&self.file, &self.nuclide_name)
+    }
+
+    /// Read URR probability tables.
+    pub fn urr_tables(&self, temp_label: &str) -> Option<UrrProbabilityTables> {
+        read_urr_from_file(&self.file, &self.nuclide_name, temp_label)
+    }
+}
+
 /// Tabulated nu-bar (average neutrons per fission) as a function of energy.
 pub struct NuBarTable {
     /// Energy grid in eV, sorted ascending.
@@ -1076,6 +1301,158 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
         distributions,
         center_of_mass,
     }))
+}
+
+// ── Internal helpers for NuclideFileReader ──────────────────────────────────
+
+/// Read nu-bar from an already-opened reaction_018 group.
+fn read_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Result<NuBarTable> {
+    let subgroups = rxn_group.groups().unwrap_or_default();
+    let mut prompt_table: Option<NuBarTable> = None;
+    let mut delayed_constants: Vec<f64> = Vec::new();
+
+    for product_name in &subgroups {
+        if !product_name.starts_with("product_") { continue; }
+        let product = match rxn_group.group(product_name) { Ok(g) => g, Err(_) => continue };
+        let attrs = product.attrs().unwrap_or_default();
+        let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
+        if !is_neutron { continue; }
+        let is_prompt = matches!(attrs.get("emission_mode"), Some(hdf5_pure::AttrValue::String(s)) if s == "prompt");
+        let yield_ds = match product.dataset("yield") { Ok(ds) => ds, Err(_) => continue };
+        let shape = yield_ds.shape().unwrap_or_default();
+        let raw = match yield_ds.read_f64() { Ok(r) => r, Err(_) => continue };
+
+        if is_prompt {
+            if shape.len() == 2 && shape[0] == 2 {
+                let n = shape[1] as usize;
+                if raw.len() >= 2 * n {
+                    prompt_table = Some(NuBarTable { energies: raw[..n].to_vec(), values: raw[n..2*n].to_vec() });
+                }
+            } else if shape.len() == 1 && shape[0] == 1 {
+                prompt_table = Some(NuBarTable { energies: vec![1e-5, 20.0e6], values: vec![raw[0], raw[0]] });
+            }
+        } else if shape.len() == 2 && shape[0] == 2 {
+            let n = shape[1] as usize;
+            if raw.len() >= 2 * n { delayed_constants.push(raw[n..2*n].iter().sum::<f64>() / n as f64); }
+        } else if shape.len() == 1 && shape[0] == 1 {
+            delayed_constants.push(raw[0]);
+        }
+    }
+    match prompt_table {
+        Some(mut t) => { let d: f64 = delayed_constants.iter().sum(); for v in &mut t.values { *v += d; } Ok(t) }
+        None => Ok(NuBarTable { energies: vec![], values: vec![] }),
+    }
+}
+
+/// Read angular distribution from an already-open file.
+fn read_angular_dist_from_file(file: &hdf5_pure::File, nuclide_name: &str, mt: u32) -> Option<AngularDistribution> {
+    let root = file.root();
+    let nuc = root.group(nuclide_name).ok()?;
+    let rxn_name = format!("reaction_{mt:03}");
+    let rxn = nuc.group("reactions").ok()?.group(&rxn_name).ok()?;
+    let rxn_attrs = rxn.attrs().unwrap_or_default();
+    let center_of_mass = matches!(rxn_attrs.get("center_of_mass"), Some(hdf5_pure::AttrValue::I64(1)));
+    let angle = rxn.group("product_0").ok()?.group("distribution_0").ok()?.group("angle").ok()?;
+    let energies = angle.dataset("energy").ok()?.read_f64().ok()?;
+    if energies.is_empty() { return None; }
+    let n_energies = energies.len();
+    let mu_ds = angle.dataset("mu").ok()?;
+    let mu_shape = mu_ds.shape().ok()?;
+    let mu_raw = mu_ds.read_f64().ok()?;
+    if mu_shape.len() != 2 || mu_shape[0] != 3 { return None; }
+    let n_total = mu_shape[1] as usize;
+    let mu_attrs = mu_ds.attrs().unwrap_or_default();
+    let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("offsets") {
+        arr.iter().map(|&v| v as usize).collect()
+    } else { let per_e = n_total / n_energies; (0..n_energies).map(|i| i * per_e).collect() };
+    let mu_values = &mu_raw[..n_total];
+    let cdf_values = &mu_raw[2 * n_total..3 * n_total];
+    let mut distributions = Vec::with_capacity(n_energies);
+    for i in 0..n_energies {
+        let start = offsets.get(i).copied().unwrap_or(0);
+        let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+        if start >= end || start >= n_total {
+            distributions.push(TabularMuDist { mu: vec![-1.0, 1.0], cdf: vec![0.0, 1.0] });
+        } else {
+            distributions.push(TabularMuDist { mu: mu_values[start..end].to_vec(), cdf: cdf_values[start..end].to_vec() });
+        }
+    }
+    Some(AngularDistribution { energies, distributions, center_of_mass })
+}
+
+/// Read fission energy distribution from an already-open file.
+fn read_fission_edist_from_file(file: &hdf5_pure::File, nuclide_name: &str) -> Option<EnergyDistribution> {
+    let root = file.root();
+    let nuc = root.group(nuclide_name).ok()?;
+    let rxn = nuc.group("reactions").ok()?.group("reaction_018").ok()?;
+    let subgroups = rxn.groups().unwrap_or_default();
+    for product_name in &subgroups {
+        if !product_name.starts_with("product_") { continue; }
+        let product = match rxn.group(product_name) { Ok(g) => g, Err(_) => continue };
+        let attrs = product.attrs().unwrap_or_default();
+        let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
+        let is_prompt = matches!(attrs.get("emission_mode"), Some(hdf5_pure::AttrValue::String(s)) if s == "prompt");
+        if !is_neutron || !is_prompt { continue; }
+        let edist = product.group("distribution_0").ok()?.group("energy").ok()?;
+        let energies = edist.dataset("energy").ok()?.read_f64().ok()?;
+        if energies.is_empty() { continue; }
+        let dist_ds = edist.dataset("distribution").ok()?;
+        let dist_shape = dist_ds.shape().ok()?;
+        let dist_raw = dist_ds.read_f64().ok()?;
+        if dist_shape.len() != 2 || dist_shape[0] != 3 { continue; }
+        let n_total = dist_shape[1] as usize;
+        let dist_attrs = dist_ds.attrs().unwrap_or_default();
+        let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else { let per_e = n_total / energies.len(); (0..energies.len()).map(|i| i * per_e).collect() };
+        let e_out_values = &dist_raw[..n_total];
+        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+        let n_energies = energies.len();
+        let mut distributions = Vec::with_capacity(n_energies);
+        for i in 0..n_energies {
+            let start = offsets.get(i).copied().unwrap_or(0);
+            let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+            if start >= end || start >= n_total {
+                distributions.push(TabularEnergyDist { e_out: vec![1e5, 2e6], cdf: vec![0.0, 1.0] });
+            } else {
+                distributions.push(TabularEnergyDist { e_out: e_out_values[start..end].to_vec(), cdf: cdf_values[start..end].to_vec() });
+            }
+        }
+        return Some(EnergyDistribution { energies, distributions });
+    }
+    None
+}
+
+/// Read URR probability tables from an already-open file.
+fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &str) -> Option<UrrProbabilityTables> {
+    let root = file.root();
+    let nuc = root.group(nuclide_name).ok()?;
+    let urr = nuc.group("urr").ok()?;
+    let temp_group = urr.group(temp_label).ok()?;
+    let attrs = temp_group.attrs().unwrap_or_default();
+    let multiply_smooth = matches!(attrs.get("multiply_smooth"), Some(hdf5_pure::AttrValue::I64(1)));
+    let energies = temp_group.dataset("energy").ok()?.read_f64().ok()?;
+    let n_e = energies.len();
+    let table_ds = temp_group.dataset("table").ok()?;
+    let table_shape = table_ds.shape().ok()?;
+    let table_raw = table_ds.read_f64().ok()?;
+    if table_shape.len() != 3 || table_shape[0] as usize != n_e || table_shape[1] != 6 { return None; }
+    let n_bands = table_shape[2] as usize;
+    let n_ch = 6_usize;
+    let mut cum_prob = Vec::with_capacity(n_e);
+    let mut total_factor = Vec::with_capacity(n_e);
+    let mut elastic_factor = Vec::with_capacity(n_e);
+    let mut fission_factor = Vec::with_capacity(n_e);
+    let mut capture_factor = Vec::with_capacity(n_e);
+    for e in 0..n_e {
+        let base = e * n_ch * n_bands;
+        cum_prob.push((0..n_bands).map(|b| table_raw[base + b]).collect());
+        total_factor.push((0..n_bands).map(|b| table_raw[base + n_bands + b]).collect());
+        elastic_factor.push((0..n_bands).map(|b| table_raw[base + 2 * n_bands + b]).collect());
+        fission_factor.push((0..n_bands).map(|b| table_raw[base + 3 * n_bands + b]).collect());
+        capture_factor.push((0..n_bands).map(|b| table_raw[base + 4 * n_bands + b]).collect());
+    }
+    Some(UrrProbabilityTables { energies, n_bands, cum_prob, total_factor, elastic_factor, fission_factor, capture_factor, multiply_smooth })
 }
 
 /// Linear interpolation of (x_src, y_src) onto x_dst.

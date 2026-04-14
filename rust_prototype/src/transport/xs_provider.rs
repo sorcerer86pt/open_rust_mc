@@ -6,7 +6,7 @@
 //! product instead of binary-searching a table.
 
 use crate::decompose;
-use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData, UrrProbabilityTables};
+use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData, NuclideFileReader, UrrProbabilityTables};
 use crate::kernel::SvdKernel;
 use crate::physics::collision::MicroXs;
 use crate::transport::simulate::XsProvider;
@@ -243,7 +243,51 @@ pub fn build_reaction_kernel(
     Some(ReactionKernel { kernel, coeffs })
 }
 
-/// Load a complete nuclide (all key reactions) from HDF5 and build SVD kernels.
+/// Build an SVD kernel from a `NuclideFileReader` (single-pass, no re-read).
+fn build_kernel_from_reader(
+    reader: &NuclideFileReader,
+    mt: u32,
+    svd_rank: usize,
+    temp_idx: usize,
+) -> Option<ReactionKernel> {
+    let data = reader.read_reaction(mt).ok()?;
+
+    if data.n_energy() == 0 || data.n_temp() == 0 {
+        return None;
+    }
+
+    let log_matrix = data.to_log_matrix();
+    let svd = decompose::svd(&log_matrix, data.n_energy(), data.n_temp());
+
+    let rank = svd_rank.min(svd.rank);
+    let n_e = svd.n_e;
+    let n_t = svd.n_t;
+
+    let mut basis = vec![0.0_f64; n_e * rank];
+    for j in 0..rank {
+        let s_j = svd.s[j];
+        for i in 0..n_e {
+            basis[i * rank + j] = svd.u[i * svd.rank + j] * s_j;
+        }
+    }
+
+    let mut vt_coeffs = vec![0.0_f64; rank * n_t];
+    for j in 0..rank {
+        for t in 0..n_t {
+            vt_coeffs[j * n_t + t] = svd.vt[j * n_t + t];
+        }
+    }
+
+    let kernel = SvdKernel::new(basis, vt_coeffs, data.energies.clone(), rank, n_e, n_t);
+    let t_idx = temp_idx.min(n_t - 1);
+    let coeffs = kernel.temp_coeffs(t_idx);
+    Some(ReactionKernel { kernel, coeffs })
+}
+
+/// Load a complete nuclide from HDF5 in a single pass.
+///
+/// Opens the file once, reads energy grids once, then reads all reactions
+/// and metadata without redundant I/O.
 pub fn load_nuclide(
     h5_path: &std::path::Path,
     svd_rank: usize,
@@ -253,79 +297,77 @@ pub fn load_nuclide(
 ) -> NuclideKernels {
     println!("  Loading {} (rank={svd_rank})...", h5_path.display());
 
-    // Read AWR from HDF5 (fall back to provided value)
-    let awr = hdf5_reader::read_awr(h5_path).unwrap_or(awr_fallback);
-    println!("    AWR = {awr:.3}");
+    // Open file ONCE and cache energy grids
+    let reader = match NuclideFileReader::open(h5_path) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("    WARNING: failed to open {}: {e}", h5_path.display());
+            return NuclideKernels {
+                elastic: None, inelastic: None, n2n: None, n3n: None,
+                fission: None, capture: None, awr: awr_fallback,
+                nu_bar_const: nu_bar_fallback, nu_bar_table: None,
+                discrete_levels: vec![], has_continuum_inelastic: false,
+                elastic_angle: None, fission_energy_dist: None, urr_tables: None,
+            };
+        }
+    };
 
-    // Read energy-dependent nu-bar
-    let nu_bar_table = hdf5_reader::read_nu_bar(h5_path).ok();
+    let awr = reader.awr().unwrap_or(awr_fallback);
+    println!("    AWR = {awr:.3} ({} temps, {} energy pts)",
+             reader.temp_labels.len(), reader.union_grid.len());
+
+    let nu_bar_table = reader.nu_bar().ok();
     if let Some(ref t) = nu_bar_table {
         if !t.energies.is_empty() {
-            println!("    nu-bar(E): {} points, {:.3} @ thermal, {:.3} @ 1 MeV, {:.3} @ 10 MeV",
-                     t.energies.len(),
-                     t.lookup(0.0253), t.lookup(1.0e6), t.lookup(10.0e6));
+            println!("    nu-bar(E): {} pts, {:.3} @ thermal, {:.3} @ 1 MeV",
+                     t.energies.len(), t.lookup(0.0253), t.lookup(1.0e6));
         }
     }
 
-    // Read discrete inelastic levels
-    let level_infos = hdf5_reader::read_discrete_levels(h5_path, awr).unwrap_or_default();
+    // Discrete levels — all read from the same open file
+    let level_infos = reader.discrete_levels(awr);
     let has_continuum = level_infos.iter().any(|l| l.mt == 91);
     let n_levels = level_infos.len();
-
     let mut discrete_levels: Vec<DiscreteLevel> = Vec::with_capacity(n_levels);
     for info in level_infos {
-        let kernel = build_reaction_kernel(h5_path, info.mt, svd_rank.min(2), temp_idx);
+        let kernel = build_kernel_from_reader(&reader, info.mt, svd_rank.min(2), temp_idx);
         discrete_levels.push(DiscreteLevel { info, kernel });
     }
     let loaded_count = discrete_levels.iter().filter(|l| l.kernel.is_some()).count();
     if n_levels > 0 {
-        println!("    Discrete levels: {loaded_count}/{n_levels} loaded (continuum={has_continuum})");
+        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum})");
     }
 
-    // Load fission energy distribution
-    let fission_energy_dist = hdf5_reader::read_fission_energy_dist(h5_path).unwrap_or(None);
+    let fission_energy_dist = reader.fission_energy_dist();
     if let Some(ref d) = fission_energy_dist {
-        println!("    Fission spectrum: {} incident energies", d.energies.len());
+        println!("    Fission spectrum: {} energies", d.energies.len());
     }
 
-    // Load elastic angular distribution
-    let elastic_angle = hdf5_reader::read_angular_distribution(h5_path, 2).unwrap_or(None);
-    if let Some(ref ang) = elastic_angle {
-        println!("    Elastic angular dist: {} energies, CM={}",
-                 ang.energies.len(), ang.center_of_mass);
+    let elastic_angle = reader.angular_distribution(2);
+    if let Some(ref a) = elastic_angle {
+        println!("    Elastic angular dist: {} energies, CM={}", a.energies.len(), a.center_of_mass);
     }
 
-    // Load URR probability tables (use temp_idx to pick the right temperature)
-    // The common temp labels sorted are: ["250K", "294K", "600K", "900K", "1200K", "2500K"]
-    // temp_idx=1 corresponds to "294K" which is room temperature
-    let temp_labels = ["250K", "294K", "600K", "900K", "1200K", "2500K"];
-    let urr_temp = temp_labels.get(temp_idx).unwrap_or(&"294K");
-    let urr_tables = hdf5_reader::read_urr_tables(h5_path, urr_temp).unwrap_or(None);
+    let urr_temp = reader.temp_labels.get(temp_idx).cloned().unwrap_or_else(|| "294K".to_string());
+    let urr_tables = reader.urr_tables(&urr_temp);
     if let Some(ref u) = urr_tables {
-        println!("    URR: {} energies, {} bands, range {:.0}–{:.0} eV, multiply_smooth={}",
+        println!("    URR: {} energies, {} bands, {:.0}–{:.0} eV",
                  u.energies.len(), u.n_bands,
-                 u.energies.first().unwrap_or(&0.0),
-                 u.energies.last().unwrap_or(&0.0),
-                 u.multiply_smooth);
+                 u.energies.first().unwrap_or(&0.0), u.energies.last().unwrap_or(&0.0));
     }
 
-    let elastic = build_reaction_kernel(h5_path, 2, svd_rank, temp_idx);
-    if elastic.is_some() { println!("    MT=2 (elastic): loaded"); }
-
-    let inelastic = build_reaction_kernel(h5_path, 4, svd_rank, temp_idx);
-    if inelastic.is_some() { println!("    MT=4 (inelastic): loaded"); }
-
-    let n2n = build_reaction_kernel(h5_path, 16, svd_rank, temp_idx);
-    if n2n.is_some() { println!("    MT=16 (n,2n): loaded"); }
-
-    let n3n = build_reaction_kernel(h5_path, 17, svd_rank, temp_idx);
-    if n3n.is_some() { println!("    MT=17 (n,3n): loaded"); }
-
-    let fission = build_reaction_kernel(h5_path, 18, svd_rank, temp_idx);
-    if fission.is_some() { println!("    MT=18 (fission): loaded"); }
-
-    let capture = build_reaction_kernel(h5_path, 102, svd_rank, temp_idx);
-    if capture.is_some() { println!("    MT=102 (capture): loaded"); }
+    let elastic = build_kernel_from_reader(&reader, 2, svd_rank, temp_idx);
+    if elastic.is_some() { println!("    MT=2 (elastic)"); }
+    let inelastic = build_kernel_from_reader(&reader, 4, svd_rank, temp_idx);
+    if inelastic.is_some() { println!("    MT=4 (inelastic)"); }
+    let n2n = build_kernel_from_reader(&reader, 16, svd_rank, temp_idx);
+    if n2n.is_some() { println!("    MT=16 (n,2n)"); }
+    let n3n = build_kernel_from_reader(&reader, 17, svd_rank, temp_idx);
+    if n3n.is_some() { println!("    MT=17 (n,3n)"); }
+    let fission = build_kernel_from_reader(&reader, 18, svd_rank, temp_idx);
+    if fission.is_some() { println!("    MT=18 (fission)"); }
+    let capture = build_kernel_from_reader(&reader, 102, svd_rank, temp_idx);
+    if capture.is_some() { println!("    MT=102 (capture)"); }
 
     NuclideKernels {
         elastic, inelastic, n2n, n3n, fission, capture,
