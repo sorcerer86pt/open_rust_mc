@@ -39,8 +39,8 @@ traditional table lookup at 3--5~ns per energy point; (iii) Godiva
 $\Delta k_\text{eff} < 10$~pcm at all tested ranks ($k=2$ through $k=5$),
 indistinguishable from the unmodified library within Monte Carlo statistics.
 A standalone pure-Rust transport engine using SVD-compressed cross-sections
-as its sole data source achieves $k_\text{eff} = 1.00016 \pm 0.00080$ on
-Godiva---16~pcm from the experimental value---with a complete eigenvalue
+as its sole data source achieves $k_\text{eff} = 0.99963 \pm 0.00091$ on
+Godiva---37~pcm from the experimental value---with a complete eigenvalue
 calculation in 3.4~seconds.
 The method is particularly effective for the thermal and fast energy regions,
 where rank-1 approximation suffices, while the resolved resonance region
@@ -139,7 +139,7 @@ The key contributions are:
     \item A standalone pure-Rust Monte Carlo transport engine using
     SVD cross-sections with full physics (anisotropic scattering,
     tabulated fission spectra, URR probability tables, free-gas thermal
-    model) achieving $k_\text{eff} = 1.00016 \pm 0.00080$ on Godiva
+    model) achieving $k_\text{eff} = 0.99963 \pm 0.00091$ on Godiva
     in 3.4~seconds wall time.
 \end{enumerate}
 
@@ -655,20 +655,20 @@ $+$ Energy-dependent $\bar{\nu}(E)$    & 1.059 & $+5900$ & correct but exposes m
 $+$ Anisotropic elastic scattering     & 0.965 & $-3500$ & increased leakage \\
 $+$ Tabulated fission spectrum          & 1.006 & $+600$  & harder spectrum \\
 $+$ URR probability tables             & 1.007 & $+700$  & minor self-shielding \\
-$+$ Stochastic energy interpolation    & 1.000 & $+16$   & removes interpolation bias \\
+$+$ Correlated CDF interpolation    & 1.000 & $+16$   & removes interpolation bias \\
 \midrule
-Final (150 batches, 20k particles) & 1.00016 & $+16$ & $\pm 0.00080$ ($1\sigma$) \\
+Final (150 batches, 20k particles) & 0.99963 & $-37$ & $\pm 0.00091$ ($1\sigma$) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The final result of $k_\text{eff} = 1.00016 \pm 0.00080$ agrees
+The final result of $k_\text{eff} = 0.99963 \pm 0.00091$ agrees
 with the experimental value to within $0.2\sigma$, and lies
-$\sim$160~pcm above the OpenMC reference of $0.99857$. The small
+$\sim$100~pcm above the OpenMC reference of $0.99857$. The small
 residual difference from OpenMC is attributed to minor numerical
 differences in the SVD-reconstructed cross-sections versus OpenMC's
-pointwise tables, and to the stochastic (rather than deterministic)
-interpolation scheme used for angular and energy distributions.
+pointwise tables and to the finite number of SVD basis functions
+used for cross-section reconstruction in the resonance region.
 
 Performance of the standalone engine:
 \begin{itemize}
@@ -733,8 +733,10 @@ that accurate cross-section values alone are insufficient; the
 auxiliary nuclear data (angular distributions, fission spectra, URR
 tables) and their correct interpolation are equally important.
 The $\sim$700~pcm bias from nearest-energy lookup (corrected by
-stochastic interpolation) highlights that distribution sampling
-techniques matter as much as the underlying cross-section accuracy.
+correlated CDF interpolation---using the same random number to
+invert both adjacent distributions, then blending the results)
+highlights that distribution sampling techniques matter as much
+as the underlying cross-section accuracy.
 
 \paragraph{Limitations.}
 The 6--8 temperature columns in current nuclear data
@@ -799,7 +801,7 @@ Monte Carlo neutron transport. The method achieves:
     within Monte Carlo statistics.
     \item \textbf{Standalone validation}: A pure-Rust transport engine
     using SVD cross-sections with comprehensive physics achieves
-    $k_\text{eff} = 1.00016 \pm 0.00080$ on Godiva (16~pcm from
+    $k_\text{eff} = 0.99963 \pm 0.00091$ on Godiva (37~pcm from
     experiment) in 3.4~seconds total wall time.
     \item \textbf{Generality}: 47 out of 52 $^{235}$U reaction channels
     are effectively rank-1; all reactions are SVD-compressible.
@@ -821,9 +823,9 @@ an initial 600~pcm bias to 16~pcm agreement required implementing
 energy-dependent $\bar{\nu}$, anisotropic scattering, tabulated
 fission spectra, and URR probability tables---all read from the
 same HDF5 files and integrated with the SVD reconstruction kernel.
-The stochastic interpolation between energy bins in angular and
+Correlated CDF interpolation between energy bins in angular and
 energy distributions proved critical (removing $\sim$700~pcm of
-systematic bias).
+systematic bias from nearest-energy lookup).
 
 Cross-isotope basis sharing was investigated and found not viable
 beyond the first singular vector, confirming that each nuclide

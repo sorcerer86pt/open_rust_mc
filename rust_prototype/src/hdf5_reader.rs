@@ -473,9 +473,10 @@ pub struct TabularMuDist {
 impl AngularDistribution {
     /// Sample the scattering cosine mu at a given energy.
     ///
-    /// Uses stochastic interpolation between adjacent energy bins:
-    /// the lower bin is selected with probability (1-f) and the upper
-    /// bin with probability f, where f is the interpolation fraction.
+    /// Uses correlated CDF interpolation: the same random number is used
+    /// to invert both adjacent CDFs, then the resulting mu values are
+    /// linearly interpolated. This preserves distribution shape while
+    /// avoiding the variance of stochastic bin selection.
     pub fn sample_mu(&self, energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
         if self.energies.is_empty() {
             return 2.0 * rng.uniform() - 1.0; // isotropic fallback
@@ -489,11 +490,10 @@ impl AngularDistribution {
             return self.distributions[n - 1].sample(rng);
         }
 
-        // Find energy bracket
         let idx = match self.energies.binary_search_by(|e| {
             e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
         }) {
-            Ok(i) => return self.distributions[i].sample(rng), // exact match
+            Ok(i) => return self.distributions[i].sample(rng),
             Err(i) => if i > 0 { i - 1 } else { 0 },
         };
 
@@ -501,26 +501,29 @@ impl AngularDistribution {
             return self.distributions[idx].sample(rng);
         }
 
-        // Stochastic interpolation: choose lower or upper bin probabilistically
         let e_lo = self.energies[idx];
         let e_hi = self.energies[idx + 1];
         let frac = (energy - e_lo) / (e_hi - e_lo);
 
-        if rng.uniform() < frac {
-            self.distributions[idx + 1].sample(rng)
-        } else {
-            self.distributions[idx].sample(rng)
-        }
+        // Correlated sampling: same xi for both CDF inversions
+        let xi = rng.uniform();
+        let mu_lo = self.distributions[idx].sample_with_xi(xi);
+        let mu_hi = self.distributions[idx + 1].sample_with_xi(xi);
+        (mu_lo * (1.0 - frac) + mu_hi * frac).clamp(-1.0, 1.0)
     }
 }
 
 impl TabularMuDist {
-    /// Sample mu using inverse CDF method.
+    /// Sample mu using inverse CDF, drawing a fresh random number.
     fn sample(&self, rng: &mut crate::transport::rng::Rng) -> f64 {
-        let xi = rng.uniform();
+        self.sample_with_xi(rng.uniform())
+    }
+
+    /// Sample mu using inverse CDF with a pre-drawn random number.
+    fn sample_with_xi(&self, xi: f64) -> f64 {
         let n = self.cdf.len();
         if n < 2 {
-            return 2.0 * rng.uniform() - 1.0;
+            return 2.0 * xi - 1.0; // uniform fallback
         }
 
         // Binary search on CDF
@@ -792,7 +795,7 @@ pub struct TabularEnergyDist {
 impl EnergyDistribution {
     /// Sample an outgoing energy at a given incident energy.
     ///
-    /// Uses stochastic interpolation between adjacent incident energy bins.
+    /// Uses deterministic linear interpolation between adjacent incident energy bins.
     pub fn sample(&self, incident_energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
         if self.energies.is_empty() {
             return incident_energy;
@@ -817,22 +820,24 @@ impl EnergyDistribution {
             return self.distributions[idx].sample(rng);
         }
 
-        // Stochastic interpolation
+        // Correlated sampling: same xi for both CDF inversions
         let e_lo = self.energies[idx];
         let e_hi = self.energies[idx + 1];
         let frac = (incident_energy - e_lo) / (e_hi - e_lo);
 
-        if rng.uniform() < frac {
-            self.distributions[idx + 1].sample(rng)
-        } else {
-            self.distributions[idx].sample(rng)
-        }
+        let xi = rng.uniform();
+        let e_out_lo = self.distributions[idx].sample_with_xi(xi);
+        let e_out_hi = self.distributions[idx + 1].sample_with_xi(xi);
+        (e_out_lo * (1.0 - frac) + e_out_hi * frac).max(1e-5)
     }
 }
 
 impl TabularEnergyDist {
     fn sample(&self, rng: &mut crate::transport::rng::Rng) -> f64 {
-        let xi = rng.uniform();
+        self.sample_with_xi(rng.uniform())
+    }
+
+    fn sample_with_xi(&self, xi: f64) -> f64 {
         let n = self.cdf.len();
         if n < 2 {
             return self.e_out.first().copied().unwrap_or(1.0e6);

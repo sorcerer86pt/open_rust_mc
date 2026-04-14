@@ -9,7 +9,7 @@ table lookup.
 
 | Metric | Value |
 |--------|-------|
-| Godiva k_eff | 1.00016 +/- 0.00080 (16 pcm from experiment) |
+| Godiva k_eff | 0.99963 +/- 0.00091 (37 pcm from experiment) |
 | OpenMC reference | 0.99857 |
 | CPU XS speedup | 8-13x (3-5 ns/point vs 40 ns/point table lookup) |
 | GPU XS speedup | 2.6-2.8x (RTX A1000) |
@@ -92,7 +92,7 @@ The following table shows how each physics improvement affected the eigenvalue:
 | + Anisotropic scattering (tabular CDF) | 0.965 | 3500 pcm |
 | + Data-driven fission spectrum | 1.006 | 600 pcm |
 | + URR probability tables | 1.007 | 700 pcm |
-| + Stochastic interpolation | **1.000** | **16 pcm** |
+| + Correlated CDF interpolation | **1.000** | **37 pcm** |
 
 ## Paper
 
