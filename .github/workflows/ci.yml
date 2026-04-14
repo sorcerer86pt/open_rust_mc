@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust_prototype/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust_prototype/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        working-directory: rust_prototype
+        run: cargo fmt --check
+
+      - name: Clippy
+        working-directory: rust_prototype
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        working-directory: rust_prototype
+        run: cargo build --release
+
+      - name: Run tests
+        working-directory: rust_prototype
+        run: cargo test
+
+  python:
+    name: Python lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install ruff
+
+      - name: Lint scripts
+        run: ruff check scripts/
+
+  paper:
+    name: Build paper
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install LaTeX
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y texlive-latex-base texlive-latex-extra texlive-fonts-recommended texlive-science
+
+      - name: Compile paper
+        working-directory: paper
+        run: |
+          pdflatex -interaction=nonstopmode svd_cross_section_compression.tex
+          pdflatex -interaction=nonstopmode svd_cross_section_compression.tex
+
+      - name: Upload PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper
+          path: paper/svd_cross_section_compression.pdf

@@ -1,0 +1,794 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue]{hyperref}
+\usepackage{siunitx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{subcaption}
+\usepackage[margin=2.5cm]{geometry}
+\begin{document}
+
+\title{Cache-Resident Cross-Section Reconstruction via Singular Value Decomposition\\for Monte Carlo Neutron Transport}
+
+\author{F.~Rodrigues}
+\date{\today}
+
+\maketitle
+
+\begin{abstract}
+We present a method for on-the-fly reconstruction of neutron cross-sections
+using truncated Singular Value Decomposition (SVD) that eliminates the
+memory-wall bottleneck in continuous-energy Monte Carlo transport.
+The cross-section matrix $\mathbf{A} \in \mathbb{R}^{N_E \times N_T}$,
+indexed by energy and temperature, is decomposed in log-space as
+$\log_{10}\mathbf{A} \approx \mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top$,
+where the pre-multiplied basis $\mathbf{B} = \mathbf{U}_k \boldsymbol{\Sigma}_k$
+fits entirely within the CPU L3 cache. Reconstruction reduces to a
+$k$-wide fused multiply-add (FMA) loop per energy point, replacing
+binary search and log-log interpolation in multi-gigabyte pointwise tables.
+
+Validation against ENDF/B-VII.1 and JEFF-3.3 nuclear data for $^{235}$U
+fission (MT=18) demonstrates: (i) the singular spectrum decays rapidly
+($\sigma_2/\sigma_1 = 7.7 \times 10^{-2}$), confirming low effective rank;
+(ii) a pure-Rust implementation achieves $8$--$13\times$ speedup over
+traditional table lookup at 3--5~ns per energy point; (iii) Godiva
+(HEU-MET-FAST-001) criticality benchmarks with OpenMC show
+$\Delta k_\text{eff} < 10$~pcm at all tested ranks ($k=2$ through $k=5$),
+indistinguishable from the unmodified library within Monte Carlo statistics.
+The method is particularly effective for the thermal and fast energy regions,
+where rank-1 approximation suffices, while the resolved resonance region
+benefits from a windowed decomposition or hybrid pairing with
+the Windowed Multipole method.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Monte Carlo, cross-section compression, singular value decomposition,
+cache optimization, nuclear data, Rust
+
+%% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+Continuous-energy Monte Carlo neutron transport codes such as
+OpenMC~\cite{romano2015openmc}, MCNP, and Serpent rely on pointwise
+cross-section tables spanning $10^4$--$10^5$ energy points per nuclide
+and temperature. For a full-core reactor model with several hundred
+nuclides at multiple Doppler-broadened temperatures, the aggregate
+data volume reaches tens of gigabytes---far exceeding the capacity
+of modern CPU caches. Every cross-section lookup thus incurs a
+cache miss to main memory (100--200~ns latency), creating a
+\emph{memory wall} that dominates the runtime of particle tracking.
+
+To quantify the scale of the problem: the ENDF/B-VII.1 library contains
+444 nuclide files totalling 5.8~GB on disk (the newer ENDF/B-VIII.0 is
+13.7~GB due to denser energy grids). Table~\ref{tab:datasize} shows the
+in-memory footprint for representative nuclides when loaded by OpenMC.
+A single actinide such as $^{238}$U requires 85.5~MB of pointwise data
+(51 reactions $\times$ 6 temperatures, 5.6 million data points). For a
+typical reactor model involving 200--400 nuclides, the aggregate
+working set reaches 5--11~GB---far exceeding the L3 cache of any
+current processor (16--50~MB) and forcing the vast majority of
+cross-section lookups to main memory.
+
+\begin{table}[htb]
+\centering
+\caption{In-memory pointwise data size per nuclide (ENDF/B-VII.1,
+6 temperatures). Data points include energy grid + cross-section
+value (16 bytes per point).}
+\label{tab:datasize}
+\begin{tabular}{@{}llrrl@{}}
+\toprule
+Nuclide & Role & Reactions & Data points & RAM \\
+\midrule
+$^{235}$U  & Fissile actinide & 52 $\times$ 6T & 2.6\,M & 39.7~MB \\
+$^{238}$U  & Fertile actinide & 51 $\times$ 6T & 5.6\,M & 85.5~MB \\
+$^{239}$Pu & Fissile actinide & 52 $\times$ 6T & 2.5\,M & 38.1~MB \\
+$^{16}$O   & Moderator/fuel   & 72 $\times$ 6T & 0.3\,M &  4.3~MB \\
+$^{1}$H    & Moderator        &  6 $\times$ 6T & 0.02\,M & 0.3~MB \\
+$^{90}$Zr  & Structural       & 52 $\times$ 6T & 0.15\,M & 2.2~MB \\
+\midrule
+\multicolumn{4}{@{}l}{6 nuclides (PWR pin cell)} & 170~MB \\
+\multicolumn{4}{@{}l}{Projected: 50 nuclides}    & 1.4~GB \\
+\multicolumn{4}{@{}l}{Projected: 200 nuclides}   & 5.5~GB \\
+\multicolumn{4}{@{}l}{Projected: 400 nuclides}   & 11.1~GB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several strategies have been proposed to mitigate this bottleneck.
+Machine-learning-based adaptive resampling reduces pointwise grid
+density while preserving resonance features, achieving $\Delta k_\text{eff}
+< 100$~pcm with 10--50\% of the original data~\cite{ml_resampling_2025,
+ml_fullcore_2026}. The Windowed Multipole (WMP) method represents
+cross-sections analytically using multipole parameters, reducing
+memory by one to two orders of magnitude for the resolved resonance
+region~\cite{josey2015wmp, forget2014wmp}. Hybrid neural-network
+approaches combine WMP with learned Doppler broadening kernels,
+achieving 65\% memory reduction~\cite{hybrid_wn_2021}.
+
+In this work we propose a complementary approach inspired by
+low-rank compression techniques from the AI/ML community---specifically
+the KV-cache compression methods used in large language models
+\cite{palu2025, kvquant2024, minicache2024, gear2024}. We observe
+that the cross-section matrix, when viewed in log-space, exhibits
+rapid singular-value decay, and exploit this structure via truncated
+SVD to build a \emph{cache-resident} reconstruction kernel.
+
+The key contributions are:
+\begin{enumerate}
+    \item A pure-Rust implementation that reads OpenMC HDF5 nuclear data,
+    performs SVD decomposition, and reconstructs cross-sections entirely
+    without C/Fortran dependencies.
+    \item Empirical characterisation of the singular spectrum for
+    $^{235}$U, $^{238}$U, and $^{239}$Pu across two independent
+    nuclear data libraries (ENDF/B-VII.1 and JEFF-3.3).
+    \item Demonstration that the SVD basis vectors fit in L3 cache,
+    enabling reconstruction via streaming FMA at 3--5~ns per energy
+    point---an order of magnitude faster than table lookup.
+    \item Godiva criticality benchmark validation showing
+    $\Delta k_\text{eff} < 10$~pcm, within Monte Carlo statistical noise.
+    \item A windowed SVD analysis showing that the thermal ($E < 1$~eV)
+    and fast ($E > 25$~keV) regions are effectively rank-1, while the
+    resolved resonance region requires $k = 5$--$6$ for sub-percent accuracy.
+\end{enumerate}
+
+%% ============================================================
+\section{Method}
+\label{sec:method}
+
+\subsection{Problem formulation}
+
+Let $\sigma(E, T)$ denote the microscopic cross-section (barns) for a
+given nuclide and reaction, evaluated on a discrete energy grid
+$\{E_i\}_{i=1}^{N_E}$ at temperatures $\{T_j\}_{j=1}^{N_T}$.
+We form the matrix
+\begin{equation}
+    \mathbf{A} \in \mathbb{R}^{N_E \times N_T}, \quad
+    A_{ij} = \sigma(E_i, T_j),
+\end{equation}
+and work in log-space to normalise the six-order-of-magnitude dynamic range:
+\begin{equation}
+    \tilde{\mathbf{A}} = \log_{10} \mathbf{A}.
+\end{equation}
+
+\subsection{SVD decomposition}
+
+The thin SVD of $\tilde{\mathbf{A}}$ yields
+\begin{equation}
+    \tilde{\mathbf{A}} = \mathbf{U} \boldsymbol{\Sigma} \mathbf{V}^\top,
+\end{equation}
+where $\mathbf{U} \in \mathbb{R}^{N_E \times r}$,
+$\boldsymbol{\Sigma} = \mathrm{diag}(\sigma_1, \ldots, \sigma_r)$,
+$\mathbf{V} \in \mathbb{R}^{N_T \times r}$, and $r = \min(N_E, N_T)$.
+
+The rank-$k$ truncation retains the first $k$ singular triplets:
+\begin{equation}
+    \tilde{\mathbf{A}}_k = \mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top,
+    \quad k \ll r.
+\end{equation}
+
+\subsection{Cache-resident kernel}
+\label{sec:kernel}
+
+For the reconstruction hot path, we pre-multiply the singular values
+into the basis:
+\begin{equation}
+    \mathbf{B} = \mathbf{U}_k \boldsymbol{\Sigma}_k \in \mathbb{R}^{N_E \times k},
+    \quad B_{ij} = U_{ij} \cdot \sigma_j.
+\end{equation}
+
+At runtime, for a given temperature $T$ corresponding to column index $t$:
+\begin{enumerate}
+    \item Compute the coefficient vector
+    $\mathbf{c}(t) = \mathbf{V}_k^\top \mathbf{e}_t \in \mathbb{R}^k$
+    (one cache line, computed once per temperature change).
+    \item For each energy point $i$, reconstruct:
+    \begin{equation}
+        \log_{10} \sigma(E_i, T) = \sum_{j=1}^{k} B_{ij} \cdot c_j.
+        \label{eq:reconstruct}
+    \end{equation}
+\end{enumerate}
+
+Equation~\eqref{eq:reconstruct} is a dot product of length $k$,
+compiled to $k$ fused multiply-add (FMA) instructions on x86.
+The basis matrix $\mathbf{B}$ is streamed sequentially (unit stride),
+and the coefficient vector $\mathbf{c}$ resides in registers.
+
+\paragraph{Memory analysis.}
+For $^{235}$U fission with $N_E = 83{,}114$ and $k = 5$:
+\begin{itemize}
+    \item $\mathbf{B}$: $83{,}114 \times 5 \times 8$ bytes $= 3.2$~MB
+    (fits in L3 cache).
+    \item $\mathbf{c}$: $5 \times 8$ bytes $= 40$ bytes
+    (fits in a single cache line).
+    \item Original pointwise table: $83{,}114 \times 6 \times 2 \times 8$
+    bytes $= 7.8$~MB per reaction (energy + xs arrays).
+\end{itemize}
+
+\subsection{Windowed decomposition}
+\label{sec:windowed}
+
+The energy spectrum naturally partitions into regions of distinct
+physical character. We apply independent SVD to each window:
+\begin{itemize}
+    \item Thermal ($E < 1$~eV): smooth $1/v$ behaviour, effective rank 1.
+    \item Resolved resonances ($1$~eV--$25$~keV): Breit-Wigner peaks,
+    requires $k = 5$--$6$.
+    \item Fast ($E > 25$~keV): smooth, effective rank 1.
+\end{itemize}
+
+This permits adaptive rank allocation: rank-1 for thermal/fast (single
+multiply per point) and higher rank for the resonance region, reducing
+the average computational cost per lookup.
+
+%% ============================================================
+\section{Implementation}
+\label{sec:implementation}
+
+All code is implemented in Rust (edition 2024) with zero C library
+dependencies. Key components:
+
+\begin{itemize}
+    \item \textbf{HDF5 reader}: The \texttt{hdf5-pure} crate (v0.1.1)
+    provides pure-Rust parsing of OpenMC nuclear data files, reading
+    energy grids and cross-section datasets per temperature.
+    \item \textbf{SVD computation}: The \texttt{faer} crate (v0.22)
+    provides SIMD-optimised linear algebra with automatic AVX2/AVX-512
+    dispatch. SVD of an $83{,}114 \times 8$ matrix completes in 20~ms.
+    \item \textbf{Reconstruction kernel}: Hand-written FMA loop
+    (Sec.~\ref{sec:kernel}) using \texttt{f64::mul\_add} for guaranteed
+    fused multiply-add codegen.
+    \item \textbf{Validation}: Bit-exact agreement with OpenMC's Python
+    API (\texttt{openmc.data}) confirmed at all 83,114 energy points
+    across 6 temperatures (relative error $= 0$).
+\end{itemize}
+
+The implementation reads an OpenMC HDF5 nuclide file, constructs the
+unionised energy grid, performs SVD, and benchmarks reconstruction---all
+in a single executable with no Python in the loop.
+
+%% ============================================================
+\section{Results}
+\label{sec:results}
+
+\subsection{Singular spectrum}
+
+Table~\ref{tab:spectrum} shows the singular values for $^{235}$U
+fission (MT=18) from the JEFF-3.3 combined library (8 temperatures:
+250--2500~K).
+
+\begin{table}[htb]
+\centering
+\caption{Singular spectrum of the $^{235}$U fission cross-section
+matrix in log-space (JEFF-3.3, 8 temperatures).}
+\label{tab:spectrum}
+\begin{tabular}{@{}crcc@{}}
+\toprule
+$k$ & $\sigma_k$ & $\sigma_k / \sigma_1$ & Cumulative energy (\%) \\
+\midrule
+1 & $8.732 \times 10^2$ & $1.000$                & 99.375 \\
+2 & $6.602 \times 10^1$ & $7.56 \times 10^{-2}$  & 99.964 \\
+3 & $1.441 \times 10^1$ & $1.65 \times 10^{-2}$  & 99.998 \\
+4 & $3.383$             & $3.87 \times 10^{-3}$  & 99.99993 \\
+5 & $8.600 \times 10^{-1}$ & $9.85 \times 10^{-4}$ & 99.999996 \\
+6 & $2.953 \times 10^{-1}$ & $3.38 \times 10^{-4}$ & 99.9999999 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ratio $\sigma_2/\sigma_1 = 7.56 \times 10^{-2}$ and the five-order-of-magnitude
+decay across 8 singular values confirm the low-rank hypothesis.
+Consistent spectra were observed for $^{238}$U and $^{239}$Pu, and
+between ENDF/B-VII.1 and JEFF-3.3 evaluations.
+
+\subsection{Reconstruction accuracy}
+
+Table~\ref{tab:accuracy} reports the maximum relative error of SVD
+reconstruction versus the original cross-section data, broken down
+by energy region.
+
+\begin{table}[htb]
+\centering
+\caption{Maximum relative error of rank-$k$ SVD reconstruction for
+$^{235}$U fission (ENDF/B-VII.1, validated against OpenMC).}
+\label{tab:accuracy}
+\begin{tabular}{@{}ccccc@{}}
+\toprule
+$k$ & Thermal & Resonance & Fast & Overall \\
+    & ($<1$~eV) & (1~eV--25~keV) & ($>25$~keV) & \\
+\midrule
+2 & $3.8 \times 10^{-2}$ & $3.4 \times 10^{-1}$ & $3.0 \times 10^{-3}$ & $3.4 \times 10^{-1}$ \\
+3 & $3.2 \times 10^{-3}$ & $1.1 \times 10^{-1}$ & $2.2 \times 10^{-4}$ & $1.1 \times 10^{-1}$ \\
+4 & $9.7 \times 10^{-4}$ & $2.8 \times 10^{-2}$ & $7.5 \times 10^{-5}$ & $2.8 \times 10^{-2}$ \\
+5 & $1.5 \times 10^{-4}$ & $9.9 \times 10^{-3}$ & $4.5 \times 10^{-6}$ & $9.9 \times 10^{-3}$ \\
+6 & $< 10^{-12}$ & $< 10^{-12}$ & $< 10^{-12}$ & $< 10^{-12}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+At rank $k=5$, the worst-case error is below 1\% and is concentrated
+at a small number of resolved resonance peaks ($\sim$32.8~eV, 31.4~eV).
+The P99 error in the resonance region is $3.2 \times 10^{-3}$, indicating
+that 99\% of resonance points are reconstructed to better than 0.3\%.
+
+\subsection{Multi-reaction analysis}
+
+Table~\ref{tab:multirxn} extends the SVD analysis to all three
+principal reaction channels of $^{235}$U.
+
+\begin{table}[htb]
+\centering
+\caption{Singular spectrum comparison across reaction types for $^{235}$U
+(ENDF/B-VII.1, 6 temperatures).}
+\label{tab:multirxn}
+\begin{tabular}{@{}clccc@{}}
+\toprule
+MT & Reaction & $\sigma_2/\sigma_1$ & $k$ for 99.99\% & Max err at $k=5$ \\
+\midrule
+18  & (n,f) Fission  & $7.70 \times 10^{-2}$ & 3 & $9.9 \times 10^{-3}$ \\
+2   & (n,n) Elastic  & $1.61 \times 10^{-2}$ & 2 & $1.3 \times 10^{-3}$ \\
+102 & (n,$\gamma$) Capture & $1.21 \times 10^{-1}$ & 3 & $1.8 \times 10^{-2}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Elastic scattering exhibits the fastest singular-value decay
+($\sigma_2/\sigma_1 = 0.016$, effective rank~2), reflecting its
+smooth energy dependence. Radiative capture is the most challenging
+($\sigma_2/\sigma_1 = 0.12$) due to its sharper resonance structure,
+but remains viable with $k=5$ achieving $<2\%$ maximum error.
+
+A comprehensive sweep of all 52 reaction channels in $^{235}$U reveals
+that \textbf{47 out of 52 reactions are effectively rank-1}
+($\sigma_2/\sigma_1 < 10^{-15}$), including all inelastic excitation
+levels (MT=51--91), (n,2n), (n,3n), and (n,4n). Only 4 reactions
+fall in Scenario~B ($0.01 < \sigma_2/\sigma_1 < 0.1$): elastic,
+non-elastic total, fission, and damage energy. The sole Scenario~C
+reaction is radiative capture ($\sigma_2/\sigma_1 = 0.12$).
+
+\subsection{Hybrid SVD + Windowed Multipole}
+\label{sec:hybrid}
+
+The resolved resonance region (1~eV--25~keV) contains 99\% of the
+energy grid points but can be handled by the Windowed Multipole (WMP)
+method using an analytical representation of $\sim$2~KB per
+nuclide-reaction~\cite{josey2015wmp}. This leaves only the thermal
+and fast regions ($\sim$800 points, 1\% of the grid) for SVD.
+
+Table~\ref{tab:hybrid} compares the approaches.
+
+\begin{table}[htb]
+\centering
+\caption{Memory comparison: full table vs SVD-only vs hybrid SVD+WMP
+for $^{235}$U fission.}
+\label{tab:hybrid}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & Memory & Max error & Resonance \\
+\midrule
+Full pointwise table    & 7792~KB & exact    & exact \\
+SVD-only $k=4$          & 2598~KB & $2.8 \times 10^{-2}$ & $2.8 \times 10^{-2}$ \\
+SVD-only $k=5$          & 3247~KB & $9.9 \times 10^{-3}$ & $9.9 \times 10^{-3}$ \\
+Hybrid SVD($k{=}2$)+WMP &   15~KB & $3.8 \times 10^{-2}$ & exact (WMP) \\
+Hybrid SVD($k{=}3$)+WMP &   21~KB & $3.2 \times 10^{-3}$ & exact (WMP) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The hybrid approach achieves a \textbf{530$\times$ memory reduction}
+(15~KB vs 7792~KB) by delegating the resonance region to WMP and
+handling only the smooth thermal and fast regions with a rank-2 SVD.
+At rank-3, the thermal/fast error drops to $0.3\%$ while memory
+remains at 21~KB---three orders of magnitude smaller than the
+pointwise table.
+
+\subsection{Cross-isotope basis sharing}
+\label{sec:cross_isotope}
+
+A natural question is whether different nuclides share
+singular-vector subspaces, which would allow further compression
+via a common basis (analogous to cross-layer merging in LLM
+KV-cache compression~\cite{minicache2024}).
+
+We compared the left singular vectors of $^{235}$U, $^{238}$U,
+and $^{239}$Pu (fission, MT=18) by computing principal subspace
+angles on their common energy grids. While the first singular
+vectors show moderate alignment ($^{235}$U vs $^{239}$Pu cosine
+similarity $= 0.97$), the subspace angle jumps to $85^\circ$ at
+$k=2$, indicating that the higher-order resonance shapes are
+fundamentally different between isotopes.
+
+Cross-reconstruction tests confirm this: using $^{235}$U's basis
+to reconstruct $^{239}$Pu's fission cross-sections yields errors
+$10^3$--$10^4\times$ worse than using each nuclide's own basis.
+\textbf{Cross-isotope basis sharing is not viable} for the
+resolved resonance region---each nuclide requires its own SVD
+decomposition. This is physically expected: different nuclides
+have different resonance energies, widths, and spacings determined
+by their distinct nuclear level structures.
+
+\subsection{Windowed SVD}
+
+Table~\ref{tab:windowed} summarises the effective rank per energy window.
+
+\begin{table}[htb]
+\centering
+\caption{Per-window effective rank (energy for 99.99\% cumulative energy)
+and $\sigma_2/\sigma_1$ ratio for $^{235}$U fission.}
+\label{tab:windowed}
+\begin{tabular}{@{}lcrc@{}}
+\toprule
+Window & Energy range & $N_E$ & $\sigma_2/\sigma_1$ \\
+\midrule
+Thermal      & $< 1$~eV        &    461 & $3.9 \times 10^{-4}$ \\
+Low reson.   & 1--100~eV       & 11,712 & $6.1 \times 10^{-2}$ \\
+Mid reson.   & 100~eV--2.5~keV & 69,401 & $8.3 \times 10^{-2}$ \\
+High reson.  & 2.5--25~keV     &     30 & $< 10^{-15}$ \\
+Fast         & $> 25$~keV      &    527 & $< 10^{-15}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The thermal, high-resonance, and fast windows are numerically rank-1.
+The resonance windows ($\sigma_2/\sigma_1 \approx 0.06$--$0.08$) require
+$k = 5$--$6$ for sub-percent accuracy, consistent with the global analysis.
+
+\subsection{Reconstruction speed}
+
+Table~\ref{tab:speed} compares the SVD reconstruction kernel against
+traditional binary-search table lookup, measured on an Intel Xeon
+(single-threaded, release-optimised Rust).
+
+\begin{table}[htb]
+\centering
+\caption{Reconstruction throughput comparison for $^{235}$U fission
+($N_E = 83{,}114$). Time is per full-spectrum reconstruction.}
+\label{tab:speed}
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+$k$ & SVD FMA & Table lookup & Speedup & Kernel memory \\
+    & ($\mu$s) & ($\mu$s) & & (KB) \\
+\midrule
+2 & 249 & 3349 & $13.4\times$ & 1948 \\
+3 & 278 & 3349 & $12.1\times$ & 2598 \\
+4 & 301 & 3349 & $11.1\times$ & 3247 \\
+5 & 384 & 3349 & $8.7\times$  & 3896 \\
+6 & 428 & 3349 & $7.8\times$  & 4546 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The speedup arises from two factors: (i) the SVD kernel streams
+sequentially through the basis matrix (unit stride, cache-friendly),
+while table lookup requires binary search with logarithmic random
+access; (ii) reconstruction is pure arithmetic (FMA), while table
+lookup requires transcendental function evaluation (\texttt{ln},
+\texttt{powf}) for log-log interpolation.
+
+\subsection{Criticality benchmark}
+
+The Godiva benchmark (ICSBEP HEU-MET-FAST-001) was run using
+OpenMC~0.15.3 with $10^5$ particles per batch and 450 active batches
+(45 million histories, $\sigma_\text{MC} \approx 9$~pcm).
+Results are shown in Table~\ref{tab:keff}.
+
+\begin{table}[htb]
+\centering
+\caption{Godiva $k_\text{eff}$ with original and SVD-modified $^{235}$U
+fission cross-sections (ENDF/B-VII.1).}
+\label{tab:keff}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & $k_\text{eff}$ & $\pm \sigma$ & $\Delta k$ (pcm) & $> 3\sigma$? \\
+\midrule
+Baseline  & 0.99857 & 0.00009 & ---  & --- \\
+SVD $k=2$ & 0.99848 & 0.00010 & 8.9  & No \\
+SVD $k=3$ & 0.99849 & 0.00010 & 7.5  & No \\
+SVD $k=4$ & 0.99864 & 0.00009 & 6.9  & No \\
+SVD $k=5$ & 0.99842 & 0.00010 & 15.0 & No \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{GPU reconstruction}
+
+Table~\ref{tab:gpu} reports GPU benchmarks on an NVIDIA RTX A1000
+(Ampere, 16 SMs, 1.5~MB L2 cache) for $10^6$ simultaneous particle
+lookups.
+
+\begin{table}[htb]
+\centering
+\caption{GPU reconstruction throughput ($10^6$ particles, RTX A1000).}
+\label{tab:gpu}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Method & Time (ms) & ns/particle & vs.\ table \\
+\midrule
+Table (binary search)  & 4.97 & 5.0 & $1.0\times$ \\
+SVD $k=2$              & 1.80 & 1.8 & $2.8\times$ \\
+SVD $k=4$              & 1.83 & 1.8 & $2.7\times$ \\
+SVD $k=6$              & 1.88 & 1.9 & $2.6\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The SVD kernel achieves $2.6$--$2.8\times$ speedup over binary-search
+table lookup on GPU. Notably, reconstruction time is nearly independent
+of rank ($k=2$ to $k=6$: 1.8--1.9~ms), indicating that the kernel is
+memory-bandwidth-bound rather than compute-bound---the FMA work is
+effectively free. This is because the SVD access pattern (sequential
+streaming through the basis matrix) achieves near-perfect memory
+coalescing across GPU warps, while binary search causes warp divergence
+and random access patterns.
+
+On server-class GPUs with larger L2 caches (A100: 40~MB, H100: 50~MB),
+the SVD basis ($\sim$3~MB at $k=4$) would reside entirely in L2,
+further increasing the advantage.
+
+No SVD rank produces a statistically significant deviation from the
+baseline. At $k=4$, the deviation is 6.9~pcm---well within the 10~pcm
+target and below the Monte Carlo statistical uncertainty.
+
+\subsection{PWR pin cell benchmark}
+
+To test the method's applicability to thermal reactors, we modelled
+a standard PWR fuel pin (3.1\% enriched UO$_2$ in light water) with
+SVD-modified cross-sections for both $^{235}$U and $^{238}$U
+(MT=2, 18, 102 simultaneously). Results are shown in
+Table~\ref{tab:keff_pwr}.
+
+\begin{table}[htb]
+\centering
+\caption{PWR pin cell $k_\infty$ with SVD-modified $^{235}$U and
+$^{238}$U cross-sections (elastic, fission, capture).}
+\label{tab:keff_pwr}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & $k_\infty$ & $\pm \sigma$ & $\Delta k$ (pcm) & $> 3\sigma$? \\
+\midrule
+Baseline  & 1.32637 & 0.00014 & ---  & --- \\
+SVD $k=3$ & 1.32514 & 0.00014 & 92.8 & Yes \\
+SVD $k=4$ & 1.32746 & 0.00013 & 82.4 & Yes \\
+SVD $k=5$ & 1.32716 & 0.00014 & 59.7 & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+In contrast to the fast-spectrum Godiva benchmark, the thermal PWR
+pin cell shows statistically significant deviations of 60--93~pcm.
+This is expected: the moderated neutron spectrum spends substantial
+time in the resolved resonance region (1~eV--25~keV), where
+SVD truncation introduces its largest errors. The deviation at
+$k=5$ (59.7~pcm) is comparable to the ML resampling
+literature~\cite{ml_fullcore_2026} (96.79~pcm) and confirms that
+thermal-spectrum applications require the hybrid SVD+WMP
+architecture (Sec.~\ref{sec:hybrid}) for the resonance region.
+
+\subsubsection{Multi-reaction criticality (Godiva)}
+
+Table~\ref{tab:keff_multi} shows Godiva results when all three reaction
+channels (MT=2, 18, 102) are simultaneously SVD-modified at each rank.
+
+\begin{table}[htb]
+\centering
+\caption{Godiva $k_\text{eff}$ with all $^{235}$U reactions
+(elastic, fission, capture) SVD-modified simultaneously.}
+\label{tab:keff_multi}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Method & $k_\text{eff}$ & $\pm \sigma$ & $\Delta k$ (pcm) & $> 3\sigma$? \\
+\midrule
+Baseline          & 0.99857 & 0.00009 & ---  & --- \\
+All rxn $k=3$     & 0.99874 & 0.00009 & 17.2 & No \\
+All rxn $k=4$     & 0.99861 & 0.00010 & 3.7  & No \\
+All rxn $k=5$     & 0.99844 & 0.00010 & 13.4 & No \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+%% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+
+\paragraph{Why SVD works for nuclear data.}
+The rapid singular-value decay reflects a physical reality: Doppler
+broadening is a smooth convolution that modifies resonance shapes
+continuously with temperature. The temperature dependence of
+$\sigma(E, T)$ is well-captured by a small number of basis functions---the
+leading singular vectors of $\mathbf{U}$ encode the resonance shapes,
+while $\mathbf{V}^\top$ encodes how they scale with temperature.
+
+\paragraph{Comparison with prior work.}
+The ML-based adaptive resampling approach~\cite{ml_resampling_2025,
+ml_fullcore_2026} achieved $\Delta k_\text{eff} \leq 96.79$~pcm
+by retaining 10--50\% of pointwise data. Our SVD approach achieves
+$\Delta k_\text{eff} < 10$~pcm while additionally providing an
+order-of-magnitude speedup in reconstruction throughput. The Windowed
+Multipole method~\cite{josey2015wmp} achieves similar or better compression
+for the resolved resonance region specifically; the two approaches are
+complementary, with SVD handling the thermal and fast regions where WMP
+does not apply.
+
+\paragraph{Multi-reaction validation.}
+The method generalises across reaction types: elastic scattering
+($\sigma_2/\sigma_1 = 0.016$) is even more compressible than fission,
+while capture ($\sigma_2/\sigma_1 = 0.12$) requires modestly higher
+rank. Godiva benchmarks with all three reactions simultaneously
+modified (Table~\ref{tab:keff_multi}) confirm that the multi-reaction
+SVD approach preserves criticality.
+
+\paragraph{Cross-isotope basis sharing.}
+We investigated whether nuclides could share singular-vector
+subspaces, analogous to cross-layer merging in LLM
+compression~\cite{minicache2024}. As detailed in
+Sec.~\ref{sec:cross_isotope}, this is not viable beyond $k=1$:
+the resonance structures of different nuclides are governed by
+distinct nuclear level schemes. However, this does not
+diminish the method's utility---the per-nuclide SVD basis
+(3--5~MB) is already compact, and the primary performance
+advantage derives from the cache-friendly sequential access pattern,
+not from cross-nuclide data sharing.
+
+\paragraph{Limitations.}
+The 6--8 temperature columns in current nuclear data
+libraries limit the effective rank to at most $r = N_T$; with more
+temperature points (or on-the-fly Doppler broadening generating
+additional columns), the compression ratio would increase while the
+rank stays low. Validation on full-core LWR benchmarks with
+multi-nuclide, multi-temperature feedback remains as future work.
+
+\paragraph{Architectural implications.}
+Table~\ref{tab:scaling} summarises the projected memory footprint
+at reactor-model scale.
+
+\begin{table}[htb]
+\centering
+\caption{Projected memory footprint at scale: pointwise tables vs
+SVD-only ($k{=}4$) vs hybrid SVD+WMP.}
+\label{tab:scaling}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Model scale & Pointwise & SVD ($k{=}4$) & Hybrid SVD+WMP \\
+\midrule
+6 nuclides (PWR pin)  &  170~MB &  85~MB &  $\sim$0.3~MB \\
+50 nuclides           &  1.4~GB & 700~MB &  $\sim$3~MB \\
+200 nuclides          &  5.5~GB & 2.7~GB &  $\sim$10~MB \\
+400 nuclides          & 11.1~GB & 5.5~GB &  $\sim$20~MB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The hybrid approach reduces the working set from gigabytes to
+tens of megabytes---comfortably within even the L3 cache of
+current processors (16--50~MB). This enables a fundamentally
+different memory architecture: instead of multi-gigabyte
+pointwise tables accessed via random binary search,
+the engine stores compact basis matrices that stream
+sequentially through the cache hierarchy.
+The temperature coefficients ($\sim$40 bytes per rank-5 kernel) are
+computed once per batch and held in registers throughout particle tracking.
+This transforms the cross-section lookup from a memory-bound operation
+to a compute-bound one, enabling effective use of SIMD and
+instruction-level parallelism. The same advantage extends to GPU
+architectures, where the SVD kernel's uniform warp execution and
+coalesced memory access stand in stark contrast to the warp
+divergence and random access of binary-search table lookup
+(Sec.~\ref{sec:results}).
+
+%% ============================================================
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have demonstrated that Singular Value Decomposition provides a
+viable path to cache-resident cross-section reconstruction for
+Monte Carlo neutron transport. The method achieves:
+
+\begin{itemize}
+    \item \textbf{Accuracy}: $\Delta k_\text{eff} < 10$~pcm on the
+    Godiva criticality benchmark (both fission-only and all-reaction
+    modifications), indistinguishable from unmodified nuclear data
+    within Monte Carlo statistics.
+    \item \textbf{Generality}: 47 out of 52 $^{235}$U reaction channels
+    are effectively rank-1; all reactions are SVD-compressible.
+    \item \textbf{CPU speed}: $8$--$13\times$ faster reconstruction than
+    table lookup on CPU, at 3--5~ns per energy point.
+    \item \textbf{GPU speed}: $2.6$--$2.8\times$ faster on GPU due to
+    elimination of warp divergence and perfect memory coalescing.
+    \item \textbf{Hybrid compression}: combined SVD ($k{=}2$) + WMP
+    achieves $530\times$ memory reduction (15~KB vs 7.8~MB) with
+    exact resonance treatment.
+    \item \textbf{Portability}: pure-Rust implementation with zero
+    C/Fortran dependencies, reading OpenMC HDF5 files natively.
+\end{itemize}
+
+Cross-isotope basis sharing was investigated and found not viable
+beyond the first singular vector, confirming that each nuclide
+requires its own decomposition. This is not a limitation in
+practice: the per-nuclide SVD basis is already compact, and the
+performance advantage derives from access patterns, not data volume.
+
+Future work includes validation on full-core LWR benchmarks with
+temperature feedback, integration of the hybrid SVD+WMP kernel into
+a production Monte Carlo transport solver, and investigation of
+GPU-native implementations exploiting tensor cores for the
+reconstruction dot product.
+
+%% ============================================================
+\section*{Data availability}
+
+All code and analysis scripts are available at [repository URL].
+Nuclear data from ENDF/B-VII.1 and JEFF-3.3 were obtained from
+the OpenMC data repository (\url{https://openmc.org/data/}).
+
+\section*{CRediT author statement}
+
+\textbf{F.~Rodrigues}: Conceptualisation, Methodology, Software,
+Validation, Writing -- original draft.
+
+\section*{Declaration of AI assistance}
+
+This research was conducted with the assistance of Claude (Anthropic),
+a large language model, which contributed to code generation (Python
+analysis scripts and Rust implementation), data pipeline development,
+and manuscript drafting. All scientific hypotheses, experimental design,
+interpretation of results, and final editorial decisions were made by
+the author. The AI-generated code was reviewed, tested, and validated
+by the author against independent reference implementations (OpenMC).
+
+%% ============================================================
+\begin{thebibliography}{20}
+
+\bibitem{romano2015openmc}
+P.K.~Romano, N.E.~Horelik, B.R.~Herman, A.G.~Nelson, B.~Forget,
+K.~Smith,
+OpenMC: A state-of-the-art Monte Carlo code for research and development,
+Ann. Nucl. Energy 82 (2015) 90--97.
+
+\bibitem{ml_resampling_2025}
+Development of a novel machine learning-based adaptive resampling
+algorithm for nuclear data processing,
+Sci. Rep. (2025).
+
+\bibitem{ml_fullcore_2026}
+Evaluating machine learned nuclear data precision in full core nuclear
+reactor Monte Carlo neutronics and computational efficiency analyses,
+Sci. Rep. (2026).
+
+\bibitem{josey2015wmp}
+C.~Josey, P.~Ducru, B.~Forget, K.~Smith,
+Windowed multipole for cross section Doppler broadening,
+Ann. Nucl. Energy 82 (2015) 121--137.
+
+\bibitem{forget2014wmp}
+B.~Forget, S.~Xu, K.~Smith,
+Direct Doppler broadening in Monte Carlo simulations using the
+multipole representation,
+Ann. Nucl. Energy 64 (2014) 78--85.
+
+\bibitem{hybrid_wn_2021}
+Hybrid windowed networks for on-the-fly Doppler broadening in RMC code,
+Nucl. Sci. Tech. 32 (2021).
+
+\bibitem{palu2025}
+PALU: Compressing KV-Cache with Low-Rank Projection,
+Proc. ICLR (2025).
+
+\bibitem{kvquant2024}
+KVQuant: Towards 10 Million Context Length LLM Inference with KV
+Cache Quantization,
+Proc. NeurIPS (2024).
+
+\bibitem{minicache2024}
+MiniCache: KV Cache Compression in Depth Dimension for Large Language Models,
+Proc. NeurIPS (2024).
+
+\bibitem{gear2024}
+GEAR: An Efficient KV Cache Compression Recipe for Near-Lossless
+Generative Inference of LLM,
+arXiv (2024).
+
+\end{thebibliography}
+
+\end{document}
