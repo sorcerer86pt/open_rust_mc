@@ -74,13 +74,14 @@ impl PointwiseTable {
     pub fn lookup(&self, energy: f64) -> f64 {
         let n = self.energies.len();
 
-        // Use hash table for O(1) lookup when available, else binary search
+        // Use hash table for O(1) lookup when available, else binary search.
+        // Both return the lower bracket index for interpolation.
         let idx = if let Some(ref ht) = self.hash_table {
             let i = ht.lookup(energy, &self.energies);
-            // Clamp: hash might land on the exact point or one below
-            if i + 1 >= n { return self.xs[n - 1]; }
             if energy <= self.energies[0] { return self.xs[0]; }
-            i
+            if i >= n { return self.xs[n - 1]; }
+            // Hash returns upper bracket; we need lower for interpolation
+            if i > 0 { i - 1 } else { 0 }
         } else {
             match self.energies.binary_search_by(|e| {
                 e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)

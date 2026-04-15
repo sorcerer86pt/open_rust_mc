@@ -48,7 +48,7 @@ def resonance_integral(energies, xs, e_lo, e_hi):
         return 0.0
     # Integrand: σ(E)/E
     integrand = s / e
-    return np.trapz(integrand, e)
+    return np.trapezoid(integrand, e)
 
 
 def svd_reconstruct(energies, xs_matrix_log, rank):

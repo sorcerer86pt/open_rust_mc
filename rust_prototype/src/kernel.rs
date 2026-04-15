@@ -61,12 +61,18 @@ impl EnergyHashTable {
     }
 
     /// O(1) energy lookup: hash to bin, then linear scan ≤ a few entries.
+    ///
+    /// Returns the same index as binary search: the upper bracketing point
+    /// (smallest index where `energies[idx] >= energy`), clamped to [0, n-1].
+    /// This matches `SvdKernel::energy_index_binary` behavior.
     #[inline]
     pub fn lookup(&self, energy: f64, energies: &[f64]) -> usize {
         let n = energies.len();
         if n < 2 { return 0; }
+        if energy <= energies[0] { return 0; }
+        if energy >= energies[n - 1] { return n - 1; }
 
-        let log_e = energy.max(1e-11).ln();
+        let log_e = energy.ln();
         let bin = ((log_e - self.log_e_min) * self.inv_bin_width) as usize;
         let bin = bin.min(self.n_bins - 1);
 
@@ -74,10 +80,11 @@ impl EnergyHashTable {
         let mut idx = self.bins[bin] as usize;
         idx = idx.min(n - 1);
 
-        // Linear scan forward (typically ≤ 2 steps)
-        while idx + 1 < n && energies[idx + 1] <= energy {
+        // Linear scan forward to find the upper bracket (energies[idx] >= energy)
+        while idx < n && energies[idx] < energy {
             idx += 1;
         }
+        idx = idx.min(n - 1);
 
         idx
     }
