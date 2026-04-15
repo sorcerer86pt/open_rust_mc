@@ -205,6 +205,10 @@ pub struct BatchResult {
     pub absorptions: u32,
     pub fissions: u32,
     pub collisions: u32,
+    /// Number of thermal scattering events (S(α,β)).
+    pub thermal_scatters: u32,
+    /// Number of surface crossings (reflections + transmissions).
+    pub surface_crossings: u32,
 }
 
 /// Per-particle transport result for parallel reduction.
@@ -241,10 +245,14 @@ fn transport_particle<XS: XsProvider>(
     let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
     let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
 
-    let max_collisions = 1000;
+    // OpenMC uses max_particle_events = 1,000,000 (any step: collision, surface, reflection).
+    // For thermal systems, neutrons may undergo thousands of scattering events to thermalize.
+    let max_events = 1_000_000_u32;
     let mut void_crossings = 0_u32;
+    let mut total_events = 0_u32;
 
-    while particle.is_alive() && particle.n_collisions < max_collisions {
+    while particle.is_alive() && total_events < max_events {
+        total_events += 1;
         let cell = &cells[particle.cell_idx];
 
         let mat_idx = match cell.fill {
@@ -327,15 +335,15 @@ fn transport_particle<XS: XsProvider>(
             // S(α,β) thermal scattering: replace free-atom elastic XS
             // with thermal scattering XS below energy_max
             if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx) {
-                if particle.energy < tsl.energy_max {
+                if particle.energy < tsl.energy_max && particle.energy > 0.0 {
                     let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                    let thermal_total = tsl.total_xs(particle.energy, t_idx);
-                    // Remove free-atom elastic, add thermal total
-                    let delta = thermal_total - xs.elastic;
-                    xs.total += delta;
-                    thermal_xs_add[i] = thermal_total;
-                    // Zero out free-atom elastic — thermal scattering replaces it
-                    xs.elastic = 0.0;
+                    let thermal_total = tsl.total_xs(particle.energy, t_idx).max(0.0);
+                    if thermal_total > 0.0 {
+                        let delta = thermal_total - xs.elastic;
+                        xs.total += delta;
+                        thermal_xs_add[i] = thermal_total;
+                        xs.elastic = 0.0;
+                    }
                 }
             }
 
@@ -846,16 +854,24 @@ pub fn run_eigenvalue<XS: XsProvider>(
     (results, k_final)
 }
 
-/// Create an initial source uniformly distributed in the first material cell.
+/// Create an initial source uniformly distributed in fissile material cells.
+///
+/// Rejection-samples points in the bounding box of fissile cells, accepting
+/// only those that land inside a cell containing material. For Godiva, this
+/// is the single fuel sphere. For PWR pin cell, this is the cylindrical
+/// fuel region (rejects corners of the bounding box that fall in gap/clad/water).
 fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> Vec<FissionSite> {
     let mut rng = Rng::new(seed * 100_000, 0);
     let mut sites = Vec::with_capacity(n);
 
-    let cell = cells.iter().find(|c| matches!(c.fill, CellFill::Material(_)));
-    let aabb = cell.map(|c| c.aabb).unwrap_or(crate::geometry::Aabb::new(
-        Vec3::new(-10.0, -10.0, -10.0),
-        Vec3::new(10.0, 10.0, 10.0),
-    ));
+    // Find the first material cell (assumed fissile for eigenvalue problems)
+    let target_idx = cells.iter().position(|c| matches!(c.fill, CellFill::Material(_)));
+    let aabb = target_idx
+        .map(|i| cells[i].aabb)
+        .unwrap_or(crate::geometry::Aabb::new(
+            Vec3::new(-10.0, -10.0, -10.0),
+            Vec3::new(10.0, 10.0, 10.0),
+        ));
 
     while sites.len() < n {
         let x = aabb.min.x + rng.uniform() * (aabb.max.x - aabb.min.x);
@@ -863,12 +879,16 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> 
         let z = aabb.min.z + rng.uniform() * (aabb.max.z - aabb.min.z);
         let pos = Vec3::new(x, y, z);
 
-        if geometry::ray::find_cell(pos, surfaces, cells).is_some() {
-            sites.push(FissionSite {
-                pos,
-                energy: 1.0e6,
-                weight: 1.0,
-            });
+        // Only accept if the point is actually in the target cell
+        // (rejects points in the AABB corners that are outside the cylinder)
+        if let Some(idx) = geometry::ray::find_cell(pos, surfaces, cells) {
+            if Some(idx) == target_idx {
+                sites.push(FissionSite {
+                    pos,
+                    energy: 1.0e6,
+                    weight: 1.0,
+                });
+            }
         }
     }
 
