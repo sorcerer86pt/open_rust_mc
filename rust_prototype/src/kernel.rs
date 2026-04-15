@@ -262,6 +262,11 @@ impl SvdKernel {
         &self.energies
     }
 
+    /// Return the f32 basis (for GPU upload).
+    pub fn basis_f32(&self) -> &[f32] {
+        &self.basis
+    }
+
     /// Look up the energy grid index using the hash table if available,
     /// falling back to binary search otherwise.
     #[inline]

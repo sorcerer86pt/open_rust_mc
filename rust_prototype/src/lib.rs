@@ -10,6 +10,8 @@ pub mod compare;
 pub mod decompose;
 pub mod error;
 pub mod geometry;
+#[cfg(feature = "cuda")]
+pub mod gpu;
 pub mod hdf5_reader;
 pub mod kernel;
 pub mod loader;
