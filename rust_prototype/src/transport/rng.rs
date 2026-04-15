@@ -72,6 +72,19 @@ impl Rng {
         (sin_theta * phi.cos(), sin_theta * phi.sin(), mu)
     }
 
+    /// Get the internal state (for saving/restoring in event-based transport).
+    #[inline]
+    pub fn state(&self) -> u64 { self.state }
+
+    /// Get the stream/increment (for saving/restoring).
+    #[inline]
+    pub fn stream(&self) -> u64 { self.inc >> 1 }
+
+    /// Restore from saved state and stream.
+    pub fn from_state(state: u64, stream: u64) -> Self {
+        Self { state, inc: (stream << 1) | 1 }
+    }
+
     /// Discrete sampling: pick an index 0..n with probability proportional to weights.
     /// Assumes weights are non-negative and sum to `total`.
     #[inline]
