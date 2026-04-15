@@ -663,24 +663,33 @@ per batch unless noted).
 \begin{table}[htb]
 \centering
 \caption{Godiva $k_\text{eff}$ from the standalone Rust engine as
-physics components are added. The experimental benchmark value is
-$k_\text{eff} = 1.0000$.}
+physics and implementation components are added. The experimental
+benchmark value is $k_\text{eff} = 1.0000$. Top section: physics
+progression (80 batches, 10k particles). Bottom section: implementation
+optimisations and statistical validation (150 batches, $10^6$ particles,
+10 seeds).}
 \label{tab:keff_standalone}
 \begin{tabular}{@{}lccl@{}}
 \toprule
-Physics model & $k_\text{eff}$ & $\Delta k$ (pcm) & Note \\
+Component & $k_\text{eff}$ & $\Delta k$ (pcm) & Note \\
 \midrule
+\multicolumn{4}{@{}l}{\textit{Physics progression (80b $\times$ 10k particles):}} \\
 Constant $\bar{\nu}$, isotropic, Watt & 0.994 & $-600$ & compensating errors \\
-$+$ Energy-dependent $\bar{\nu}(E)$    & 1.059 & $+5900$ & correct but exposes missing physics \\
+$+$ Energy-dependent $\bar{\nu}(E)$    & 1.059 & $+5900$ & exposes missing physics \\
 $+$ Anisotropic elastic scattering     & 0.965 & $-3500$ & increased leakage \\
 $+$ Tabulated fission spectrum          & 1.006 & $+600$  & harder spectrum \\
 $+$ URR probability tables             & 1.007 & $+700$  & minor self-shielding \\
-$+$ Correlated CDF interpolation    & 1.000 & $+16$   & removes interpolation bias \\
+$+$ Correlated CDF interpolation        & 1.000 & $+16$   & removes interpolation bias \\
 \midrule
-Final (150 batches, 20k particles) & 0.99963 & $-37$ & $\pm 0.00091$ ($1\sigma$) \\
+\multicolumn{4}{@{}l}{\textit{Implementation optimisations (150b $\times$ 1M particles, 10 seeds):}} \\
+$+$ f32 basis, Arc grids, exp2          & 1.00017 & $+17$ & halved memory, no k change \\
+$+$ Stack alloc, single binary search   & 1.00012 & $+12$ & $\pm 0.00007$ (10 seeds) \\
+$+$ Hash-based $O(1)$ energy index      & 1.00012 & $+12$ & no k change, faster lookup \\
+$+$ Ducru temperature interpolation     & 1.00012 & $+12$ & exact at library temps \\
 \midrule
-\multicolumn{4}{@{}l}{\textit{After Phase~1 optimisations (f32 basis, Arc grids, exp2, stack alloc):}} \\
-10-seed mean (150b $\times$ 1M part.) & 1.00012 & $+12$ & $\pm 0.00007$ (10 seeds) \\
+\multicolumn{4}{@{}l}{\textit{Comparison targets:}} \\
+Pointwise table (same engine, 10 seeds) & 0.99905 & $-95$ & $\pm 0.00013$ \\
+OpenMC reference (single run)           & 0.99844 & $-156$ & $\pm 0.00006$ \\
 \bottomrule
 \end{tabular}
 \end{table}

@@ -120,13 +120,13 @@ for RANK in 2 3 4 5 6; do
 done
 ```
 
-### Resonance integral validation (requires OpenMC in WSL)
+### Resonance integral validation (requires Linux; WSL on Windows)
 ```bash
 conda activate openmc
 python scripts/resonance_integral_validation.py
 ```
 
-### Three-way comparison: SVD vs Table vs OpenMC (requires WSL)
+### Three-way comparison: SVD vs Table vs OpenMC (requires Linux; WSL on Windows)
 ```bash
 conda activate openmc
 python scripts/honesty_test.py --particles 1000000 --batches 150
