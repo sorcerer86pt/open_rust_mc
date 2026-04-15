@@ -216,6 +216,8 @@ struct ParticleResult {
     fission_sites: Vec<FissionSite>,
     leakage: u32,
     absorptions: u32,
+    thermal_scatters: u32,
+    surface_crossings: u32,
     fissions: u32,
     collisions: u32,
 }
@@ -237,6 +239,8 @@ fn transport_particle<XS: XsProvider>(
         absorptions: 0,
         fissions: 0,
         collisions: 0,
+        thermal_scatters: 0,
+        surface_crossings: 0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -371,6 +375,7 @@ fn transport_particle<XS: XsProvider>(
         match trace {
             Some(hit) if hit.distance < dist_collision => {
                 particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
+                result.surface_crossings += 1;
 
                 let bc = surfaces[hit.surface_idx].boundary_condition();
                 match bc {
@@ -415,6 +420,7 @@ fn transport_particle<XS: XsProvider>(
 
                     if xi_reaction < thermal_xs_add[nuc_idx] {
                         // Thermal scattering event
+                        result.thermal_scatters += 1;
                         let (e_out, mu) = tsl.sample(particle.energy, t_idx, &mut rng);
                         particle.energy = e_out;
                         // Apply scattering angle
@@ -557,6 +563,8 @@ fn transport_particle_delta<XS: XsProvider>(
         absorptions: 0,
         fissions: 0,
         collisions: 0,
+        thermal_scatters: 0,
+        surface_crossings: 0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -814,6 +822,8 @@ pub fn run_eigenvalue<XS: XsProvider>(
         let mut absorptions = 0_u32;
         let mut fissions = 0_u32;
         let mut collisions = 0_u32;
+        let mut thermal_scatters = 0_u32;
+        let mut surface_crossings = 0_u32;
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -821,6 +831,8 @@ pub fn run_eigenvalue<XS: XsProvider>(
             absorptions += pr.absorptions;
             fissions += pr.fissions;
             collisions += pr.collisions;
+            thermal_scatters += pr.thermal_scatters;
+            surface_crossings += pr.surface_crossings;
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -832,6 +844,8 @@ pub fn run_eigenvalue<XS: XsProvider>(
             absorptions,
             fissions,
             collisions,
+            thermal_scatters,
+            surface_crossings,
         };
 
         if batch > config.inactive {
@@ -841,8 +855,9 @@ pub fn run_eigenvalue<XS: XsProvider>(
 
         let active = if batch > config.inactive { " *" } else { "" };
         println!(
-            "  Batch {batch:>4}: k={k_batch:.5}  collisions={collisions}  \
-             fissions={fissions}  leakage={leakage}{active}"
+            "  Batch {batch:>4}: k={k_batch:.5}  coll={collisions}  \
+             fiss={fissions}  leak={leakage}  therm={thermal_scatters}  \
+             surf={surface_crossings}{active}"
         );
 
         results.push(result);
