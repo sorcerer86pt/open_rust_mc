@@ -26,6 +26,10 @@ Completed physics:
 - Continuum inelastic (MT=91) evaporation spectrum
 - URR probability tables (20-band sampling)
 - Free gas thermal scattering (Maxwell-Boltzmann target velocity)
+- S(α,β) thermal scattering for H in H₂O (c_H_in_H2O.h5)
+  - Continuous inelastic (iwt=2): CDF + lin-lin interp + cosine smearing
+  - Coherent/incoherent elastic, Bragg edges, Debye-Waller
+  - 9 temperatures, stochastic interpolation
 - (n,2n) and (n,3n) reactions
 - Void cell free-streaming
 - Auto-detect tracking mode (surface vs delta)
@@ -54,10 +58,9 @@ Benoit Forget (MIT, co-author of WMP) reviewed the paper and suggested:
 All three addressed and committed.
 
 Next steps (not yet done):
-- PyO3 Python bindings (research done, ready to implement)
+- Validate PWR pin cell with S(α,β) on beefier desktop (run_pwr_tests.ps1)
 - Event-based GPU transport (cudarc integration done, kernel works)
-- PWR pin cell at scale (binary exists, void streaming works, needs validation)
-- S(alpha,beta) thermal scattering (needed for thermal reactors)
+- PyO3 Python bindings (research done, ready to implement)
 - HPC benchmarking on dedicated cluster (desktop noise too high)
 
 Working directory: C:\Users\fog\madman_svd_experiment

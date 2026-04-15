@@ -86,26 +86,44 @@ Delta from experiment = **16 pcm** (< 0.2 sigma). 150 batches, 20k particles.
 - Discrete levels (41 per nuclide) dominate memory for both approaches
 - OpenMC comparison script: `scripts/honesty_test.py` (WSL + conda)
 
+### S(α,β) Thermal Scattering (DONE — needs validation run)
+
+**8. S(α,β) thermal scattering for H in H₂O (DONE)**
+- Reads OpenMC thermal scattering HDF5 files (e.g., `c_H_in_H2O.h5`)
+- Continuous inelastic (iwt=2): CDF sampling with lin-lin interpolation,
+  scaled energy bounds (OpenMC Eq 31-35), discrete cosine smearing
+- Discrete inelastic (iwt=0,1): equiprobable/skewed bin sampling
+- Coherent elastic: Bragg edge sampling (graphite, Be)
+- Incoherent elastic: Debye-Waller angle formula
+- Stochastic temperature interpolation (OpenMC method)
+- c_H_in_H2O: 9 temperatures (294-800K), 106 energies, ~50K E_out pts,
+  ~770K mu pts per temperature, loaded from 186 MB HDF5 file
+- Transport integration: replaces free-atom elastic XS below energy_max
+  (~3.75 eV) with thermal inelastic+elastic XS, samples S(α,β) for
+  collision outcomes
+- Impact: expected ~1000-5000 pcm for PWR pin cell (awaiting validation)
+
+**9. PWR pin cell multi-seed benchmarking (DONE)**
+- `--seeds N` flag for independent runs with confidence intervals
+- ns/particle timing, speedup ratios, memory comparison
+- Auto-loads `c_H_in_H2O.h5` for H1 nuclide in water material
+- 8 nuclides (U235, U238, O16, H1, Zr90-94), 3 materials
+
 ## What Needs Fixing (Physics Gaps vs OpenMC)
 
-### Priority 1 — Close the remaining ~850 pcm gap
+### Priority 1 — Validate PWR pin cell with S(α,β)
+- Run `pwr_pincell --mode both` with S(α,β) data, compare SVD vs Table
+- Compare k_inf with OpenMC (which uses same S(α,β) data)
+- Quantify S(α,β) impact: run with and without thermal scattering
 
-### Priority 2 — Refinement
+### Priority 2 — Event-based GPU transport
+- Current: history-based (one particle birth-to-death per thread)
+- Target: event-based (batch operations: sort→XS lookup→collide→compact)
+- Tramm et al. 2024: event-based is 6x faster than history-based on GPU
+- Sort particles by (material, energy) before XS lookup = critical optimization
+- Already have GPU SVD kernel (8.7x on RTX A1000), need event loop
 
-**8. Free gas thermal scattering correction**
-- Currently: target nucleus is stationary (cold target approximation)
-- OpenMC: samples target velocity from Maxwell-Boltzmann distribution,
-  applies relative velocity correction (important at low energies)
-- Impact: ~10-30 pcm for thermal systems, negligible for fast Godiva
-
-### Priority 3 — Feature parity (correctness, not pcm)
-
-**9. S(α,β) thermal scattering data**
-- Needed for: H in water, graphite, UO2, ZrH
-- OpenMC: reads `c_H_in_H2O.h5` etc., applies coherent/incoherent elastic
-  and inelastic thermal scattering below ~4 eV
-- Impact: critical for thermal reactors (PWR pin cell)
-- These files are huge (178 MB for H₂O) but SVD may compress them well
+### Priority 3 — Feature parity
 
 **10. Photon transport**
 - OpenMC: full coupled neutron-photon transport
@@ -163,7 +181,8 @@ rust_prototype/
       xs_provider.rs            — SVD kernel ↔ transport bridge
     kernel.rs                   — SVD reconstruction (FMA + faer)
     decompose.rs                — faer SVD computation
-    hdf5_reader.rs              — pure-Rust HDF5 reader
+    hdf5_reader.rs              — pure-Rust HDF5 reader + thermal loader
+    thermal.rs                  — S(α,β) data structures + sampling
     compare.rs                  — error analysis
     loader.rs                   — numpy .npy loader
     nuclide.rs                  — nuclide data from .npy
@@ -171,6 +190,7 @@ rust_prototype/
     error.rs                    — error types
   src/bin/
     godiva.rs                   — end-to-end Godiva eigenvalue
+    pwr_pincell.rs              — PWR pin cell (8 nuclides, S(α,β))
     bench_mem.rs                — memory/speed comparison
     validate_vs_openmc.rs       — bit-exact validation
   benches/
@@ -205,6 +225,9 @@ paper/
 # Build
 cd rust_prototype && cargo build --release
 
+# Run all tests (36 tests)
+cargo test --lib
+
 # Run Godiva with real nuclear data
 cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
   --rank 5 --batches 80 --inactive 15 --particles 10000
@@ -213,18 +236,25 @@ cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
 cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
   --mode both --rank 5 --batches 150 --inactive 20 --particles 20000
 
+# PWR pin cell with S(α,β) thermal scattering
+cargo run --release --bin pwr_pincell -- path/to/endfb-vii.1-hdf5/neutron \
+  --mode both --rank 5 --batches 100 --inactive 20 --particles 20000
+
+# PWR pin cell full benchmark (multi-seed)
+cargo run --release --bin pwr_pincell -- path/to/endfb-vii.1-hdf5/neutron \
+  --mode both --rank 5 --batches 150 --inactive 20 --particles 50000 --seeds 5
+
 # Table-only mode (OpenMC-style baseline)
 cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
   --mode table --batches 150 --inactive 20 --particles 20000
 
-# Run all tests
-cargo test --lib
+# GPU benchmark (requires --features cuda)
+cargo run --release --features cuda --bin gpu_bench -- \
+  path/to/endfb-vii.1-hdf5/neutron --rank 5 --particles 1000000
 
-# HDF5 exploration
-cargo run --release -- explore path/to/U235.h5
-
-# SVD benchmark (needs .npy files from Python pipeline)
-cargo run --release -- npy --prefix jeff33_
+# Full test suite (PowerShell)
+cd .. && .\run_pwr_tests.ps1              # all tests
+cd .. && .\run_pwr_tests.ps1 -Download    # download data + run tests
 ```
 
 ## Nuclear Data
@@ -233,7 +263,8 @@ Download ENDF/B-VII.1 HDF5 from https://openmc.org/data/
 Extract to `data/endfb-vii.1-hdf5/`. Key files:
 - `neutron/U234.h5`, `U235.h5`, `U238.h5` (Godiva)
 - `neutron/H1.h5`, `O16.h5`, `Zr90.h5` (PWR pin cell)
-- Full library: 444 nuclide files, 5.8 GB
+- `neutron/c_H_in_H2O.h5` (S(α,β) thermal scattering for H in water)
+- Full library: 444 nuclide files + thermal data, 5.8 GB
 
 ## Key Numbers to Remember
 
