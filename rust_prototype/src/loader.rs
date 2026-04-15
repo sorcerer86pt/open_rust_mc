@@ -106,6 +106,6 @@ impl SvdFactors {
             }
         }
 
-        SvdKernel::new(basis, vt_coeffs, self.energies, rank, n_e, n_t)
+        SvdKernel::new(basis, vt_coeffs, self.energies.into(), rank, n_e, n_t)
     }
 }

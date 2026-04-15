@@ -10,7 +10,7 @@ use crate::transport::particle::{FissionSite, Particle};
 use crate::transport::rng::Rng;
 
 /// Cross-section data for a nuclide at a specific energy.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct MicroXs {
     /// Total cross-section (barns). From MT=1, or sum of all partials.
     pub total: f64,

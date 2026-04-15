@@ -76,6 +76,16 @@ Delta from experiment = **16 pcm** (< 0.2 sigma). 150 batches, 20k particles.
 - U-234: 26 energies, 1.5-100 keV; U-235: 19 energies, 2.25-25 keV; U-238: 18 energies, 20-149 keV
 - Impact: ~100-200 pcm improvement
 
+### Honesty Test (implemented)
+- `--mode svd|table|both` flag on godiva binary
+- `TableXsProvider` — OpenMC-style pointwise table lookup, same physics
+- `--mode both` runs both providers back-to-back, prints comparison
+- At rank=5, SVD uses ~1.7x MORE memory per reaction than single-temp table
+  (basis stores `rank` values per energy point vs table's 1 value)
+- SVD memory advantage appears at rank≤1 (single-temp) or multi-temperature
+- Discrete levels (41 per nuclide) dominate memory for both approaches
+- OpenMC comparison script: `scripts/honesty_test.py` (WSL + conda)
+
 ## What Needs Fixing (Physics Gaps vs OpenMC)
 
 ### Priority 1 — Close the remaining ~850 pcm gap
@@ -198,6 +208,14 @@ cd rust_prototype && cargo build --release
 # Run Godiva with real nuclear data
 cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
   --rank 5 --batches 80 --inactive 15 --particles 10000
+
+# Honesty test: SVD vs pointwise table head-to-head
+cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
+  --mode both --rank 5 --batches 150 --inactive 20 --particles 20000
+
+# Table-only mode (OpenMC-style baseline)
+cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
+  --mode table --batches 150 --inactive 20 --particles 20000
 
 # Run all tests
 cargo test --lib

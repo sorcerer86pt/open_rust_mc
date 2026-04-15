@@ -214,7 +214,7 @@ fn build_kernel_from_svd(
     open_rust_mc::kernel::SvdKernel::new(
         basis,
         vt_coeffs,
-        energies.to_vec(),
+        energies.to_vec().into(),
         rank,
         n_e,
         n_t,

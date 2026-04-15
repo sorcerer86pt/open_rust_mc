@@ -19,11 +19,129 @@ use crate::transport::material::Material;
 use crate::transport::particle::{FissionBank, FissionSite, Particle};
 use crate::transport::rng::Rng;
 
+/// Maximum nuclides per material for stack-allocated XS buffers.
+/// Godiva has 3, most materials have < 8. Avoids per-collision heap allocation.
+const MAX_NUCLIDES: usize = 16;
+
 /// Configuration for a simulation.
 pub struct SimConfig {
     pub batches: u32,
     pub inactive: u32,
     pub particles_per_batch: u32,
+    /// Global seed — different seeds produce independent runs for statistical benchmarking.
+    pub seed: u64,
+}
+
+// ── Delta tracking support ──────────────────────────────────────────
+
+/// Coarse table of majorant macroscopic total XS, used for delta tracking.
+/// Stores max(Σ_t) over all materials at log-spaced energy points.
+pub struct MajorantTable {
+    log_e_min: f64,
+    inv_step: f64,
+    values: Vec<f64>,
+}
+
+impl MajorantTable {
+    /// Look up majorant Σ_t at a given energy (1/cm).
+    #[inline]
+    fn lookup(&self, energy: f64) -> f64 {
+        let log_e = energy.max(1e-11).ln();
+        let frac = (log_e - self.log_e_min) * self.inv_step;
+        let idx = (frac as usize).min(self.values.len() - 2);
+        let t = frac - idx as f64;
+        self.values[idx] * (1.0 - t) + self.values[idx + 1] * t
+    }
+}
+
+/// Transport algorithm selection — detected automatically from geometry.
+enum TrackingMode {
+    /// Standard surface tracking — for single-material or reflective-only geometries.
+    Surface,
+    /// Woodcock delta tracking — for heterogeneous geometries with transmission boundaries.
+    /// Avoids surface intersection at internal material interfaces.
+    Delta(MajorantTable),
+}
+
+/// Detect which tracking algorithm to use based on geometry and materials.
+///
+/// Returns `Delta` if multiple materials exist with moderate XS contrast,
+/// `Surface` otherwise. Prints the decision to stdout.
+fn detect_tracking_mode<XS: XsProvider>(
+    cells: &[Cell],
+    materials: &[Material],
+    xs_provider: &XS,
+) -> TrackingMode {
+    // Count unique material indices
+    let mut mat_indices: Vec<usize> = cells.iter()
+        .filter_map(|c| match c.fill {
+            CellFill::Material(m) => Some(m as usize),
+            _ => None,
+        })
+        .collect();
+    mat_indices.sort_unstable();
+    mat_indices.dedup();
+
+    if mat_indices.len() <= 1 {
+        println!("  Tracking: SURFACE (single material — delta tracking not beneficial)");
+        return TrackingMode::Surface;
+    }
+
+    // Multiple materials — compute majorant and contrast ratio
+    let n_pts = 10_000;
+    let e_min = 1e-5_f64;
+    let e_max = 20e6_f64;
+    let log_min = e_min.ln();
+    let log_max = e_max.ln();
+    let step = (log_max - log_min) / (n_pts - 1) as f64;
+
+    let mut values = Vec::with_capacity(n_pts);
+    let mut max_contrast = 0.0_f64;
+
+    for i in 0..n_pts {
+        let energy = (log_min + i as f64 * step).exp();
+
+        let mut mat_totals = Vec::with_capacity(mat_indices.len());
+        for &mi in &mat_indices {
+            if mi >= materials.len() { continue; }
+            let mat = &materials[mi];
+            let mut macro_t = 0.0;
+            for nuc in &mat.nuclides {
+                let xs = xs_provider.lookup(nuc.xs_kernel_idx, energy);
+                macro_t += nuc.atom_density * xs.total;
+            }
+            mat_totals.push(macro_t);
+        }
+
+        let sigma_max = mat_totals.iter().copied().fold(0.0_f64, f64::max);
+        let sigma_min = mat_totals.iter().copied()
+            .filter(|&s| s > 1e-10)
+            .fold(f64::INFINITY, f64::min);
+
+        if sigma_min > 0.0 && sigma_min < f64::INFINITY {
+            max_contrast = max_contrast.max(sigma_max / sigma_min);
+        }
+
+        // Add 5% safety margin to majorant
+        values.push(sigma_max * 1.05);
+    }
+
+    // High contrast (>20x) means >95% virtual collisions — delta tracking is worse
+    if max_contrast > 20.0 {
+        println!("  Tracking: SURFACE (heterogeneous but contrast={:.1}x too high for delta tracking)",
+                 max_contrast);
+        return TrackingMode::Surface;
+    }
+
+    let avg_rejection = if max_contrast > 1.0 { 1.0 - 1.0 / max_contrast } else { 0.0 };
+    println!("  Tracking: DELTA (heterogeneous — {} materials, contrast={:.1}x, ~{:.0}% virtual collisions)",
+             mat_indices.len(), max_contrast, avg_rejection * 100.0);
+
+    TrackingMode::Delta(MajorantTable {
+        log_e_min: log_min,
+        inv_step: 1.0 / step,
+        values,
+    })
 }
 
 /// Cross-section provider trait — abstracts over SVD kernel vs table lookup.
@@ -114,12 +232,62 @@ fn transport_particle<XS: XsProvider>(
     let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
 
     let max_collisions = 1000;
+    let mut void_crossings = 0_u32;
+
     while particle.is_alive() && particle.n_collisions < max_collisions {
         let cell = &cells[particle.cell_idx];
 
         let mat_idx = match cell.fill {
             CellFill::Material(m) => m as usize,
-            CellFill::Void | CellFill::Universe(_) => {
+            CellFill::Void => {
+                // Void region — free-stream to next surface (no interactions).
+                // Safety limit prevents infinite loops in degenerate geometries.
+                void_crossings += 1;
+                if void_crossings > 100 {
+                    particle.kill();
+                    result.leakage += 1;
+                    break;
+                }
+                let trace = geometry::ray::trace_step(
+                    particle.pos, particle.dir, particle.cell_idx, surfaces, cells,
+                );
+                match trace {
+                    Some(hit) => {
+                        // Nudge proportional to distance — ensures clean surface crossing
+                        let nudge = (hit.distance * 1e-8).max(1e-8);
+                        particle.advance(hit.distance + nudge);
+                        let bc = surfaces[hit.surface_idx].boundary_condition();
+                        match bc {
+                            BoundaryCondition::Vacuum => {
+                                particle.kill();
+                                result.leakage += 1;
+                                break;
+                            }
+                            BoundaryCondition::Reflective => {
+                                let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                                let d = particle.dir;
+                                particle.dir = d - n * (2.0 * d.dot(n));
+                            }
+                            BoundaryCondition::Transmission => {
+                                if let Some(next) = hit.next_cell_idx {
+                                    particle.cell_idx = next;
+                                } else {
+                                    particle.kill();
+                                    result.leakage += 1;
+                                    break;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    None => {
+                        particle.kill();
+                        result.leakage += 1;
+                        break;
+                    }
+                }
+            }
+            CellFill::Universe(_) => {
                 particle.kill();
                 result.leakage += 1;
                 break;
@@ -134,19 +302,19 @@ fn transport_particle<XS: XsProvider>(
 
         let material = &materials[mat_idx];
 
-        // Look up microscopic cross-sections with URR sampling
+        // Look up microscopic cross-sections with URR sampling.
+        // Stack-allocated buffers — no heap allocation per collision.
         let urr_xi = rng.uniform();
-        let micro_xs: Vec<MicroXs> = material.nuclides
-            .iter()
-            .map(|nuc| {
-                let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
-                xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
-                xs
-            })
-            .collect();
-
-        let micro_totals: Vec<f64> = micro_xs.iter().map(|x| x.total).collect();
-        let macro_total = material.macro_total(&micro_totals);
+        let n_nuclides = material.nuclides.len();
+        let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+        let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+        for (i, nuc) in material.nuclides.iter().enumerate() {
+            let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+            xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+            micro_totals[i] = xs.total;
+            micro_xs[i] = xs;
+        }
+        let macro_total = material.macro_total(&micro_totals[..n_nuclides]);
 
         if macro_total <= 0.0 {
             particle.kill();
@@ -166,7 +334,7 @@ fn transport_particle<XS: XsProvider>(
 
         match trace {
             Some(hit) if hit.distance < dist_collision => {
-                particle.advance(hit.distance + 1e-10);
+                particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
 
                 let bc = surfaces[hit.surface_idx].boundary_condition();
                 match bc {
@@ -194,7 +362,7 @@ fn transport_particle<XS: XsProvider>(
                 result.collisions += 1;
 
                 let nuc_idx = material.sample_nuclide(
-                    &micro_totals,
+                    &micro_totals[..n_nuclides],
                     macro_total,
                     rng.uniform(),
                 );
@@ -244,7 +412,238 @@ fn transport_particle<XS: XsProvider>(
     result
 }
 
+/// Transport a single particle using Woodcock delta tracking.
+///
+/// Instead of tracing to surfaces to sample collision distance, uses a
+/// pre-computed majorant XS for the entire geometry. At each potential
+/// collision, accepts or rejects based on real/majorant XS ratio.
+/// This avoids surface intersection at transmission boundaries.
+fn transport_particle_delta<XS: XsProvider>(
+    site: &FissionSite,
+    batch: u64,
+    particle_idx: u64,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Material],
+    xs_provider: &XS,
+    majorant: &MajorantTable,
+) -> ParticleResult {
+    let mut rng = Rng::for_particle(batch, particle_idx);
+    let mut result = ParticleResult {
+        fission_sites: Vec::new(),
+        leakage: 0,
+        absorptions: 0,
+        fissions: 0,
+        collisions: 0,
+    };
+
+    let (u, v, w) = rng.isotropic_direction();
+    let dir = Vec3::new(u, v, w);
+    let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
+    let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
+
+    let max_steps = 10_000;
+    let mut steps = 0;
+
+    while particle.is_alive() && steps < max_steps {
+        steps += 1;
+        let sigma_maj = majorant.lookup(particle.energy);
+
+        if sigma_maj <= 1e-20 {
+            particle.kill();
+            result.leakage += 1;
+            break;
+        }
+
+        let d_collision = rng.exponential(sigma_maj);
+
+        // Check for vacuum/reflective boundaries before advancing
+        let trace = geometry::ray::trace_step(
+            particle.pos, particle.dir, particle.cell_idx, surfaces, cells,
+        );
+
+        match trace {
+            Some(hit) if hit.distance < d_collision => {
+                let bc = surfaces[hit.surface_idx].boundary_condition();
+                match bc {
+                    BoundaryCondition::Vacuum => {
+                        particle.kill();
+                        result.leakage += 1;
+                        break;
+                    }
+                    BoundaryCondition::Reflective => {
+                        particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
+                        let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                        let d = particle.dir;
+                        particle.dir = d - n * (2.0 * d.dot(n));
+                        continue;
+                    }
+                    BoundaryCondition::Transmission => {
+                        // Delta tracking: skip transmission boundaries, just advance
+                        particle.advance(d_collision);
+                        // Find which cell we ended up in
+                        match geometry::ray::find_cell(particle.pos, surfaces, cells) {
+                            Some(idx) => particle.cell_idx = idx,
+                            None => {
+                                particle.kill();
+                                result.leakage += 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {
+                // No boundary before collision distance — advance freely
+                particle.advance(d_collision);
+                // Verify we're still in a valid cell
+                if let Some(idx) = geometry::ray::find_cell(particle.pos, surfaces, cells) {
+                    particle.cell_idx = idx;
+                } else {
+                    particle.kill();
+                    result.leakage += 1;
+                    break;
+                }
+            }
+        }
+
+        // Get current material — handle void by free-streaming
+        let cell = &cells[particle.cell_idx];
+        let mat_idx = match cell.fill {
+            CellFill::Material(m) => m as usize,
+            CellFill::Void => {
+                // Void region — free-stream to next surface
+                let trace = geometry::ray::trace_step(
+                    particle.pos, particle.dir, particle.cell_idx, surfaces, cells,
+                );
+                match trace {
+                    Some(hit) => {
+                        particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
+                        let bc = surfaces[hit.surface_idx].boundary_condition();
+                        match bc {
+                            BoundaryCondition::Vacuum => {
+                                particle.kill();
+                                result.leakage += 1;
+                                break;
+                            }
+                            BoundaryCondition::Reflective => {
+                                let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                                let d = particle.dir;
+                                particle.dir = d - n * (2.0 * d.dot(n));
+                            }
+                            BoundaryCondition::Transmission => {
+                                if let Some(next) = hit.next_cell_idx {
+                                    particle.cell_idx = next;
+                                } else {
+                                    particle.kill();
+                                    result.leakage += 1;
+                                    break;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    None => {
+                        particle.kill();
+                        result.leakage += 1;
+                        break;
+                    }
+                }
+            }
+            CellFill::Universe(_) => {
+                particle.kill();
+                result.leakage += 1;
+                break;
+            }
+        };
+        if mat_idx >= materials.len() {
+            particle.kill();
+            result.leakage += 1;
+            break;
+        }
+
+        let material = &materials[mat_idx];
+
+        // Compute real Σ_t for acceptance test
+        let urr_xi = rng.uniform();
+        let n_nuclides = material.nuclides.len();
+        let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+        let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+        for (i, nuc) in material.nuclides.iter().enumerate() {
+            let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+            xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+            micro_totals[i] = xs.total;
+            micro_xs[i] = xs;
+        }
+        let sigma_real = material.macro_total(&micro_totals[..n_nuclides]);
+
+        // Acceptance test: real collision with probability Σ_t / Σ_maj
+        if rng.uniform() >= sigma_real / sigma_maj {
+            continue; // Virtual collision — keep tracking
+        }
+
+        // Real collision — process exactly as surface tracking
+        result.collisions += 1;
+
+        let macro_total = sigma_real;
+        if macro_total <= 0.0 {
+            particle.kill();
+            result.leakage += 1;
+            break;
+        }
+
+        let nuc_idx = material.sample_nuclide(
+            &micro_totals[..n_nuclides], macro_total, rng.uniform(),
+        );
+
+        let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+        let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+        let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+        let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+
+        let inelastic_data = if !level_info.is_empty() {
+            Some(InelasticData {
+                levels: &level_info,
+                level_xs: &level_xs,
+                has_continuum: has_cont,
+            })
+        } else {
+            None
+        };
+
+        let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+        let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+
+        let outcome = collision::process_collision(
+            &mut particle,
+            &micro_xs[nuc_idx],
+            inelastic_data.as_ref(),
+            elastic_angle,
+            fission_edist,
+            cell.temperature,
+            &mut rng,
+        );
+
+        match outcome {
+            CollisionOutcome::Scatter => {}
+            CollisionOutcome::Absorption => {
+                result.absorptions += 1;
+            }
+            CollisionOutcome::Fission { sites } => {
+                result.fissions += 1;
+                result.fission_sites.extend(sites);
+            }
+        }
+    }
+
+    result
+}
+
 /// Run a k-eigenvalue simulation with rayon parallel transport.
+///
+/// Automatically detects the optimal tracking algorithm based on geometry:
+/// - Single material → surface tracking
+/// - Multiple materials → Woodcock delta tracking
 ///
 /// Returns per-batch results and the final k_eff estimate.
 pub fn run_eigenvalue<XS: XsProvider>(
@@ -256,22 +655,34 @@ pub fn run_eigenvalue<XS: XsProvider>(
 ) -> (Vec<BatchResult>, f64) {
     let n = config.particles_per_batch as usize;
 
-    let mut source_bank = initial_source(n, surfaces, cells);
+    // Auto-detect optimal tracking algorithm
+    let tracking = detect_tracking_mode(cells, materials, xs_provider);
+
+    let seed = config.seed;
+    let mut source_bank = initial_source(n, surfaces, cells, seed);
 
     let mut results = Vec::with_capacity(config.batches as usize);
     let mut k_sum = 0.0;
     let mut k_count = 0_u32;
 
     for batch in 1..=config.batches {
-        // Parallel transport: each particle runs independently
+        // Parallel transport: dispatch based on tracking mode.
+        // Seed offsets batch number to make each seed produce independent streams.
+        let batch_seed = batch as u64 + seed * 100_000;
         let particle_results: Vec<ParticleResult> = source_bank
             .par_iter()
             .enumerate()
             .map(|(i, site)| {
-                transport_particle(
-                    site, batch as u64, i as u64,
-                    surfaces, cells, materials, xs_provider,
-                )
+                match &tracking {
+                    TrackingMode::Surface => transport_particle(
+                        site, batch_seed, i as u64,
+                        surfaces, cells, materials, xs_provider,
+                    ),
+                    TrackingMode::Delta(majorant) => transport_particle_delta(
+                        site, batch_seed, i as u64,
+                        surfaces, cells, materials, xs_provider, majorant,
+                    ),
+                }
             })
             .collect();
 
@@ -314,7 +725,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
 
         results.push(result);
 
-        source_bank = normalize_fission_bank(&fission_bank, n, batch);
+        source_bank = normalize_fission_bank(&fission_bank, n, batch + seed as u32 * 100_000);
     }
 
     let k_final = if k_count > 0 { k_sum / k_count as f64 } else { 0.0 };
@@ -322,8 +733,8 @@ pub fn run_eigenvalue<XS: XsProvider>(
 }
 
 /// Create an initial source uniformly distributed in the first material cell.
-fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell]) -> Vec<FissionSite> {
-    let mut rng = Rng::new(0, 0);
+fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> Vec<FissionSite> {
+    let mut rng = Rng::new(seed * 100_000, 0);
     let mut sites = Vec::with_capacity(n);
 
     let cell = cells.iter().find(|c| matches!(c.fill, CellFill::Material(_)));
@@ -419,6 +830,7 @@ mod tests {
             batches: 10,
             inactive: 3,
             particles_per_batch: 500,
+            seed: 0,
         };
 
         let (results, k_final) = run_eigenvalue(
@@ -429,5 +841,200 @@ mod tests {
         assert!(k_final > 0.3 && k_final < 3.0,
                 "k_final = {k_final} — out of reasonable range");
         println!("\n  Godiva smoke test: k_final = {k_final:.4}");
+    }
+
+    #[test]
+    fn void_streaming_pincell_geometry() {
+        // Particle born in fuel → crosses void gap → enters clad.
+        // Verifies that void cells don't kill the particle.
+        use crate::geometry::surface::BoundaryCondition;
+
+        let fuel_r = 0.4096;
+        let clad_ir = 0.4180;
+        let clad_or = 0.4750;
+
+        let surfaces = vec![
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: fuel_r,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: clad_ir,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: clad_or,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0))
+                .with_aabb(crate::geometry::Aabb::new(
+                    Vec3::new(-fuel_r, -fuel_r, -fuel_r),
+                    Vec3::new(fuel_r, fuel_r, fuel_r),
+                )),
+            Cell::new(
+                CellId(1),
+                cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
+                CellFill::Void,
+            )
+            .with_aabb(crate::geometry::Aabb::new(
+                Vec3::new(-clad_ir, -clad_ir, -clad_ir),
+                Vec3::new(clad_ir, clad_ir, clad_ir),
+            )),
+            Cell::new(
+                CellId(2),
+                cell::intersect_all(vec![cell::outside(1), cell::inside(2)]),
+                CellFill::Material(1),
+            )
+            .with_aabb(crate::geometry::Aabb::new(
+                Vec3::new(-clad_or, -clad_or, -clad_or),
+                Vec3::new(clad_or, clad_or, clad_or),
+            )),
+            Cell::new(CellId(3), cell::outside(2), CellFill::Void),
+        ];
+
+        // Fuel: high fission to keep neutrons alive
+        let mut fuel = Material::new("fuel", 294.0);
+        fuel.add_nuclide(0.048, 0);
+        // Clad: pure absorber (kills all neutrons)
+        let mut clad = Material::new("clad", 294.0);
+        clad.add_nuclide(0.04, 1);
+
+        let materials = vec![fuel, clad];
+
+        let xs_provider = ConstantXs {
+            xs: vec![
+                MicroXs {
+                    total: 7.0, elastic: 4.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
+                    fission: 2.0, capture: 0.1, nu_bar: 2.43, awr: 235.0,
+                },
+                MicroXs {
+                    total: 5.0, elastic: 1.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
+                    fission: 0.0, capture: 4.0, nu_bar: 0.0, awr: 91.0,
+                },
+            ],
+        };
+
+        let config = SimConfig { batches: 5, inactive: 1, particles_per_batch: 200, seed: 0 };
+        let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
+
+        // Key check: simulation runs to completion. If void streaming is broken,
+        // particles die in the gap and we get k=0 and no collisions.
+        let total_collisions: u32 = results.iter().map(|r| r.collisions).sum();
+        assert!(total_collisions > 100,
+                "Too few collisions ({total_collisions}) — void streaming may be broken");
+        println!("\n  Void streaming test: {total_collisions} collisions across {} batches", results.len());
+    }
+
+    #[test]
+    fn tracking_mode_single_material_is_surface() {
+        // Single material → surface tracking
+        let surfaces = vec![
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: 5.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            Cell::new(CellId(1), cell::outside(0), CellFill::Void),
+        ];
+        let mut mat = Material::new("test", 294.0);
+        mat.add_nuclide(0.04, 0);
+        let materials = vec![mat];
+
+        let xs = ConstantXs {
+            xs: vec![MicroXs {
+                total: 5.0, elastic: 3.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
+                fission: 1.0, capture: 1.0, nu_bar: 2.43, awr: 235.0,
+            }],
+        };
+
+        let mode = detect_tracking_mode(&cells, &materials, &xs);
+        assert!(matches!(mode, TrackingMode::Surface),
+                "Single material should use surface tracking");
+    }
+
+    #[test]
+    fn tracking_mode_high_contrast_falls_back() {
+        // Two materials with high XS contrast → should fall back to surface
+        let surfaces = vec![
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: 5.0,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: 10.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            Cell::new(
+                CellId(1),
+                cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
+                CellFill::Material(1),
+            ),
+            Cell::new(CellId(2), cell::outside(1), CellFill::Void),
+        ];
+        let mut mat_strong = Material::new("strong", 294.0);
+        mat_strong.add_nuclide(0.05, 0);
+        let mut mat_weak = Material::new("weak", 294.0);
+        mat_weak.add_nuclide(0.0001, 1);
+        let materials = vec![mat_strong, mat_weak];
+
+        let xs = ConstantXs {
+            xs: vec![
+                MicroXs { total: 100.0, elastic: 90.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
+                          fission: 5.0, capture: 5.0, nu_bar: 2.43, awr: 235.0 },
+                MicroXs { total: 1.0, elastic: 0.9, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
+                          fission: 0.0, capture: 0.1, nu_bar: 0.0, awr: 56.0 },
+            ],
+        };
+
+        let mode = detect_tracking_mode(&cells, &materials, &xs);
+        assert!(matches!(mode, TrackingMode::Surface),
+                "High contrast should fall back to surface tracking");
+    }
+
+    #[test]
+    fn different_seeds_produce_different_results() {
+        // Two runs with different seeds should give different per-batch k values
+        let surfaces = vec![
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0), radius: 8.7407,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0))
+                .with_aabb(crate::geometry::Aabb::new(
+                    Vec3::new(-8.7407, -8.7407, -8.7407),
+                    Vec3::new(8.7407, 8.7407, 8.7407),
+                )),
+            Cell::new(CellId(1), cell::outside(0), CellFill::Void),
+        ];
+        let mut mat = Material::new("HEU", 294.0);
+        mat.add_nuclide(0.048, 0);
+        let materials = vec![mat];
+        let xs = ConstantXs {
+            xs: vec![MicroXs {
+                total: 7.0, elastic: 4.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
+                fission: 1.2, capture: 0.1, nu_bar: 2.43, awr: 235.0,
+            }],
+        };
+
+        let config0 = SimConfig { batches: 5, inactive: 1, particles_per_batch: 500, seed: 0 };
+        let config1 = SimConfig { batches: 5, inactive: 1, particles_per_batch: 500, seed: 1 };
+
+        let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);
+        let (r1, _) = run_eigenvalue(&config1, &surfaces, &cells, &materials, &xs);
+
+        // Per-batch k_eff values should differ (stochastic independence)
+        let k0: Vec<f64> = r0.iter().map(|r| r.k_eff).collect();
+        let k1: Vec<f64> = r1.iter().map(|r| r.k_eff).collect();
+        assert_ne!(k0, k1, "Different seeds must produce different batch sequences");
     }
 }

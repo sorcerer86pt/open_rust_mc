@@ -208,7 +208,7 @@ fn build_kernel(svd: &decompose::SvdResult, energies: &[f64], k: usize) -> SvdKe
         }
     }
 
-    SvdKernel::new(basis, vt_coeffs, energies.to_vec(), rank, n_e, n_t)
+    SvdKernel::new(basis, vt_coeffs, energies.to_vec().into(), rank, n_e, n_t)
 }
 
 #[cfg(windows)]
