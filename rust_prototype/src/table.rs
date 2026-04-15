@@ -42,23 +42,22 @@ impl PointwiseTable {
             .to_vec();
 
         let e: Arc<[f64]> = energies.into();
-        let ht = if e.len() > 100 { Some(EnergyHashTable::new(&e, 8192)) } else { None };
-        Ok(Self { energies: e, xs, hash_table: ht })
+        // Hash table disabled for PointwiseTable — the log-log interpolation
+        // is sensitive to bracket accuracy. SVD uses hash (index-only, no interp).
+        Ok(Self { energies: e, xs, hash_table: None })
     }
 
     /// Build from raw vectors (for benchmarking without file I/O).
     pub fn from_vecs(energies: Vec<f64>, xs: Vec<f64>) -> Self {
         debug_assert_eq!(energies.len(), xs.len());
         let e: Arc<[f64]> = energies.into();
-        let ht = if e.len() > 100 { Some(EnergyHashTable::new(&e, 8192)) } else { None };
-        Self { energies: e, xs, hash_table: ht }
+        Self { energies: e, xs, hash_table: None }
     }
 
     /// Build from a shared energy grid and owned XS values.
     pub fn from_shared_grid(energies: Arc<[f64]>, xs: Vec<f64>) -> Self {
         debug_assert_eq!(energies.len(), xs.len());
-        let ht = if energies.len() > 100 { Some(EnergyHashTable::new(&energies, 8192)) } else { None };
-        Self { energies, xs, hash_table: ht }
+        Self { energies, xs, hash_table: None }
     }
 
     /// Memory footprint of XS data only (bytes), excluding shared energy grid.
