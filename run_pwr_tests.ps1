@@ -151,7 +151,7 @@ if (Test-Path "${JEFF_PREFIX}energies.npy") {
 
 # ── GPU ─────────────────────────────────────────────────────────────────
 
-RunAndLog "TEST 6: GPU benchmark" {
+RunAndLog "TEST 6a: GPU benchmark — U-235 fission (single nuclide)" {
     $env:RUST_BACKTRACE = "0"
     cargo build --release --features cuda --bin gpu_bench 2>&1
     if ($LASTEXITCODE -eq 0) {
@@ -159,6 +159,15 @@ RunAndLog "TEST 6: GPU benchmark" {
           --rank 5 --particles 1000000
     } else {
         Write-Host "  SKIP: CUDA build failed"
+    }
+}
+
+RunAndLog "TEST 6b: GPU benchmark — PWR pin cell (8 nuclides, CPU vs CUDA)" {
+    if ($LASTEXITCODE -eq 0) {
+        cargo run --release --features cuda --bin gpu_bench -- $DATA `
+          --rank 5 --particles 1000000 --pwr
+    } else {
+        Write-Host "  SKIP: CUDA build not available"
     }
 }
 
