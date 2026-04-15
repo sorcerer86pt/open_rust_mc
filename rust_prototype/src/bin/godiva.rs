@@ -205,7 +205,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     let xs_mem: usize = kernels.iter().map(|k| k.svd_memory_bytes()).sum();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB", xs_mem as f64 / 1024.0);
-    (xs_provider::SvdXsProvider { nuclides: kernels }, xs_mem, load_ms)
+    (xs_provider::SvdXsProvider { nuclides: kernels, thermal: vec![] }, xs_mem, load_ms)
 }
 
 fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
@@ -230,7 +230,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB", xs_mem as f64 / 1024.0);
-    (xs_provider::TableXsProvider { nuclides: tables }, xs_mem, load_ms)
+    (xs_provider::TableXsProvider { nuclides: tables, thermal: vec![] }, xs_mem, load_ms)
 }
 
 fn print_benchmark(r: &BenchmarkResult, _particles: u32) {

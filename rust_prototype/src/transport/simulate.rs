@@ -15,6 +15,7 @@ use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
 use crate::hdf5_reader::{AngularDistribution, DiscreteLevelInfo, EnergyDistribution};
 use crate::physics::collision::{self, CollisionOutcome, InelasticData, MicroXs};
+use crate::thermal::ThermalScatteringData;
 use crate::transport::material::Material;
 use crate::transport::particle::{FissionBank, FissionSite, Particle};
 use crate::transport::rng::Rng;
@@ -173,6 +174,15 @@ pub trait XsProvider: Send + Sync {
     }
 
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
+
+    /// Get thermal scattering data for a nuclide, if available.
+    ///
+    /// Returns `Some` if the nuclide has associated S(α,β) thermal scattering data
+    /// (e.g., H1 in H₂O). The transport loop uses this to replace free-gas elastic
+    /// scattering with thermal scattering below `energy_max` (~4 eV).
+    fn thermal_scattering(&self, _nuclide_idx: usize) -> Option<&ThermalScatteringData> {
+        None
+    }
 }
 
 /// Simple constant cross-section provider for testing.
@@ -308,9 +318,27 @@ fn transport_particle<XS: XsProvider>(
         let n_nuclides = material.nuclides.len();
         let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
         let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+        // Track thermal scattering XS addition per nuclide
+        let mut thermal_xs_add = [0.0_f64; MAX_NUCLIDES];
         for (i, nuc) in material.nuclides.iter().enumerate() {
             let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
             xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+
+            // S(α,β) thermal scattering: replace free-atom elastic XS
+            // with thermal scattering XS below energy_max
+            if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx) {
+                if particle.energy < tsl.energy_max {
+                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                    let thermal_total = tsl.total_xs(particle.energy, t_idx);
+                    // Remove free-atom elastic, add thermal total
+                    let delta = thermal_total - xs.elastic;
+                    xs.total += delta;
+                    thermal_xs_add[i] = thermal_total;
+                    // Zero out free-atom elastic — thermal scattering replaces it
+                    xs.elastic = 0.0;
+                }
+            }
+
             micro_totals[i] = xs.total;
             micro_xs[i] = xs;
         }
@@ -368,41 +396,94 @@ fn transport_particle<XS: XsProvider>(
                 );
 
                 let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
-                let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
-                let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
-                let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
 
-                let inelastic_data = if !level_info.is_empty() {
-                    Some(InelasticData {
-                        levels: &level_info,
-                        level_xs: &level_xs,
-                        has_continuum: has_cont,
-                    })
-                } else {
-                    None
-                };
+                // Check if this nuclide+energy qualifies for thermal scattering
+                let use_thermal = thermal_xs_add[nuc_idx] > 0.0;
+                if use_thermal {
+                    // Thermal scattering: sample from S(α,β)
+                    let tsl = xs_provider.thermal_scattering(xs_kernel_idx).expect("thermal data");
+                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                    let xi_reaction = rng.uniform() * micro_xs[nuc_idx].total;
 
-                let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
-                let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
-
-                let outcome = collision::process_collision(
-                    &mut particle,
-                    &micro_xs[nuc_idx],
-                    inelastic_data.as_ref(),
-                    elastic_angle,
-                    fission_edist,
-                    cell.temperature,
-                    &mut rng,
-                );
-
-                match outcome {
-                    CollisionOutcome::Scatter => {}
-                    CollisionOutcome::Absorption => {
-                        result.absorptions += 1;
+                    if xi_reaction < thermal_xs_add[nuc_idx] {
+                        // Thermal scattering event
+                        let (e_out, mu) = tsl.sample(particle.energy, t_idx, &mut rng);
+                        particle.energy = e_out;
+                        // Apply scattering angle
+                        let phi = 2.0 * std::f64::consts::PI * rng.uniform();
+                        let sin_mu = (1.0 - mu * mu).max(0.0).sqrt();
+                        let d = particle.dir;
+                        let w2 = d.z * d.z;
+                        if w2 < 0.999 {
+                            let inv_sq = 1.0 / (1.0 - w2).sqrt();
+                            particle.dir = Vec3::new(
+                                mu * d.x + sin_mu * (d.x * d.z * phi.cos() - d.y * phi.sin()) * inv_sq,
+                                mu * d.y + sin_mu * (d.y * d.z * phi.cos() + d.x * phi.sin()) * inv_sq,
+                                mu * d.z - sin_mu * (1.0 - w2).sqrt() * phi.cos(),
+                            );
+                        } else {
+                            let sign = if d.z > 0.0 { 1.0 } else { -1.0 };
+                            particle.dir = Vec3::new(
+                                sin_mu * phi.cos(),
+                                sin_mu * phi.sin() * sign,
+                                mu * sign,
+                            );
+                        }
+                        // Continue — this was a scatter
+                    } else {
+                        // Non-thermal reaction (fission, capture, inelastic, etc.)
+                        // Process normally but with elastic = 0
+                        let outcome = process_non_thermal_collision(
+                            &mut particle, &micro_xs[nuc_idx], xs_kernel_idx,
+                            xs_provider, cell.temperature, &mut rng,
+                        );
+                        match outcome {
+                            CollisionOutcome::Scatter => {}
+                            CollisionOutcome::Absorption => { result.absorptions += 1; }
+                            CollisionOutcome::Fission { sites } => {
+                                result.fissions += 1;
+                                result.fission_sites.extend(sites);
+                            }
+                        }
                     }
-                    CollisionOutcome::Fission { sites } => {
-                        result.fissions += 1;
-                        result.fission_sites.extend(sites);
+                } else {
+                    // Standard collision processing (no thermal scattering)
+                    let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+                    let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+                    let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+
+                    let inelastic_data = if !level_info.is_empty() {
+                        Some(InelasticData {
+                            levels: &level_info,
+                            level_xs: &level_xs,
+                            has_continuum: has_cont,
+                        })
+                    } else {
+                        None
+                    };
+
+                    let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+                    let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+
+                    let outcome = collision::process_collision(
+                        &mut particle,
+                        &micro_xs[nuc_idx],
+                        inelastic_data.as_ref(),
+                        elastic_angle,
+                        fission_edist,
+                        cell.temperature,
+                        &mut rng,
+                    );
+
+                    match outcome {
+                        CollisionOutcome::Scatter => {}
+                        CollisionOutcome::Absorption => {
+                            result.absorptions += 1;
+                        }
+                        CollisionOutcome::Fission { sites } => {
+                            result.fissions += 1;
+                            result.fission_sites.extend(sites);
+                        }
                     }
                 }
             }
@@ -410,6 +491,39 @@ fn transport_particle<XS: XsProvider>(
     }
 
     result
+}
+
+/// Process a non-thermal collision for a nuclide where thermal scattering
+/// replaced elastic. The elastic channel is zero, so only inelastic/fission/capture remain.
+fn process_non_thermal_collision<XS: XsProvider>(
+    particle: &mut Particle,
+    xs: &MicroXs,
+    xs_kernel_idx: usize,
+    xs_provider: &XS,
+    temperature: f64,
+    rng: &mut Rng,
+) -> CollisionOutcome {
+    let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+    let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+    let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+
+    let inelastic_data = if !level_info.is_empty() {
+        Some(InelasticData {
+            levels: &level_info,
+            level_xs: &level_xs,
+            has_continuum: has_cont,
+        })
+    } else {
+        None
+    };
+
+    let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+    let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+
+    collision::process_collision(
+        particle, xs, inelastic_data.as_ref(),
+        elastic_angle, fission_edist, temperature, rng,
+    )
 }
 
 /// Transport a single particle using Woodcock delta tracking.

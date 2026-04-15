@@ -1460,6 +1460,395 @@ fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &s
     Some(UrrProbabilityTables { energies, n_bands, cum_prob, total_factor, elastic_factor, fission_factor, capture_factor, multiply_smooth })
 }
 
+// ── Thermal Scattering HDF5 Reader ─────────────────────────────────────
+
+use crate::thermal::{
+    ThermalScatteringData, InelasticThermal, InelasticDist,
+    ContinuousInelastic, DiscreteInelastic, ElasticThermal,
+};
+
+/// Load thermal scattering data from an OpenMC HDF5 file (e.g., `c_H_in_H2O.h5`).
+///
+/// HDF5 layout (Section 3.3 of OpenMC docs):
+/// ```text
+/// /<thermal_name>/
+///   @atomic_weight_ratio, @energy_max, @nuclides
+///   kTs/<TTT>K  (double, kT in eV)
+///   inelastic/<TTT>K/inelastic/
+///     xs (Tabulated1D: [2, n_e])
+///     distribution/ (@type, energy, energy_out[5][N], mu[3][M])
+///   elastic/<TTT>K/elastic/  (optional)
+///     xs (CoherentElastic / IncoherentElastic / Tabulated1D)
+///     distribution/ (...)
+/// ```
+pub fn load_thermal_scattering(path: &Path) -> Result<ThermalScatteringData> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+    let root = file.root();
+
+    // Find the thermal material group (first group under root)
+    let name = root.groups().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot list root: {e}"),
+    })?.into_iter().next().ok_or_else(|| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: "no group at root".into(),
+    })?;
+
+    let g = root.group(&name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot open /{name}: {e}"),
+    })?;
+
+    // Read top-level attributes
+    let attrs = g.attrs().unwrap_or_default();
+    let awr = match attrs.get("atomic_weight_ratio") {
+        Some(hdf5_pure::AttrValue::F64(v)) => *v,
+        _ => 1.0,
+    };
+    let energy_max = match attrs.get("energy_max") {
+        Some(hdf5_pure::AttrValue::F64(v)) => *v,
+        _ => 4.0,
+    };
+    let nuclides: Vec<String> = match attrs.get("nuclides") {
+        Some(hdf5_pure::AttrValue::StringArray(arr)) => arr.clone(),
+        _ => vec![],
+    };
+
+    println!("  Thermal: {name}  nuclides={nuclides:?}  energy_max={energy_max:.2} eV  AWR={awr:.3}");
+
+    // Read temperatures from kTs group
+    let kts_group = g.group("kTs").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot open kTs: {e}"),
+    })?;
+    let kt_labels = kts_group.datasets().unwrap_or_default();
+
+    let mut temp_data: Vec<(String, f64)> = Vec::new();
+    for label in &kt_labels {
+        let ds = kts_group.dataset(label).map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot read kTs/{label}: {e}"),
+        })?;
+        let val = ds.read_f64().map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("kTs/{label} read error: {e}"),
+        })?;
+        if let Some(&kt) = val.first() {
+            temp_data.push((label.clone(), kt));
+        }
+    }
+    // Sort by kT value
+    temp_data.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let temp_labels: Vec<String> = temp_data.iter().map(|(l, _)| l.clone()).collect();
+    let kts: Vec<f64> = temp_data.iter().map(|(_, kt)| *kt).collect();
+
+    println!("  Temperatures: {temp_labels:?}");
+
+    // Read inelastic data per temperature
+    let mut inelastic = Vec::with_capacity(temp_labels.len());
+    for label in &temp_labels {
+        let inel = read_thermal_inelastic(&file, &name, label, path)?;
+        inelastic.push(inel);
+    }
+
+    // Read elastic data per temperature (optional)
+    let elastic = read_thermal_elastic_all(&file, &name, &temp_labels, path);
+
+    Ok(ThermalScatteringData {
+        name,
+        nuclides,
+        energy_max,
+        awr,
+        kts,
+        temp_labels,
+        inelastic,
+        elastic,
+    })
+}
+
+/// Read inelastic thermal scattering for one temperature.
+fn read_thermal_inelastic(
+    file: &hdf5_pure::File,
+    thermal_name: &str,
+    temp_label: &str,
+    path: &Path,
+) -> Result<InelasticThermal> {
+    let root = file.root();
+    let base = root.group(thermal_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    // Navigate: /<thermal>/<TTT>K/inelastic/
+    let temp_group = base.group(temp_label).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot open {temp_label}: {e}"),
+    })?;
+    let inel_group = temp_group.group("inelastic").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot open {temp_label}/inelastic: {e}"),
+    })?;
+
+    // Read cross section (Tabulated1D: [2, n_e])
+    let xs_ds = inel_group.dataset("xs").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read {temp_label}/inelastic/xs: {e}"),
+    })?;
+    let xs_shape = xs_ds.shape().unwrap_or_default();
+    let xs_raw = xs_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("xs read error: {e}"),
+    })?;
+
+    let n_e = if xs_shape.len() == 2 { xs_shape[1] as usize } else { xs_raw.len() / 2 };
+    let energy: Vec<f64> = xs_raw[..n_e].to_vec();
+    let xs: Vec<f64> = xs_raw[n_e..2 * n_e].to_vec();
+
+    // Read distribution
+    let dist_group = inel_group.group("distribution").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot open distribution: {e}"),
+    })?;
+
+    let dist_attrs = dist_group.attrs().unwrap_or_default();
+    let dist_type = match dist_attrs.get("type") {
+        Some(hdf5_pure::AttrValue::String(s)) => s.clone(),
+        _ => "incoherent_inelastic".to_string(),
+    };
+
+    let dist = if dist_type == "incoherent_inelastic_discrete" {
+        read_discrete_inelastic_dist(&dist_group, path)?
+    } else {
+        // "incoherent_inelastic" or "correlated" — continuous tabular
+        read_continuous_inelastic_dist(&dist_group, path)?
+    };
+
+    println!("    {temp_label} inelastic: {n_e} energies, type={dist_type}");
+
+    Ok(InelasticThermal { energy, xs, dist })
+}
+
+/// Read continuous inelastic distribution (type="incoherent_inelastic" / "correlated").
+fn read_continuous_inelastic_dist(
+    group: &hdf5_pure::Group,
+    path: &Path,
+) -> Result<InelasticDist> {
+    // energy: double[n_inc]
+    let energy_ds = group.dataset("energy").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read distribution/energy: {e}"),
+    })?;
+    let inc_energy = energy_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("energy read error: {e}"),
+    })?;
+    let n_inc = inc_energy.len();
+
+    // energy_out: double[5][N_total]
+    let eout_ds = group.dataset("energy_out").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read energy_out: {e}"),
+    })?;
+    let eout_shape = eout_ds.shape().unwrap_or_default();
+    let eout_raw = eout_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("energy_out read error: {e}"),
+    })?;
+
+    let n_total = if eout_shape.len() == 2 { eout_shape[1] as usize } else { eout_raw.len() / 5 };
+
+    // Unpack 5 rows
+    let e_out = eout_raw[..n_total].to_vec();
+    let pdf_e = eout_raw[n_total..2 * n_total].to_vec();
+    let cdf_e = eout_raw[2 * n_total..3 * n_total].to_vec();
+    // Row 3: interpolation codes for angular distributions
+    let mu_interp_f64 = &eout_raw[3 * n_total..4 * n_total];
+    let mu_interp: Vec<u32> = mu_interp_f64.iter().map(|&v| v as u32).collect();
+    // Row 4: offsets into mu array
+    let mu_offsets_f64 = &eout_raw[4 * n_total..5 * n_total];
+    let mu_offsets: Vec<usize> = mu_offsets_f64.iter().map(|&v| v as usize).collect();
+
+    // Read offsets attribute for energy_out distributions
+    let eout_attrs = eout_ds.attrs().unwrap_or_default();
+    let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = eout_attrs.get("offsets") {
+        arr.iter().map(|&v| v as usize).collect()
+    } else if let Some(hdf5_pure::AttrValue::F64Array(arr)) = eout_attrs.get("offsets") {
+        arr.iter().map(|&v| v as usize).collect()
+    } else {
+        // Fallback: evenly split
+        let per_e = n_total / n_inc.max(1);
+        (0..n_inc).map(|i| i * per_e).collect()
+    };
+
+    let interp: Vec<u32> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = eout_attrs.get("interpolation") {
+        arr.iter().map(|&v| v as u32).collect()
+    } else {
+        vec![2; n_inc] // default: linear-linear
+    };
+
+    // mu: double[3][M_total]
+    let mu_ds = group.dataset("mu").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read mu: {e}"),
+    })?;
+    let mu_shape = mu_ds.shape().unwrap_or_default();
+    let mu_raw = mu_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("mu read error: {e}"),
+    })?;
+
+    let n_mu_total = if mu_shape.len() == 2 { mu_shape[1] as usize } else { mu_raw.len() / 3 };
+
+    let mu = mu_raw[..n_mu_total].to_vec();
+    let pdf_mu = mu_raw[n_mu_total..2 * n_mu_total].to_vec();
+    let cdf_mu = mu_raw[2 * n_mu_total..3 * n_mu_total].to_vec();
+
+    println!("    Continuous: {n_inc} inc energies, {n_total} E_out pts, {n_mu_total} mu pts");
+
+    Ok(InelasticDist::Continuous(ContinuousInelastic {
+        n_inc,
+        offsets,
+        interp,
+        e_out,
+        pdf_e,
+        cdf_e,
+        mu_interp,
+        mu_offsets,
+        mu,
+        pdf_mu,
+        cdf_mu,
+    }))
+}
+
+/// Read discrete inelastic distribution (type="incoherent_inelastic_discrete").
+fn read_discrete_inelastic_dist(
+    group: &hdf5_pure::Group,
+    path: &Path,
+) -> Result<InelasticDist> {
+    // energy_out: double[n_inc][n_out]
+    let eout_ds = group.dataset("energy_out").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read energy_out: {e}"),
+    })?;
+    let eout_shape = eout_ds.shape().unwrap_or_default();
+    let energy_out = eout_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("energy_out read error: {e}"),
+    })?;
+    let n_out = if eout_shape.len() >= 2 { eout_shape[1] as usize } else { 1 };
+
+    // mu_out: double[n_inc][n_out][n_mu]
+    let mu_ds = group.dataset("mu_out").map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("cannot read mu_out: {e}"),
+    })?;
+    let mu_shape = mu_ds.shape().unwrap_or_default();
+    let mu_out = mu_ds.read_f64().map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("mu_out read error: {e}"),
+    })?;
+    let n_mu = if mu_shape.len() >= 3 { mu_shape[2] as usize } else { 1 };
+
+    // skewed: int8 (0 = equi-probable, 1 = skewed)
+    let dist_attrs = group.attrs().unwrap_or_default();
+    let skewed = match dist_attrs.get("skewed") {
+        Some(hdf5_pure::AttrValue::I64(v)) => *v != 0,
+        _ => {
+            // Check for the dataset version
+            if let Ok(ds) = group.dataset("skewed") {
+                ds.read_f64().ok().and_then(|v| v.first().copied()).unwrap_or(0.0) != 0.0
+            } else {
+                false
+            }
+        }
+    };
+
+    Ok(InelasticDist::Discrete(DiscreteInelastic {
+        energy_out,
+        n_out,
+        mu_out,
+        n_mu,
+        skewed,
+    }))
+}
+
+/// Read elastic thermal scattering for all temperatures (returns None if absent).
+fn read_thermal_elastic_all(
+    file: &hdf5_pure::File,
+    thermal_name: &str,
+    temp_labels: &[String],
+    path: &Path,
+) -> Option<Vec<ElasticThermal>> {
+    let root = file.root();
+    let base = root.group(thermal_name).ok()?;
+
+    // Check if elastic exists at the first temperature
+    let first_temp = base.group(temp_labels.first()?).ok()?;
+    first_temp.group("elastic").ok()?; // If this fails, no elastic data
+
+    let mut elastic = Vec::with_capacity(temp_labels.len());
+    for label in temp_labels {
+        let el = read_thermal_elastic_one(file, thermal_name, label, path);
+        elastic.push(el);
+    }
+    Some(elastic)
+}
+
+/// Read elastic thermal scattering for one temperature.
+fn read_thermal_elastic_one(
+    file: &hdf5_pure::File,
+    thermal_name: &str,
+    temp_label: &str,
+    _path: &Path,
+) -> ElasticThermal {
+    let root = file.root();
+    let base = match root.group(thermal_name) { Ok(g) => g, Err(_) => return default_elastic() };
+    let temp = match base.group(temp_label) { Ok(g) => g, Err(_) => return default_elastic() };
+    let el = match temp.group("elastic") { Ok(g) => g, Err(_) => return default_elastic() };
+
+    // Read xs dataset and check type attribute
+    let xs_ds = match el.dataset("xs") { Ok(d) => d, Err(_) => return default_elastic() };
+    let xs_attrs = xs_ds.attrs().unwrap_or_default();
+    let xs_type = match xs_attrs.get("type") {
+        Some(hdf5_pure::AttrValue::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    match xs_type.as_str() {
+        "CoherentElastic" => {
+            // [2, n_bragg]: row 0 = bragg edges, row 1 = cumulative factors
+            let raw = xs_ds.read_f64().unwrap_or_default();
+            let shape = xs_ds.shape().unwrap_or_default();
+            let n = if shape.len() == 2 { shape[1] as usize } else { raw.len() / 2 };
+            let bragg_edges = raw[..n].to_vec();
+            let factors = raw[n..2 * n].to_vec();
+            println!("    {temp_label} elastic: coherent, {n} Bragg edges");
+            ElasticThermal::Coherent { bragg_edges, factors }
+        }
+        "IncoherentElastic" => {
+            // [2]: bound_xs, debye_waller
+            let raw = xs_ds.read_f64().unwrap_or_default();
+            let bound_xs = raw.first().copied().unwrap_or(0.0);
+            let debye_waller = raw.get(1).copied().unwrap_or(0.0);
+            println!("    {temp_label} elastic: incoherent, σ_b={bound_xs:.1} b, W'={debye_waller:.4} eV⁻¹");
+            ElasticThermal::Incoherent { bound_xs, debye_waller }
+        }
+        _ => {
+            // Unknown or Tabulated1D — try to read as tabulated cross section
+            println!("    {temp_label} elastic: type={xs_type} (unsupported, skipping)");
+            default_elastic()
+        }
+    }
+}
+
+fn default_elastic() -> ElasticThermal {
+    ElasticThermal::Incoherent { bound_xs: 0.0, debye_waller: 0.0 }
+}
+
 /// Linear interpolation of (x_src, y_src) onto x_dst.
 /// Both x_src and x_dst must be sorted ascending.
 fn interpolate_to_grid(x_src: &[f64], y_src: &[f64], x_dst: &[f64]) -> Vec<f64> {

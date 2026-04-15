@@ -18,4 +18,5 @@ pub mod loader;
 pub mod nuclide;
 pub mod physics;
 pub mod table;
+pub mod thermal;
 pub mod transport;

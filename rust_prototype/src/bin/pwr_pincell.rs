@@ -4,10 +4,14 @@
 //! This is the real test for SVD compression — 8 nuclides across 3 materials
 //! with heterogeneous geometry (cylinder + reflective box).
 //!
+//! Supports multi-seed statistical benchmarking for rigorous time/particle
+//! measurements with confidence intervals.
+//!
 //! Usage:
-//!   pwr_pincell <data_dir> [--rank K] [--batches N] [--particles N] [--mode MODE]
+//!   pwr_pincell <data_dir> [--rank K] [--batches N] [--particles N] [--mode MODE] [--seeds S]
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
@@ -15,8 +19,10 @@ use clap::Parser;
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
+use open_rust_mc::hdf5_reader;
+use open_rust_mc::thermal::ThermalScatteringData;
 use open_rust_mc::transport::material::Material;
-use open_rust_mc::transport::simulate::{self, BatchResult, SimConfig, XsProvider};
+use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
 use open_rust_mc::transport::xs_provider;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -45,6 +51,10 @@ struct Args {
 
     #[arg(short, long, value_enum, default_value_t = XsMode::Svd)]
     mode: XsMode,
+
+    /// Number of independent seeds for statistical benchmarking.
+    #[arg(short, long, default_value_t = 1)]
+    seeds: u32,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar).
@@ -60,36 +70,118 @@ const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
     ("Zr94.h5", 93.120,  0.0),   // 7
 ];
 
-struct RunResult {
+/// Results from one seeded run.
+struct SeedResult {
+    #[allow(dead_code)]
+    seed: u32,
     k_mean: f64,
     k_std: f64,
-    load_ms: f64,
     sim_ms: f64,
-    xs_memory_bytes: usize,
+    total_histories: u64,
 }
 
-fn run_simulation<XS: XsProvider>(
-    config: &SimConfig,
+impl SeedResult {
+    fn ns_per_particle(&self) -> f64 {
+        self.sim_ms * 1e6 / self.total_histories as f64
+    }
+}
+
+/// Aggregate results across multiple seeds.
+struct BenchmarkResult {
+    label: String,
+    load_ms: f64,
+    xs_memory_bytes: usize,
+    seed_results: Vec<SeedResult>,
+}
+
+impl BenchmarkResult {
+    fn k_eff_mean(&self) -> f64 {
+        let n = self.seed_results.len() as f64;
+        self.seed_results.iter().map(|r| r.k_mean).sum::<f64>() / n
+    }
+
+    fn k_eff_std(&self) -> f64 {
+        if self.seed_results.len() < 2 { return self.seed_results[0].k_std; }
+        let mean = self.k_eff_mean();
+        let n = self.seed_results.len() as f64;
+        let var = self.seed_results.iter()
+            .map(|r| (r.k_mean - mean).powi(2))
+            .sum::<f64>() / (n - 1.0);
+        var.sqrt()
+    }
+
+    fn ns_per_particle_mean(&self) -> f64 {
+        let n = self.seed_results.len() as f64;
+        self.seed_results.iter().map(|r| r.ns_per_particle()).sum::<f64>() / n
+    }
+
+    fn ns_per_particle_std(&self) -> f64 {
+        if self.seed_results.len() < 2 { return 0.0; }
+        let mean = self.ns_per_particle_mean();
+        let n = self.seed_results.len() as f64;
+        let var = self.seed_results.iter()
+            .map(|r| (r.ns_per_particle() - mean).powi(2))
+            .sum::<f64>() / (n - 1.0);
+        var.sqrt()
+    }
+
+    fn total_sim_ms(&self) -> f64 {
+        self.seed_results.iter().map(|r| r.sim_ms).sum()
+    }
+}
+
+/// Run multiple seeds with a given XS provider, return aggregate results.
+fn run_multi_seed<XS: XsProvider>(
+    label: &str,
+    args: &Args,
     surfaces: &[Surface],
     cells: &[Cell],
     materials: &[Material],
     xs_provider: &XS,
-    inactive: u32,
-) -> (Vec<BatchResult>, f64, f64, f64) {
-    let t1 = Instant::now();
-    let (results, _) = simulate::run_eigenvalue(config, surfaces, cells, materials, xs_provider);
-    let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
+    xs_memory_bytes: usize,
+    load_ms: f64,
+) -> BenchmarkResult {
+    let total_histories = (args.batches - args.inactive) as u64 * args.particles as u64;
+    let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
-    let active: Vec<f64> = results.iter()
-        .filter(|r| r.batch > inactive)
-        .map(|r| r.k_eff)
-        .collect();
-    let n = active.len() as f64;
-    let k_mean = active.iter().sum::<f64>() / n;
-    let k_var = active.iter().map(|&k| (k - k_mean).powi(2)).sum::<f64>() / (n * (n - 1.0));
-    let k_std = k_var.sqrt();
+    for seed in 0..args.seeds {
+        let config = SimConfig {
+            batches: args.batches,
+            inactive: args.inactive,
+            particles_per_batch: args.particles,
+            seed: seed as u64,
+        };
 
-    (results, k_mean, k_std, sim_ms)
+        if args.seeds > 1 {
+            print!("  Seed {seed}: ");
+        } else {
+            println!();
+        }
+
+        let t1 = Instant::now();
+        let (results, _) = simulate::run_eigenvalue(&config, surfaces, cells, materials, xs_provider);
+        let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
+
+        let active: Vec<f64> = results.iter()
+            .filter(|r| r.batch > args.inactive)
+            .map(|r| r.k_eff)
+            .collect();
+        let n = active.len() as f64;
+        let k_mean = active.iter().sum::<f64>() / n;
+        let k_var = active.iter().map(|&k| (k - k_mean).powi(2)).sum::<f64>() / (n * (n - 1.0));
+        let k_std = k_var.sqrt();
+
+        let sr = SeedResult { seed, k_mean, k_std, sim_ms, total_histories };
+
+        if args.seeds > 1 {
+            println!("k={k_mean:.5} +/- {k_std:.5}  {sim_ms:.0}ms  ({:.1} ns/particle)",
+                     sr.ns_per_particle());
+        }
+
+        seed_results.push(sr);
+    }
+
+    BenchmarkResult { label: label.to_string(), load_ms, xs_memory_bytes, seed_results }
 }
 
 fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
@@ -220,7 +312,37 @@ fn setup_materials() -> Vec<Material> {
     vec![fuel, clad, water]
 }
 
-fn run_svd(args: &Args, surfaces: &[Surface], cells: &[Cell], materials: &[Material], config: &SimConfig) -> RunResult {
+/// Load thermal scattering data and build the per-nuclide thermal vector.
+///
+/// H1 (xs_kernel_idx=3) gets c_H_in_H2O thermal data if available.
+fn load_thermal(data_dir: &PathBuf) -> Vec<Option<Arc<ThermalScatteringData>>> {
+    let h2o_path = data_dir.join("c_H_in_H2O.h5");
+    let h2o_thermal: Option<Arc<ThermalScatteringData>> = if h2o_path.exists() {
+        match hdf5_reader::load_thermal_scattering(&h2o_path) {
+            Ok(tsl) => {
+                println!("  S(a,b): loaded {} ({} temperatures)", tsl.name, tsl.temp_labels.len());
+                Some(Arc::new(tsl))
+            }
+            Err(e) => {
+                eprintln!("  WARNING: failed to load S(a,b) from {}: {e}", h2o_path.display());
+                None
+            }
+        }
+    } else {
+        println!("  S(a,b): c_H_in_H2O.h5 not found — using free gas model for H");
+        None
+    };
+
+    // Build thermal vector indexed by xs_kernel_idx (same order as NUCLIDE_SPECS)
+    // Index 3 = H1 → gets H₂O thermal data
+    let mut thermal: Vec<Option<Arc<ThermalScatteringData>>> = vec![None; NUCLIDE_SPECS.len()];
+    if let Some(ref tsl) = h2o_thermal {
+        thermal[3] = Some(Arc::clone(tsl)); // H1 = index 3
+    }
+    thermal
+}
+
+fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     println!("\n── Loading nuclear data (SVD, rank={}) ──", args.rank);
     let t0 = Instant::now();
 
@@ -241,18 +363,16 @@ fn run_svd(args: &Args, surfaces: &[Surface], cells: &[Cell], materials: &[Mater
         }
     }
 
+    let thermal = load_thermal(&args.data_dir);
     let xs_mem: usize = kernels.iter().map(|k| k.svd_memory_bytes()).sum();
-    let provider = xs_provider::SvdXsProvider { nuclides: kernels };
+    let provider = xs_provider::SvdXsProvider { nuclides: kernels, thermal };
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB ({} nuclides)", xs_mem as f64 / 1024.0, NUCLIDE_SPECS.len());
 
-    println!("\n── Running eigenvalue (SVD) ──\n");
-    let (_, k_mean, k_std, sim_ms) = run_simulation(config, surfaces, cells, materials, &provider, args.inactive);
-
-    RunResult { k_mean, k_std, load_ms, sim_ms, xs_memory_bytes: xs_mem }
+    (provider, xs_mem, load_ms)
 }
 
-fn run_table(args: &Args, surfaces: &[Surface], cells: &[Cell], materials: &[Material], config: &SimConfig) -> RunResult {
+fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     println!("\n── Loading nuclear data (pointwise table) ──");
     let t0 = Instant::now();
 
@@ -273,29 +393,36 @@ fn run_table(args: &Args, surfaces: &[Surface], cells: &[Cell], materials: &[Mat
         }
     }
 
+    let thermal = load_thermal(&args.data_dir);
     let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
-    let provider = xs_provider::TableXsProvider { nuclides: tables };
+    let provider = xs_provider::TableXsProvider { nuclides: tables, thermal };
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB ({} nuclides)", xs_mem as f64 / 1024.0, NUCLIDE_SPECS.len());
 
-    println!("\n── Running eigenvalue (pointwise table) ──\n");
-    let (_, k_mean, k_std, sim_ms) = run_simulation(config, surfaces, cells, materials, &provider, args.inactive);
-
-    RunResult { k_mean, k_std, load_ms, sim_ms, xs_memory_bytes: xs_mem }
+    (provider, xs_mem, load_ms)
 }
 
-fn print_result(label: &str, r: &RunResult, particles: u32, batches: u32) {
-    let mc_pcm = r.k_std / r.k_mean * 1e5;
-    println!("  {label}:");
-    println!("    k_inf       = {:.5} +/- {:.5}", r.k_mean, r.k_std);
-    println!("    MC uncert   = {mc_pcm:.0} pcm");
-    println!("    Load time   = {:.0} ms", r.load_ms);
-    println!("    Sim time    = {:.0} ms  ({} batches x {} particles)", r.sim_ms, batches, particles);
-    println!("    XS memory   = {:.1} KB", r.xs_memory_bytes as f64 / 1024.0);
+fn print_benchmark(r: &BenchmarkResult) {
+    let n_seeds = r.seed_results.len();
+
+    println!("  {}:", r.label);
+    println!("    k_inf            = {:.5} +/- {:.5}", r.k_eff_mean(), r.k_eff_std());
+    if n_seeds > 1 {
+        println!("    ns/particle      = {:.2} +/- {:.2} ({n_seeds} seeds)",
+                 r.ns_per_particle_mean(), r.ns_per_particle_std());
+    } else {
+        println!("    ns/particle      = {:.2}", r.ns_per_particle_mean());
+    }
+    println!("    Total sim time   = {:.0} ms ({n_seeds} run{})", r.total_sim_ms(), if n_seeds > 1 { "s" } else { "" });
+    println!("    Load time        = {:.0} ms", r.load_ms);
+    println!("    XS memory        = {:.1} KB", r.xs_memory_bytes as f64 / 1024.0);
 }
 
 fn main() {
     let args = Args::parse();
+
+    let active_batches = args.batches - args.inactive;
+    let histories_per_run = active_batches as u64 * args.particles as u64;
 
     println!("=== open_rust_mc — PWR Pin Cell Benchmark ===\n");
     println!("Data dir:     {}", args.data_dir.display());
@@ -303,61 +430,85 @@ fn main() {
     if matches!(args.mode, XsMode::Svd | XsMode::Both) {
         println!("SVD rank:     {}", args.rank);
     }
-    println!("Batches:      {} ({} inactive + {} active)", args.batches, args.inactive, args.batches - args.inactive);
-    println!("Particles:    {}", args.particles);
+    println!("Batches:      {} ({} inactive + {} active)",
+             args.batches, args.inactive, active_batches);
+    println!("Particles:    {}/batch", args.particles);
+    println!("Histories:    {} per run ({} active batches x {} particles)",
+             histories_per_run, active_batches, args.particles);
     println!("Nuclides:     {} (U235, U238, O16, H1, Zr90-94)", NUCLIDE_SPECS.len());
     println!("Materials:    3 (UO2 fuel, Zircaloy clad, H2O moderator)");
+    if args.seeds > 1 {
+        println!("Seeds:        {} (independent runs for statistical confidence)", args.seeds);
+    }
+    println!("S(a,b):       c_H_in_H2O (if available in data_dir)");
 
     let (surfaces, cells) = setup_geometry();
     let materials = setup_materials();
 
-    let config = SimConfig {
-        batches: args.batches,
-        inactive: args.inactive,
-        particles_per_batch: args.particles,
-        seed: 0,
-    };
-
     match args.mode {
         XsMode::Svd => {
-            let r = run_svd(&args, &surfaces, &cells, &materials, &config);
+            let (provider, xs_mem, load_ms) = load_svd(&args);
+            let r = run_multi_seed(
+                &format!("SVD (rank={})", args.rank),
+                &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+            );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell");
             println!("{}", "=".repeat(60));
-            print_result("SVD", &r, args.particles, args.batches);
+            print_benchmark(&r);
         }
         XsMode::Table => {
-            let r = run_table(&args, &surfaces, &cells, &materials, &config);
+            let (provider, xs_mem, load_ms) = load_table(&args);
+            let r = run_multi_seed(
+                "Pointwise Table",
+                &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+            );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell");
             println!("{}", "=".repeat(60));
-            print_result("Pointwise Table", &r, args.particles, args.batches);
+            print_benchmark(&r);
         }
         XsMode::Both => {
-            let svd = run_svd(&args, &surfaces, &cells, &materials, &config);
-            let tbl = run_table(&args, &surfaces, &cells, &materials, &config);
+            let (svd_prov, svd_mem, svd_load) = load_svd(&args);
+            let svd = run_multi_seed(
+                &format!("SVD (rank={})", args.rank),
+                &args, &surfaces, &cells, &materials, &svd_prov, svd_mem, svd_load,
+            );
+            drop(svd_prov); // free before loading table
+
+            let (tbl_prov, tbl_mem, tbl_load) = load_table(&args);
+            let tbl = run_multi_seed(
+                "Pointwise Table",
+                &args, &surfaces, &cells, &materials, &tbl_prov, tbl_mem, tbl_load,
+            );
 
             println!("\n{}", "=".repeat(60));
-            println!("PWR PIN CELL — HEAD-TO-HEAD COMPARISON");
+            println!("PWR PIN CELL — STATISTICAL BENCHMARK");
             println!("{}", "=".repeat(60));
 
-            print_result(&format!("SVD (rank={})", args.rank), &svd, args.particles, args.batches);
+            print_benchmark(&svd);
             println!();
-            print_result("Pointwise Table", &tbl, args.particles, args.batches);
+            print_benchmark(&tbl);
 
-            let dk_pcm = (svd.k_mean - tbl.k_mean).abs() / tbl.k_mean * 1e5;
-            let mem_ratio = if svd.xs_memory_bytes > 0 {
-                tbl.xs_memory_bytes as f64 / svd.xs_memory_bytes as f64
-            } else { 0.0 };
-            let speed_ratio = if svd.sim_ms > 0.0 { tbl.sim_ms / svd.sim_ms } else { 0.0 };
+            let dk = (svd.k_eff_mean() - tbl.k_eff_mean()).abs() / tbl.k_eff_mean() * 1e5;
+            let speedup = tbl.ns_per_particle_mean() / svd.ns_per_particle_mean();
 
             println!("\n  {}", "-".repeat(50));
             println!("  COMPARISON:");
-            println!("    k_inf gap (SVD vs table) = {dk_pcm:.0} pcm");
-            println!("    Memory ratio (tbl/svd)   = {mem_ratio:.2}x ({:.1} KB vs {:.1} KB)",
+            println!("    k_inf gap (SVD - table)  = {dk:.0} pcm");
+            println!("    SVD speedup              = {speedup:.2}x ({:.2} vs {:.2} ns/particle)",
+                     svd.ns_per_particle_mean(), tbl.ns_per_particle_mean());
+            if args.seeds > 1 {
+                let s1 = svd.ns_per_particle_std();
+                let s2 = tbl.ns_per_particle_std();
+                let m1 = svd.ns_per_particle_mean();
+                let m2 = tbl.ns_per_particle_mean();
+                let ratio_std = speedup * ((s1/m1).powi(2) + (s2/m2).powi(2)).sqrt();
+                println!("    Speedup uncertainty      = +/- {ratio_std:.2}x ({} seeds)", args.seeds);
+            }
+            println!("    Memory ratio (tbl/svd)   = {:.2}x ({:.1} KB vs {:.1} KB)",
+                     tbl.xs_memory_bytes as f64 / svd.xs_memory_bytes as f64,
                      svd.xs_memory_bytes as f64 / 1024.0, tbl.xs_memory_bytes as f64 / 1024.0);
-            println!("    Speed ratio (tbl/svd)    = {speed_ratio:.2}x ({:.0} ms vs {:.0} ms)",
-                     svd.sim_ms, tbl.sim_ms);
         }
     }
 }

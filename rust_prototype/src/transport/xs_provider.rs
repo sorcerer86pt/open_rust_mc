@@ -12,6 +12,7 @@ use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDis
 use crate::kernel::SvdKernel;
 use crate::physics::collision::MicroXs;
 use crate::table::PointwiseTable;
+use crate::thermal::ThermalScatteringData;
 use crate::transport::simulate::XsProvider;
 
 /// Per-nuclide SVD-compressed cross-section data.
@@ -152,6 +153,8 @@ impl NuclideKernels {
 /// Cross-section provider backed by SVD-compressed kernels.
 pub struct SvdXsProvider {
     pub nuclides: Vec<NuclideKernels>,
+    /// Thermal scattering data per nuclide (None if no S(α,β) for this nuclide).
+    pub thermal: Vec<Option<Arc<ThermalScatteringData>>>,
 }
 
 impl XsProvider for SvdXsProvider {
@@ -219,6 +222,10 @@ impl XsProvider for SvdXsProvider {
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
+    }
+
+    fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
+        self.thermal.get(nuclide_idx)?.as_deref()
     }
 }
 
@@ -518,6 +525,8 @@ impl NuclideTableData {
 /// Used for the "honesty test" comparison against SVD reconstruction.
 pub struct TableXsProvider {
     pub nuclides: Vec<NuclideTableData>,
+    /// Thermal scattering data per nuclide (None if no S(α,β) for this nuclide).
+    pub thermal: Vec<Option<Arc<ThermalScatteringData>>>,
 }
 
 impl XsProvider for TableXsProvider {
@@ -561,6 +570,10 @@ impl XsProvider for TableXsProvider {
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
+    }
+
+    fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
+        self.thermal.get(nuclide_idx)?.as_deref()
     }
 }
 
