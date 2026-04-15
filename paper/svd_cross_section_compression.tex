@@ -144,12 +144,17 @@ The key contributions are:
     \item A standalone pure-Rust Monte Carlo transport engine using
     SVD cross-sections with full physics (anisotropic scattering,
     tabulated fission spectra, URR probability tables, free-gas thermal
-    model) achieving $k_\text{eff} = 1.00017 \pm 0.00005$ on Godiva
-    (10 independent seeds, 17~pcm from experiment).
+    model) achieving $k_\text{eff} = 1.00012 \pm 0.00007$ on Godiva
+    (10 independent seeds, 12~pcm from experiment).
     \item A statistically rigorous head-to-head comparison (``honesty
     test'') against pointwise table lookup in the same engine,
-    reporting $1.45\times$ speedup ($\pm 0.48$) in ns/particle
-    with 111~pcm fidelity cost, benchmarked over 10 seeds.
+    reporting $1.19\times$ speedup in ns/particle during quiet
+    system periods ($700 \pm 8$ vs $832 \pm 11$~ns/particle)
+    with 107~pcm fidelity cost, benchmarked over 10 seeds each.
+    \item Resonance integral validation confirming $< 0.2\%$ error
+    on $\int \sigma(E)\,dE/E$ across all standard energy groups.
+    \item GPU reconstruction kernel achieving $8.7\times$ speedup
+    over CPU with zero error (machine epsilon).
 \end{enumerate}
 
 %% ============================================================
@@ -215,15 +220,16 @@ The basis matrix $\mathbf{B}$ is streamed sequentially (unit stride),
 and the coefficient vector $\mathbf{c}$ resides in registers.
 
 \paragraph{Energy index lookup.}
-The energy index $i$ is still obtained by binary search on the energy
-grid ($O(\log N_E)$, typically $\sim$17 comparisons for $N_E \approx
-10^5$). The SVD kernel speedup applies to the \emph{reconstruction
-step} (Eq.~\ref{eq:reconstruct}), not to the energy search. In full
-transport, we share a single binary search across all reaction channels
-within a nuclide (which use the same unionised energy grid), eliminating
-5 of 6 redundant searches per collision. A hash-based index
-lookup~\cite{brown2014hash} would further reduce this to $O(1)$
-amortised cost; this remains as future work.
+The energy index $i$ must be determined before reconstruction.
+The SVD kernel speedup applies to the \emph{reconstruction step}
+(Eq.~\ref{eq:reconstruct}), not to the energy search. In the full
+transport engine, we apply two optimisations: (i)~a single search
+shared across all reaction channels within a nuclide (which use the
+same unionised energy grid via reference counting), eliminating 5~of~6
+redundant searches per collision; and (ii)~a hash-based $O(1)$
+index lookup~\cite{brown2014hash} using 8192 log-uniform bins,
+replacing the $O(\log N_E)$ binary search ($\sim$17 comparisons
+for $N_E \approx 10^5$).
 
 \paragraph{Memory analysis.}
 For $^{235}$U fission with $N_E = 83{,}114$ and $k = 5$:
@@ -911,7 +917,7 @@ not from cross-nuclide data sharing.
 
 \paragraph{Micro-benchmark vs full-transport speedup.}
 The kernel-level speedup ($8$--$13\times$, Table~\ref{tab:speed})
-does not translate directly to full-transport speedup ($1.45\times$,
+does not translate directly to full-transport speedup ($1.19\times$,
 Table~\ref{tab:honesty}). This is because cross-section lookup is
 only one component of particle transport; on the 3-nuclide Godiva
 problem, it accounts for roughly 40--50\% of runtime. The remaining
@@ -924,7 +930,7 @@ correspondingly increase. Validation at this scale remains future work.
 \paragraph{Standalone engine validation.}
 The standalone transport engine (Sec.~\ref{sec:standalone}) provides
 the strongest evidence that SVD compression is viable for production
-use. The 17~pcm agreement with the Godiva experimental value across
+use. The 12~pcm agreement with the Godiva experimental value across
 10~independent seeds was achieved entirely through SVD-reconstructed
 cross-sections---no pointwise tables are used at any stage.
 The physics progression in Table~\ref{tab:keff_standalone} reveals
@@ -955,17 +961,16 @@ with the kernel method's rigorous temperature accuracy, potentially
 achieving 0.1\% temperature interpolation error with only 9 reference
 temperatures~\cite{ducru2017}.
 
-\paragraph{Resonance integral validation.}
-The accuracy metrics presented (pointwise maximum relative error)
-overstate the practical impact of SVD truncation, especially at
+\paragraph{Resonance integral accuracy.}
+The pointwise maximum relative error (Table~\ref{tab:accuracy})
+overstates the practical impact of SVD truncation, especially at
 cross-section minima between resonances where absolute values are
-small and contribute negligibly to reaction rates. A more physically
-meaningful metric is the infinite-dilution resonance integral
-$I = \int \sigma(E) \, dE/E$ over standard energy ranges
-(thermal, epithermal groups). This integral-weighted accuracy
-is the standard validation metric in nuclear data processing and
-would likely show SVD performing better than the pointwise error
-tables suggest. This validation is planned as immediate future work.
+small and contribute negligibly to reaction rates. The resonance
+integral validation (Table~\ref{tab:resonance_integrals}) confirms
+this: at rank~5, all energy groups show $< 0.2\%$ error on
+$\int \sigma(E)\,dE/E$, even for $^{238}$U capture which has
+the most challenging resonance structure. This is the physically
+meaningful metric for nuclear data accuracy.
 
 \paragraph{Limitations.}
 The standalone engine currently lacks S($\alpha$,$\beta$)
@@ -1068,7 +1073,7 @@ Monte Carlo neutron transport. The method achieves:
 The standalone engine demonstrates that SVD-compressed cross-sections
 are not merely a storage optimisation but can serve as the primary
 data backend for a complete transport solver. The progression from
-an initial 600~pcm bias to 17~pcm agreement required implementing
+an initial 600~pcm bias to 12~pcm agreement required implementing
 energy-dependent $\bar{\nu}$, anisotropic scattering, tabulated
 fission spectra, and URR probability tables---all read from the
 same HDF5 files and integrated with the SVD reconstruction kernel.
@@ -1077,7 +1082,7 @@ energy distributions proved critical (removing $\sim$700~pcm of
 systematic bias from nearest-energy lookup).
 
 \paragraph{Honest assessment of current limitations.}
-The $1.45\times$ full-transport speedup on a 3-nuclide fast-spectrum
+The $1.19\times$ full-transport speedup on a 3-nuclide fast-spectrum
 benchmark is modest. In production HPC environments where memory is
 abundant and overnight runtimes on 1000+~cores are routine, the
 primary value proposition must be \emph{time per particle}, not
@@ -1110,7 +1115,8 @@ cluster nodes with CPU pinning to reduce timing variance.
 %% ============================================================
 \section*{Data availability}
 
-All code and analysis scripts are available at [repository URL].
+All code and analysis scripts are available at
+\url{https://github.com/sorcerer86pt/open_rust_mc}.
 Nuclear data from ENDF/B-VII.1 and JEFF-3.3 were obtained from
 the OpenMC data repository (\url{https://openmc.org/data/}).
 
