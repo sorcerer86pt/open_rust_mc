@@ -795,12 +795,16 @@ to 70--80\%~\cite{tramm2014xsbench}, and the full-transport speedup
 from SVD would correspondingly increase.
 
 \paragraph{GPU reconstruction.}
-Table~\ref{tab:gpu} shows that the SVD kernel achieves $8.7\times$
-speedup over CPU on an NVIDIA RTX~A1000 laptop GPU (Ampere, 16~SMs)
-for the reconstruction kernel alone, with zero error relative to CPU
-(max relative error $1.5 \times 10^{-16}$, i.e.\ machine epsilon).
-The \texttt{f32} basis with \texttt{f64} accumulation strategy
-preserves full precision across the GPU--CPU boundary.
+The SVD kernel achieves $8.7\times$ speedup over CPU on an NVIDIA
+RTX~A1000 laptop GPU (Ampere, 16~SMs) for the reconstruction dot
+product alone, with zero error relative to CPU (max relative error
+$1.5 \times 10^{-16}$, i.e.\ machine epsilon). The \texttt{f32}
+basis with \texttt{f64} accumulation strategy preserves full
+precision across the GPU--CPU boundary. For context, OpenMC's full
+GPU transport achieves $9$--$17\times$ over CPU on the same
+architecture class~\cite{tramm2024} using event-based parallelism;
+our result is kernel-level only and does not include geometry,
+collision physics, or particle management overhead.
 
 \paragraph{Optimisations applied.}
 The results in Table~\ref{tab:honesty} reflect six implementation
@@ -1028,12 +1032,18 @@ Monte Carlo neutron transport. The method achieves:
     of runtime on 3-nuclide problems.
     \item \textbf{Generality}: 47 out of 52 $^{235}$U reaction channels
     are effectively rank-1; all reactions are SVD-compressible.
-    \item \textbf{GPU speed}: $8.7\times$ faster on NVIDIA RTX~A1000
-    (Ampere laptop GPU) for the reconstruction kernel, with zero
-    error (max relative error $= 1.5 \times 10^{-16}$). On
-    server-class GPUs (A100, H100) the advantage would increase
-    further. Event-based transport~\cite{tramm2024} is required
-    for full GPU-accelerated particle tracking.
+    \item \textbf{GPU reconstruction kernel}: $8.7\times$ faster than
+    CPU on an NVIDIA RTX~A1000 (Ampere laptop GPU) for the SVD
+    reconstruction dot product alone, with zero error (max relative
+    error $= 1.5 \times 10^{-16}$). This is not directly comparable
+    to OpenMC's full GPU transport~\cite{tramm2024}, which achieves
+    $9$--$17\times$ over CPU for complete particle tracking using
+    event-based parallelism with OpenMP offloading. Our kernel-level
+    result demonstrates that the SVD access pattern (coalesced
+    streaming, no warp divergence) is well-suited to GPU execution;
+    a full event-based GPU transport implementation is required to
+    determine whether SVD compression improves upon OpenMC's
+    GPU throughput at scale.
     \item \textbf{Resonance integrals}: SVD rank-5 reproduces
     infinite-dilution resonance integrals to $< 0.2\%$ across all
     standard energy groups, confirming that pointwise truncation
