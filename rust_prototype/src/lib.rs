@@ -12,6 +12,8 @@ pub mod error;
 pub mod geometry;
 #[cfg(feature = "cuda")]
 pub mod gpu;
+#[cfg(feature = "cuda")]
+pub mod gpu_transport;
 pub mod hdf5_reader;
 pub mod kernel;
 pub mod loader;
