@@ -250,16 +250,17 @@ __device__ int energy_index(const double* grid, int n_e, double energy) {
     return lo;
 }
 
-// Reconstruct one cross-section from SVD basis + coefficients
+// Reconstruct one cross-section from SVD basis + coefficients.
+// Uses __ldg() for read-only cache (texture path) on basis data.
 __device__ double svd_reconstruct(
-    const float* basis,    // [n_e * rank]
-    const double* coeffs,  // [rank]
+    const float* __restrict__ basis,    // [n_e * rank]
+    const double* __restrict__ coeffs,  // [rank]
     int e_idx, int rank)
 {
     const float* row = &basis[e_idx * rank];
     double acc = 0.0;
     for (int j = 0; j < rank; j++) {
-        acc = fma((double)row[j], coeffs[j], acc);
+        acc = fma((double)__ldg(&row[j]), __ldg(&coeffs[j]), acc);
     }
     return exp2(acc * 3.321928094887362);  // log10->linear
 }
@@ -996,6 +997,226 @@ save_rng:
     rng_inc[tid] = rng.inc;
 }
 
+// ════════════════════════════════════════════════════════════════════
+// KERNEL: Persistent transport (multiple steps per launch)
+// ════════════════════════════════════════════════════════════════════
+//
+// Combines all optimizations:
+//   - Particle state in registers across N steps (no global memory per step)
+//   - Warp-level reduction for counters (__shfl_down_sync)
+//   - __ldg() for read-only SVD data
+//   - Local counter accumulation (one warp atomic per N steps)
+//   - __restrict__ hints for pointer aliasing
+
+extern "C" __global__ void __launch_bounds__(256, 2)
+transport_persistent(
+    const int* __restrict__ compact_idx, int n_alive,
+    double* __restrict__ pos_x, double* __restrict__ pos_y, double* __restrict__ pos_z,
+    double* __restrict__ dir_x, double* __restrict__ dir_y, double* __restrict__ dir_z,
+    double* __restrict__ energy,
+    int* __restrict__ cell_idx,
+    int* __restrict__ alive,
+    const float* __restrict__ all_basis,
+    const double* __restrict__ all_coeffs,
+    const double* __restrict__ all_energy_grids,
+    const int* __restrict__ basis_offsets,
+    const int* __restrict__ grid_offsets,
+    const int* __restrict__ n_energies,
+    const int* __restrict__ has_reaction,
+    const int* __restrict__ coeffs_offsets,
+    int rank,
+    const int* __restrict__ mat_n_nuclides,
+    const int* __restrict__ mat_nuclide_idx,
+    const double* __restrict__ mat_atom_density,
+    const double* __restrict__ awr_table,
+    const double* __restrict__ nu_bar_const,
+    unsigned long long* __restrict__ rng_state_arr,
+    unsigned long long* __restrict__ rng_inc_arr,
+    double* __restrict__ fission_x, double* __restrict__ fission_y,
+    double* __restrict__ fission_z, double* __restrict__ fission_e,
+    double* __restrict__ fission_w,
+    int* fission_count, int max_fission_bank,
+    int* cnt_collisions, int* cnt_fissions, int* cnt_leakage, int* cnt_surface_crossings,
+    int steps_per_launch)
+{
+    int lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= n_alive) return;
+    int tid = compact_idx[lane];
+
+    // Load particle state into registers
+    double px = pos_x[tid], py = pos_y[tid], pz = pos_z[tid];
+    double dx = dir_x[tid], dy = dir_y[tid], dz = dir_z[tid];
+    double E = energy[tid];
+    int cell = cell_idx[tid];
+    int is_alive = alive[tid];
+
+    PcgState rng;
+    rng.state = rng_state_arr[tid];
+    rng.inc = rng_inc_arr[tid];
+
+    // Local counters — accumulated across steps, reduced at end
+    int lcnt_coll = 0, lcnt_fis = 0, lcnt_leak = 0, lcnt_surf = 0;
+
+    for (int step = 0; step < steps_per_launch && is_alive; step++) {
+        int mat = cell_material(cell);
+
+        // ── Void: stream to surface ──
+        if (mat < 0) {
+            double d_surf; int bc, next;
+            trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+            if (d_surf > 1e19) { is_alive = 0; lcnt_leak++; break; }
+            lcnt_surf++;
+            if (bc == BC_REFLECTIVE) {
+                px += dx*d_surf; py += dy*d_surf; pz += dz*d_surf;
+                if (fabs(pz-HALF_PITCH)<1e-6 || fabs(pz+HALF_PITCH)<1e-6) dz=-dz;
+                else if (fabs(px-HALF_PITCH)<1e-6 || fabs(px+HALF_PITCH)<1e-6) dx=-dx;
+                else if (fabs(py-HALF_PITCH)<1e-6 || fabs(py+HALF_PITCH)<1e-6) dy=-dy;
+            } else if (bc == BC_TRANSMISSION) {
+                double nudge = fmax(d_surf*1e-8, 1e-8);
+                px+=dx*(d_surf+nudge); py+=dy*(d_surf+nudge); pz+=dz*(d_surf+nudge);
+                if (next >= 0) cell = next;
+                else { is_alive = 0; lcnt_leak++; break; }
+            } else { is_alive = 0; lcnt_leak++; break; }
+            continue;
+        }
+
+        // ── XS lookup (all in registers) ──
+        int n_nuc = __ldg(&mat_n_nuclides[mat]);
+        double sum_total=0, sum_elastic=0, sum_fission=0, sum_capture=0;
+        double best_awr = __ldg(&awr_table[0]), best_nu = __ldg(&nu_bar_const[0]);
+
+        for (int i = 0; i < n_nuc; i++) {
+            int nuc_idx = __ldg(&mat_nuclide_idx[mat*4+i]);
+            double N_i = __ldg(&mat_atom_density[mat*4+i]);
+            int g_off = __ldg(&grid_offsets[nuc_idx]);
+            int n_e = __ldg(&n_energies[nuc_idx]);
+            int e_idx = energy_index(&all_energy_grids[g_off], n_e, E);
+
+            double sig_el=0, sig_fis=0, sig_cap=0, sig_rest=0;
+            for (int r = 0; r < N_REACTIONS; r++) {
+                int key = nuc_idx * N_REACTIONS + r;
+                if (__ldg(&has_reaction[key])) {
+                    double s = svd_reconstruct(
+                        &all_basis[__ldg(&basis_offsets[key])],
+                        &all_coeffs[__ldg(&coeffs_offsets[key])], e_idx, rank);
+                    if (r == RXN_ELASTIC)  sig_el = s;
+                    else if (r == RXN_FISSION) sig_fis = s;
+                    else if (r == RXN_CAPTURE) sig_cap = s;
+                    else sig_rest += s;
+                }
+            }
+            double micro_t = sig_el + sig_fis + sig_cap + sig_rest;
+            sum_total += N_i * micro_t;
+            sum_elastic += N_i * sig_el;
+            sum_fission += N_i * sig_fis;
+            sum_capture += N_i * sig_cap;
+            if (sig_fis > 0.0) {
+                best_awr = __ldg(&awr_table[nuc_idx]);
+                best_nu = __ldg(&nu_bar_const[nuc_idx]);
+            }
+        }
+
+        if (sum_total <= 0.0) { is_alive = 0; break; }
+
+        // ── Sample + trace ──
+        double d_coll = -log(pcg_uniform(&rng)) / sum_total;
+        double d_surf; int bc, next;
+        trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+
+        // ── Process event ──
+        if (d_surf < d_coll) {
+            lcnt_surf++;
+            if (bc == BC_REFLECTIVE) {
+                px+=dx*d_surf; py+=dy*d_surf; pz+=dz*d_surf;
+                if (fabs(pz-HALF_PITCH)<1e-6||fabs(pz+HALF_PITCH)<1e-6) dz=-dz;
+                else if (fabs(px-HALF_PITCH)<1e-6||fabs(px+HALF_PITCH)<1e-6) dx=-dx;
+                else if (fabs(py-HALF_PITCH)<1e-6||fabs(py+HALF_PITCH)<1e-6) dy=-dy;
+            } else if (bc == BC_TRANSMISSION) {
+                double nudge = fmax(d_surf*1e-8, 1e-8);
+                px+=dx*(d_surf+nudge); py+=dy*(d_surf+nudge); pz+=dz*(d_surf+nudge);
+                if (next >= 0) cell = next;
+                else { is_alive = 0; lcnt_leak++; break; }
+            } else { is_alive = 0; lcnt_leak++; break; }
+        } else {
+            lcnt_coll++;
+            px+=dx*d_coll; py+=dy*d_coll; pz+=dz*d_coll;
+            cell = find_cell(px, py, pz);
+            if (cell < 0) { is_alive = 0; lcnt_leak++; break; }
+
+            double xi = pcg_uniform(&rng) * sum_total;
+            if (xi < sum_elastic) {
+                // Elastic scatter
+                double A = best_awr;
+                double mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
+                double alpha = ((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
+                E = E * (1.0+alpha+(1.0-alpha)*mu_cm) / 2.0;
+                if (E < 1e-11) E = 1e-11;
+                double mu_lab = (1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm);
+                double phi = 2.0*PI*pcg_uniform(&rng);
+                double sin_mu = sqrt(fmax(0.0, 1.0-mu_lab*mu_lab));
+                double w2 = dz*dz;
+                if (w2 < 0.999) {
+                    double inv_sq = 1.0/sqrt(1.0-w2);
+                    double dx2=mu_lab*dx+sin_mu*(dx*dz*cos(phi)-dy*sin(phi))*inv_sq;
+                    double dy2=mu_lab*dy+sin_mu*(dy*dz*cos(phi)+dx*sin(phi))*inv_sq;
+                    double dz2=mu_lab*dz-sin_mu*sqrt(1.0-w2)*cos(phi);
+                    dx=dx2; dy=dy2; dz=dz2;
+                } else {
+                    double sign = (dz>0.0)?1.0:-1.0;
+                    dx=sin_mu*cos(phi); dy=sin_mu*sin(phi)*sign; dz=mu_lab*sign;
+                }
+            } else if (xi < sum_elastic+sum_fission) {
+                // Fission
+                lcnt_fis++;
+                double nu = best_nu;
+                int n_sites = (int)nu;
+                if (pcg_uniform(&rng) < (nu-(double)n_sites)) n_sites++;
+                for (int s = 0; s < n_sites; s++) {
+                    int idx = atomicAdd(fission_count, 1);
+                    if (idx < max_fission_bank) {
+                        fission_x[idx]=px; fission_y[idx]=py; fission_z[idx]=pz;
+                        double a=0.988, E_fiss;
+                        for (int att=0; att<100; att++) {
+                            double x1=-log(pcg_uniform(&rng));
+                            double x2=-log(pcg_uniform(&rng));
+                            double c2=cos(PI/2.0*pcg_uniform(&rng));
+                            E_fiss = a*(x1+x2*c2*c2);
+                            if (E_fiss > 0.0) break;
+                        }
+                        fission_e[idx] = E_fiss*1e6;
+                        fission_w[idx] = 1.0;
+                    }
+                }
+                is_alive = 0;
+            } else {
+                // Capture
+                is_alive = 0;
+            }
+        }
+    } // end step loop
+
+    // Write back state
+    pos_x[tid]=px; pos_y[tid]=py; pos_z[tid]=pz;
+    dir_x[tid]=dx; dir_y[tid]=dy; dir_z[tid]=dz;
+    energy[tid]=E; cell_idx[tid]=cell; alive[tid]=is_alive;
+    rng_state_arr[tid]=rng.state; rng_inc_arr[tid]=rng.inc;
+
+    // Warp-level reduction: sum counters across warp, one atomic per warp
+    unsigned mask = __activemask();
+    for (int offset = 16; offset > 0; offset /= 2) {
+        lcnt_coll += __shfl_down_sync(mask, lcnt_coll, offset);
+        lcnt_fis  += __shfl_down_sync(mask, lcnt_fis,  offset);
+        lcnt_leak += __shfl_down_sync(mask, lcnt_leak, offset);
+        lcnt_surf += __shfl_down_sync(mask, lcnt_surf, offset);
+    }
+    if ((threadIdx.x & 31) == 0) {
+        if (lcnt_coll > 0) atomicAdd(cnt_collisions, lcnt_coll);
+        if (lcnt_fis > 0)  atomicAdd(cnt_fissions, lcnt_fis);
+        if (lcnt_leak > 0) atomicAdd(cnt_leakage, lcnt_leak);
+        if (lcnt_surf > 0) atomicAdd(cnt_surface_crossings, lcnt_surf);
+    }
+}
+
 "#;
 
 // ── Rust-side GPU transport context ──────────────────────────────
@@ -1011,11 +1232,12 @@ pub struct GpuTransportContext {
     // Shared
     k_init_source: CudaFunction,
     k_count_alive: CudaFunction,
-    // Optimized: fused kernel + compaction + energy sort
-    k_transport_fused: CudaFunction,
+    // Optimized kernels
+    _k_transport_fused: CudaFunction,
     k_compact_alive: CudaFunction,
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
+    k_transport_persistent: CudaFunction,
 }
 
 /// SVD data uploaded to GPU for all nuclides.
@@ -1069,16 +1291,18 @@ impl GpuTransportContext {
         let k_compact_alive = module.load_function("compact_alive")?;
         let k_energy_bin_count = module.load_function("energy_bin_count")?;
         let k_energy_bin_scatter = module.load_function("energy_bin_scatter")?;
+        let k_transport_persistent = module.load_function("transport_persistent")?;
         let stream = ctx.default_stream();
 
-        println!("  GPU transport kernels compiled (9 kernels)");
+        println!("  GPU transport kernels compiled (10 kernels)");
 
         Ok(Self {
             _ctx: ctx, stream,
             k_xs_lookup, k_sample_trace, k_process_event,
             k_init_source, k_count_alive,
-            k_transport_fused, k_compact_alive,
+            _k_transport_fused: k_transport_fused, k_compact_alive,
             k_energy_bin_count, k_energy_bin_scatter,
+            k_transport_persistent,
         })
     }
 
@@ -1485,11 +1709,8 @@ impl GpuTransportContext {
         let mut n_alive = n as i32;
         let compact_interval = 10; // Re-compact every N steps
 
-        for step in 0..max_steps {
-            if n_alive <= 0 { break; }
-
-            // Compact + sort alive particles periodically
-            if step % compact_interval == 0 {
+        let mut step = 0_u32;
+        while step < max_steps && n_alive > 0 {
                 // 1. Compact: build dense list of alive particle indices
                 let mut d_compact_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
                 let compact_grid = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -1545,17 +1766,17 @@ impl GpuTransportContext {
 
                 // Swap: sorted becomes the active compact index
                 std::mem::swap(&mut d_compact_idx, &mut d_compact_idx_sorted);
-            }
 
-            // Launch fused kernel with (possibly sorted) compact index
+            // Launch persistent kernel: N steps in one kernel call
             let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
             let alive_cfg = LaunchConfig {
                 grid_dim: (alive_grid, 1, 1),
                 block_dim: (BLOCK_SIZE, 1, 1),
                 shared_mem_bytes: 0,
             };
+            let steps_this_launch = compact_interval as i32;
             unsafe {
-                self.stream.launch_builder(&self.k_transport_fused)
+                self.stream.launch_builder(&self.k_transport_persistent)
                     .arg(&d_compact_idx)
                     .arg(&n_alive)
                     .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
@@ -1581,8 +1802,11 @@ impl GpuTransportContext {
                     .arg(&mut d_fis_count).arg(&max_fission)
                     .arg(&mut d_cnt_coll).arg(&mut d_cnt_fis)
                     .arg(&mut d_cnt_leak).arg(&mut d_cnt_surf)
+                    .arg(&steps_this_launch)
                     .launch(alive_cfg)?;
             }
+
+            step += compact_interval; // persistent kernel did N steps
         }
 
         // Download results
