@@ -696,6 +696,15 @@ transport_persistent(
     const int* __restrict__ level_basis_offsets,
     const int* __restrict__ level_coeffs_offsets,
     const int* __restrict__ level_has_kernel,
+    // Angular distributions
+    const double* __restrict__ ang_energies,
+    const double* __restrict__ ang_mu_arr,
+    const double* __restrict__ ang_cdf_arr,
+    const int* __restrict__ ang_dist_offsets,
+    const int* __restrict__ ang_dist_sizes,
+    const int* __restrict__ ang_nuc_offsets,
+    const int* __restrict__ ang_nuc_n_energies,
+    const int* __restrict__ ang_is_cm,
     // RNG
     unsigned long long* __restrict__ rng_state_arr,
     unsigned long long* __restrict__ rng_inc_arr,
@@ -945,8 +954,12 @@ transport_persistent(
                         dx = vout_x/v_out; dy = vout_y/v_out; dz = vout_z/v_out;
                     }
                 } else {
-                    // Standard two-body elastic (stationary target)
-                    double mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
+                    // Two-body elastic with anisotropic angular distribution
+                    int a_off = __ldg(&ang_nuc_offsets[hit_nuc_idx]);
+                    int a_ne = __ldg(&ang_nuc_n_energies[hit_nuc_idx]);
+                    double mu_cm = sample_angular_dist(
+                        E, &rng, ang_energies, ang_dist_offsets, ang_dist_sizes,
+                        ang_mu_arr, ang_cdf_arr, a_off, a_ne, __ldg(&ang_is_cm[hit_nuc_idx]));
                     double alpha = ((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
                     E = E * (1.0+alpha+(1.0-alpha)*mu_cm) / 2.0;
                     if (E < 1e-11) E = 1e-11;
@@ -1118,6 +1131,15 @@ pub struct GpuNuclideData {
     pub level_basis_offsets: CudaSlice<i32>,  // per-level offset into level_basis
     pub level_coeffs_offsets: CudaSlice<i32>, // per-level offset into level_coeffs
     pub level_has_kernel: CudaSlice<i32>,     // per-level: 1 if kernel exists, 0 if not
+    // Anisotropic elastic scattering angular distributions
+    pub ang_energies: CudaSlice<f64>,         // flat: energy grids for angular dist
+    pub ang_mu: CudaSlice<f64>,               // flat: cosine values
+    pub ang_cdf: CudaSlice<f64>,              // flat: CDF values
+    pub ang_dist_offsets: CudaSlice<i32>,      // per (nuc, energy) → offset into mu/cdf
+    pub ang_dist_sizes: CudaSlice<i32>,        // per (nuc, energy) → n_mu
+    pub ang_nuc_offsets: CudaSlice<i32>,       // per-nuclide → offset into ang_energies
+    pub ang_nuc_n_energies: CudaSlice<i32>,    // per-nuclide → number of angular energies
+    pub ang_is_cm: CudaSlice<i32>,             // per-nuclide → 1 if CM frame
     // Fission energy distributions (tabulated CDF)
     pub fis_inc_energies: CudaSlice<f64>,
     pub fis_dist_offsets: CudaSlice<i32>,
@@ -1299,6 +1321,35 @@ impl GpuTransportContext {
         println!("  GPU: {} discrete levels, {:.1} MB level basis",
                  n_total_levels, lev_basis_vec.len() as f64 * 4.0 / 1e6);
 
+        // ── Pack angular distributions ──
+        let mut ang_e_vec: Vec<f64> = Vec::new();
+        let mut ang_mu_vec: Vec<f64> = Vec::new();
+        let mut ang_cdf_vec: Vec<f64> = Vec::new();
+        let mut ang_doff_vec: Vec<i32> = Vec::new();
+        let mut ang_dsz_vec: Vec<i32> = Vec::new();
+        let mut ang_noff_vec = vec![0_i32; n_nuc];
+        let mut ang_nne_vec = vec![0_i32; n_nuc];
+        let mut ang_cm_vec = vec![0_i32; n_nuc];
+
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref ad) = nuc.elastic_angle {
+                ang_noff_vec[nuc_idx] = ang_e_vec.len() as i32;
+                ang_nne_vec[nuc_idx] = ad.energies.len() as i32;
+                ang_cm_vec[nuc_idx] = if ad.center_of_mass { 1 } else { 0 };
+                for (i, e) in ad.energies.iter().enumerate() {
+                    ang_e_vec.push(*e);
+                    let dist = &ad.distributions[i];
+                    ang_doff_vec.push(ang_mu_vec.len() as i32);
+                    ang_dsz_vec.push(dist.mu.len() as i32);
+                    ang_mu_vec.extend_from_slice(&dist.mu);
+                    ang_cdf_vec.extend_from_slice(&dist.cdf);
+                }
+            }
+        }
+        if ang_e_vec.is_empty() { ang_e_vec.push(0.0); }
+        if ang_mu_vec.is_empty() { ang_mu_vec.push(0.0); ang_cdf_vec.push(0.0); }
+        if ang_doff_vec.is_empty() { ang_doff_vec.push(0); ang_dsz_vec.push(0); }
+
         // ── Pack nu-bar tables (flat with offsets) ──
         let mut nb_energies_vec: Vec<f64> = Vec::new();
         let mut nb_values_vec: Vec<f64> = Vec::new();
@@ -1369,6 +1420,14 @@ impl GpuTransportContext {
             level_basis_offsets: self.stream.clone_htod(&lev_basis_off_vec)?,
             level_coeffs_offsets: self.stream.clone_htod(&lev_coeffs_off_vec)?,
             level_has_kernel: self.stream.clone_htod(&lev_has_kernel_vec)?,
+            ang_energies: self.stream.clone_htod(&ang_e_vec)?,
+            ang_mu: self.stream.clone_htod(&ang_mu_vec)?,
+            ang_cdf: self.stream.clone_htod(&ang_cdf_vec)?,
+            ang_dist_offsets: self.stream.clone_htod(&ang_doff_vec)?,
+            ang_dist_sizes: self.stream.clone_htod(&ang_dsz_vec)?,
+            ang_nuc_offsets: self.stream.clone_htod(&ang_noff_vec)?,
+            ang_nuc_n_energies: self.stream.clone_htod(&ang_nne_vec)?,
+            ang_is_cm: self.stream.clone_htod(&ang_cm_vec)?,
             nu_bar_energies: self.stream.clone_htod(&nb_energies_vec)?,
             nu_bar_values: self.stream.clone_htod(&nb_values_vec)?,
             nu_bar_offsets: self.stream.clone_htod(&nb_offsets_vec)?,
@@ -1718,6 +1777,15 @@ impl GpuTransportContext {
                     .arg(&nuc_data.level_basis_offsets)
                     .arg(&nuc_data.level_coeffs_offsets)
                     .arg(&nuc_data.level_has_kernel)
+                    // Angular distributions
+                    .arg(&nuc_data.ang_energies)
+                    .arg(&nuc_data.ang_mu)
+                    .arg(&nuc_data.ang_cdf)
+                    .arg(&nuc_data.ang_dist_offsets)
+                    .arg(&nuc_data.ang_dist_sizes)
+                    .arg(&nuc_data.ang_nuc_offsets)
+                    .arg(&nuc_data.ang_nuc_n_energies)
+                    .arg(&nuc_data.ang_is_cm)
                     // RNG
                     .arg(&mut d_rng_state).arg(&mut d_rng_inc)
                     .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
