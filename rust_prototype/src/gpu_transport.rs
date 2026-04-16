@@ -725,6 +725,235 @@ extern "C" __global__ void count_alive(
     if (alive[tid]) atomicAdd(count, 1);
 }
 
+// ════════════════════════════════════════════════════════════════════
+// KERNEL: Stream compaction — build dense index of alive particles
+// ════════════════════════════════════════════════════════════════════
+
+extern "C" __global__ void compact_alive(
+    const int* alive, int n_particles,
+    int* compact_idx,     // output: dense list of alive particle indices
+    int* compact_count)   // output: number of alive particles (atomic)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_particles || !alive[tid]) return;
+    int pos = atomicAdd(compact_count, 1);
+    compact_idx[pos] = tid;
+}
+
+// ════════════════════════════════════════════════════════════════════
+// KERNEL: Fused transport step (XS lookup + trace + process)
+// ════════════════════════════════════════════════════════════════════
+//
+// Single kernel does all three steps per particle. Intermediate data
+// (macro XS, collision distance, surface distance) stays in registers
+// — no global memory round-trip. This eliminates 2/3 of kernel launch
+// overhead and the associated global memory traffic.
+//
+// Uses compact_idx for indirect indexing: only alive particles run.
+
+extern "C" __global__ void transport_step_fused(
+    // Compact index (only alive particles)
+    const int* compact_idx,
+    int n_alive,
+    // Particle state (SoA, indexed by compact_idx)
+    double* pos_x, double* pos_y, double* pos_z,
+    double* dir_x, double* dir_y, double* dir_z,
+    double* energy,
+    int* cell_idx,
+    int* alive,
+    // SVD data
+    const float* all_basis,
+    const double* all_coeffs,
+    const double* all_energy_grids,
+    const int* basis_offsets,
+    const int* grid_offsets,
+    const int* n_energies,
+    const int* has_reaction,
+    const int* coeffs_offsets,
+    int rank,
+    // Material data
+    const int* mat_n_nuclides,
+    const int* mat_nuclide_idx,
+    const double* mat_atom_density,
+    const double* awr_table,
+    const double* nu_bar_const,
+    // RNG
+    unsigned long long* rng_state,
+    unsigned long long* rng_inc,
+    // Fission bank
+    double* fission_x, double* fission_y, double* fission_z,
+    double* fission_e, double* fission_w,
+    int* fission_count,
+    int max_fission_bank,
+    // Counters
+    int* cnt_collisions,
+    int* cnt_fissions,
+    int* cnt_leakage,
+    int* cnt_surface_crossings)
+{
+    int lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= n_alive) return;
+    int tid = compact_idx[lane];  // actual particle index
+
+    double px = pos_x[tid], py = pos_y[tid], pz = pos_z[tid];
+    double dx = dir_x[tid], dy = dir_y[tid], dz = dir_z[tid];
+    double E = energy[tid];
+    int cell = cell_idx[tid];
+
+    PcgState rng;
+    rng.state = rng_state[tid];
+    rng.inc = rng_inc[tid];
+
+    // ── Handle void cells ──
+    int mat = cell_material(cell);
+    if (mat < 0) {
+        double d_surf; int bc, next;
+        trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+        if (d_surf > 1e19) {
+            alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_rng;
+        }
+        atomicAdd(cnt_surface_crossings, 1);
+        if (bc == BC_REFLECTIVE) {
+            px += dx * d_surf; py += dy * d_surf; pz += dz * d_surf;
+            if (fabs(pz - HALF_PITCH) < 1e-6 || fabs(pz + HALF_PITCH) < 1e-6) dz = -dz;
+            else if (fabs(px - HALF_PITCH) < 1e-6 || fabs(px + HALF_PITCH) < 1e-6) dx = -dx;
+            else if (fabs(py - HALF_PITCH) < 1e-6 || fabs(py + HALF_PITCH) < 1e-6) dy = -dy;
+        } else if (bc == BC_TRANSMISSION) {
+            double nudge = fmax(d_surf * 1e-8, 1e-8);
+            px += dx*(d_surf+nudge); py += dy*(d_surf+nudge); pz += dz*(d_surf+nudge);
+            if (next >= 0) cell = next;
+            else { alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_state; }
+        } else { alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_rng; }
+        goto save_state;
+    }
+
+    // ── Step 1: XS lookup (registers only) ──
+    {
+        int n_nuc = mat_n_nuclides[mat];
+        double sum_total = 0.0, sum_elastic = 0.0, sum_fission = 0.0, sum_capture = 0.0;
+        double best_awr = awr_table[0], best_nu = nu_bar_const[0];
+        double nuc_macro[4]; // per-nuclide macroscopic total (max 4 nuclides/mat)
+
+        for (int i = 0; i < n_nuc; i++) {
+            int nuc_idx = mat_nuclide_idx[mat * 4 + i];
+            double N_i = mat_atom_density[mat * 4 + i];
+            int g_off = grid_offsets[nuc_idx];
+            int n_e = n_energies[nuc_idx];
+            int e_idx = energy_index(&all_energy_grids[g_off], n_e, E);
+
+            double sigma[N_REACTIONS];
+            for (int r = 0; r < N_REACTIONS; r++) {
+                int key = nuc_idx * N_REACTIONS + r;
+                if (has_reaction[key]) {
+                    sigma[r] = svd_reconstruct(&all_basis[basis_offsets[key]],
+                                                &all_coeffs[coeffs_offsets[key]], e_idx, rank);
+                } else { sigma[r] = 0.0; }
+            }
+            double micro_t = sigma[0]+sigma[1]+sigma[2]+sigma[3]+sigma[4]+sigma[5];
+            double macro_t = N_i * micro_t;
+            nuc_macro[i] = macro_t;
+            sum_total += macro_t;
+            sum_elastic += N_i * sigma[RXN_ELASTIC];
+            sum_fission += N_i * sigma[RXN_FISSION];
+            sum_capture += N_i * sigma[RXN_CAPTURE];
+            if (sigma[RXN_FISSION] > 0.0) {
+                best_awr = awr_table[nuc_idx];
+                best_nu = nu_bar_const[nuc_idx];
+            }
+        }
+
+        if (sum_total <= 0.0) { alive[tid] = 0; goto save_rng; }
+
+        // ── Step 2: Sample collision distance + trace ──
+        double d_coll = -log(pcg_uniform(&rng)) / sum_total;
+        double d_surf; int bc, next;
+        trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+
+        // ── Step 3: Process event ──
+        if (d_surf < d_coll) {
+            // Surface crossing
+            atomicAdd(cnt_surface_crossings, 1);
+            if (bc == BC_REFLECTIVE) {
+                px += dx*d_surf; py += dy*d_surf; pz += dz*d_surf;
+                if (fabs(pz - HALF_PITCH) < 1e-6 || fabs(pz + HALF_PITCH) < 1e-6) dz = -dz;
+                else if (fabs(px - HALF_PITCH) < 1e-6 || fabs(px + HALF_PITCH) < 1e-6) dx = -dx;
+                else if (fabs(py - HALF_PITCH) < 1e-6 || fabs(py + HALF_PITCH) < 1e-6) dy = -dy;
+            } else if (bc == BC_TRANSMISSION) {
+                double nudge = fmax(d_surf * 1e-8, 1e-8);
+                px += dx*(d_surf+nudge); py += dy*(d_surf+nudge); pz += dz*(d_surf+nudge);
+                if (next >= 0) cell = next;
+                else { alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_state; }
+            } else { alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_state; }
+        } else {
+            // Collision
+            atomicAdd(cnt_collisions, 1);
+            px += dx*d_coll; py += dy*d_coll; pz += dz*d_coll;
+            cell = find_cell(px, py, pz);
+            if (cell < 0) { alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_state; }
+
+            double xi = pcg_uniform(&rng) * sum_total;
+            if (xi < sum_elastic) {
+                // Elastic scatter
+                double A = best_awr;
+                double mu_cm = 2.0 * pcg_uniform(&rng) - 1.0;
+                double alpha = ((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
+                E = E * (1.0 + alpha + (1.0-alpha)*mu_cm) / 2.0;
+                if (E < 1e-11) E = 1e-11;
+
+                double mu_lab = (1.0 + A*mu_cm) / sqrt(1.0 + A*A + 2.0*A*mu_cm);
+                double phi = 2.0 * PI * pcg_uniform(&rng);
+                double sin_mu = sqrt(fmax(0.0, 1.0 - mu_lab*mu_lab));
+                double w2 = dz*dz;
+                if (w2 < 0.999) {
+                    double inv_sq = 1.0 / sqrt(1.0 - w2);
+                    double dx2 = mu_lab*dx + sin_mu*(dx*dz*cos(phi) - dy*sin(phi))*inv_sq;
+                    double dy2 = mu_lab*dy + sin_mu*(dy*dz*cos(phi) + dx*sin(phi))*inv_sq;
+                    double dz2 = mu_lab*dz - sin_mu*sqrt(1.0-w2)*cos(phi);
+                    dx=dx2; dy=dy2; dz=dz2;
+                } else {
+                    double sign = (dz > 0.0) ? 1.0 : -1.0;
+                    dx = sin_mu*cos(phi); dy = sin_mu*sin(phi)*sign; dz = mu_lab*sign;
+                }
+            } else if (xi < sum_elastic + sum_fission) {
+                // Fission
+                atomicAdd(cnt_fissions, 1);
+                double nu = best_nu;
+                int n_sites = (int)nu;
+                if (pcg_uniform(&rng) < (nu - (double)n_sites)) n_sites++;
+                for (int s = 0; s < n_sites; s++) {
+                    int idx = atomicAdd(fission_count, 1);
+                    if (idx < max_fission_bank) {
+                        fission_x[idx] = px; fission_y[idx] = py; fission_z[idx] = pz;
+                        double a = 0.988, E_fiss;
+                        for (int att = 0; att < 100; att++) {
+                            double x1 = -log(pcg_uniform(&rng));
+                            double x2 = -log(pcg_uniform(&rng));
+                            double c2 = cos(PI/2.0*pcg_uniform(&rng));
+                            E_fiss = a * (x1 + x2*c2*c2);
+                            if (E_fiss > 0.0) break;
+                        }
+                        fission_e[idx] = E_fiss * 1e6;
+                        fission_w[idx] = 1.0;
+                    }
+                }
+                alive[tid] = 0; goto save_state;
+            } else {
+                // Capture
+                alive[tid] = 0; goto save_state;
+            }
+        }
+    }
+
+save_state:
+    pos_x[tid] = px; pos_y[tid] = py; pos_z[tid] = pz;
+    dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
+    energy[tid] = E;
+    cell_idx[tid] = cell;
+save_rng:
+    rng_state[tid] = rng.state;
+    rng_inc[tid] = rng.inc;
+}
+
 "#;
 
 // ── Rust-side GPU transport context ──────────────────────────────
@@ -733,12 +962,16 @@ extern "C" __global__ void count_alive(
 pub struct GpuTransportContext {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
-    // Kernels
+    // Original 3-kernel approach
     k_xs_lookup: CudaFunction,
     k_sample_trace: CudaFunction,
     k_process_event: CudaFunction,
+    // Shared
     k_init_source: CudaFunction,
     k_count_alive: CudaFunction,
+    // Optimized: fused kernel + compaction
+    k_transport_fused: CudaFunction,
+    k_compact_alive: CudaFunction,
 }
 
 /// SVD data uploaded to GPU for all nuclides.
@@ -788,14 +1021,17 @@ impl GpuTransportContext {
         let k_process_event = module.load_function("process_event")?;
         let k_init_source = module.load_function("init_source")?;
         let k_count_alive = module.load_function("count_alive")?;
+        let k_transport_fused = module.load_function("transport_step_fused")?;
+        let k_compact_alive = module.load_function("compact_alive")?;
         let stream = ctx.default_stream();
 
-        println!("  GPU transport kernels compiled (5 kernels)");
+        println!("  GPU transport kernels compiled (7 kernels)");
 
         Ok(Self {
             _ctx: ctx, stream,
             k_xs_lookup, k_sample_trace, k_process_event,
             k_init_source, k_count_alive,
+            k_transport_fused, k_compact_alive,
         })
     }
 
@@ -1086,6 +1322,184 @@ impl GpuTransportContext {
         }
 
         // ── Download results ──
+        let fis_count = self.stream.clone_dtoh(&d_fis_count)?[0] as usize;
+        let cnt_coll = self.stream.clone_dtoh(&d_cnt_coll)?[0] as u32;
+        let cnt_fis = self.stream.clone_dtoh(&d_cnt_fis)?[0] as u32;
+        let cnt_leak = self.stream.clone_dtoh(&d_cnt_leak)?[0] as u32;
+        let cnt_surf = self.stream.clone_dtoh(&d_cnt_surf)?[0] as u32;
+
+        let fis_count_clamped = fis_count.min(max_fission as usize);
+        let fission_bank = if fis_count_clamped > 0 {
+            let fx = self.stream.clone_dtoh(&d_fis_x)?;
+            let fy = self.stream.clone_dtoh(&d_fis_y)?;
+            let fz = self.stream.clone_dtoh(&d_fis_z)?;
+            let fe = self.stream.clone_dtoh(&d_fis_e)?;
+            (0..fis_count_clamped)
+                .map(|i| (fx[i], fy[i], fz[i], fe[i]))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let k_eff = fission_bank.len() as f64 / n as f64;
+
+        Ok(GpuBatchResult {
+            k_eff,
+            collisions: cnt_coll,
+            fissions: cnt_fis,
+            leakage: cnt_leak,
+            surface_crossings: cnt_surf,
+            fission_bank,
+        })
+    }
+
+    /// Optimized batch: fused kernel + stream compaction.
+    ///
+    /// Single kernel per step (XS + trace + process in registers).
+    /// Compaction removes dead particles between steps so only alive
+    /// particles consume GPU threads.
+    pub fn run_batch_fused(
+        &self,
+        source_bank: &[(f64, f64, f64, f64)],
+        batch: u32,
+        nuc_data: &GpuNuclideData,
+        mat_data: &GpuMaterialData,
+        max_steps: u32,
+    ) -> Result<GpuBatchResult, Box<dyn std::error::Error>> {
+        let n = source_bank.len();
+        let n_i32 = n as i32;
+        let grid_full = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        let cfg_full = LaunchConfig {
+            grid_dim: (grid_full, 1, 1),
+            block_dim: (BLOCK_SIZE, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Unpack source bank into SoA
+        let mut sx = Vec::with_capacity(n);
+        let mut sy = Vec::with_capacity(n);
+        let mut sz = Vec::with_capacity(n);
+        let mut se = Vec::with_capacity(n);
+        for &(x, y, z, e) in source_bank {
+            sx.push(x); sy.push(y); sz.push(z); se.push(e);
+        }
+
+        let d_src_x = self.stream.clone_htod(&sx)?;
+        let d_src_y = self.stream.clone_htod(&sy)?;
+        let d_src_z = self.stream.clone_htod(&sz)?;
+        let d_src_e = self.stream.clone_htod(&se)?;
+
+        // Pre-allocate all particle state arrays (reused across steps)
+        let mut d_pos_x: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_pos_y: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_pos_z: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_dir_x: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_dir_y: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_dir_z: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_energy: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_cell: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        let mut d_alive: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        let mut d_rng_state: CudaSlice<u64> = self.stream.alloc_zeros(n)?;
+        let mut d_rng_inc: CudaSlice<u64> = self.stream.alloc_zeros(n)?;
+
+        // Compaction buffer
+        let mut d_compact_idx: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        // Fission bank
+        let max_fission = (n * 3) as i32;
+        let mut d_fis_x: CudaSlice<f64> = self.stream.alloc_zeros(max_fission as usize)?;
+        let mut d_fis_y: CudaSlice<f64> = self.stream.alloc_zeros(max_fission as usize)?;
+        let mut d_fis_z: CudaSlice<f64> = self.stream.alloc_zeros(max_fission as usize)?;
+        let mut d_fis_e: CudaSlice<f64> = self.stream.alloc_zeros(max_fission as usize)?;
+        let mut d_fis_w: CudaSlice<f64> = self.stream.alloc_zeros(max_fission as usize)?;
+        let mut d_fis_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+
+        // Counters
+        let mut d_cnt_coll: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+        let mut d_cnt_fis: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+        let mut d_cnt_leak: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+        let mut d_cnt_surf: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+
+        // Initialize source
+        let batch_seed = batch as u64 * 1_000_000;
+        unsafe {
+            self.stream.launch_builder(&self.k_init_source)
+                .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
+                .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
+                .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
+                .arg(&d_src_x).arg(&d_src_y).arg(&d_src_z).arg(&d_src_e)
+                .arg(&n_i32)
+                .arg(&batch_seed)
+                .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+                .launch(cfg_full)?;
+        }
+
+        let mut n_alive = n as i32;
+        let compact_interval = 10; // Re-compact every N steps
+
+        for step in 0..max_steps {
+            if n_alive <= 0 { break; }
+
+            // Compact alive particles periodically
+            if step % compact_interval == 0 {
+                // Reset compact count
+                let mut d_compact_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+
+                let compact_grid = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                let compact_cfg = LaunchConfig {
+                    grid_dim: (compact_grid, 1, 1),
+                    block_dim: (BLOCK_SIZE, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe {
+                    self.stream.launch_builder(&self.k_compact_alive)
+                        .arg(&d_alive).arg(&n_i32)
+                        .arg(&mut d_compact_idx).arg(&mut d_compact_count)
+                        .launch(compact_cfg)?;
+                }
+                let count = self.stream.clone_dtoh(&d_compact_count)?;
+                n_alive = count[0];
+                if n_alive <= 0 { break; }
+            }
+
+            // Launch fused kernel with compact index
+            let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let alive_cfg = LaunchConfig {
+                grid_dim: (alive_grid, 1, 1),
+                block_dim: (BLOCK_SIZE, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe {
+                self.stream.launch_builder(&self.k_transport_fused)
+                    .arg(if step % compact_interval == 0 { &d_compact_idx } else { &d_compact_idx })
+                    .arg(&n_alive)
+                    .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
+                    .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
+                    .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
+                    .arg(&nuc_data.all_basis)
+                    .arg(&nuc_data.all_coeffs)
+                    .arg(&nuc_data.all_energy_grids)
+                    .arg(&nuc_data.basis_offsets)
+                    .arg(&nuc_data.grid_offsets)
+                    .arg(&nuc_data.n_energies)
+                    .arg(&nuc_data.has_reaction)
+                    .arg(&nuc_data.coeffs_offsets)
+                    .arg(&nuc_data.rank)
+                    .arg(&mat_data.mat_n_nuclides)
+                    .arg(&mat_data.mat_nuclide_idx)
+                    .arg(&mat_data.mat_atom_density)
+                    .arg(&mat_data.awr_table)
+                    .arg(&mat_data.nu_bar_const)
+                    .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+                    .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
+                    .arg(&mut d_fis_e).arg(&mut d_fis_w)
+                    .arg(&mut d_fis_count).arg(&max_fission)
+                    .arg(&mut d_cnt_coll).arg(&mut d_cnt_fis)
+                    .arg(&mut d_cnt_leak).arg(&mut d_cnt_surf)
+                    .launch(alive_cfg)?;
+            }
+        }
+
+        // Download results
         let fis_count = self.stream.clone_dtoh(&d_fis_count)?[0] as usize;
         let cnt_coll = self.stream.clone_dtoh(&d_cnt_coll)?[0] as u32;
         let cnt_fis = self.stream.clone_dtoh(&d_cnt_fis)?[0] as u32;

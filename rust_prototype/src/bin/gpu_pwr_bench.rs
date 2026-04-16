@@ -43,6 +43,9 @@ mod cuda_main {
         particles: u32,
         #[arg(short, long, default_value_t = 1)]
         temp_idx: usize,
+        /// Run mode: "fused" (optimized), "split" (3-kernel), "both" (compare)
+        #[arg(short, long, default_value = "both")]
+        mode: String,
     }
 
     /// Nuclide specs: (filename, AWR, fallback nu-bar) — same as pwr_pincell.rs
@@ -141,46 +144,82 @@ mod cuda_main {
         let gpu_init_ms = t_gpu.elapsed().as_secs_f64() * 1000.0;
         println!("  GPU ready in {gpu_init_ms:.0} ms");
 
-        // ── Run eigenvalue iterations ──
-        println!("\n── Running GPU transport ──");
-        let mut source_bank = initial_source(n, 0);
-        let mut k_sum = 0.0_f64;
-        let mut k_count = 0_u32;
+        let run_split = args.mode == "split" || args.mode == "both";
+        let run_fused = args.mode == "fused" || args.mode == "both";
 
-        let t_sim = Instant::now();
+        // ── Helper: run one mode ──
+        fn run_mode(
+            label: &str,
+            gpu: &GpuTransportContext,
+            nuc_data: &open_rust_mc::gpu_transport::GpuNuclideData,
+            mat_data: &open_rust_mc::gpu_transport::GpuMaterialData,
+            n: usize,
+            batches: u32,
+            inactive: u32,
+            fused: bool,
+        ) -> (f64, f64, f64) {
+            println!("\n── {label} ──");
+            let mut source_bank = initial_source(n, 0);
+            let mut k_sum = 0.0_f64;
+            let mut k_count = 0_u32;
+            let active_batches = batches - inactive;
 
-        for batch in 1..=args.batches {
-            let result = gpu.run_batch(&source_bank, batch, &nuc_data, &mat_data, 1_000_000)
-                .expect("GPU batch failed");
+            let t_sim = Instant::now();
+            for batch in 1..=batches {
+                let result = if fused {
+                    gpu.run_batch_fused(&source_bank, batch, nuc_data, mat_data, 1_000_000)
+                } else {
+                    gpu.run_batch(&source_bank, batch, nuc_data, mat_data, 1_000_000)
+                }.expect("GPU batch failed");
 
-            let active = if batch > args.inactive { " *" } else { "" };
-            println!("  Batch {:>4}: k={:.5}  coll={}  fiss={}  leak={}  surf={}{active}",
-                     batch, result.k_eff, result.collisions, result.fissions,
-                     result.leakage, result.surface_crossings);
-            let _ = std::io::stdout().flush();
+                let active = if batch > inactive { " *" } else { "" };
+                println!("  Batch {:>4}: k={:.5}  coll={}  fiss={}  leak={}  surf={}{active}",
+                         batch, result.k_eff, result.collisions, result.fissions,
+                         result.leakage, result.surface_crossings);
+                let _ = std::io::stdout().flush();
 
-            if batch > args.inactive {
-                k_sum += result.k_eff;
-                k_count += 1;
+                if batch > inactive {
+                    k_sum += result.k_eff;
+                    k_count += 1;
+                }
+                source_bank = normalize_bank(&result.fission_bank, n, batch as u64);
             }
 
-            source_bank = normalize_bank(&result.fission_bank, n, batch as u64);
+            let sim_ms = t_sim.elapsed().as_secs_f64() * 1000.0;
+            let total_histories = active_batches as u64 * n as u64;
+            let ns_pp = sim_ms * 1e6 / total_histories as f64;
+            let k_mean = if k_count > 0 { k_sum / k_count as f64 } else { 0.0 };
+
+            println!("\n  {label}:");
+            println!("    k_inf       = {k_mean:.5}");
+            println!("    ns/particle = {ns_pp:.2}");
+            println!("    sim time    = {sim_ms:.0} ms");
+
+            (k_mean, ns_pp, sim_ms)
         }
 
-        let sim_ms = t_sim.elapsed().as_secs_f64() * 1000.0;
-        let total_histories = active_batches as u64 * n as u64;
-        let ns_per_particle = sim_ms * 1e6 / total_histories as f64;
+        let mut split_ns = 0.0;
+        let mut fused_ns = 0.0;
 
-        let k_mean = if k_count > 0 { k_sum / k_count as f64 } else { 0.0 };
+        if run_split {
+            let (_, ns, _) = run_mode("3-kernel (split)", &gpu, &nuc_data, &mat_data,
+                                       n, args.batches, args.inactive, false);
+            split_ns = ns;
+        }
+        if run_fused {
+            let (_, ns, _) = run_mode("Fused + compaction", &gpu, &nuc_data, &mat_data,
+                                       n, args.batches, args.inactive, true);
+            fused_ns = ns;
+        }
 
-        println!("\n{}", "=".repeat(60));
-        println!("GPU EVENT-BASED PWR PIN CELL RESULTS");
-        println!("{}", "=".repeat(60));
-        println!("  k_inf            = {k_mean:.5}");
-        println!("  ns/particle      = {ns_per_particle:.2}");
-        println!("  Sim time         = {sim_ms:.0} ms ({} batches)", args.batches);
-        println!("  Load time        = {load_ms:.0} ms (CPU) + {gpu_init_ms:.0} ms (GPU upload)");
-        println!("  Total histories  = {total_histories}");
+        if run_split && run_fused {
+            println!("\n{}", "=".repeat(60));
+            println!("COMPARISON");
+            println!("{}", "=".repeat(60));
+            println!("  Split:    {split_ns:.2} ns/particle");
+            println!("  Fused:    {fused_ns:.2} ns/particle");
+            println!("  Speedup:  {:.2}x", split_ns / fused_ns);
+        }
     }
 
     fn setup_materials() -> Vec<open_rust_mc::transport::material::Material> {
