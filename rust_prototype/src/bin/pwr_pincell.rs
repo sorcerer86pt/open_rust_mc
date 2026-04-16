@@ -425,9 +425,9 @@ fn main() {
     let args = Args::parse();
 
     let inactive = if args.inactive >= args.batches {
-        eprintln!("  Warning: inactive ({}) >= batches ({}), capping to {}",
-                  args.inactive, args.batches, args.batches.saturating_sub(1));
-        args.batches.saturating_sub(1)
+        println!("  [Warning] Inactive batches ({}) >= total batches ({}). Capping inactive to {}.",
+                 args.inactive, args.batches, args.batches - 1);
+        args.batches - 1
     } else {
         args.inactive
     };

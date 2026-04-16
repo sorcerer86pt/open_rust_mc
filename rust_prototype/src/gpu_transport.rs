@@ -686,6 +686,16 @@ transport_persistent(
     const double* __restrict__ sab_cdf_mu_arr,
     const double* __restrict__ sab_xs_arr,
     double sab_energy_max,
+    // Discrete inelastic levels
+    const double* __restrict__ level_q_values,
+    const double* __restrict__ level_thresholds,
+    const int* __restrict__ level_offsets,
+    const int* __restrict__ level_counts,
+    const float* __restrict__ level_basis,
+    const double* __restrict__ level_coeffs,
+    const int* __restrict__ level_basis_offsets,
+    const int* __restrict__ level_coeffs_offsets,
+    const int* __restrict__ level_has_kernel,
     // RNG
     unsigned long long* __restrict__ rng_state_arr,
     unsigned long long* __restrict__ rng_inc_arr,
@@ -987,15 +997,53 @@ transport_persistent(
                 // Capture — absorbed
                 is_alive = 0;
             } else {
-                // Inelastic / (n,2n) / (n,3n) — scatter with energy loss
-                // Two-body kinematics: E_out = ((A/(A+1))^2) * E_in + Q*(A+1)/A
-                // For heavy nuclei (A~235): ~99% energy retained minus Q
-                // Sample Q uniformly from first discrete levels
-                double Q = -(0.045e6 + pcg_uniform(&rng) * 0.955e6); // 45 keV to 1 MeV
-                double E_out = E * (A/(A+1.0)) * (A/(A+1.0)) + Q * (A+1.0)/A;
-                if (E_out <= 0.0) E_out = E * 0.5; // below threshold: approximate
+                // Inelastic / (n,2n) / (n,3n) — proper discrete level sampling
+                // Reconstruct per-level XS, sample proportional to cross-section
+                int lv_off = __ldg(&level_offsets[hit_nuc_idx]);
+                int n_levels = __ldg(&level_counts[hit_nuc_idx]);
+
+                double Q = -0.5e6; // fallback if no levels
+                if (n_levels > 0) {
+                    // Reconstruct level XS and build CDF
+                    double level_xs_sum = 0.0;
+                    double level_xs_cum[64]; // max 64 levels
+                    int n_active = 0;
+                    for (int l = 0; l < n_levels && l < 64; l++) {
+                        int gl = lv_off + l; // global level index
+                        double lxs = 0.0;
+                        if (E >= __ldg(&level_thresholds[gl]) && __ldg(&level_has_kernel[gl])) {
+                            int bo = __ldg(&level_basis_offsets[gl]);
+                            int co = __ldg(&level_coeffs_offsets[gl]);
+                            // Use parent nuclide energy index (already computed)
+                            int g_off_nuc = __ldg(&grid_offsets[hit_nuc_idx]);
+                            int n_e_nuc = __ldg(&n_energies[hit_nuc_idx]);
+                            int e_idx_l = energy_index(&all_energy_grids[g_off_nuc], n_e_nuc, E);
+                            lxs = svd_reconstruct(&level_basis[bo], &level_coeffs[co], e_idx_l, rank);
+                        }
+                        level_xs_sum += lxs;
+                        level_xs_cum[l] = level_xs_sum;
+                        n_active++;
+                    }
+
+                    // Sample level from CDF
+                    if (level_xs_sum > 0.0) {
+                        double xi_lev = pcg_uniform(&rng) * level_xs_sum;
+                        int selected = 0;
+                        for (int l = 0; l < n_active; l++) {
+                            if (xi_lev < level_xs_cum[l]) { selected = l; break; }
+                            selected = l;
+                        }
+                        Q = __ldg(&level_q_values[lv_off + selected]);
+                    }
+                }
+
+                // Two-body kinematics with selected Q-value
+                double A_ratio = A / (A + 1.0);
+                double E_out = E * A_ratio * A_ratio + Q * (A + 1.0) / A;
+                if (E_out <= 0.0) E_out = E * 0.01; // below threshold fallback
                 E = fmax(E_out, 1e-11);
-                // Isotropic direction
+
+                // Isotropic scattering in CM frame
                 double mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
                 double phi = 2.0*PI*pcg_uniform(&rng);
                 double sin_t = sqrt(fmax(0.0, 1.0 - mu_cm*mu_cm));
@@ -1060,6 +1108,16 @@ pub struct GpuNuclideData {
     pub nu_bar_values: CudaSlice<f64>,
     pub nu_bar_offsets: CudaSlice<i32>,
     pub nu_bar_sizes: CudaSlice<i32>,
+    // Discrete inelastic levels (Q-values + SVD basis for XS-proportional sampling)
+    pub level_q_values: CudaSlice<f64>,      // flat: all Q-values concatenated
+    pub level_thresholds: CudaSlice<f64>,    // flat: all thresholds concatenated
+    pub level_offsets: CudaSlice<i32>,        // per-nuclide offset into level arrays
+    pub level_counts: CudaSlice<i32>,         // per-nuclide number of levels
+    pub level_basis: CudaSlice<f32>,          // flat: SVD basis for each level's XS
+    pub level_coeffs: CudaSlice<f64>,         // flat: SVD coefficients for each level
+    pub level_basis_offsets: CudaSlice<i32>,  // per-level offset into level_basis
+    pub level_coeffs_offsets: CudaSlice<i32>, // per-level offset into level_coeffs
+    pub level_has_kernel: CudaSlice<i32>,     // per-level: 1 if kernel exists, 0 if not
     // Fission energy distributions (tabulated CDF)
     pub fis_inc_energies: CudaSlice<f64>,
     pub fis_dist_offsets: CudaSlice<i32>,
@@ -1200,6 +1258,47 @@ impl GpuTransportContext {
         if all_coeffs_vec.is_empty() { all_coeffs_vec.push(0.0); }
         if all_grids_vec.is_empty() { all_grids_vec.push(0.0); }
 
+        // ── Pack discrete inelastic levels (Q-values + SVD basis) ──
+        let mut lev_q_vec: Vec<f64> = Vec::new();
+        let mut lev_thr_vec: Vec<f64> = Vec::new();
+        let mut lev_off_vec = vec![0_i32; n_nuc];
+        let mut lev_cnt_vec = vec![0_i32; n_nuc];
+        let mut lev_basis_vec: Vec<f32> = Vec::new();
+        let mut lev_coeffs_vec: Vec<f64> = Vec::new();
+        let mut lev_basis_off_vec: Vec<i32> = Vec::new();
+        let mut lev_coeffs_off_vec: Vec<i32> = Vec::new();
+        let mut lev_has_kernel_vec: Vec<i32> = Vec::new();
+
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            lev_off_vec[nuc_idx] = lev_q_vec.len() as i32;
+            lev_cnt_vec[nuc_idx] = nuc.discrete_levels.len() as i32;
+            for lev in &nuc.discrete_levels {
+                lev_q_vec.push(lev.info.q_value);
+                lev_thr_vec.push(lev.info.threshold);
+                if let Some(ref rk) = lev.kernel {
+                    lev_has_kernel_vec.push(1);
+                    lev_basis_off_vec.push(lev_basis_vec.len() as i32);
+                    lev_basis_vec.extend_from_slice(rk.kernel.basis_f32());
+                    lev_coeffs_off_vec.push(lev_coeffs_vec.len() as i32);
+                    lev_coeffs_vec.extend_from_slice(&rk.coeffs);
+                } else {
+                    lev_has_kernel_vec.push(0);
+                    lev_basis_off_vec.push(0);
+                    lev_coeffs_off_vec.push(0);
+                }
+            }
+        }
+        if lev_q_vec.is_empty() {
+            lev_q_vec.push(0.0); lev_thr_vec.push(0.0);
+            lev_has_kernel_vec.push(0); lev_basis_off_vec.push(0); lev_coeffs_off_vec.push(0);
+        }
+        if lev_basis_vec.is_empty() { lev_basis_vec.push(0.0); }
+        if lev_coeffs_vec.is_empty() { lev_coeffs_vec.push(0.0); }
+
+        let n_total_levels: usize = lev_cnt_vec.iter().map(|&c| c as usize).sum();
+        println!("  GPU: {} discrete levels, {:.1} MB level basis",
+                 n_total_levels, lev_basis_vec.len() as f64 * 4.0 / 1e6);
+
         // ── Pack nu-bar tables (flat with offsets) ──
         let mut nb_energies_vec: Vec<f64> = Vec::new();
         let mut nb_values_vec: Vec<f64> = Vec::new();
@@ -1261,6 +1360,15 @@ impl GpuTransportContext {
             has_reaction: self.stream.clone_htod(&has_reaction_vec)?,
             coeffs_offsets: self.stream.clone_htod(&coeffs_offsets_vec)?,
             rank: rank as i32,
+            level_q_values: self.stream.clone_htod(&lev_q_vec)?,
+            level_thresholds: self.stream.clone_htod(&lev_thr_vec)?,
+            level_offsets: self.stream.clone_htod(&lev_off_vec)?,
+            level_counts: self.stream.clone_htod(&lev_cnt_vec)?,
+            level_basis: self.stream.clone_htod(&lev_basis_vec)?,
+            level_coeffs: self.stream.clone_htod(&lev_coeffs_vec)?,
+            level_basis_offsets: self.stream.clone_htod(&lev_basis_off_vec)?,
+            level_coeffs_offsets: self.stream.clone_htod(&lev_coeffs_off_vec)?,
+            level_has_kernel: self.stream.clone_htod(&lev_has_kernel_vec)?,
             nu_bar_energies: self.stream.clone_htod(&nb_energies_vec)?,
             nu_bar_values: self.stream.clone_htod(&nb_values_vec)?,
             nu_bar_offsets: self.stream.clone_htod(&nb_offsets_vec)?,
@@ -1600,6 +1708,16 @@ impl GpuTransportContext {
                     .arg(&sab_data.cdf_mu)
                     .arg(&sab_data.xs)
                     .arg(&sab_data.energy_max)
+                    // Discrete levels
+                    .arg(&nuc_data.level_q_values)
+                    .arg(&nuc_data.level_thresholds)
+                    .arg(&nuc_data.level_offsets)
+                    .arg(&nuc_data.level_counts)
+                    .arg(&nuc_data.level_basis)
+                    .arg(&nuc_data.level_coeffs)
+                    .arg(&nuc_data.level_basis_offsets)
+                    .arg(&nuc_data.level_coeffs_offsets)
+                    .arg(&nuc_data.level_has_kernel)
                     // RNG
                     .arg(&mut d_rng_state).arg(&mut d_rng_inc)
                     .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
