@@ -1081,9 +1081,12 @@ transport_persistent(
         }
 
         // ── XS lookup (all in registers) ──
+        // Store per-nuclide macro XS for nuclide sampling
         int n_nuc = __ldg(&mat_n_nuclides[mat]);
         double sum_total=0, sum_elastic=0, sum_fission=0, sum_capture=0;
-        double best_awr = __ldg(&awr_table[0]), best_nu = __ldg(&nu_bar_const[0]);
+        double nuc_macro_t[4] = {0,0,0,0}; // per-nuclide macroscopic total
+        double nuc_sig_el[4] = {0,0,0,0};  // per-nuclide macro elastic
+        double nuc_sig_fis[4] = {0,0,0,0}; // per-nuclide macro fission
 
         for (int i = 0; i < n_nuc; i++) {
             int nuc_idx = __ldg(&mat_nuclide_idx[mat*4+i]);
@@ -1106,14 +1109,13 @@ transport_persistent(
                 }
             }
             double micro_t = sig_el + sig_fis + sig_cap + sig_rest;
-            sum_total += N_i * micro_t;
+            nuc_macro_t[i] = N_i * micro_t;
+            nuc_sig_el[i]  = N_i * sig_el;
+            nuc_sig_fis[i] = N_i * sig_fis;
+            sum_total   += N_i * micro_t;
             sum_elastic += N_i * sig_el;
             sum_fission += N_i * sig_fis;
             sum_capture += N_i * sig_cap;
-            if (sig_fis > 0.0) {
-                best_awr = __ldg(&awr_table[nuc_idx]);
-                best_nu = __ldg(&nu_bar_const[nuc_idx]);
-            }
         }
 
         if (sum_total <= 0.0) { is_alive = 0; break; }
@@ -1143,32 +1145,123 @@ transport_persistent(
             cell = find_cell(px, py, pz);
             if (cell < 0) { is_alive = 0; lcnt_leak++; break; }
 
-            double xi = pcg_uniform(&rng) * sum_total;
-            if (xi < sum_elastic) {
-                // Elastic scatter
-                double A = best_awr;
-                double mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
-                double alpha = ((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
-                E = E * (1.0+alpha+(1.0-alpha)*mu_cm) / 2.0;
-                if (E < 1e-11) E = 1e-11;
-                double mu_lab = (1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm);
-                double phi = 2.0*PI*pcg_uniform(&rng);
-                double sin_mu = sqrt(fmax(0.0, 1.0-mu_lab*mu_lab));
-                double w2 = dz*dz;
-                if (w2 < 0.999) {
-                    double inv_sq = 1.0/sqrt(1.0-w2);
-                    double dx2=mu_lab*dx+sin_mu*(dx*dz*cos(phi)-dy*sin(phi))*inv_sq;
-                    double dy2=mu_lab*dy+sin_mu*(dy*dz*cos(phi)+dx*sin(phi))*inv_sq;
-                    double dz2=mu_lab*dz-sin_mu*sqrt(1.0-w2)*cos(phi);
-                    dx=dx2; dy=dy2; dz=dz2;
+            // ── Sample which NUCLIDE was hit (proportional to macro XS) ──
+            double xi_nuc = pcg_uniform(&rng) * sum_total;
+            double cumul = 0.0;
+            int hit_local = 0;  // local index within material
+            for (int i = 0; i < n_nuc; i++) {
+                cumul += nuc_macro_t[i];
+                if (xi_nuc < cumul) { hit_local = i; break; }
+            }
+            int hit_nuc_idx = __ldg(&mat_nuclide_idx[mat*4+hit_local]);
+            double A = __ldg(&awr_table[hit_nuc_idx]);
+
+            // ── Sample reaction type for this nuclide ──
+            double xi_rxn = pcg_uniform(&rng) * nuc_macro_t[hit_local];
+            if (xi_rxn < nuc_sig_el[hit_local]) {
+                // ══ Elastic scatter with correct AWR ══
+                // Cell temperatures: fuel=900K, clad=600K, water=600K
+                double cell_kT;
+                if (cell == CELL_FUEL) cell_kT = 900.0 * 8.617333262e-5;
+                else cell_kT = 600.0 * 8.617333262e-5; // clad & water
+
+                // Free-gas thermal scattering for E < 400*kT
+                // (target nucleus has thermal motion — critical for H-1)
+                if (E < 400.0 * cell_kT && A < 10.0) {
+                    // Box-Muller target velocity sampling
+                    double sigma = sqrt(cell_kT / A);
+                    double v_n = sqrt(2.0 * E);
+
+                    // Target velocity components (Box-Muller)
+                    double u1 = pcg_uniform(&rng), u2 = pcg_uniform(&rng);
+                    double r_bm = sigma * sqrt(-2.0 * log(fmax(u1, 1e-30)));
+                    double theta_bm = 2.0 * PI * u2;
+                    double vt_x = r_bm * cos(theta_bm);
+                    double vt_y = r_bm * sin(theta_bm);
+                    u1 = pcg_uniform(&rng); u2 = pcg_uniform(&rng);
+                    r_bm = sigma * sqrt(-2.0 * log(fmax(u1, 1e-30)));
+                    theta_bm = 2.0 * PI * u2;
+                    double vt_z = r_bm * cos(theta_bm);
+
+                    // Neutron velocity in lab
+                    double vn_x = dx * v_n, vn_y = dy * v_n, vn_z = dz * v_n;
+
+                    // Relative velocity
+                    double vr_x = vn_x - vt_x, vr_y = vn_y - vt_y, vr_z = vn_z - vt_z;
+                    double v_rel = sqrt(vr_x*vr_x + vr_y*vr_y + vr_z*vr_z);
+                    if (v_rel < 1e-20) v_rel = 1e-20;
+
+                    // CM velocity
+                    double inv_ap1 = 1.0 / (1.0 + A);
+                    double vcm_x = (vn_x + A*vt_x) * inv_ap1;
+                    double vcm_y = (vn_y + A*vt_y) * inv_ap1;
+                    double vcm_z = (vn_z + A*vt_z) * inv_ap1;
+
+                    // Neutron speed in CM = v_rel * A/(A+1)
+                    double v_cm_n = v_rel * A * inv_ap1;
+
+                    // Isotropic scatter in CM
+                    double mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
+                    double phi = 2.0*PI*pcg_uniform(&rng);
+                    double sin_t = sqrt(fmax(0.0, 1.0-mu_cm*mu_cm));
+
+                    // Scattered direction in CM (relative to v_rel direction)
+                    double vr_hat_x = vr_x/v_rel, vr_hat_y = vr_y/v_rel, vr_hat_z = vr_z/v_rel;
+                    // Build orthonormal basis from vr_hat
+                    double abs_z = fabs(vr_hat_z);
+                    double perp_x, perp_y, perp_z;
+                    if (abs_z < 0.999) {
+                        double inv_p = 1.0/sqrt(1.0-vr_hat_z*vr_hat_z);
+                        perp_x = -vr_hat_y*inv_p; perp_y = vr_hat_x*inv_p; perp_z = 0.0;
+                    } else {
+                        double inv_p = 1.0/sqrt(1.0-vr_hat_x*vr_hat_x);
+                        perp_x = 0.0; perp_y = -vr_hat_z*inv_p; perp_z = vr_hat_y*inv_p;
+                    }
+                    // cross product for third basis vector
+                    double perp2_x = vr_hat_y*perp_z - vr_hat_z*perp_y;
+                    double perp2_y = vr_hat_z*perp_x - vr_hat_x*perp_z;
+                    double perp2_z = vr_hat_x*perp_y - vr_hat_y*perp_x;
+
+                    double scat_x = mu_cm*vr_hat_x + sin_t*(cos(phi)*perp_x + sin(phi)*perp2_x);
+                    double scat_y = mu_cm*vr_hat_y + sin_t*(cos(phi)*perp_y + sin(phi)*perp2_y);
+                    double scat_z = mu_cm*vr_hat_z + sin_t*(cos(phi)*perp_z + sin(phi)*perp2_z);
+
+                    // Lab velocity = CM velocity + scattered CM neutron velocity
+                    double vout_x = vcm_x + v_cm_n * scat_x;
+                    double vout_y = vcm_y + v_cm_n * scat_y;
+                    double vout_z = vcm_z + v_cm_n * scat_z;
+
+                    double v_out = sqrt(vout_x*vout_x + vout_y*vout_y + vout_z*vout_z);
+                    E = 0.5 * v_out * v_out;
+                    if (E < 1e-11) E = 1e-11;
+                    if (v_out > 1e-20) {
+                        dx = vout_x/v_out; dy = vout_y/v_out; dz = vout_z/v_out;
+                    }
                 } else {
-                    double sign = (dz>0.0)?1.0:-1.0;
-                    dx=sin_mu*cos(phi); dy=sin_mu*sin(phi)*sign; dz=mu_lab*sign;
+                    // Standard two-body elastic (stationary target)
+                    double mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
+                    double alpha = ((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
+                    E = E * (1.0+alpha+(1.0-alpha)*mu_cm) / 2.0;
+                    if (E < 1e-11) E = 1e-11;
+                    double mu_lab = (1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm);
+                    double phi = 2.0*PI*pcg_uniform(&rng);
+                    double sin_mu = sqrt(fmax(0.0, 1.0-mu_lab*mu_lab));
+                    double w2 = dz*dz;
+                    if (w2 < 0.999) {
+                        double inv_sq = 1.0/sqrt(1.0-w2);
+                        double dx2=mu_lab*dx+sin_mu*(dx*dz*cos(phi)-dy*sin(phi))*inv_sq;
+                        double dy2=mu_lab*dy+sin_mu*(dy*dz*cos(phi)+dx*sin(phi))*inv_sq;
+                        double dz2=mu_lab*dz-sin_mu*sqrt(1.0-w2)*cos(phi);
+                        dx=dx2; dy=dy2; dz=dz2;
+                    } else {
+                        double sign = (dz>0.0)?1.0:-1.0;
+                        dx=sin_mu*cos(phi); dy=sin_mu*sin(phi)*sign; dz=mu_lab*sign;
+                    }
                 }
-            } else if (xi < sum_elastic+sum_fission) {
-                // Fission
+            } else if (xi_rxn < nuc_sig_el[hit_local]+nuc_sig_fis[hit_local]) {
+                // Fission — use hit nuclide's nu-bar
                 lcnt_fis++;
-                double nu = best_nu;
+                double nu = __ldg(&nu_bar_const[hit_nuc_idx]);
                 int n_sites = (int)nu;
                 if (pcg_uniform(&rng) < (nu-(double)n_sites)) n_sites++;
                 for (int s = 0; s < n_sites; s++) {
