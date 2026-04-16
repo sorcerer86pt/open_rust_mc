@@ -1,0 +1,4 @@
+# Track benchmark result CSVs — these are committed with the paper
+# Ignore temp/intermediate files only
+*.tmp
+*.log
