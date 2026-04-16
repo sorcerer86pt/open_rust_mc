@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::hint::black_box;
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use open_rust_mc::kernel;
 use open_rust_mc::loader::SvdFactors;
 use open_rust_mc::table::PointwiseTable;

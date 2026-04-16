@@ -1,13 +1,11 @@
 //! Memory and speed comparison: SVD kernel vs. pointwise tables.
 use std::path::PathBuf;
-use std::time::Instant;
 use std::fs;
 use std::io::{self, Write};
 
 use open_rust_mc::decompose;
 use open_rust_mc::hdf5_reader::NuclideData;
 use open_rust_mc::kernel::SvdKernel;
-use open_rust_mc::table::PointwiseTable;
 
 fn main() {
     let raw_args: Vec<String> = std::env::args().skip(1).collect();

@@ -10,6 +10,7 @@
 //! Usage:
 //!   pwr_pincell <data_dir> [--rank K] [--batches N] [--particles N] [--mode MODE] [--seeds S]
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -154,6 +155,7 @@ fn run_multi_seed<XS: XsProvider>(
 
         if args.seeds > 1 {
             print!("  Seed {seed}: ");
+            let _ = std::io::stdout().flush();
         } else {
             println!();
         }

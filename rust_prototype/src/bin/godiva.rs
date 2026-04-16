@@ -12,6 +12,7 @@
 //! Examples:
 //!   godiva data/ --mode both --seeds 5 --particles 20000 --batches 150
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -153,6 +154,7 @@ fn run_multi_seed<XS: XsProvider>(
 
         if args.seeds > 1 {
             print!("  Seed {seed}: ");
+            let _ = std::io::stdout().flush();
         } else {
             println!();
         }
@@ -240,6 +242,12 @@ fn print_benchmark(r: &BenchmarkResult, _particles: u32) {
 
     println!("  {}:", r.label);
     println!("    k_eff            = {:.5} +/- {:.5}", r.k_eff_mean(), r.k_eff_std());
+    if n_seeds > 1 {
+        for sr in &r.seed_results {
+            println!("      seed {}: k={:.5} +/- {:.5}  ({:.1} ns/p)",
+                     sr.seed, sr.k_mean, sr.k_std, sr.ns_per_particle());
+        }
+    }
     println!("    delta(exp)       = {delta_pcm:.0} pcm");
     if n_seeds > 1 {
         println!("    ns/particle      = {:.2} +/- {:.2} ({n_seeds} seeds)",

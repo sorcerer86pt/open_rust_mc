@@ -192,7 +192,7 @@ mod cuda_main {
                 let cpu_ns = cpu_ms * 1e6 / n_particles as f64;
 
                 // GPU
-                let gpu_results = gpu.reconstruct_batch(basis, coeffs, &energy_indices, n_e, rank)
+                let _ = gpu.reconstruct_batch(basis, coeffs, &energy_indices, n_e, rank)
                     .expect("GPU failed");
                 // Timed run (after warmup from above)
                 let t1 = Instant::now();

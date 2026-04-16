@@ -8,6 +8,8 @@
 //!   5. Normalize the fission bank -> new source bank
 //!   6. Repeat
 
+use std::io::Write;
+
 use rayon::prelude::*;
 
 use crate::geometry::{self, Vec3};
@@ -277,20 +279,22 @@ fn transport_particle<XS: XsProvider>(
                     Some(hit) => {
                         // Nudge proportional to distance — ensures clean surface crossing
                         let nudge = (hit.distance * 1e-8).max(1e-8);
-                        particle.advance(hit.distance + nudge);
                         let bc = surfaces[hit.surface_idx].boundary_condition();
                         match bc {
                             BoundaryCondition::Vacuum => {
+                                particle.advance(hit.distance);
                                 particle.kill();
                                 result.leakage += 1;
                                 break;
                             }
                             BoundaryCondition::Reflective => {
+                                particle.advance(hit.distance);
                                 let n = surfaces[hit.surface_idx].normal_at(particle.pos);
                                 let d = particle.dir;
                                 particle.dir = d - n * (2.0 * d.dot(n));
                             }
                             BoundaryCondition::Transmission => {
+                                particle.advance(hit.distance + nudge);
                                 if let Some(next) = hit.next_cell_idx {
                                     particle.cell_idx = next;
                                 } else {
@@ -374,21 +378,26 @@ fn transport_particle<XS: XsProvider>(
 
         match trace {
             Some(hit) if hit.distance < dist_collision => {
-                particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
                 result.surface_crossings += 1;
-
                 let bc = surfaces[hit.surface_idx].boundary_condition();
                 match bc {
                     BoundaryCondition::Vacuum => {
+                        particle.advance(hit.distance);
                         particle.kill();
                         result.leakage += 1;
                     }
                     BoundaryCondition::Reflective => {
+                        // Advance exactly to the surface (no overshoot), then reflect.
+                        // COINCIDENCE_TOL in Surface::distance() filters the t≈0
+                        // re-intersection, preventing infinite bounce loops.
+                        particle.advance(hit.distance);
                         let n = surfaces[hit.surface_idx].normal_at(particle.pos);
                         let d = particle.dir;
                         particle.dir = d - n * (2.0 * d.dot(n));
                     }
                     BoundaryCondition::Transmission => {
+                        // Overshoot slightly to land clearly inside the next cell.
+                        particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
                         if let Some(next) = hit.next_cell_idx {
                             particle.cell_idx = next;
                         } else {
@@ -602,7 +611,7 @@ fn transport_particle_delta<XS: XsProvider>(
                         break;
                     }
                     BoundaryCondition::Reflective => {
-                        particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
+                        particle.advance(hit.distance);
                         let n = surfaces[hit.surface_idx].normal_at(particle.pos);
                         let d = particle.dir;
                         particle.dir = d - n * (2.0 * d.dot(n));
@@ -648,20 +657,22 @@ fn transport_particle_delta<XS: XsProvider>(
                 );
                 match trace {
                     Some(hit) => {
-                        particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
                         let bc = surfaces[hit.surface_idx].boundary_condition();
                         match bc {
                             BoundaryCondition::Vacuum => {
+                                particle.advance(hit.distance);
                                 particle.kill();
                                 result.leakage += 1;
                                 break;
                             }
                             BoundaryCondition::Reflective => {
+                                particle.advance(hit.distance);
                                 let n = surfaces[hit.surface_idx].normal_at(particle.pos);
                                 let d = particle.dir;
                                 particle.dir = d - n * (2.0 * d.dot(n));
                             }
                             BoundaryCondition::Transmission => {
+                                particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
                                 if let Some(next) = hit.next_cell_idx {
                                     particle.cell_idx = next;
                                 } else {
@@ -859,6 +870,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
              fiss={fissions}  leak={leakage}  therm={thermal_scatters}  \
              surf={surface_crossings}{active}"
         );
+        let _ = std::io::stdout().flush();
 
         results.push(result);
 
@@ -1080,7 +1092,7 @@ mod tests {
     #[test]
     fn tracking_mode_single_material_is_surface() {
         // Single material → surface tracking
-        let surfaces = vec![
+        let _surfaces = vec![
             Surface::Sphere {
                 center: Vec3::new(0.0, 0.0, 0.0), radius: 5.0,
                 bc: BoundaryCondition::Vacuum,
@@ -1109,7 +1121,7 @@ mod tests {
     #[test]
     fn tracking_mode_high_contrast_falls_back() {
         // Two materials with high XS contrast → should fall back to surface
-        let surfaces = vec![
+        let _surfaces = vec![
             Surface::Sphere {
                 center: Vec3::new(0.0, 0.0, 0.0), radius: 5.0,
                 bc: BoundaryCondition::Transmission,

@@ -47,7 +47,7 @@ extern "C" __global__ void svd_reconstruct(
 
     /// GPU context for SVD reconstruction.
     pub struct GpuSvdContext {
-        ctx: Arc<CudaContext>,
+        _ctx: Arc<CudaContext>,
         stream: Arc<CudaStream>,
         func: CudaFunction,
     }
@@ -66,7 +66,7 @@ extern "C" __global__ void svd_reconstruct(
 
             println!("  GPU initialized (CUDA)");
 
-            Ok(Self { ctx, stream, func })
+            Ok(Self { _ctx: ctx, stream, func })
         }
 
         /// Batch SVD reconstruction on GPU.
@@ -84,9 +84,9 @@ extern "C" __global__ void svd_reconstruct(
             let n_particles = energy_indices.len();
 
             // Upload to GPU
-            let d_basis = self.stream.memcpy_stod(basis)?;
-            let d_coeffs = self.stream.memcpy_stod(coeffs)?;
-            let d_indices = self.stream.memcpy_stod(energy_indices)?;
+            let d_basis = self.stream.clone_htod(basis)?;
+            let d_coeffs = self.stream.clone_htod(coeffs)?;
+            let d_indices = self.stream.clone_htod(energy_indices)?;
             let mut d_output: CudaSlice<f64> = self.stream.alloc_zeros(n_particles)?;
 
             // Launch config
@@ -116,7 +116,7 @@ extern "C" __global__ void svd_reconstruct(
             }
 
             // Download results
-            let output = self.stream.memcpy_dtov(&d_output)?;
+            let output = self.stream.clone_dtoh(&d_output)?;
             Ok(output)
         }
     }
