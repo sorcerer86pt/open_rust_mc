@@ -1,0 +1,158 @@
+Fabio  rust_prototype  ➜ (main)  ♥ 20:22  cargo run --release --features cuda --bin gpu_pwr_bench -- ../data/endfb-vii.1-hdf5/neutron --geometry pwr --rank 6 --batches 150 --inactive 20  --particles 20000 --seeds 5
+warning: field `k_count_alive` is never read
+  --> src\gpu_transport.rs:33:5
+   |
+29 | pub struct GpuTransportContext {
+   |            ------------------- field in this struct
+...
+33 |     k_count_alive: CudaFunction,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `open-rust-mc` (lib) generated 1 warning
+   Compiling open-rust-mc v0.1.0 (E:\git\open_rust_mc\rust_prototype)
+    Finished `release` profile [optimized] target(s) in 4.13sch(bin)
+     Running `target\release\gpu_pwr_bench.exe ../data/endfb-vii.1-hdf5/neutron --geometry pwr --rank 6 --batches 150 --inactive 20 --particles 20000 --seeds 5`
+=== GPU PWR pin cell — Paper Benchmark ===
+
+Data dir:     ../data/endfb-vii.1-hdf5/neutron
+Geometry:     PWR pin cell
+SVD rank:     6
+Batches:      150 (20 inactive + 130 active)
+Particles:    20000/batch
+Seeds:        5
+Histories:    2600000 per seed
+
+── Loading nuclear data (SVD, rank=6) ──
+  Loading U235.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\U235.h5 (rank=6)...
+    AWR = 233.025 (6 temps, 83114 energy pts)
+    nu-bar(E): 79 pts, 2.435 @ thermal, 2.530 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true)
+    Fission spectrum: 20 energies
+    Elastic angular dist: 49 energies, CM=true
+    URR: 19 energies, 20 bands, 2250–25000 eV
+    MT=2 (elastic)
+    MT=4 (inelastic)
+    MT=16 (n,2n)
+    MT=17 (n,3n)
+    MT=18 (fission)
+    MT=102 (capture)
+  Loading U238.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\U238.h5 (rank=6)...
+    AWR = 236.006 (6 temps, 185903 energy pts)
+    nu-bar(E): 10 pts, 2.483 @ thermal, 2.554 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true)
+    Fission spectrum: 25 energies
+    Elastic angular dist: 38 energies, CM=true
+    URR: 18 energies, 20 bands, 20000–149029 eV
+    MT=2 (elastic)
+    MT=16 (n,2n)
+    MT=17 (n,3n)
+    MT=18 (fission)
+    MT=102 (capture)
+  Loading O16.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\O16.h5 (rank=6)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true)
+    Elastic angular dist: 1175 energies, CM=true
+    MT=2 (elastic)
+    MT=4 (inelastic)
+    MT=16 (n,2n)
+    MT=102 (capture)
+  Loading H1.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\H1.h5 (rank=6)...
+    AWR = 0.999 (6 temps, 590 energy pts)
+    Elastic angular dist: 96 energies, CM=true
+    MT=2 (elastic)
+    MT=102 (capture)
+  Loading Zr90.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr90.h5 (rank=6)...
+    AWR = 89.132 (6 temps, 5263 energy pts)
+    Discrete levels: 10/10 (continuum=true)
+    Elastic angular dist: 66 energies, CM=true
+    URR: 13 energies, 20 bands, 53500–100000 eV
+    MT=2 (elastic)
+    MT=16 (n,2n)
+    MT=102 (capture)
+  Loading Zr91.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr91.h5 (rank=6)...
+    AWR = 90.125 (6 temps, 12167 energy pts)
+    Discrete levels: 10/10 (continuum=true)
+    Elastic angular dist: 63 energies, CM=true
+    URR: 15 energies, 20 bands, 10000–100000 eV
+    MT=2 (elastic)
+    MT=16 (n,2n)
+    MT=102 (capture)
+  Loading Zr92.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr92.h5 (rank=6)...
+    AWR = 91.115 (6 temps, 14161 energy pts)
+    Discrete levels: 10/10 (continuum=true)
+    Elastic angular dist: 68 energies, CM=true
+    URR: 3 energies, 20 bands, 71000–100000 eV
+    MT=2 (elastic)
+    MT=16 (n,2n)
+    MT=17 (n,3n)
+    MT=102 (capture)
+  Loading Zr94.h5...
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr94.h5 (rank=6)...
+    AWR = 93.100 (6 temps, 13810 energy pts)
+    Discrete levels: 13/13 (continuum=true)
+    Elastic angular dist: 62 energies, CM=true
+    URR: 2 energies, 20 bands, 90000–100000 eV
+    MT=2 (elastic)
+    MT=16 (n,2n)
+    MT=17 (n,3n)
+    MT=102 (capture)
+  Loaded in 1180 ms
+
+── Initializing GPU transport ──
+  GPU transport kernels compiled (8 kernels)
+  GPU: 133 discrete levels, 92.4 MB level basis
+  GPU: basis=38.5 MB, grids=2.5 MB, nu-bar=89 pts, fis_spec=29015 pts
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(a,b): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU ready in 307 ms
+
+── GPU SVD PWR pin cell (5 seeds) ──
+  Seed 0: k=1.38058  31558ms  (12137.5 ns/p)
+  Seed 1: k=1.38179  32034ms  (12320.8 ns/p)
+  Seed 2: k=1.38106  32483ms  (12493.5 ns/p)
+  Seed 3: k=1.38197  34062ms  (13100.9 ns/p)
+  Seed 4: k=1.38124  33448ms  (12864.6 ns/p)
+
+============================================================
+BENCHMARK RESULTS - PWR pin cell
+============================================================
+  GPU SVD PWR pin cell:
+    k_inf            = 1.38133 +/- 0.00056 (5 seeds)
+      seed 0: k=1.38058  (12137.5 ns/p)
+      seed 1: k=1.38179  (12320.8 ns/p)
+      seed 2: k=1.38106  (12493.5 ns/p)
+      seed 3: k=1.38197  (13100.9 ns/p)
+      seed 4: k=1.38124  (12864.6 ns/p)
+    ns/particle      = 12583.47 +/- 394.58
+    Total sim time   = 163585 ms (5 runs)
+
+  Load time = 1180 ms (CPU) + 307 ms (GPU)
+  Physics:  SVD rank=6, S(a,b)=H2O, nu-bar=table, fission=CDF

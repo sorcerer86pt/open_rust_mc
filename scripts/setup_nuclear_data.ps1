@@ -69,7 +69,7 @@ function Download-And-Extract {
 
     Remove-Item $archive -ErrorAction SilentlyContinue
     $count = (Get-ChildItem "$OutDir/neutron/*.h5" -ErrorAction SilentlyContinue).Count
-    Write-Host "  $Label: $count nuclide files extracted" -ForegroundColor Green
+    Write-Host "  ${Label}: $count nuclide files extracted" -ForegroundColor Green
 }
 
 Write-Host "`n========================================" -ForegroundColor Cyan
@@ -100,7 +100,7 @@ if ($All -or $Endf8) {
 if ($All -or $Jeff) {
     Write-Host "`n[3/3] JEFF-3.3 HDF5" -ForegroundColor Cyan
     Download-And-Extract `
-        -Url "https://anl.box.com/shared/static/ddetxzp0gv1buk1jt8nne4jnl74ehag4.xz" `
+        -Url "https://anl.box.com/shared/static/3v7pru88pgm6f67sh6vcsod97m52asof.xz" `
         -OutDir "$DataDir/jeff-3.3-hdf5" `
         -Label "jeff-3.3-hdf5"
 } else {

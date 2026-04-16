@@ -22,7 +22,7 @@ param(
     [switch]$Quick,       # Reduced stats for quick testing
     [switch]$GpuGodiva,   # Also run GPU Godiva at each rank
     [switch]$GpuPwr,      # Also run GPU PWR at each rank
-    [string]$DataDir = "data/endfb-vii.1-hdf5/neutron"
+    [string]$DataDir = "../data/endfb-vii.1-hdf5/neutron"
 )
 
 if ($Quick) {

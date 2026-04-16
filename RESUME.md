@@ -161,3 +161,23 @@ run_paper_full.ps1                        Full benchmark script (CPU + GPU + sca
 4. Run OpenMC 10-seed reference via WSL (verify Table mode matches)
 5. Update paper tables + appendix with corrected numbers
 6. OpenCL port (gpu/opencl/)
+
+
+
+### NEW - Things to check
+1. Thermal Scattering Replacement (S(α,β))This is a high-risk area for bias. In your Rust code:Rustif let Some(tsl) = xs_provider.thermal_scattering(nuc_idx) {
+    if particle.energy < tsl.energy_max {
+        // ... replaces free-atom elastic with thermal total ...
+        xs.total += delta;
+        thermal_xs_add[i] = thermal_total;
+        xs.elastic = 0.0; // Elastic is suppressed
+    }
+}
+Check in CUDA:Does the GPU kernel correctly suppress the elastic scattering cross-section when S(α,β) is active?If the GPU adds the thermal scattering XS on top of the SVD-reconstructed elastic XS (instead of replacing it), you will have an artificially high scattering rate, leading to a significant $k_{eff}$ bias.2. Surface "Nudging" and PrecisionYour Rust code handles surface crossings with a specific nudge:Rustlet nudge = (hit.distance * 1e-8).max(1e-8);
+particle.advance(hit.distance + nudge);
+Check in CUDA:The CUDA kernel uses d_s + 1e-10 or best_t + 1e-10.If the GPU nudge is too small (e.g., 1e-10 vs the Rust 1e-8), floating-point errors in the find_cell function might cause "surface stuckness," where a particle thinks it is in the wrong cell after a crossing. In a PWR pin cell, if a neutron "sticks" in the fuel instead of entering the moderator, the spectrum will be much harder, raising $k_{eff}$.3. Reaction Sampling OrderIn the Rust code, you calculate a macro_total and then sample the nuclide, then the reaction.Check in CUDA:Ensure the GPU samples reactions in the exact same branching order. If the GPU samples Fission before Capture, but the CPU does the opposite (or uses different cumulative probability logic), small differences in the RNG or precision will accumulate into a large pcm bias over millions of histories.4. Tracking Mode DivergenceYour Rust code has an auto-detector for Delta Tracking (Woodcock) vs Surface Tracking:Rustlet tracking = detect_tracking_mode(cells, materials, xs_provider);
+The Trap:If your Rust CPU run is using TrackingMode::Surface but your GPU implementation is effectively using a different logic (or a fixed majorant), they will diverge. Surface tracking is generally more "exact" regarding boundary locations, whereas Delta Tracking can be sensitive to the MajorantTable precision.Action: Force your Rust code to use the same tracking logic as the GPU (likely Surface Tracking based on your transport.cu snippet) to ensure you are comparing apples to apples.5. Log-Log Interpolation BaseIn your Rust XsProvider, check how the interpolation fraction is calculated. Your CUDA kernel uses:C++double log_e = log(E);
+double log_lo = log(grid[e_idx]);
+double log_hi = log(grid[e_idx+1]);
+log_frac = (log_e - log_lo) / (log_hi - log_lo);
+This is natural log ($\ln$). If your Rust code uses log10 or log2 to calculate the interpolation fraction for the SVD coefficients, the reconstructed cross-sections will differ slightly at every energy point. Over the U238 resonance range, these "slight" differences total up to thousands of pcm.Summary for your MEM file:FeatureRust (CPU)CUDA (GPU)Thermal XSReplaces ElasticCheck if Added or ReplacedNudge1e-81e-10 (Check for cell-finding errors)InterpolationCheck Base ($\ln$ vs $\log_{10}$)Uses $\ln$TrackingSurface/Delta AutoSurface (Check trace_surface)Tomorrow's Priority: Focus on the S(α,β) replacement logic and the U238 capture tally. If the GPU $k$ is 1.38 and CPU is 1.35, the GPU is missing about 2-3% of the total captures.
