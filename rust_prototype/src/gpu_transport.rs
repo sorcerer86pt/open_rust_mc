@@ -716,6 +716,48 @@ extern "C" __global__ void init_source(
 // KERNEL: Count alive particles (reduction)
 // ════════════════════════════════════════════════════════════════════
 
+// ════════════════════════════════════════════════════════════════════
+// KERNEL: Energy bin counting (for sort)
+// ════════════════════════════════════════════════════════════════════
+// Log-scale binning: 256 bins from 1e-5 eV to 20 MeV.
+// Particles with similar energies end up in the same bin, so after
+// scatter they access adjacent rows of the SVD basis → coalesced reads.
+
+#define N_ENERGY_BINS 256
+// log2(1e-5) ≈ -16.6, log2(20e6) ≈ 24.3, range ≈ 41
+#define LOG_E_MIN (-16.6096)
+#define LOG_E_RANGE 40.9193
+#define INV_LOG_STEP (N_ENERGY_BINS / LOG_E_RANGE)
+
+__device__ int energy_to_bin(double E) {
+    double log_e = log2(fmax(E, 1e-11));
+    int bin = (int)((log_e - LOG_E_MIN) * INV_LOG_STEP);
+    return max(0, min(N_ENERGY_BINS - 1, bin));
+}
+
+extern "C" __global__ void energy_bin_count(
+    const double* energy, const int* compact_idx, int n_alive,
+    int* bin_counts)
+{
+    int lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= n_alive) return;
+    int tid = compact_idx[lane];
+    atomicAdd(&bin_counts[energy_to_bin(energy[tid])], 1);
+}
+
+extern "C" __global__ void energy_bin_scatter(
+    const double* energy, const int* compact_idx_in, int n_alive,
+    int* compact_idx_out, int* bin_offsets)
+{
+    int lane = blockIdx.x * blockDim.x + threadIdx.x;
+    if (lane >= n_alive) return;
+    int tid = compact_idx_in[lane];
+    int pos = atomicAdd(&bin_offsets[energy_to_bin(energy[tid])], 1);
+    compact_idx_out[pos] = tid;
+}
+
+// ════════════════════════════════════════════════════════════════════
+
 extern "C" __global__ void count_alive(
     const int* alive, int n_particles, int* count)
 {
@@ -969,9 +1011,11 @@ pub struct GpuTransportContext {
     // Shared
     k_init_source: CudaFunction,
     k_count_alive: CudaFunction,
-    // Optimized: fused kernel + compaction
+    // Optimized: fused kernel + compaction + energy sort
     k_transport_fused: CudaFunction,
     k_compact_alive: CudaFunction,
+    k_energy_bin_count: CudaFunction,
+    k_energy_bin_scatter: CudaFunction,
 }
 
 /// SVD data uploaded to GPU for all nuclides.
@@ -1023,15 +1067,18 @@ impl GpuTransportContext {
         let k_count_alive = module.load_function("count_alive")?;
         let k_transport_fused = module.load_function("transport_step_fused")?;
         let k_compact_alive = module.load_function("compact_alive")?;
+        let k_energy_bin_count = module.load_function("energy_bin_count")?;
+        let k_energy_bin_scatter = module.load_function("energy_bin_scatter")?;
         let stream = ctx.default_stream();
 
-        println!("  GPU transport kernels compiled (7 kernels)");
+        println!("  GPU transport kernels compiled (9 kernels)");
 
         Ok(Self {
             _ctx: ctx, stream,
             k_xs_lookup, k_sample_trace, k_process_event,
             k_init_source, k_count_alive,
             k_transport_fused, k_compact_alive,
+            k_energy_bin_count, k_energy_bin_scatter,
         })
     }
 
@@ -1402,8 +1449,10 @@ impl GpuTransportContext {
         let mut d_rng_state: CudaSlice<u64> = self.stream.alloc_zeros(n)?;
         let mut d_rng_inc: CudaSlice<u64> = self.stream.alloc_zeros(n)?;
 
-        // Compaction buffer
+        // Compaction + sort buffers
         let mut d_compact_idx: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        let mut d_compact_idx_sorted: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        let n_bins = 256;
         // Fission bank
         let max_fission = (n * 3) as i32;
         let mut d_fis_x: CudaSlice<f64> = self.stream.alloc_zeros(max_fission as usize)?;
@@ -1439,11 +1488,10 @@ impl GpuTransportContext {
         for step in 0..max_steps {
             if n_alive <= 0 { break; }
 
-            // Compact alive particles periodically
+            // Compact + sort alive particles periodically
             if step % compact_interval == 0 {
-                // Reset compact count
+                // 1. Compact: build dense list of alive particle indices
                 let mut d_compact_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
-
                 let compact_grid = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
                 let compact_cfg = LaunchConfig {
                     grid_dim: (compact_grid, 1, 1),
@@ -1459,9 +1507,47 @@ impl GpuTransportContext {
                 let count = self.stream.clone_dtoh(&d_compact_count)?;
                 n_alive = count[0];
                 if n_alive <= 0 { break; }
+
+                // 2. Energy sort: bin count → prefix sum → scatter
+                let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                let alive_cfg = LaunchConfig {
+                    grid_dim: (alive_grid, 1, 1),
+                    block_dim: (BLOCK_SIZE, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+
+                // 2a. Count particles per energy bin
+                let mut d_bin_counts: CudaSlice<i32> = self.stream.alloc_zeros(n_bins)?;
+                unsafe {
+                    self.stream.launch_builder(&self.k_energy_bin_count)
+                        .arg(&d_energy).arg(&d_compact_idx).arg(&n_alive)
+                        .arg(&mut d_bin_counts)
+                        .launch(alive_cfg)?;
+                }
+
+                // 2b. Prefix sum on CPU (256 ints — trivial)
+                let counts = self.stream.clone_dtoh(&d_bin_counts)?;
+                let mut offsets = vec![0_i32; n_bins];
+                let mut running = 0_i32;
+                for i in 0..n_bins {
+                    offsets[i] = running;
+                    running += counts[i];
+                }
+                let d_bin_offsets = self.stream.clone_htod(&offsets)?;
+
+                // 2c. Scatter compact indices into energy-sorted order
+                unsafe {
+                    self.stream.launch_builder(&self.k_energy_bin_scatter)
+                        .arg(&d_energy).arg(&d_compact_idx).arg(&n_alive)
+                        .arg(&mut d_compact_idx_sorted).arg(&d_bin_offsets)
+                        .launch(alive_cfg)?;
+                }
+
+                // Swap: sorted becomes the active compact index
+                std::mem::swap(&mut d_compact_idx, &mut d_compact_idx_sorted);
             }
 
-            // Launch fused kernel with compact index
+            // Launch fused kernel with (possibly sorted) compact index
             let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
             let alive_cfg = LaunchConfig {
                 grid_dim: (alive_grid, 1, 1),
@@ -1470,7 +1556,7 @@ impl GpuTransportContext {
             };
             unsafe {
                 self.stream.launch_builder(&self.k_transport_fused)
-                    .arg(if step % compact_interval == 0 { &d_compact_idx } else { &d_compact_idx })
+                    .arg(&d_compact_idx)
                     .arg(&n_alive)
                     .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
                     .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
