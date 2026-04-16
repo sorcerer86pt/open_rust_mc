@@ -141,13 +141,14 @@ fn run_multi_seed<XS: XsProvider>(
     xs_memory_bytes: usize,
     load_ms: f64,
 ) -> BenchmarkResult {
-    let total_histories = (args.batches - args.inactive) as u64 * args.particles as u64;
+    let inactive = args.inactive.min(args.batches.saturating_sub(1));
+    let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
     let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
     for seed in 0..args.seeds {
         let config = SimConfig {
             batches: args.batches,
-            inactive: args.inactive,
+            inactive,
             particles_per_batch: args.particles,
             seed: seed as u64,
         };
@@ -164,7 +165,7 @@ fn run_multi_seed<XS: XsProvider>(
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let active: Vec<f64> = results.iter()
-            .filter(|r| r.batch > args.inactive)
+            .filter(|r| r.batch > inactive)
             .map(|r| r.k_eff)
             .collect();
         let n = active.len() as f64;
@@ -263,7 +264,14 @@ fn print_benchmark(r: &BenchmarkResult, _particles: u32) {
 fn main() {
     let args = Args::parse();
 
-    let active_batches = args.batches - args.inactive;
+    let inactive = if args.inactive >= args.batches {
+        eprintln!("  Warning: inactive ({}) >= batches ({}), capping to {}",
+                  args.inactive, args.batches, args.batches.saturating_sub(1));
+        args.batches.saturating_sub(1)
+    } else {
+        args.inactive
+    };
+    let active_batches = args.batches - inactive;
     let histories_per_run = active_batches as u64 * args.particles as u64;
 
     println!("=== open_rust_mc — Godiva Eigenvalue Benchmark ===\n");
@@ -273,7 +281,7 @@ fn main() {
         println!("SVD rank:     {}", args.rank);
     }
     println!("Batches:      {} ({} inactive + {} active)",
-             args.batches, args.inactive, active_batches);
+             args.batches, inactive, active_batches);
     println!("Particles:    {}/batch", args.particles);
     println!("Histories:    {} per run ({} active batches x {} particles)",
              histories_per_run, active_batches, args.particles);

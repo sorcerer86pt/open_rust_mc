@@ -44,9 +44,6 @@ mod cuda_main {
         particles: u32,
         #[arg(short, long, default_value_t = 1)]
         temp_idx: usize,
-        /// Run mode: "fused" (optimized), "split" (3-kernel), "both" (compare)
-        #[arg(short, long, default_value = "fused")]
-        mode: String,
         /// Number of independent seeds for statistical benchmarking.
         #[arg(short, long, default_value_t = 1)]
         seeds: u32,
@@ -182,7 +179,6 @@ mod cuda_main {
         batches: u32,
         inactive: u32,
         seeds: u32,
-        fused: bool,
         geom_type: i32,
     ) -> BenchResult {
         let active_batches = batches - inactive;
@@ -204,11 +200,9 @@ mod cuda_main {
             let t_sim = Instant::now();
             for batch in 1..=batches {
                 let batch_id = batch + seed * batches;
-                let result = if fused {
-                    gpu.run_batch_fused_geom(&source_bank, batch_id, nuc_data, mat_data, sab_data, 1_000_000, geom_type)
-                } else {
-                    gpu.run_batch(&source_bank, batch_id, nuc_data, mat_data, 1_000_000)
-                }.expect("GPU batch failed");
+                let result = gpu.run_batch(
+                    &source_bank, batch_id, nuc_data, mat_data, sab_data, 1_000_000, geom_type
+                ).expect("GPU batch failed");
 
                 if seeds == 1 {
                     let active = if batch > inactive { " *" } else { "" };
@@ -263,7 +257,8 @@ mod cuda_main {
 
     pub fn run() {
         let args = Args::parse();
-        let active_batches = args.batches - args.inactive;
+        let inactive = args.inactive.min(args.batches.saturating_sub(1));
+        let active_batches = args.batches - inactive;
         let n = args.particles as usize;
 
         let is_godiva = args.geometry == "godiva";
@@ -276,11 +271,10 @@ mod cuda_main {
         println!("Geometry:     {}", geom_label);
         println!("SVD rank:     {}", args.rank);
         println!("Batches:      {} ({} inactive + {} active)",
-                 args.batches, args.inactive, active_batches);
+                 args.batches, inactive, active_batches);
         println!("Particles:    {}/batch", args.particles);
         println!("Seeds:        {}", args.seeds);
         println!("Histories:    {} per seed", active_batches as u64 * n as u64);
-        println!("Mode:         {}", args.mode);
 
         // ── Load nuclear data ──
         println!("\n── Loading nuclear data (SVD, rank={}) ──", args.rank);
@@ -328,45 +322,17 @@ mod cuda_main {
         let gpu_init_ms = t_gpu.elapsed().as_secs_f64() * 1000.0;
         println!("  GPU ready in {gpu_init_ms:.0} ms");
 
-        // ── Run benchmarks ──
-        let run_split = args.mode == "split" || args.mode == "both";
-        let run_fused = args.mode == "fused" || args.mode == "both";
-
-        let mut results: Vec<BenchResult> = Vec::new();
-
-        if run_split {
-            let r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data,
-                                   "GPU 3-kernel (split)", n,
-                                   args.batches, args.inactive, args.seeds, false, geom_type);
-            results.push(r);
-        }
-        if run_fused {
-            let mut r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data,
-                                      "GPU SVD (fused+sort)", n,
-                                      args.batches, args.inactive, args.seeds, true, geom_type);
-            r.load_ms = load_ms + gpu_init_ms;
-            results.push(r);
-        }
+        // ── Run benchmark ──
+        let mut r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data,
+                                   &format!("GPU SVD {geom_label}"), n,
+                                   args.batches, inactive, args.seeds, geom_type);
+        r.load_ms = load_ms + gpu_init_ms;
 
         // ── Print results ──
         println!("\n{}", "=".repeat(60));
-        println!("BENCHMARK RESULTS — PWR Pin Cell");
+        println!("BENCHMARK RESULTS - {geom_label}");
         println!("{}", "=".repeat(60));
-
-        for r in &results {
-            print_result(r);
-            println!();
-        }
-
-        // Comparison table if multiple modes
-        if results.len() > 1 {
-            let r0 = &results[0];
-            let r1 = &results[1];
-            let speedup = r0.ns_mean() / r1.ns_mean();
-            println!("  COMPARISON:");
-            println!("    {} → {} speedup = {:.2}x", r0.label, r1.label, speedup);
-        }
-
+        print_result(&r);
         println!("\n  Load time = {load_ms:.0} ms (CPU) + {gpu_init_ms:.0} ms (GPU)");
         println!("  Physics:  SVD rank={}, S(a,b)={}, nu-bar=table, fission=CDF",
                  args.rank, if h2o_path.exists() { "H2O" } else { "free-gas" });
