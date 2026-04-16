@@ -24,7 +24,7 @@ param(
     [switch]$SkipOpenMC
 )
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = "Continue"
 $timestamp = Get-Date -Format "yyyyMMdd_HHmm"
 $logFile = "paper_results_${timestamp}.txt"
 
@@ -34,7 +34,7 @@ Write-Host "Logging to: $logFile" -ForegroundColor Cyan
 $DATA = "data\endfb-vii.1-hdf5\neutron"
 
 Write-Host "`n$('=' * 70)" -ForegroundColor Cyan
-Write-Host "  FULL PAPER BENCHMARK — $Seeds seeds, $Particles particles" -ForegroundColor Cyan
+Write-Host "  FULL PAPER BENCHMARK - $Seeds seeds, $Particles particles" -ForegroundColor Cyan
 Write-Host "  Godiva: $GodivaBatches batches | PWR: $PwrBatches batches" -ForegroundColor Cyan
 Write-Host "  Inactive: $Inactive | SVD rank: $Rank" -ForegroundColor Cyan
 Write-Host "  Started: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Cyan
@@ -50,16 +50,16 @@ Write-Host ""
 # ── 1. OpenMC reference (WSL) ──
 if (-not $SkipOpenMC) {
     Write-Host "`n$('=' * 70)" -ForegroundColor Green
-    Write-Host "  TEST 1: OpenMC reference (Godiva + PWR, $Seeds seeds)" -ForegroundColor Green
+    Write-Host "  TEST 1: OpenMC reference Godiva + PWR, $Seeds seeds" -ForegroundColor Green
     Write-Host "$('=' * 70)`n"
     wsl -d Ubuntu-24.04 -- bash -c "source ~/miniforge3/bin/activate openmc && cd /mnt/c/Users/fog/madman_svd_experiment/scripts && python paper_openmc_benchmark.py --seeds $Seeds --particles $Particles --batches $GodivaBatches --inactive $Inactive" 2>&1 | Out-String -Stream
 } else {
-    Write-Host "`n  SKIPPING OpenMC (--SkipOpenMC)`n" -ForegroundColor Gray
+    Write-Host "`n  SKIPPING OpenMC --SkipOpenMC`n" -ForegroundColor Gray
 }
 
 # ── 2. Godiva CPU Table ──
 Write-Host "`n$('=' * 70)" -ForegroundColor Green
-Write-Host "  TEST 2: Godiva — CPU Table ($Seeds seeds)" -ForegroundColor Green
+Write-Host "  TEST 2: Godiva - CPU Table $Seeds seeds" -ForegroundColor Green
 Write-Host "$('=' * 70)`n"
 Set-Location rust_prototype
 cargo run --release --bin godiva -- "..\$DATA" `
@@ -69,7 +69,7 @@ Set-Location ..
 
 # ── 3. Godiva CPU SVD ──
 Write-Host "`n$('=' * 70)" -ForegroundColor Green
-Write-Host "  TEST 3: Godiva — CPU SVD rank=$Rank ($Seeds seeds)" -ForegroundColor Green
+Write-Host "  TEST 3: Godiva - CPU SVD rank=$Rank $Seeds seeds" -ForegroundColor Green
 Write-Host "$('=' * 70)`n"
 Set-Location rust_prototype
 cargo run --release --bin godiva -- "..\$DATA" `
@@ -79,7 +79,7 @@ Set-Location ..
 
 # ── 4. PWR CPU Table ──
 Write-Host "`n$('=' * 70)" -ForegroundColor Green
-Write-Host "  TEST 4: PWR pin cell — CPU Table ($Seeds seeds)" -ForegroundColor Green
+Write-Host "  TEST 4: PWR pin cell - CPU Table $Seeds seeds" -ForegroundColor Green
 Write-Host "$('=' * 70)`n"
 Set-Location rust_prototype
 cargo run --release --bin pwr_pincell -- "..\$DATA" `
@@ -89,7 +89,7 @@ Set-Location ..
 
 # ── 5. PWR CPU SVD ──
 Write-Host "`n$('=' * 70)" -ForegroundColor Green
-Write-Host "  TEST 5: PWR pin cell — CPU SVD rank=$Rank ($Seeds seeds)" -ForegroundColor Green
+Write-Host "  TEST 5: PWR pin cell - CPU SVD rank=$Rank $Seeds seeds" -ForegroundColor Green
 Write-Host "$('=' * 70)`n"
 Set-Location rust_prototype
 cargo run --release --bin pwr_pincell -- "..\$DATA" `
@@ -99,7 +99,7 @@ Set-Location ..
 
 # ── 6. PWR GPU SVD ──
 Write-Host "`n$('=' * 70)" -ForegroundColor Green
-Write-Host "  TEST 6: PWR pin cell — GPU SVD rank=$Rank ($Seeds seeds)" -ForegroundColor Green
+Write-Host "  TEST 6: PWR pin cell - GPU SVD rank=$Rank $Seeds seeds" -ForegroundColor Green
 Write-Host "$('=' * 70)`n"
 Set-Location rust_prototype
 cargo run --release --features cuda --bin gpu_pwr_bench -- "..\$DATA" `
@@ -109,7 +109,7 @@ Set-Location ..
 
 # ── 7. GPU Scaling sweep ──
 Write-Host "`n$('=' * 70)" -ForegroundColor Green
-Write-Host "  TEST 7: GPU Scaling (particle count sweep, 3 seeds each)" -ForegroundColor Green
+Write-Host "  TEST 7: GPU Scaling particle count sweep, 3 seeds each" -ForegroundColor Green
 Write-Host "$('=' * 70)`n"
 Set-Location rust_prototype
 foreach ($N in @(5000, 10000, 20000, 50000, 100000, 200000)) {

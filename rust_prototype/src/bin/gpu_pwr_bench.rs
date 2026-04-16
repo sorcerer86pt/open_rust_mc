@@ -50,9 +50,12 @@ mod cuda_main {
         /// Number of independent seeds for statistical benchmarking.
         #[arg(short, long, default_value_t = 1)]
         seeds: u32,
+        /// Geometry: "pwr" (8 nuclides, pin cell) or "godiva" (3 nuclides, bare sphere)
+        #[arg(short, long, default_value = "pwr")]
+        geometry: String,
     }
 
-    const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
+    const PWR_NUCLIDES: &[(&str, f64, f64)] = &[
         ("U235.h5", 233.025, 2.43),
         ("U238.h5", 236.006, 2.49),
         ("O16.h5",  15.858,  0.0),
@@ -61,6 +64,12 @@ mod cuda_main {
         ("Zr91.h5", 90.130,  0.0),
         ("Zr92.h5", 91.126,  0.0),
         ("Zr94.h5", 93.120,  0.0),
+    ];
+
+    const GODIVA_NUCLIDES: &[(&str, f64, f64)] = &[
+        ("U234.h5", 232.030, 0.0),
+        ("U235.h5", 233.025, 2.43),
+        ("U238.h5", 236.006, 2.49),
     ];
 
     /// Per-seed result.
@@ -116,7 +125,7 @@ mod cuda_main {
         }
     }
 
-    fn initial_source(n: usize, seed: u64) -> Vec<(f64, f64, f64, f64)> {
+    fn initial_source_pwr(n: usize, seed: u64) -> Vec<(f64, f64, f64, f64)> {
         use open_rust_mc::transport::rng::Rng;
         let fuel_or = 0.4096_f64;
         let half = 0.63_f64;
@@ -133,9 +142,29 @@ mod cuda_main {
         sites
     }
 
+    fn initial_source_godiva(n: usize, seed: u64) -> Vec<(f64, f64, f64, f64)> {
+        use open_rust_mc::transport::rng::Rng;
+        let r = 8.7407_f64;
+        let mut rng = Rng::new(seed * 100_000, 0);
+        let mut sites = Vec::with_capacity(n);
+        while sites.len() < n {
+            let x = -r + rng.uniform() * 2.0 * r;
+            let y = -r + rng.uniform() * 2.0 * r;
+            let z = -r + rng.uniform() * 2.0 * r;
+            if x*x + y*y + z*z < r * r {
+                sites.push((x, y, z, 1.0e6));
+            }
+        }
+        sites
+    }
+
+    fn initial_source(n: usize, seed: u64, is_godiva: bool) -> Vec<(f64, f64, f64, f64)> {
+        if is_godiva { initial_source_godiva(n, seed) } else { initial_source_pwr(n, seed) }
+    }
+
     fn normalize_bank(bank: &[(f64, f64, f64, f64)], n: usize, seed: u64) -> Vec<(f64, f64, f64, f64)> {
         use open_rust_mc::transport::rng::Rng;
-        if bank.is_empty() { return initial_source(n, seed); }
+        if bank.is_empty() { return initial_source(n, seed, false); }
         let mut rng = Rng::new(seed, 0);
         (0..n).map(|_| {
             let idx = (rng.uniform() * bank.len() as f64) as usize;
@@ -154,6 +183,7 @@ mod cuda_main {
         inactive: u32,
         seeds: u32,
         fused: bool,
+        geom_type: i32,
     ) -> BenchResult {
         let active_batches = batches - inactive;
         let total_histories = active_batches as u64 * n as u64;
@@ -164,7 +194,7 @@ mod cuda_main {
 
         for seed in 0..seeds {
             let seed_offset = seed as u64 * 1_000_000;
-            let mut source_bank = initial_source(n, seed as u64);
+            let mut source_bank = initial_source(n, seed as u64, geom_type == 1);
             let mut k_sum = 0.0_f64;
             let mut k_count = 0_u32;
 
@@ -175,7 +205,7 @@ mod cuda_main {
             for batch in 1..=batches {
                 let batch_id = batch + seed * batches;
                 let result = if fused {
-                    gpu.run_batch_fused(&source_bank, batch_id, nuc_data, mat_data, sab_data, 1_000_000)
+                    gpu.run_batch_fused_geom(&source_bank, batch_id, nuc_data, mat_data, sab_data, 1_000_000, geom_type)
                 } else {
                     gpu.run_batch(&source_bank, batch_id, nuc_data, mat_data, 1_000_000)
                 }.expect("GPU batch failed");
@@ -236,8 +266,14 @@ mod cuda_main {
         let active_batches = args.batches - args.inactive;
         let n = args.particles as usize;
 
-        println!("=== GPU PWR Pin Cell — Paper Benchmark ===\n");
+        let is_godiva = args.geometry == "godiva";
+        let geom_type: i32 = if is_godiva { 1 } else { 0 };
+        let nuclide_specs: &[(&str, f64, f64)] = if is_godiva { GODIVA_NUCLIDES } else { PWR_NUCLIDES };
+        let geom_label = if is_godiva { "Godiva (bare HEU sphere)" } else { "PWR pin cell" };
+
+        println!("=== GPU {} — Paper Benchmark ===\n", geom_label);
         println!("Data dir:     {}", args.data_dir.display());
+        println!("Geometry:     {}", geom_label);
         println!("SVD rank:     {}", args.rank);
         println!("Batches:      {} ({} inactive + {} active)",
                  args.batches, args.inactive, active_batches);
@@ -250,7 +286,7 @@ mod cuda_main {
         println!("\n── Loading nuclear data (SVD, rank={}) ──", args.rank);
         let t_load = Instant::now();
         let mut kernels = Vec::new();
-        for &(filename, awr, nu_bar) in NUCLIDE_SPECS {
+        for &(filename, awr, nu_bar) in nuclide_specs {
             let path = args.data_dir.join(filename);
             println!("  Loading {}...", filename);
             kernels.push(xs_provider::load_nuclide(&path, args.rank, args.temp_idx, awr, nu_bar));
@@ -267,13 +303,13 @@ mod cuda_main {
         };
 
         let nuc_data = gpu.upload_nuclide_data(&kernels, args.rank).expect("upload nuclide data");
-        let materials = setup_materials();
-        let awrs: Vec<f64> = NUCLIDE_SPECS.iter().map(|s| s.1).collect();
-        let nu_bars: Vec<f64> = NUCLIDE_SPECS.iter().map(|s| s.2).collect();
+        let materials = if is_godiva { setup_godiva_materials() } else { setup_materials() };
+        let awrs: Vec<f64> = nuclide_specs.iter().map(|s| s.1).collect();
+        let nu_bars: Vec<f64> = nuclide_specs.iter().map(|s| s.2).collect();
         let mat_data = gpu.upload_material_data(&materials, &awrs, &nu_bars).expect("upload material data");
 
         let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
-        let sab_data = if h2o_path.exists() {
+        let sab_data = if !is_godiva && h2o_path.exists() {
             match open_rust_mc::hdf5_reader::load_thermal_scattering(&h2o_path) {
                 Ok(tsl) => {
                     let t_idx = tsl.select_temperature(600.0, 0.5);
@@ -301,13 +337,13 @@ mod cuda_main {
         if run_split {
             let r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data,
                                    "GPU 3-kernel (split)", n,
-                                   args.batches, args.inactive, args.seeds, false);
+                                   args.batches, args.inactive, args.seeds, false, geom_type);
             results.push(r);
         }
         if run_fused {
             let mut r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data,
                                       "GPU SVD (fused+sort)", n,
-                                      args.batches, args.inactive, args.seeds, true);
+                                      args.batches, args.inactive, args.seeds, true, geom_type);
             r.load_ms = load_ms + gpu_init_ms;
             results.push(r);
         }
@@ -334,6 +370,17 @@ mod cuda_main {
         println!("\n  Load time = {load_ms:.0} ms (CPU) + {gpu_init_ms:.0} ms (GPU)");
         println!("  Physics:  SVD rank={}, S(a,b)={}, nu-bar=table, fission=CDF",
                  args.rank, if h2o_path.exists() { "H2O" } else { "free-gas" });
+    }
+
+    fn setup_godiva_materials() -> Vec<open_rust_mc::transport::material::Material> {
+        use open_rust_mc::transport::material::Material;
+        // Godiva HEU: single material, 3 nuclides
+        // Atom densities for 93.71% enriched U metal at 18.74 g/cm3
+        let mut fuel = Material::new("HEU", 294.0);
+        fuel.add_nuclide(0.000483, 0);  // U-234 (xs_kernel_idx=0)
+        fuel.add_nuclide(0.04509, 1);   // U-235 (xs_kernel_idx=1)
+        fuel.add_nuclide(0.00265, 2);   // U-238 (xs_kernel_idx=2)
+        vec![fuel]
     }
 
     fn setup_materials() -> Vec<open_rust_mc::transport::material::Material> {

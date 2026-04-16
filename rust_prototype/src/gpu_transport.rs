@@ -104,6 +104,13 @@ __device__ void pcg_init(PcgState* rng, unsigned long long seed, unsigned long l
 #define BC_REFLECTIVE   1
 #define BC_VACUUM       2
 
+// Geometry types
+#define GEOM_PWR    0
+#define GEOM_GODIVA 1
+
+// Godiva: bare HEU sphere
+#define GODIVA_RADIUS 8.7407
+
 // Cell/material mapping
 #define CELL_FUEL  0
 #define CELL_GAP   1
@@ -148,7 +155,12 @@ __device__ double dist_plane(double p, double d, double x0) {
 }
 
 // Find which cell contains a point
-__device__ int find_cell(double x, double y, double z) {
+__device__ int find_cell(double x, double y, double z, int geom_type) {
+    if (geom_type == GEOM_GODIVA) {
+        double r2 = x*x + y*y + z*z;
+        return (r2 < GODIVA_RADIUS * GODIVA_RADIUS) ? 0 : -1;
+    }
+    // PWR pin cell
     double r2 = x*x + y*y;
     bool in_z = (z > -HALF_PITCH) && (z < HALF_PITCH);
     if (!in_z) return -1;
@@ -164,7 +176,9 @@ __device__ int find_cell(double x, double y, double z) {
 }
 
 // Get material index for a cell (-1 = void)
-__device__ int cell_material(int cell) {
+__device__ int cell_material(int cell, int geom_type) {
+    if (geom_type == GEOM_GODIVA) return (cell == 0) ? 0 : -1;
+    // PWR
     if (cell == CELL_FUEL)  return MAT_FUEL;
     if (cell == CELL_CLAD)  return MAT_CLAD;
     if (cell == CELL_WATER) return MAT_WATER;
@@ -176,9 +190,27 @@ __device__ int cell_material(int cell) {
 __device__ void trace_surface(
     double px, double py, double pz,
     double dx, double dy, double dz,
-    int cell,
+    int cell, int geom_type,
     double* out_dist, int* out_bc, int* out_next_cell)
 {
+    if (geom_type == GEOM_GODIVA) {
+        // Sphere intersection: |p + t*d|^2 = R^2
+        double a = dx*dx + dy*dy + dz*dz;
+        double b = 2.0*(px*dx + py*dy + pz*dz);
+        double c = px*px + py*py + pz*pz - GODIVA_RADIUS*GODIVA_RADIUS;
+        double disc = b*b - 4.0*a*c;
+        if (disc < 0.0) { *out_dist = 1e20; *out_bc = BC_VACUUM; *out_next_cell = -1; return; }
+        double sq = sqrt(disc);
+        double t1 = (-b - sq) / (2.0*a);
+        double t2 = (-b + sq) / (2.0*a);
+        double t = (t1 > COINCIDENCE_TOL) ? t1 : ((t2 > COINCIDENCE_TOL) ? t2 : 1e20);
+        *out_dist = t;
+        *out_bc = BC_VACUUM;
+        *out_next_cell = -1;
+        return;
+    }
+
+    // PWR pin cell geometry
     double best_t = 1e20;
     int best_bc = BC_VACUUM;
     int best_next = -1;
@@ -225,7 +257,7 @@ __device__ void trace_surface(
         double nx = px + dx * (best_t + 1e-10);
         double ny = py + dy * (best_t + 1e-10);
         double nz = pz + dz * (best_t + 1e-10);
-        best_next = find_cell(nx, ny, nz);
+        best_next = find_cell(nx, ny, nz, geom_type);
     }
 
     *out_dist = best_t;
@@ -552,7 +584,7 @@ extern "C" __global__ void xs_lookup(
 
     double E = energy[tid];
     int cell = cell_idx[tid];
-    int mat = cell_material(cell);
+    int mat = cell_material(cell, GEOM_PWR);
     if (mat < 0) {
         // Void cell — zero XS
         out_macro_total[tid] = 0.0;
@@ -655,7 +687,7 @@ extern "C" __global__ void sample_and_trace(
     int bc, next;
     trace_surface(pos_x[tid], pos_y[tid], pos_z[tid],
                   dir_x[tid], dir_y[tid], dir_z[tid],
-                  cell_idx[tid], &d_surf, &bc, &next);
+                  cell_idx[tid], GEOM_PWR, &d_surf, &bc, &next);
 
     out_dist_collision[tid] = d_coll;
     out_dist_surface[tid] = d_surf;
@@ -717,7 +749,7 @@ extern "C" __global__ void process_event(
     int cell = cell_idx[tid];
 
     // ── Void cell: free-stream to surface ──
-    if (cell_material(cell) < 0) {
+    if (cell_material(cell, GEOM_PWR) < 0) {
         if (d_surf > 1e19) {
             alive[tid] = 0;
             atomicAdd(cnt_leakage, 1);
@@ -810,7 +842,7 @@ extern "C" __global__ void process_event(
         pos_z[tid] += dir_z[tid] * d_coll;
 
         // Re-find cell (safety)
-        cell_idx[tid] = find_cell(pos_x[tid], pos_y[tid], pos_z[tid]);
+        cell_idx[tid] = find_cell(pos_x[tid], pos_y[tid], pos_z[tid], GEOM_PWR);
         if (cell_idx[tid] < 0) {
             alive[tid] = 0;
             atomicAdd(cnt_leakage, 1);
@@ -918,7 +950,8 @@ extern "C" __global__ void init_source(
     // RNG seed
     unsigned long long batch_seed,
     unsigned long long* rng_state,
-    unsigned long long* rng_inc)
+    unsigned long long* rng_inc,
+    int geom_type)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_particles) return;
@@ -927,7 +960,7 @@ extern "C" __global__ void init_source(
     pos_y[tid] = src_y[tid];
     pos_z[tid] = src_z[tid];
     energy_arr[tid] = src_e[tid];
-    cell_idx[tid] = find_cell(src_x[tid], src_y[tid], src_z[tid]);
+    cell_idx[tid] = find_cell(src_x[tid], src_y[tid], src_z[tid], geom_type);
     alive[tid] = 1;
 
     // Initialize RNG for this particle
@@ -1083,10 +1116,10 @@ extern "C" __global__ void transport_step_fused(
     rng.inc = rng_inc[tid];
 
     // ── Handle void cells ──
-    int mat = cell_material(cell);
+    int mat = cell_material(cell, GEOM_PWR);
     if (mat < 0) {
         double d_surf; int bc, next;
-        trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+        trace_surface(px, py, pz, dx, dy, dz, cell, GEOM_PWR, &d_surf, &bc, &next);
         if (d_surf > 1e19) {
             alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_rng;
         }
@@ -1145,7 +1178,7 @@ extern "C" __global__ void transport_step_fused(
         // ── Step 2: Sample collision distance + trace ──
         double d_coll = -log(pcg_uniform(&rng)) / sum_total;
         double d_surf; int bc, next;
-        trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+        trace_surface(px, py, pz, dx, dy, dz, cell, GEOM_PWR, &d_surf, &bc, &next);
 
         // ── Step 3: Process event ──
         if (d_surf < d_coll) {
@@ -1166,7 +1199,7 @@ extern "C" __global__ void transport_step_fused(
             // Collision
             atomicAdd(cnt_collisions, 1);
             px += dx*d_coll; py += dy*d_coll; pz += dz*d_coll;
-            cell = find_cell(px, py, pz);
+            cell = find_cell(px, py, pz, GEOM_PWR);
             if (cell < 0) { alive[tid] = 0; atomicAdd(cnt_leakage, 1); goto save_state; }
 
             double xi = pcg_uniform(&rng) * sum_total;
@@ -1299,7 +1332,8 @@ transport_persistent(
     double* __restrict__ fission_w,
     int* fission_count, int max_fission_bank,
     int* cnt_collisions, int* cnt_fissions, int* cnt_leakage, int* cnt_surface_crossings,
-    int steps_per_launch)
+    int steps_per_launch,
+    int geom_type)
 {
     int lane = blockIdx.x * blockDim.x + threadIdx.x;
     if (lane >= n_alive) return;
@@ -1320,12 +1354,12 @@ transport_persistent(
     int lcnt_coll = 0, lcnt_fis = 0, lcnt_leak = 0, lcnt_surf = 0;
 
     for (int step = 0; step < steps_per_launch && is_alive; step++) {
-        int mat = cell_material(cell);
+        int mat = cell_material(cell, geom_type);
 
         // ── Void: stream to surface ──
         if (mat < 0) {
             double d_surf; int bc, next;
-            trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+            trace_surface(px, py, pz, dx, dy, dz, cell, geom_type, &d_surf, &bc, &next);
             if (d_surf > 1e19) { is_alive = 0; lcnt_leak++; break; }
             lcnt_surf++;
             if (bc == BC_REFLECTIVE) {
@@ -1394,7 +1428,7 @@ transport_persistent(
         // ── Sample + trace ──
         double d_coll = -log(pcg_uniform(&rng)) / sum_total;
         double d_surf; int bc, next;
-        trace_surface(px, py, pz, dx, dy, dz, cell, &d_surf, &bc, &next);
+        trace_surface(px, py, pz, dx, dy, dz, cell, geom_type, &d_surf, &bc, &next);
 
         // ── Process event ──
         if (d_surf < d_coll) {
@@ -1413,7 +1447,7 @@ transport_persistent(
         } else {
             lcnt_coll++;
             px+=dx*d_coll; py+=dy*d_coll; pz+=dz*d_coll;
-            cell = find_cell(px, py, pz);
+            cell = find_cell(px, py, pz, geom_type);
             if (cell < 0) { is_alive = 0; lcnt_leak++; break; }
 
             // ── Sample which NUCLIDE was hit (proportional to macro XS) ──
@@ -2218,6 +2252,20 @@ impl GpuTransportContext {
         sab_data: &GpuSabData,
         max_steps: u32,
     ) -> Result<GpuBatchResult, Box<dyn std::error::Error>> {
+        self.run_batch_fused_geom(source_bank, batch, nuc_data, mat_data, sab_data, max_steps, 0)
+    }
+
+    /// Run batch with explicit geometry type (0=PWR, 1=Godiva).
+    pub fn run_batch_fused_geom(
+        &self,
+        source_bank: &[(f64, f64, f64, f64)],
+        batch: u32,
+        nuc_data: &GpuNuclideData,
+        mat_data: &GpuMaterialData,
+        sab_data: &GpuSabData,
+        max_steps: u32,
+        geom_type: i32,
+    ) -> Result<GpuBatchResult, Box<dyn std::error::Error>> {
         let n = source_bank.len();
         let n_i32 = n as i32;
         let grid_full = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -2284,6 +2332,7 @@ impl GpuTransportContext {
                 .arg(&n_i32)
                 .arg(&batch_seed)
                 .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+                .arg(&geom_type)
                 .launch(cfg_full)?;
         }
 
@@ -2411,6 +2460,7 @@ impl GpuTransportContext {
                     .arg(&mut d_cnt_coll).arg(&mut d_cnt_fis)
                     .arg(&mut d_cnt_leak).arg(&mut d_cnt_surf)
                     .arg(&steps_this_launch)
+                    .arg(&geom_type)
                     .launch(alive_cfg)?;
             }
 

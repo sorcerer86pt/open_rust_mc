@@ -1,0 +1,84 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260416123626
+Username: OUTSYSTEMS\fog
+RunAs User: OUTSYSTEMS\fog
+Configuration Name: 
+Machine: OS-4YFZRV3 (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -Command & { . .\run_paper_full.ps1 -Seeds 10 -Particles 50000 -SkipOpenMC }
+Process ID: 41536
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Logging to: paper_results_20260416_1236.txt
+
+======================================================================
+  FULL PAPER BENCHMARK - 10 seeds, 50000 particles
+  Godiva: 150 batches | PWR: 150 batches
+  Inactive: 20 | SVD rank: 5
+  Started: 2026-04-16 12:36:26
+======================================================================
+â €â€ Building release binaries â€â€
+PS>TerminatingError(cargo.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop:    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)"
+>> TerminatingError(cargo.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop:    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)"
+>> TerminatingError(cargo.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop:    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)"
+>> TerminatingError(cargo.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop:    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)"
+cargo :    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)
+At C:\Users\fog\madman_svd_experiment\run_paper_full.ps1:46 char:1
++ cargo build --release --bin godiva --bin pwr_pincell --bin gpu_pwr_be ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling op...rust_prototype):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+PS>$global:?
+False
+**********************
+Windows PowerShell transcript end
+End time: 20260416123626
+**********************
+**********************
+Windows PowerShell transcript start
+Start time: 20260416123637
+Username: OUTSYSTEMS\fog
+RunAs User: OUTSYSTEMS\fog
+Configuration Name: 
+Machine: OS-4YFZRV3 (Microsoft Windows NT 10.0.26200.0)
+Host Application: C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -ExecutionPolicy Bypass -File run_paper_full.ps1 -Seeds 10 -Particles 50000 -SkipOpenMC
+Process ID: 39988
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Logging to: paper_results_20260416_1236.txt
+
+======================================================================
+  FULL PAPER BENCHMARK - 10 seeds, 50000 particles
+  Godiva: 150 batches | PWR: 150 batches
+  Inactive: 20 | SVD rank: 5
+  Started: 2026-04-16 12:36:37
+======================================================================
+â €â€ Building release binaries â€â€
+PS>TerminatingError(cargo.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop:    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)"
+>> TerminatingError(cargo.exe): "The running command stopped because the preference variable "ErrorActionPreference" or common parameter is set to Stop:    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)"
+cargo :    Compiling open-rust-mc v0.1.0 (C:\Users\fog\madman_svd_experiment\rust_prototype)
+At C:\Users\fog\madman_svd_experiment\run_paper_full.ps1:46 char:1
++ cargo build --release --bin godiva --bin pwr_pincell --bin gpu_pwr_be ...
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling op...rust_prototype):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+
+**********************
+Windows PowerShell transcript end
+End time: 20260416123638
+**********************
