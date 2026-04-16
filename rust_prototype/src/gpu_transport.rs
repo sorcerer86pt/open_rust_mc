@@ -696,6 +696,7 @@ transport_persistent(
     const int* __restrict__ level_basis_offsets,
     const int* __restrict__ level_coeffs_offsets,
     const int* __restrict__ level_has_kernel,
+    const int* __restrict__ level_mt,
     // Angular distributions
     const double* __restrict__ ang_energies,
     const double* __restrict__ ang_mu_arr,
@@ -1016,6 +1017,7 @@ transport_persistent(
                 int n_levels = __ldg(&level_counts[hit_nuc_idx]);
 
                 double Q = -0.5e6; // fallback if no levels
+                int selected = 0;
                 if (n_levels > 0) {
                     // Reconstruct level XS and build CDF
                     double level_xs_sum = 0.0;
@@ -1041,7 +1043,6 @@ transport_persistent(
                     // Sample level from CDF
                     if (level_xs_sum > 0.0) {
                         double xi_lev = pcg_uniform(&rng) * level_xs_sum;
-                        int selected = 0;
                         for (int l = 0; l < n_active; l++) {
                             if (xi_lev < level_xs_cum[l]) { selected = l; break; }
                             selected = l;
@@ -1050,10 +1051,28 @@ transport_persistent(
                     }
                 }
 
-                // Two-body kinematics with selected Q-value
-                double A_ratio = A / (A + 1.0);
-                double E_out = E * A_ratio * A_ratio + Q * (A + 1.0) / A;
-                if (E_out <= 0.0) E_out = E * 0.01; // below threshold fallback
+                // Check if continuum (MT=91) was selected
+                int sel_mt = (n_levels > 0) ? __ldg(&level_mt[lv_off + selected]) : 0;
+                double E_out;
+                if (sel_mt == 91) {
+                    // Continuum inelastic: evaporation spectrum
+                    // T = sqrt(E*/a), a = A/8 (level density parameter)
+                    double a_param = A / 8.0; // MeV^-1
+                    double e_cm_mev = E * A / ((A + 1.0) * 1.0e6);
+                    double e_exc = fmax(e_cm_mev, 0.1);
+                    double temp_mev = sqrt(e_exc / a_param);
+                    // Sample from Maxwellian: E' = -T * ln(xi1*xi2)
+                    double xi1 = fmax(pcg_uniform(&rng), 1e-30);
+                    double xi2 = fmax(pcg_uniform(&rng), 1e-30);
+                    double e_out_mev = -temp_mev * log(xi1 * xi2);
+                    e_out_mev = fmin(e_out_mev, e_cm_mev); // can't exceed available
+                    E_out = fmax(e_out_mev * 1.0e6, 1e-5); // back to eV
+                } else {
+                    // Discrete level: two-body kinematics with Q-value
+                    double A_ratio = A / (A + 1.0);
+                    E_out = E * A_ratio * A_ratio + Q * (A + 1.0) / A;
+                    if (E_out <= 0.0) E_out = E * 0.01;
+                }
                 E = fmax(E_out, 1e-11);
 
                 // Isotropic scattering in CM frame
@@ -1131,6 +1150,7 @@ pub struct GpuNuclideData {
     pub level_basis_offsets: CudaSlice<i32>,  // per-level offset into level_basis
     pub level_coeffs_offsets: CudaSlice<i32>, // per-level offset into level_coeffs
     pub level_has_kernel: CudaSlice<i32>,     // per-level: 1 if kernel exists, 0 if not
+    pub level_mt: CudaSlice<i32>,             // per-level: MT number (51-91)
     // Anisotropic elastic scattering angular distributions
     pub ang_energies: CudaSlice<f64>,         // flat: energy grids for angular dist
     pub ang_mu: CudaSlice<f64>,               // flat: cosine values
@@ -1290,6 +1310,7 @@ impl GpuTransportContext {
         let mut lev_basis_off_vec: Vec<i32> = Vec::new();
         let mut lev_coeffs_off_vec: Vec<i32> = Vec::new();
         let mut lev_has_kernel_vec: Vec<i32> = Vec::new();
+        let mut lev_mt_vec: Vec<i32> = Vec::new();
 
         for (nuc_idx, nuc) in nuclides.iter().enumerate() {
             lev_off_vec[nuc_idx] = lev_q_vec.len() as i32;
@@ -1297,6 +1318,7 @@ impl GpuTransportContext {
             for lev in &nuc.discrete_levels {
                 lev_q_vec.push(lev.info.q_value);
                 lev_thr_vec.push(lev.info.threshold);
+                lev_mt_vec.push(lev.info.mt as i32);
                 if let Some(ref rk) = lev.kernel {
                     lev_has_kernel_vec.push(1);
                     lev_basis_off_vec.push(lev_basis_vec.len() as i32);
@@ -1311,7 +1333,7 @@ impl GpuTransportContext {
             }
         }
         if lev_q_vec.is_empty() {
-            lev_q_vec.push(0.0); lev_thr_vec.push(0.0);
+            lev_q_vec.push(0.0); lev_thr_vec.push(0.0); lev_mt_vec.push(0);
             lev_has_kernel_vec.push(0); lev_basis_off_vec.push(0); lev_coeffs_off_vec.push(0);
         }
         if lev_basis_vec.is_empty() { lev_basis_vec.push(0.0); }
@@ -1420,6 +1442,7 @@ impl GpuTransportContext {
             level_basis_offsets: self.stream.clone_htod(&lev_basis_off_vec)?,
             level_coeffs_offsets: self.stream.clone_htod(&lev_coeffs_off_vec)?,
             level_has_kernel: self.stream.clone_htod(&lev_has_kernel_vec)?,
+            level_mt: self.stream.clone_htod(&lev_mt_vec)?,
             ang_energies: self.stream.clone_htod(&ang_e_vec)?,
             ang_mu: self.stream.clone_htod(&ang_mu_vec)?,
             ang_cdf: self.stream.clone_htod(&ang_cdf_vec)?,
@@ -1777,6 +1800,7 @@ impl GpuTransportContext {
                     .arg(&nuc_data.level_basis_offsets)
                     .arg(&nuc_data.level_coeffs_offsets)
                     .arg(&nuc_data.level_has_kernel)
+                    .arg(&nuc_data.level_mt)
                     // Angular distributions
                     .arg(&nuc_data.ang_energies)
                     .arg(&nuc_data.ang_mu)
