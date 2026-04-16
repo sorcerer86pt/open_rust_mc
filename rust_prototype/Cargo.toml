@@ -12,7 +12,7 @@ ndarray = "0.16"
 ndarray-npy = "0.9"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
-cudarc = { version = "0.16", optional = true, features = ["cuda-12090"] }
+cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system"] }
 
 [features]
 default = []

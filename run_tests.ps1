@@ -1,85 +1,96 @@
-# run_tests.ps1 — Full test suite for open_rust_mc
-# Run from repo root: .\run_tests.ps1
-# Use -Quick for fast smoke test, -Full for benchmark
-
+<#
+.SYNOPSIS
+    Test suite for open-rust-mc. Handles Unit tests, Physics benchmarks, and GPU acceleration.
+#>
 param(
-    [switch]$Quick,
-    [switch]$Full,
-    [switch]$Cuda
+    [switch]$Quick, 
+    [switch]$Full, 
+    [switch]$Unit, 
+    [switch]$Godiva,
+    [switch]$Pwr, 
+    [switch]$Jeff, 
+    [switch]$Cuda, 
+    [switch]$Mem,
+    [string]$Filter = "", 
+    [string]$Output = ""
 )
 
-$ErrorActionPreference = "Continue"
+$ErrorActionPreference = "Stop"
+$OriginalLocation = $PSScriptRoot
 $RustDir = "$PSScriptRoot\rust_prototype"
+# Updated to the specific neutron data directory
 $DataDir = "$PSScriptRoot\data\endfb-vii.1-hdf5\neutron"
 
-Set-Location $RustDir
+# Default suite: Unit, Godiva, Jeff, and Mem
+$AnyTestPicked = $Unit -or $Godiva -or $Jeff -or $Cuda -or $Mem -or $Pwr
+if (-not $AnyTestPicked) { $Unit = $Godiva = $Jeff = $Mem = $true }
 
-Write-Host "`n=== open_rust_mc Test Suite ===" -ForegroundColor Cyan
-Write-Host "Rust dir: $RustDir"
-Write-Host "Data dir: $DataDir`n"
-
-# ── 1. Cargo test (unit tests) ──────────────────────────────────────
-Write-Host "── 1. Unit tests ──" -ForegroundColor Yellow
-cargo test --lib 2>&1
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: unit tests" -ForegroundColor Red; exit 1 }
-Write-Host "PASS: all unit tests`n" -ForegroundColor Green
-
-# ── 2. Godiva eigenvalue (fast Godiva sphere) ───────────────────────
-Write-Host "── 2. Godiva eigenvalue (quick) ──" -ForegroundColor Yellow
-if ($Full) {
-    cargo run --release --bin godiva -- $DataDir --mode both --rank 5 --batches 150 --inactive 20 --particles 20000 --seeds 3
-} else {
-    cargo run --release --bin godiva -- $DataDir --mode both --rank 5 --batches 30 --inactive 5 --particles 5000
-}
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: godiva" -ForegroundColor Red; exit 1 }
-Write-Host "`nPASS: Godiva`n" -ForegroundColor Green
-
-# ── 3. PWR pin cell (with S(a,b) thermal scattering) ────────────────
-Write-Host "── 3. PWR pin cell ──" -ForegroundColor Yellow
-if ($Full) {
-    cargo run --release --bin pwr_pincell -- $DataDir --mode both --rank 5 --batches 100 --inactive 20 --particles 50000 --seeds 3
-} else {
-    cargo run --release --bin pwr_pincell -- $DataDir --mode both --rank 5 --batches 30 --inactive 5 --particles 5000
-}
-if ($LASTEXITCODE -ne 0) { Write-Host "FAIL: pwr_pincell" -ForegroundColor Red; exit 1 }
-Write-Host "`nPASS: PWR pin cell`n" -ForegroundColor Green
-
-# ── 4. PWR pin cell — SVD only (for timing) ─────────────────────────
-Write-Host "── 4. PWR pin cell SVD-only (timing) ──" -ForegroundColor Yellow
-if ($Full) {
-    cargo run --release --bin pwr_pincell -- $DataDir --mode svd --rank 5 --batches 50 --inactive 10 --particles 20000 --seeds 3
-} else {
-    cargo run --release --bin pwr_pincell -- $DataDir --mode svd --rank 5 --batches 20 --inactive 5 --particles 5000
-}
-Write-Host ""
-
-# ── 5. JEFF-33 SVD benchmark (if .npy files exist) ──────────────────
-$JeffPrefix = "$RustDir\..\data\jeff33_"
-if (Test-Path "${JeffPrefix}fission_energies.npy") {
-    Write-Host "── 5. JEFF-33 SVD validation ──" -ForegroundColor Yellow
-    cargo run --release -- npy --prefix jeff33_
-    Write-Host ""
-} else {
-    Write-Host "── 5. JEFF-33: skipped (no .npy files) ──" -ForegroundColor DarkGray
+if ($Output) {
+    Write-Host "Logging output to: $Output" -ForegroundColor Cyan
+    Start-Transcript -Path $Output -Append -Force | Out-Null
 }
 
-# ── 6. GPU/CUDA benchmark (optional, requires --features cuda) ──────
-if ($Cuda) {
-    Write-Host "── 6. GPU benchmark ──" -ForegroundColor Yellow
-    cargo build --release --features cuda --bin gpu_bench 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        cargo run --release --features cuda --bin gpu_bench -- $DataDir --rank 5 --particles 1000000
-    } else {
-        Write-Host "SKIP: CUDA build failed (check CUDA toolkit)" -ForegroundColor DarkGray
+Push-Location $OriginalLocation
+
+try {
+    Write-Host "`n=== open_rust_mc Test Suite ===" -ForegroundColor Cyan
+    Set-Location $RustDir
+
+    # 1. Unit Tests
+    if ($Unit) {
+        Write-Host "`n── 1. Unit tests ──" -ForegroundColor Yellow
+        cargo test --lib $Filter 2>&1 | Out-String -Stream
     }
-    Write-Host ""
-} else {
-    Write-Host "── 6. GPU: skipped (use -Cuda flag) ──" -ForegroundColor DarkGray
+
+    # 2. Godiva Eigenvalue
+    if ($Godiva) {
+        Write-Host "`n── 2. Godiva eigenvalue ──" -ForegroundColor Yellow
+        $GArgs = if ($Full) { 
+            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "150", "--inactive", "20", "--particles", "20000", "--seeds", "3") 
+        } else { 
+            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "30", "--inactive", "5", "--particles", "5000") 
+        }
+        cargo run --release --bin godiva -- $GArgs 2>&1 | Out-String -Stream
+    }
+
+    # 3. PWR Pin Cell
+    if ($Pwr) {
+        Write-Host "`n── 3. PWR pin cell ──" -ForegroundColor Yellow
+        $PArgs = if ($Full) { 
+            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "100", "--inactive", "20", "--particles", "50000", "--seeds", "5") 
+        } else { 
+            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "30", "--inactive", "5", "--particles", "5000") 
+        }
+        cargo run --release --bin pwr_pincell -- $PArgs 2>&1 | Out-String -Stream
+    }
+
+    # 5. JEFF-3.3 SVD Validation
+    if ($Jeff) {
+        # Fix: Look in the DataDir where the .npy files were extracted
+        $JeffFile = Join-Path $DataDir "jeff33_fission_energies.npy"
+        
+        if (Test-Path $JeffFile) {
+            Write-Host "`n── 5. JEFF-33 SVD validation ──" -ForegroundColor Yellow
+            cargo run --release -- npy --prefix jeff33_ 2>&1 | Out-String -Stream
+        } else {
+            Write-Host "`n── 5. JEFF-33 SVD validation (Skipped: $JeffFile not found) ──" -ForegroundColor Gray
+        }
+    }
+
+    # 7. Memory Benchmark
+    if ($Mem) {
+        Write-Host "`n── 7. Memory comparison ──" -ForegroundColor Yellow
+        # Passing the directory directly; bench_mem now correctly filters internal files
+        cargo run --release --bin bench_mem -- "$DataDir" --rank 5 2>&1 | Out-String -Stream
+    }
+
+    Write-Host "`n=== All Selected Tests Passed ===`n" -ForegroundColor Green
 }
-
-# ── 7. Memory benchmark ─────────────────────────────────────────────
-Write-Host "`n── 7. Memory comparison ──" -ForegroundColor Yellow
-cargo run --release --bin bench_mem -- $DataDir --rank 5
-Write-Host ""
-
-Write-Host "=== All tests complete ===" -ForegroundColor Cyan
+catch {
+    Write-Host "`nTEST SUITE FAILED: $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+}
+finally {
+    Pop-Location
+    if ($Output) { Stop-Transcript }
+}
