@@ -46,6 +46,9 @@ mod cuda_main {
         /// Run mode: "fused" (optimized), "split" (3-kernel), "both" (compare)
         #[arg(short, long, default_value = "both")]
         mode: String,
+        /// Number of independent seeds for statistical benchmarking.
+        #[arg(short, long, default_value_t = 1)]
+        seeds: u32,
     }
 
     /// Nuclide specs: (filename, AWR, fallback nu-bar) — same as pwr_pincell.rs
@@ -141,6 +144,25 @@ mod cuda_main {
         let mat_data = gpu.upload_material_data(&materials, &awrs, &nu_bars)
             .expect("upload material data");
 
+        // Load S(α,β) thermal scattering for H in H₂O
+        let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
+        let sab_data = if h2o_path.exists() {
+            match open_rust_mc::hdf5_reader::load_thermal_scattering(&h2o_path) {
+                Ok(tsl) => {
+                    // Use temperature closest to water (600K)
+                    let t_idx = tsl.select_temperature(600.0, 0.5);
+                    gpu.upload_sab_data(&tsl, t_idx).expect("upload S(a,b)")
+                }
+                Err(e) => {
+                    eprintln!("  WARNING: S(a,b) load failed: {e}");
+                    gpu.upload_sab_data_empty().expect("empty S(a,b)")
+                }
+            }
+        } else {
+            println!("  S(a,b): c_H_in_H2O.h5 not found — using free-gas");
+            gpu.upload_sab_data_empty().expect("empty S(a,b)")
+        };
+
         let gpu_init_ms = t_gpu.elapsed().as_secs_f64() * 1000.0;
         println!("  GPU ready in {gpu_init_ms:.0} ms");
 
@@ -153,6 +175,7 @@ mod cuda_main {
             gpu: &GpuTransportContext,
             nuc_data: &open_rust_mc::gpu_transport::GpuNuclideData,
             mat_data: &open_rust_mc::gpu_transport::GpuMaterialData,
+            sab_data: &open_rust_mc::gpu_transport::GpuSabData,
             n: usize,
             batches: u32,
             inactive: u32,
@@ -167,7 +190,7 @@ mod cuda_main {
             let t_sim = Instant::now();
             for batch in 1..=batches {
                 let result = if fused {
-                    gpu.run_batch_fused(&source_bank, batch, nuc_data, mat_data, 1_000_000)
+                    gpu.run_batch_fused(&source_bank, batch, nuc_data, mat_data, sab_data, 1_000_000)
                 } else {
                     gpu.run_batch(&source_bank, batch, nuc_data, mat_data, 1_000_000)
                 }.expect("GPU batch failed");
@@ -202,12 +225,12 @@ mod cuda_main {
         let mut fused_ns = 0.0;
 
         if run_split {
-            let (_, ns, _) = run_mode("3-kernel (split)", &gpu, &nuc_data, &mat_data,
+            let (_, ns, _) = run_mode("3-kernel (split)", &gpu, &nuc_data, &mat_data, &sab_data,
                                        n, args.batches, args.inactive, false);
             split_ns = ns;
         }
         if run_fused {
-            let (_, ns, _) = run_mode("Fused + compaction", &gpu, &nuc_data, &mat_data,
+            let (_, ns, _) = run_mode("Fused + compaction", &gpu, &nuc_data, &mat_data, &sab_data,
                                        n, args.batches, args.inactive, true);
             fused_ns = ns;
         }

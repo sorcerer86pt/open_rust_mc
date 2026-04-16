@@ -266,6 +266,241 @@ __device__ double svd_reconstruct(
 }
 
 // ════════════════════════════════════════════════════════════════════
+// Physics helper functions (full parity with CPU)
+// ════════════════════════════════════════════════════════════════════
+
+// ── Energy-dependent nu-bar (linear interpolation on table) ──
+__device__ double nu_bar_lookup(
+    double E,
+    const double* __restrict__ energies,
+    const double* __restrict__ values,
+    int offset, int n_pts)
+{
+    if (n_pts <= 0) return 0.0;
+    const double* e = &energies[offset];
+    const double* v = &values[offset];
+    if (E <= e[0]) return v[0];
+    if (E >= e[n_pts-1]) return v[n_pts-1];
+    // Binary search
+    int lo = 0, hi = n_pts - 1;
+    while (hi - lo > 1) { int mid=(lo+hi)/2; if (e[mid]<=E) lo=mid; else hi=mid; }
+    double f = (E - e[lo]) / (e[hi] - e[lo]);
+    return v[lo] + f * (v[hi] - v[lo]);
+}
+
+// ── Fission spectrum: sample outgoing energy from tabulated CDF ──
+__device__ double sample_fission_energy(
+    double E_inc, PcgState* rng,
+    const double* __restrict__ fis_inc_energies,  // incident energy grid
+    const int* __restrict__ fis_dist_offsets,      // per inc energy → offset into e_out/cdf
+    const int* __restrict__ fis_dist_sizes,        // per inc energy → n_eout
+    const double* __restrict__ fis_e_out,          // outgoing energies (flat)
+    const double* __restrict__ fis_cdf,            // CDF values (flat)
+    int nuc_fis_offset,  // offset into fis_inc_energies for this nuclide
+    int n_inc)           // number of incident energies for this nuclide
+{
+    if (n_inc <= 0) {
+        // Fallback: Watt spectrum
+        double a = 0.988;
+        double x1 = -log(fmax(pcg_uniform(rng), 1e-30));
+        double x2 = -log(fmax(pcg_uniform(rng), 1e-30));
+        double c = cos(PI/2.0 * pcg_uniform(rng));
+        return a * (x1 + x2*c*c) * 1e6;
+    }
+
+    const double* inc_e = &fis_inc_energies[nuc_fis_offset];
+
+    // Find bracketing incident energy
+    int ie = 0;
+    if (E_inc >= inc_e[n_inc-1]) ie = n_inc-1;
+    else {
+        for (int i = 0; i < n_inc-1; i++) {
+            if (E_inc >= inc_e[i] && E_inc < inc_e[i+1]) { ie = i; break; }
+        }
+    }
+
+    // Sample from CDF at this incident energy
+    int off = fis_dist_offsets[nuc_fis_offset + ie];
+    int sz = fis_dist_sizes[nuc_fis_offset + ie];
+    if (sz <= 1) return E_inc * 0.5;
+
+    double xi = pcg_uniform(rng);
+    const double* eo = &fis_e_out[off];
+    const double* cd = &fis_cdf[off];
+
+    // Binary search on CDF
+    int lo = 0, hi = sz - 1;
+    while (hi - lo > 1) { int mid=(lo+hi)/2; if (cd[mid]<=xi) lo=mid; else hi=mid; }
+    double f = (xi - cd[lo]) / fmax(cd[hi] - cd[lo], 1e-30);
+    return eo[lo] + f * (eo[hi] - eo[lo]);
+}
+
+// ── Anisotropic scattering: sample mu from tabulated CDF ──
+__device__ double sample_angular_dist(
+    double E, PcgState* rng,
+    const double* __restrict__ ang_energies,
+    const int* __restrict__ ang_dist_offsets,
+    const int* __restrict__ ang_dist_sizes,
+    const double* __restrict__ ang_mu,
+    const double* __restrict__ ang_cdf,
+    int nuc_ang_offset,
+    int n_ang_e,
+    int is_cm)  // 1=center-of-mass, 0=lab
+{
+    if (n_ang_e <= 0) return 2.0*pcg_uniform(rng) - 1.0;  // isotropic fallback
+
+    const double* ae = &ang_energies[nuc_ang_offset];
+
+    // Find bracketing energy
+    int ie = 0;
+    if (E <= ae[0]) ie = 0;
+    else if (E >= ae[n_ang_e-1]) ie = n_ang_e-1;
+    else {
+        int lo=0, hi=n_ang_e-1;
+        while (hi-lo>1) { int mid=(lo+hi)/2; if (ae[mid]<=E) lo=mid; else hi=mid; }
+        ie = lo;
+    }
+
+    int off = ang_dist_offsets[nuc_ang_offset + ie];
+    int sz = ang_dist_sizes[nuc_ang_offset + ie];
+    if (sz <= 1) return 2.0*pcg_uniform(rng) - 1.0;
+
+    double xi = pcg_uniform(rng);
+    const double* mu_arr = &ang_mu[off];
+    const double* cd = &ang_cdf[off];
+
+    int lo=0, hi=sz-1;
+    while (hi-lo>1) { int mid=(lo+hi)/2; if (cd[mid]<=xi) lo=mid; else hi=mid; }
+    double f = (xi - cd[lo]) / fmax(cd[hi] - cd[lo], 1e-30);
+    double mu = mu_arr[lo] + f * (mu_arr[hi] - mu_arr[lo]);
+    return fmax(-1.0, fmin(1.0, mu));
+}
+
+// ── URR probability tables: sample band and modify XS ──
+__device__ void apply_urr_gpu(
+    double* total, double* elastic, double* fission, double* capture,
+    double E, double xi,
+    const double* __restrict__ urr_energies,
+    const double* __restrict__ urr_cum_prob,
+    const double* __restrict__ urr_total_f,
+    const double* __restrict__ urr_elastic_f,
+    const double* __restrict__ urr_fission_f,
+    const double* __restrict__ urr_capture_f,
+    int urr_offset, int n_urr_e, int n_bands, int multiply_smooth)
+{
+    if (n_urr_e <= 0) return;
+    const double* ue = &urr_energies[urr_offset];
+    if (E < ue[0] || E > ue[n_urr_e-1]) return;
+
+    // Find energy index
+    int ie = 0;
+    int lo=0, hi=n_urr_e-1;
+    while (hi-lo>1) { int mid=(lo+hi)/2; if (ue[mid]<=E) lo=mid; else hi=mid; }
+    ie = lo;
+
+    // Sample band from cumulative probability
+    int base = urr_offset * n_bands + ie * n_bands;  // simplified offset
+    // Actually need proper flattened offset: urr_offset_bands + ie * n_bands
+    const double* cp = &urr_cum_prob[base];
+    int band = 0;
+    for (int b = 0; b < n_bands; b++) {
+        if (xi < cp[b]) { band = b; break; }
+        band = b;
+    }
+
+    double ft = urr_total_f[base + band];
+    double fe = urr_elastic_f[base + band];
+    double ff = urr_fission_f[base + band];
+    double fc = urr_capture_f[base + band];
+
+    if (multiply_smooth) {
+        *total *= ft; *elastic *= fe; *fission *= ff; *capture *= fc;
+    } else {
+        *total = ft; *elastic = fe; *fission = ff; *capture = fc;
+    }
+}
+
+// ── S(α,β) thermal scattering ──
+// Continuous inelastic: sample (E_out, mu) from CDF tables
+__device__ void sab_sample(
+    double E_in, PcgState* rng,
+    double* E_out, double* mu_out,
+    const double* __restrict__ sab_inc_energies,  // incident energy grid
+    int n_sab_inc,
+    const int* __restrict__ sab_eout_offsets,     // per inc energy → offset into e_out arrays
+    const int* __restrict__ sab_eout_sizes,       // per inc energy → n_eout
+    const double* __restrict__ sab_e_out,         // outgoing energies (flat)
+    const double* __restrict__ sab_cdf_e,         // energy CDF (flat)
+    const int* __restrict__ sab_mu_offsets,       // per (inc_e, eout) → offset into mu arrays
+    const int* __restrict__ sab_mu_sizes,         // per (inc_e, eout) → n_mu
+    const double* __restrict__ sab_mu,            // discrete cosines (flat)
+    const double* __restrict__ sab_cdf_mu)        // cosine CDF (flat)
+{
+    if (n_sab_inc <= 0) { *E_out = E_in; *mu_out = 2.0*pcg_uniform(rng)-1.0; return; }
+
+    // Find bracketing incident energy
+    int ie = 0;
+    if (E_in <= sab_inc_energies[0]) ie = 0;
+    else if (E_in >= sab_inc_energies[n_sab_inc-1]) ie = n_sab_inc-1;
+    else {
+        int lo=0, hi=n_sab_inc-1;
+        while (hi-lo>1) { int mid=(lo+hi)/2; if (sab_inc_energies[mid]<=E_in) lo=mid; else hi=mid; }
+        // Stochastic interpolation between lo and hi
+        double f = (E_in - sab_inc_energies[lo]) / fmax(sab_inc_energies[hi]-sab_inc_energies[lo], 1e-30);
+        ie = (pcg_uniform(rng) < f) ? hi : lo;
+    }
+
+    // Sample outgoing energy from CDF
+    int eo_off = sab_eout_offsets[ie];
+    int eo_sz = sab_eout_sizes[ie];
+    if (eo_sz <= 1) { *E_out = E_in; *mu_out = 2.0*pcg_uniform(rng)-1.0; return; }
+
+    double xi_e = pcg_uniform(rng);
+    const double* eo = &sab_e_out[eo_off];
+    const double* cdf_e = &sab_cdf_e[eo_off];
+
+    int lo=0, hi=eo_sz-1;
+    while (hi-lo>1) { int mid=(lo+hi)/2; if (cdf_e[mid]<=xi_e) lo=mid; else hi=mid; }
+    double f_e = (xi_e - cdf_e[lo]) / fmax(cdf_e[hi]-cdf_e[lo], 1e-30);
+    *E_out = eo[lo] + f_e * (eo[hi] - eo[lo]);
+    if (*E_out < 1e-11) *E_out = 1e-11;
+
+    int eout_bin = lo;  // which outgoing energy bin we sampled
+
+    // Sample cosine from mu CDF at this (inc_energy, eout_bin)
+    int mu_key = eo_off + eout_bin;  // linearized index for mu lookup
+    int mu_off = sab_mu_offsets[mu_key];
+    int mu_sz = sab_mu_sizes[mu_key];
+    if (mu_sz <= 1) { *mu_out = 2.0*pcg_uniform(rng)-1.0; return; }
+
+    double xi_mu = pcg_uniform(rng);
+    const double* mu_arr = &sab_mu[mu_off];
+    const double* cdf_mu = &sab_cdf_mu[mu_off];
+
+    lo=0; hi=mu_sz-1;
+    while (hi-lo>1) { int mid=(lo+hi)/2; if (cdf_mu[mid]<=xi_mu) lo=mid; else hi=mid; }
+    double f_mu = (xi_mu - cdf_mu[lo]) / fmax(cdf_mu[hi]-cdf_mu[lo], 1e-30);
+    *mu_out = mu_arr[lo] + f_mu * (mu_arr[hi] - mu_arr[lo]);
+    *mu_out = fmax(-1.0, fmin(1.0, *mu_out));
+}
+
+// S(α,β) total XS at a given energy (sum over outgoing energy PDF)
+__device__ double sab_total_xs(
+    double E_in,
+    const double* __restrict__ sab_inc_energies,
+    const double* __restrict__ sab_xs,  // total XS at each incident energy
+    int n_sab_inc)
+{
+    if (n_sab_inc <= 0) return 0.0;
+    if (E_in <= sab_inc_energies[0]) return sab_xs[0];
+    if (E_in >= sab_inc_energies[n_sab_inc-1]) return sab_xs[n_sab_inc-1];
+    int lo=0, hi=n_sab_inc-1;
+    while (hi-lo>1) { int mid=(lo+hi)/2; if (sab_inc_energies[mid]<=E_in) lo=mid; else hi=mid; }
+    double f = (E_in - sab_inc_energies[lo]) / fmax(sab_inc_energies[hi]-sab_inc_energies[lo], 1e-30);
+    return sab_xs[lo] + f * (sab_xs[hi] - sab_xs[lo]);
+}
+
+// ════════════════════════════════════════════════════════════════════
 // KERNEL 1: Cross-section lookup for all alive particles
 // ════════════════════════════════════════════════════════════════════
 //
@@ -1030,6 +1265,33 @@ transport_persistent(
     const double* __restrict__ mat_atom_density,
     const double* __restrict__ awr_table,
     const double* __restrict__ nu_bar_const,
+    // Energy-dependent nu-bar tables (flat with offsets)
+    const double* __restrict__ nu_bar_energies,
+    const double* __restrict__ nu_bar_values,
+    const int* __restrict__ nu_bar_offsets,
+    const int* __restrict__ nu_bar_sizes,
+    // Fission energy distribution (flat CDFs)
+    const double* __restrict__ fis_inc_energies,
+    const int* __restrict__ fis_dist_offsets,
+    const int* __restrict__ fis_dist_sizes,
+    const double* __restrict__ fis_e_out,
+    const double* __restrict__ fis_cdf,
+    const int* __restrict__ fis_nuc_offsets,
+    const int* __restrict__ fis_nuc_n_inc,
+    // S(α,β) thermal scattering (for H1, nuclide idx 3)
+    const double* __restrict__ sab_inc_energies,
+    int n_sab_inc,
+    const int* __restrict__ sab_eout_offsets,
+    const int* __restrict__ sab_eout_sizes,
+    const double* __restrict__ sab_e_out_arr,
+    const double* __restrict__ sab_cdf_e_arr,
+    const int* __restrict__ sab_mu_offsets_arr,
+    const int* __restrict__ sab_mu_sizes_arr,
+    const double* __restrict__ sab_mu_arr,
+    const double* __restrict__ sab_cdf_mu_arr,
+    const double* __restrict__ sab_xs_arr,
+    double sab_energy_max,
+    // RNG
     unsigned long long* __restrict__ rng_state_arr,
     unsigned long long* __restrict__ rng_inc_arr,
     double* __restrict__ fission_x, double* __restrict__ fission_y,
@@ -1108,6 +1370,15 @@ transport_persistent(
                     else sig_rest += s;
                 }
             }
+            // S(α,β) thermal scattering: replace elastic for H1 below energy_max
+            double sab_xs_val = 0.0;
+            if (nuc_idx == 3 && E < sab_energy_max && E > 0.0 && n_sab_inc > 0) {
+                sab_xs_val = sab_total_xs(E, sab_inc_energies, sab_xs_arr, n_sab_inc);
+                if (sab_xs_val > 0.0) {
+                    sig_el = sab_xs_val;  // replace free-gas elastic with S(α,β)
+                }
+            }
+
             double micro_t = sig_el + sig_fis + sig_cap + sig_rest;
             nuc_macro_t[i] = N_i * micro_t;
             nuc_sig_el[i]  = N_i * sig_el;
@@ -1159,7 +1430,35 @@ transport_persistent(
             // ── Sample reaction type for this nuclide ──
             double xi_rxn = pcg_uniform(&rng) * nuc_macro_t[hit_local];
             if (xi_rxn < nuc_sig_el[hit_local]) {
-                // ══ Elastic scatter with correct AWR ══
+                // ══ Elastic/thermal scatter with correct AWR ══
+
+                // S(α,β) thermal scattering for H1 below energy_max
+                if (hit_nuc_idx == 3 && E < sab_energy_max && n_sab_inc > 0) {
+                    double E_sab, mu_sab;
+                    sab_sample(E, &rng, &E_sab, &mu_sab,
+                               sab_inc_energies, n_sab_inc,
+                               sab_eout_offsets, sab_eout_sizes,
+                               sab_e_out_arr, sab_cdf_e_arr,
+                               sab_mu_offsets_arr, sab_mu_sizes_arr,
+                               sab_mu_arr, sab_cdf_mu_arr);
+                    E = fmax(E_sab, 1e-11);
+                    // Apply scattering angle
+                    double phi = 2.0*PI*pcg_uniform(&rng);
+                    double sin_mu = sqrt(fmax(0.0, 1.0-mu_sab*mu_sab));
+                    double w2 = dz*dz;
+                    if (w2 < 0.999) {
+                        double inv_sq = 1.0/sqrt(1.0-w2);
+                        double dx2=mu_sab*dx+sin_mu*(dx*dz*cos(phi)-dy*sin(phi))*inv_sq;
+                        double dy2=mu_sab*dy+sin_mu*(dy*dz*cos(phi)+dx*sin(phi))*inv_sq;
+                        double dz2=mu_sab*dz-sin_mu*sqrt(1.0-w2)*cos(phi);
+                        dx=dx2; dy=dy2; dz=dz2;
+                    } else {
+                        double sign=(dz>0.0)?1.0:-1.0;
+                        dx=sin_mu*cos(phi); dy=sin_mu*sin(phi)*sign; dz=mu_sab*sign;
+                    }
+                    goto end_collision;
+                }
+
                 // Cell temperatures: fuel=900K, clad=600K, water=600K
                 double cell_kT;
                 if (cell == CELL_FUEL) cell_kT = 900.0 * 8.617333262e-5;
@@ -1259,24 +1558,29 @@ transport_persistent(
                     }
                 }
             } else if (xi_rxn < nuc_sig_el[hit_local]+nuc_sig_fis[hit_local]) {
-                // Fission — use hit nuclide's nu-bar
+                // Fission — energy-dependent nu-bar from table
                 lcnt_fis++;
-                double nu = __ldg(&nu_bar_const[hit_nuc_idx]);
+                int nb_off = __ldg(&nu_bar_offsets[hit_nuc_idx]);
+                int nb_sz = __ldg(&nu_bar_sizes[hit_nuc_idx]);
+                double nu;
+                if (nb_sz > 0) {
+                    nu = nu_bar_lookup(E, nu_bar_energies, nu_bar_values, nb_off, nb_sz);
+                } else {
+                    nu = __ldg(&nu_bar_const[hit_nuc_idx]);
+                }
                 int n_sites = (int)nu;
                 if (pcg_uniform(&rng) < (nu-(double)n_sites)) n_sites++;
                 for (int s = 0; s < n_sites; s++) {
                     int idx = atomicAdd(fission_count, 1);
                     if (idx < max_fission_bank) {
                         fission_x[idx]=px; fission_y[idx]=py; fission_z[idx]=pz;
-                        double a=0.988, E_fiss;
-                        for (int att=0; att<100; att++) {
-                            double x1=-log(pcg_uniform(&rng));
-                            double x2=-log(pcg_uniform(&rng));
-                            double c2=cos(PI/2.0*pcg_uniform(&rng));
-                            E_fiss = a*(x1+x2*c2*c2);
-                            if (E_fiss > 0.0) break;
-                        }
-                        fission_e[idx] = E_fiss*1e6;
+                        // Data-driven fission spectrum from tabulated CDF
+                        int fi_off = __ldg(&fis_nuc_offsets[hit_nuc_idx]);
+                        int fi_ninc = __ldg(&fis_nuc_n_inc[hit_nuc_idx]);
+                        double E_fiss = sample_fission_energy(
+                            E, &rng, fis_inc_energies, fis_dist_offsets,
+                            fis_dist_sizes, fis_e_out, fis_cdf, fi_off, fi_ninc);
+                        fission_e[idx] = E_fiss;
                         fission_w[idx] = 1.0;
                     }
                 }
@@ -1285,6 +1589,7 @@ transport_persistent(
                 // Capture
                 is_alive = 0;
             }
+            end_collision: ;
         }
     } // end step loop
 
@@ -1333,8 +1638,9 @@ pub struct GpuTransportContext {
     k_transport_persistent: CudaFunction,
 }
 
-/// SVD data uploaded to GPU for all nuclides.
+/// SVD data + physics tables uploaded to GPU for all nuclides.
 pub struct GpuNuclideData {
+    // SVD basis data
     pub all_basis: CudaSlice<f32>,
     pub all_coeffs: CudaSlice<f64>,
     pub all_energy_grids: CudaSlice<f64>,
@@ -1344,6 +1650,35 @@ pub struct GpuNuclideData {
     pub has_reaction: CudaSlice<i32>,
     pub coeffs_offsets: CudaSlice<i32>,
     pub rank: i32,
+    // Energy-dependent nu-bar tables
+    pub nu_bar_energies: CudaSlice<f64>,
+    pub nu_bar_values: CudaSlice<f64>,
+    pub nu_bar_offsets: CudaSlice<i32>,
+    pub nu_bar_sizes: CudaSlice<i32>,
+    // Fission energy distributions (tabulated CDF)
+    pub fis_inc_energies: CudaSlice<f64>,
+    pub fis_dist_offsets: CudaSlice<i32>,
+    pub fis_dist_sizes: CudaSlice<i32>,
+    pub fis_e_out: CudaSlice<f64>,
+    pub fis_cdf: CudaSlice<f64>,
+    pub fis_nuc_offsets: CudaSlice<i32>,
+    pub fis_nuc_n_inc: CudaSlice<i32>,
+}
+
+/// S(α,β) thermal scattering data on GPU (for one temperature).
+pub struct GpuSabData {
+    pub inc_energies: CudaSlice<f64>,
+    pub n_inc: i32,
+    pub eout_offsets: CudaSlice<i32>,
+    pub eout_sizes: CudaSlice<i32>,
+    pub e_out: CudaSlice<f64>,
+    pub cdf_e: CudaSlice<f64>,
+    pub mu_offsets: CudaSlice<i32>,
+    pub mu_sizes: CudaSlice<i32>,
+    pub mu: CudaSlice<f64>,
+    pub cdf_mu: CudaSlice<f64>,
+    pub xs: CudaSlice<f64>,
+    pub energy_max: f64,
 }
 
 /// Material composition data on GPU.
@@ -1466,10 +1801,56 @@ impl GpuTransportContext {
         if all_coeffs_vec.is_empty() { all_coeffs_vec.push(0.0); }
         if all_grids_vec.is_empty() { all_grids_vec.push(0.0); }
 
-        println!("  GPU: basis={:.1} MB, grids={:.1} MB, coeffs={:.1} KB",
+        // ── Pack nu-bar tables (flat with offsets) ──
+        let mut nb_energies_vec: Vec<f64> = Vec::new();
+        let mut nb_values_vec: Vec<f64> = Vec::new();
+        let mut nb_offsets_vec = vec![0_i32; n_nuc];
+        let mut nb_sizes_vec = vec![0_i32; n_nuc];
+
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref t) = nuc.nu_bar_table {
+                if !t.energies.is_empty() {
+                    nb_offsets_vec[nuc_idx] = nb_energies_vec.len() as i32;
+                    nb_sizes_vec[nuc_idx] = t.energies.len() as i32;
+                    nb_energies_vec.extend_from_slice(&t.energies);
+                    nb_values_vec.extend_from_slice(&t.values);
+                }
+            }
+        }
+        if nb_energies_vec.is_empty() { nb_energies_vec.push(0.0); nb_values_vec.push(0.0); }
+
+        // ── Pack fission energy distributions (flat CDFs with offsets) ──
+        let mut fis_inc_e_vec: Vec<f64> = Vec::new();
+        let mut fis_dist_off_vec: Vec<i32> = Vec::new();
+        let mut fis_dist_sz_vec: Vec<i32> = Vec::new();
+        let mut fis_eout_vec: Vec<f64> = Vec::new();
+        let mut fis_cdf_vec: Vec<f64> = Vec::new();
+        let mut fis_nuc_off_vec = vec![0_i32; n_nuc];
+        let mut fis_nuc_ninc_vec = vec![0_i32; n_nuc];
+
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref edist) = nuc.fission_energy_dist {
+                fis_nuc_off_vec[nuc_idx] = fis_inc_e_vec.len() as i32;
+                fis_nuc_ninc_vec[nuc_idx] = edist.energies.len() as i32;
+                for (i, e_inc) in edist.energies.iter().enumerate() {
+                    fis_inc_e_vec.push(*e_inc);
+                    let dist = &edist.distributions[i];
+                    fis_dist_off_vec.push(fis_eout_vec.len() as i32);
+                    fis_dist_sz_vec.push(dist.e_out.len() as i32);
+                    fis_eout_vec.extend_from_slice(&dist.e_out);
+                    fis_cdf_vec.extend_from_slice(&dist.cdf);
+                }
+            }
+        }
+        if fis_inc_e_vec.is_empty() { fis_inc_e_vec.push(0.0); }
+        if fis_eout_vec.is_empty() { fis_eout_vec.push(0.0); fis_cdf_vec.push(0.0); }
+        if fis_dist_off_vec.is_empty() { fis_dist_off_vec.push(0); fis_dist_sz_vec.push(0); }
+
+        println!("  GPU: basis={:.1} MB, grids={:.1} MB, nu-bar={} pts, fis_spec={} pts",
                  all_basis_vec.len() as f64 * 4.0 / 1e6,
                  all_grids_vec.len() as f64 * 8.0 / 1e6,
-                 all_coeffs_vec.len() as f64 * 8.0 / 1e3);
+                 nb_energies_vec.len(),
+                 fis_eout_vec.len());
 
         Ok(GpuNuclideData {
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
@@ -1481,6 +1862,17 @@ impl GpuTransportContext {
             has_reaction: self.stream.clone_htod(&has_reaction_vec)?,
             coeffs_offsets: self.stream.clone_htod(&coeffs_offsets_vec)?,
             rank: rank as i32,
+            nu_bar_energies: self.stream.clone_htod(&nb_energies_vec)?,
+            nu_bar_values: self.stream.clone_htod(&nb_values_vec)?,
+            nu_bar_offsets: self.stream.clone_htod(&nb_offsets_vec)?,
+            nu_bar_sizes: self.stream.clone_htod(&nb_sizes_vec)?,
+            fis_inc_energies: self.stream.clone_htod(&fis_inc_e_vec)?,
+            fis_dist_offsets: self.stream.clone_htod(&fis_dist_off_vec)?,
+            fis_dist_sizes: self.stream.clone_htod(&fis_dist_sz_vec)?,
+            fis_e_out: self.stream.clone_htod(&fis_eout_vec)?,
+            fis_cdf: self.stream.clone_htod(&fis_cdf_vec)?,
+            fis_nuc_offsets: self.stream.clone_htod(&fis_nuc_off_vec)?,
+            fis_nuc_n_inc: self.stream.clone_htod(&fis_nuc_ninc_vec)?,
         })
     }
 
@@ -1512,6 +1904,101 @@ impl GpuTransportContext {
             mat_atom_density: self.stream.clone_htod(&atom_dens)?,
             awr_table: self.stream.clone_htod(nuclide_awrs)?,
             nu_bar_const: self.stream.clone_htod(nuclide_nu_bars)?,
+        })
+    }
+
+    /// Upload S(α,β) thermal scattering data for one temperature.
+    pub fn upload_sab_data(
+        &self,
+        tsl: &crate::thermal::ThermalScatteringData,
+        temp_idx: usize,
+    ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
+
+        let inel = &tsl.inelastic[temp_idx];
+        match &inel.dist {
+            crate::thermal::InelasticDist::Continuous(c) => {
+                // Pack incident energy grid and XS
+                let inc_e: Vec<f64> = inel.energy.clone();
+                let xs: Vec<f64> = inel.xs.clone();
+                let n_inc = inc_e.len() as i32;
+
+                // Pack outgoing energy CDFs with offsets
+                let mut eout_offsets = Vec::with_capacity(c.n_inc);
+                let mut eout_sizes = Vec::with_capacity(c.n_inc);
+                for i in 0..c.n_inc {
+                    let start = c.offsets[i];
+                    let end = if i + 1 < c.offsets.len() { c.offsets[i + 1] } else { c.e_out.len() };
+                    eout_offsets.push(start as i32);
+                    eout_sizes.push((end - start) as i32);
+                }
+
+                // Pack mu offsets/sizes (one per outgoing energy bin)
+                let mut mu_offs = Vec::with_capacity(c.mu_offsets.len());
+                let mut mu_szs = Vec::with_capacity(c.mu_offsets.len());
+                for i in 0..c.mu_offsets.len() {
+                    let start = c.mu_offsets[i];
+                    let end = if i + 1 < c.mu_offsets.len() { c.mu_offsets[i + 1] } else { c.mu.len() };
+                    mu_offs.push(start as i32);
+                    mu_szs.push((end - start) as i32);
+                }
+
+                // Ensure non-empty
+                if mu_offs.is_empty() { mu_offs.push(0); mu_szs.push(0); }
+
+                println!("  GPU S(a,b): {} inc energies, {} E_out pts, {} mu pts",
+                         n_inc, c.e_out.len(), c.mu.len());
+
+                Ok(GpuSabData {
+                    inc_energies: self.stream.clone_htod(&inc_e)?,
+                    n_inc,
+                    eout_offsets: self.stream.clone_htod(&eout_offsets)?,
+                    eout_sizes: self.stream.clone_htod(&eout_sizes)?,
+                    e_out: self.stream.clone_htod(&c.e_out)?,
+                    cdf_e: self.stream.clone_htod(&c.cdf_e)?,
+                    mu_offsets: self.stream.clone_htod(&mu_offs)?,
+                    mu_sizes: self.stream.clone_htod(&mu_szs)?,
+                    mu: self.stream.clone_htod(&c.mu)?,
+                    cdf_mu: self.stream.clone_htod(&c.cdf_mu)?,
+                    xs: self.stream.clone_htod(&xs)?,
+                    energy_max: tsl.energy_max,
+                })
+            }
+            crate::thermal::InelasticDist::Discrete(_) => {
+                // Discrete mode — create empty placeholder (not yet supported on GPU)
+                println!("  GPU S(a,b): discrete mode, using empty placeholder");
+                Ok(GpuSabData {
+                    inc_energies: self.stream.clone_htod(&[0.0_f64])?,
+                    n_inc: 0,
+                    eout_offsets: self.stream.clone_htod(&[0_i32])?,
+                    eout_sizes: self.stream.clone_htod(&[0_i32])?,
+                    e_out: self.stream.clone_htod(&[0.0_f64])?,
+                    cdf_e: self.stream.clone_htod(&[0.0_f64])?,
+                    mu_offsets: self.stream.clone_htod(&[0_i32])?,
+                    mu_sizes: self.stream.clone_htod(&[0_i32])?,
+                    mu: self.stream.clone_htod(&[0.0_f64])?,
+                    cdf_mu: self.stream.clone_htod(&[0.0_f64])?,
+                    xs: self.stream.clone_htod(&[0.0_f64])?,
+                    energy_max: 0.0,
+                })
+            }
+        }
+    }
+
+    /// Create an empty S(α,β) placeholder (no thermal scattering data).
+    pub fn upload_sab_data_empty(&self) -> Result<GpuSabData, Box<dyn std::error::Error>> {
+        Ok(GpuSabData {
+            inc_energies: self.stream.clone_htod(&[0.0_f64])?,
+            n_inc: 0,
+            eout_offsets: self.stream.clone_htod(&[0_i32])?,
+            eout_sizes: self.stream.clone_htod(&[0_i32])?,
+            e_out: self.stream.clone_htod(&[0.0_f64])?,
+            cdf_e: self.stream.clone_htod(&[0.0_f64])?,
+            mu_offsets: self.stream.clone_htod(&[0_i32])?,
+            mu_sizes: self.stream.clone_htod(&[0_i32])?,
+            mu: self.stream.clone_htod(&[0.0_f64])?,
+            cdf_mu: self.stream.clone_htod(&[0.0_f64])?,
+            xs: self.stream.clone_htod(&[0.0_f64])?,
+            energy_max: 0.0,
         })
     }
 
@@ -1728,6 +2215,7 @@ impl GpuTransportContext {
         batch: u32,
         nuc_data: &GpuNuclideData,
         mat_data: &GpuMaterialData,
+        sab_data: &GpuSabData,
         max_steps: u32,
     ) -> Result<GpuBatchResult, Box<dyn std::error::Error>> {
         let n = source_bank.len();
@@ -1889,6 +2377,33 @@ impl GpuTransportContext {
                     .arg(&mat_data.mat_atom_density)
                     .arg(&mat_data.awr_table)
                     .arg(&mat_data.nu_bar_const)
+                    // Nu-bar tables
+                    .arg(&nuc_data.nu_bar_energies)
+                    .arg(&nuc_data.nu_bar_values)
+                    .arg(&nuc_data.nu_bar_offsets)
+                    .arg(&nuc_data.nu_bar_sizes)
+                    // Fission spectrum CDFs
+                    .arg(&nuc_data.fis_inc_energies)
+                    .arg(&nuc_data.fis_dist_offsets)
+                    .arg(&nuc_data.fis_dist_sizes)
+                    .arg(&nuc_data.fis_e_out)
+                    .arg(&nuc_data.fis_cdf)
+                    .arg(&nuc_data.fis_nuc_offsets)
+                    .arg(&nuc_data.fis_nuc_n_inc)
+                    // S(α,β) thermal scattering
+                    .arg(&sab_data.inc_energies)
+                    .arg(&sab_data.n_inc)
+                    .arg(&sab_data.eout_offsets)
+                    .arg(&sab_data.eout_sizes)
+                    .arg(&sab_data.e_out)
+                    .arg(&sab_data.cdf_e)
+                    .arg(&sab_data.mu_offsets)
+                    .arg(&sab_data.mu_sizes)
+                    .arg(&sab_data.mu)
+                    .arg(&sab_data.cdf_mu)
+                    .arg(&sab_data.xs)
+                    .arg(&sab_data.energy_max)
+                    // RNG
                     .arg(&mut d_rng_state).arg(&mut d_rng_inc)
                     .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
                     .arg(&mut d_fis_e).arg(&mut d_fis_w)
