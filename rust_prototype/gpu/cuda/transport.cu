@@ -269,7 +269,8 @@ __device__ int energy_index(const double* grid, int n_e, double energy) {
     return lo;
 }
 
-__device__ double svd_reconstruct(
+// SVD reconstruct in LOG10 space (no exp2 conversion)
+__device__ double svd_reconstruct_log(
     const float* __restrict__ basis,
     const double* __restrict__ coeffs,
     int e_idx, int rank)
@@ -278,7 +279,30 @@ __device__ double svd_reconstruct(
     double acc = 0.0;
     for (int j = 0; j < rank; j++)
         acc = fma((double)__ldg(&row[j]), __ldg(&coeffs[j]), acc);
-    return exp2(acc * 3.321928094887362);
+    return acc;
+}
+
+// SVD reconstruct with log-log interpolation between grid points (OpenMC scheme)
+__device__ double svd_reconstruct_interp(
+    const float* __restrict__ basis,
+    const double* __restrict__ coeffs,
+    int e_idx, int n_e, int rank, double log_frac)
+{
+    double log_lo = svd_reconstruct_log(basis, coeffs, e_idx, rank);
+    if (e_idx + 1 >= n_e || log_frac <= 0.0)
+        return exp2(log_lo * 3.321928094887362);
+    double log_hi = svd_reconstruct_log(basis, coeffs, e_idx + 1, rank);
+    double log_interp = log_lo + log_frac * (log_hi - log_lo);
+    return exp2(log_interp * 3.321928094887362);
+}
+
+// Legacy: single-point reconstruct (used by discrete levels)
+__device__ double svd_reconstruct(
+    const float* __restrict__ basis,
+    const double* __restrict__ coeffs,
+    int e_idx, int rank)
+{
+    return exp2(svd_reconstruct_log(basis, coeffs, e_idx, rank) * 3.321928094887362);
 }
 
 __device__ double nu_bar_lookup(
@@ -307,19 +331,45 @@ __device__ double sample_fission_energy(
         return a*(x1+x2*c*c)*1e6;
     }
     const double* inc_e = &PTR_D(p, P_FIS_INC_E)[fi_off];
-    int ie = 0;
-    for (int i=0; i<fi_n-1; i++) { if (E_inc >= inc_e[i] && E_inc < inc_e[i+1]) { ie=i; break; } }
-    if (E_inc >= inc_e[fi_n-1]) ie = fi_n-1;
-    int off = PTR_I(p, P_FIS_DIST_OFF)[fi_off+ie];
-    int sz = PTR_I(p, P_FIS_DIST_SZ)[fi_off+ie];
-    if (sz <= 1) return E_inc*0.5;
+    // Edge cases
+    if (E_inc <= inc_e[0]) {
+        int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off];
+        if (sz<=1) return E_inc*0.5;
+        double xi=pcg_uniform(rng);
+        const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+        return eo[lo]+f*(eo[hi]-eo[lo]);
+    }
+    if (E_inc >= inc_e[fi_n-1]) {
+        int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+fi_n-1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+fi_n-1];
+        if (sz<=1) return E_inc*0.5;
+        double xi=pcg_uniform(rng);
+        const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+        return eo[lo]+f*(eo[hi]-eo[lo]);
+    }
+    // Binary search for bracket
+    int ie; { int lo=0,hi=fi_n-1;
+        while(hi-lo>1){int mid=(lo+hi)/2;if(inc_e[mid]<=E_inc)lo=mid;else hi=mid;} ie=lo; }
+    // Correlated sampling: one xi, invert both CDFs, interpolate
     double xi = pcg_uniform(rng);
-    const double* eo = &PTR_D(p, P_FIS_E_OUT)[off];
-    const double* cd = &PTR_D(p, P_FIS_CDF)[off];
-    int lo=0, hi=sz-1;
-    while (hi-lo>1) { int mid=(lo+hi)/2; if (cd[mid]<=xi) lo=mid; else hi=mid; }
-    double f = (xi-cd[lo]) / fmax(cd[hi]-cd[lo],1e-30);
-    return eo[lo] + f*(eo[hi]-eo[lo]);
+    double e0, e1;
+    { int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+ie], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+ie];
+      if(sz<=1){ e0=E_inc*0.5; }
+      else { const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30); e0=eo[lo]+f*(eo[hi]-eo[lo]); }
+    }
+    { int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+ie+1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+ie+1];
+      if(sz<=1){ e1=E_inc*0.5; }
+      else { const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30); e1=eo[lo]+f*(eo[hi]-eo[lo]); }
+    }
+    double frac=(E_inc-inc_e[ie])/(inc_e[ie+1]-inc_e[ie]);
+    return fmax((1.0-frac)*e0+frac*e1, 1e-5);
 }
 
 __device__ double sample_angular_dist(
@@ -329,20 +379,46 @@ __device__ double sample_angular_dist(
     int a_ne = __ldg(&PTR_I(p, P_ANG_NUC_NE)[hit_nuc]);
     if (a_ne <= 0) return 2.0*pcg_uniform(rng)-1.0;
     const double* ae = &PTR_D(p, P_ANG_ENERGIES)[a_off];
-    int ie=0;
-    if (E <= ae[0]) ie=0;
-    else if (E >= ae[a_ne-1]) ie=a_ne-1;
-    else { int lo=0,hi=a_ne-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
-    int off = PTR_I(p, P_ANG_DIST_OFF)[a_off+ie];
-    int sz = PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
-    if (sz <= 1) return 2.0*pcg_uniform(rng)-1.0;
+    // Edge: below grid
+    if (E <= ae[0]) {
+        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off];
+        if (sz<=1) return 2.0*pcg_uniform(rng)-1.0;
+        double xi=pcg_uniform(rng);
+        const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+        return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
+    }
+    // Edge: above grid
+    if (E >= ae[a_ne-1]) {
+        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+a_ne-1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+a_ne-1];
+        if (sz<=1) return 2.0*pcg_uniform(rng)-1.0;
+        double xi=pcg_uniform(rng);
+        const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+        return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
+    }
+    // Binary search for energy bracket
+    int ie; { int lo=0,hi=a_ne-1;
+        while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
+    // Correlated sampling: one xi, invert both CDFs, interpolate mu
     double xi = pcg_uniform(rng);
-    const double* mu = &PTR_D(p, P_ANG_MU)[off];
-    const double* cd = &PTR_D(p, P_ANG_CDF)[off];
-    int lo=0, hi=sz-1;
-    while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-    double f = (xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
-    return fmax(-1.0, fmin(1.0, mu[lo]+f*(mu[hi]-mu[lo])));
+    double mu0, mu1;
+    { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
+      if(sz<=1){ mu0=2.0*xi-1.0; }
+      else { const double* ma=&PTR_D(p, P_ANG_MU)[off]; const double* ca=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ca[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-ca[lo])/fmax(ca[hi]-ca[lo],1e-30); mu0=ma[lo]+f*(ma[hi]-ma[lo]); }
+    }
+    { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie+1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie+1];
+      if(sz<=1){ mu1=2.0*xi-1.0; }
+      else { const double* mb=&PTR_D(p, P_ANG_MU)[off]; const double* cb=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cb[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cb[lo])/fmax(cb[hi]-cb[lo],1e-30); mu1=mb[lo]+f*(mb[hi]-mb[lo]); }
+    }
+    double frac=(E-ae[ie])/(ae[ie+1]-ae[ie]);
+    return fmax(-1.0,fmin(1.0,(1.0-frac)*mu0+frac*mu1));
 }
 
 __device__ double sab_total_xs(double E, Params p) {
@@ -413,7 +489,8 @@ __device__ void apply_urr(
     const double* cp = &PTR_D(p, P_URR_CUM_PROB)[base];
     int band=0;
     for (int b=0; b<n_b; b++) { if (xi < cp[b]) { band=b; break; } band=b; }
-    double ft=PTR_D(p, P_URR_TOTAL_F)[base+band];
+    // ft (total factor) not used — reaction-specific factors applied directly
+    (void)PTR_D(p, P_URR_TOTAL_F);
     double fe=PTR_D(p, P_URR_ELASTIC_F)[base+band];
     double ff=PTR_D(p, P_URR_FISSION_F)[base+band];
     double fc=PTR_D(p, P_URR_CAPTURE_F)[base+band];
@@ -478,6 +555,119 @@ extern "C" __global__ void energy_bin_scatter(
         int pos = atomicAdd(&offsets[energy_to_bin(energy[tid])], 1);
         out_idx[pos] = tid;
     }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Diagnostic kernel: sample angular distribution at given (energy, xi) pairs
+// Writes mu values to output buffer for comparison with CPU.
+// Also tests stair-step vs interpolated in the same kernel.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Stair-step version (for A/B comparison within same kernel)
+__device__ double sample_angular_dist_stairstep(
+    double E, double xi, Params p, int hit_nuc)
+{
+    int a_off = PTR_I(p, P_ANG_NUC_OFF)[hit_nuc];
+    int a_ne = PTR_I(p, P_ANG_NUC_NE)[hit_nuc];
+    if (a_ne <= 0) return 2.0*xi-1.0;
+    const double* ae = &PTR_D(p, P_ANG_ENERGIES)[a_off];
+    int ie=0;
+    if (E <= ae[0]) ie=0;
+    else if (E >= ae[a_ne-1]) ie=a_ne-1;
+    else { int lo=0,hi=a_ne-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
+    int off = PTR_I(p, P_ANG_DIST_OFF)[a_off+ie];
+    int sz = PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
+    if (sz <= 1) return 2.0*xi-1.0;
+    const double* mu = &PTR_D(p, P_ANG_MU)[off];
+    const double* cd = &PTR_D(p, P_ANG_CDF)[off];
+    int lo=0, hi=sz-1;
+    while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+    double f = (xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+    return fmax(-1.0, fmin(1.0, mu[lo]+f*(mu[hi]-mu[lo])));
+}
+
+// Interpolated version (for A/B comparison)
+__device__ double sample_angular_dist_interp(
+    double E, double xi, Params p, int hit_nuc)
+{
+    int a_off = PTR_I(p, P_ANG_NUC_OFF)[hit_nuc];
+    int a_ne = PTR_I(p, P_ANG_NUC_NE)[hit_nuc];
+    if (a_ne <= 0) return 2.0*xi-1.0;
+    const double* ae = &PTR_D(p, P_ANG_ENERGIES)[a_off];
+    if (E <= ae[0]) {
+        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off];
+        if (sz<=1) return 2.0*xi-1.0;
+        const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+        return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
+    }
+    if (E >= ae[a_ne-1]) {
+        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+a_ne-1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+a_ne-1];
+        if (sz<=1) return 2.0*xi-1.0;
+        const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
+        return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
+    }
+    int ie; { int lo=0,hi=a_ne-1;
+        while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
+    double mu0, mu1;
+    { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
+      if(sz<=1){ mu0=2.0*xi-1.0; }
+      else { const double* ma=&PTR_D(p, P_ANG_MU)[off]; const double* ca=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ca[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-ca[lo])/fmax(ca[hi]-ca[lo],1e-30); mu0=ma[lo]+f*(ma[hi]-ma[lo]); }
+    }
+    { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie+1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie+1];
+      if(sz<=1){ mu1=2.0*xi-1.0; }
+      else { const double* mb=&PTR_D(p, P_ANG_MU)[off]; const double* cb=&PTR_D(p, P_ANG_CDF)[off];
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cb[mid]<=xi)lo=mid;else hi=mid;}
+        double f=(xi-cb[lo])/fmax(cb[hi]-cb[lo],1e-30); mu1=mb[lo]+f*(mb[hi]-mb[lo]); }
+    }
+    double frac=(E-ae[ie])/(ae[ie+1]-ae[ie]);
+    return fmax(-1.0,fmin(1.0,(1.0-frac)*mu0+frac*mu1));
+}
+
+// Diagnostic: reconstruct XS at given energies for a nuclide
+// Output: 6 doubles per sample (elastic, inelastic, n2n, n3n, fission, capture)
+extern "C" __global__ void debug_xs_reconstruct(
+    Params p,
+    const double* energies, int n_samples, int nuc_idx,
+    double* out_xs) // [n_samples * 6]
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_samples) return;
+    double E = energies[tid];
+    int rank = SCALAR_I(p, P_RANK);
+    int g_off = PTR_I(p, P_GRID_OFFSETS)[nuc_idx];
+    int n_e = PTR_I(p, P_N_ENERGIES)[nuc_idx];
+    int e_idx = energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off], n_e, E);
+    for (int r = 0; r < 6; r++) {
+        int key = nuc_idx * 6 + r;
+        double xs = 0.0;
+        if (PTR_I(p, P_HAS_REACTION)[key]) {
+            xs = svd_reconstruct(
+                &PTR_F(p, P_BASIS)[PTR_I(p, P_BASIS_OFFSETS)[key]],
+                &PTR_D(p, P_COEFFS)[PTR_I(p, P_COEFFS_OFFSETS)[key]],
+                e_idx, rank);
+        }
+        out_xs[tid * 6 + r] = xs;
+    }
+}
+
+extern "C" __global__ void debug_angular_sample(
+    Params p,
+    const double* energies, const double* xis, int n_samples,
+    int nuc_idx,
+    double* out_stairstep, double* out_interp)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_samples) return;
+    double E = energies[tid];
+    double xi = xis[tid];
+    out_stairstep[tid] = sample_angular_dist_stairstep(E, xi, p, nuc_idx);
+    out_interp[tid] = sample_angular_dist_interp(E, xi, p, nuc_idx);
 }
 
 extern "C" __global__ void init_source(
@@ -561,10 +751,11 @@ transport_persistent(
             continue;
         }
 
-        // XS lookup
+        // XS lookup — track all 6 reactions separately
         int n_nuc = __ldg(&PTR_I(p, P_MAT_N_NUC)[mat]);
-        double sum_t=0, sum_el=0, sum_fis=0, sum_cap=0;
-        double nuc_t[4]={}, nuc_el[4]={}, nuc_fis[4]={}, nuc_cap[4]={};
+        double sum_t=0;
+        double nuc_t[4]={}, nuc_el[4]={}, nuc_inel[4]={}, nuc_n2n[4]={};
+        double nuc_n3n[4]={}, nuc_fis[4]={}, nuc_cap[4]={};
         double urr_xi = pcg_uniform(&rng);
 
         for (int i=0; i<n_nuc; i++) {
@@ -572,19 +763,33 @@ transport_persistent(
             double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+i]);
             int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
             int n_e = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
-            int e_idx = energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off], n_e, E);
+            const double* grid = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
+            int e_idx = energy_index(grid, n_e, E);
+            // Log-log interpolation fraction (OpenMC scheme)
+            double log_frac = 0.0;
+            if (e_idx + 1 < n_e && grid[e_idx] > 0.0) {
+                double log_e = log(E);
+                double log_lo = log(grid[e_idx]);
+                double log_hi = log(grid[e_idx+1]);
+                if (log_hi > log_lo) log_frac = (log_e - log_lo) / (log_hi - log_lo);
+                if (log_frac < 0.0) log_frac = 0.0;
+                if (log_frac > 1.0) log_frac = 1.0;
+            }
 
-            double s_el=0, s_fis=0, s_cap=0, s_rest=0;
+            double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0;
             for (int r=0; r<N_REACTIONS; r++) {
                 int key = ni*N_REACTIONS+r;
                 if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
-                    double s = svd_reconstruct(
+                    double s = svd_reconstruct_interp(
                         &PTR_F(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                        &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])], e_idx, rank);
+                        &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
+                        e_idx, n_e, rank, log_frac);
                     if(r==RXN_ELASTIC) s_el=s;
+                    else if(r==RXN_INELASTIC) s_inel=s;
+                    else if(r==RXN_N2N) s_n2n=s;
+                    else if(r==RXN_N3N) s_n3n=s;
                     else if(r==RXN_FISSION) s_fis=s;
                     else if(r==RXN_CAPTURE) s_cap=s;
-                    else s_rest+=s;
                 }
             }
 
@@ -592,15 +797,16 @@ transport_persistent(
             apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
 
             // S(alpha,beta) for H1 (nuclide idx 3 in PWR)
-            double sab_xs_val = 0.0;
             if (ni==3 && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0 && SCALAR_I(p, P_SAB_N_INC) > 0) {
-                sab_xs_val = sab_total_xs(E, p);
+                double sab_xs_val = sab_total_xs(E, p);
                 if (sab_xs_val > 0.0) s_el = sab_xs_val;
             }
 
-            double micro_t = s_el + s_fis + s_cap + s_rest;
-            nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
-            sum_t+=Ni*micro_t; sum_el+=Ni*s_el; sum_fis+=Ni*s_fis; sum_cap+=Ni*s_cap;
+            double micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+            nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
+            nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
+            nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
+            sum_t+=Ni*micro_t;
         }
 
         if (sum_t <= 0.0) { is_alive=0; break; }
@@ -636,10 +842,12 @@ transport_persistent(
             int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+hit_l]);
             double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
 
-            // Sample reaction
+            // Sample reaction — order matches CPU: el, inel, n2n, n3n, fis, cap
             double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
+            double cum_rxn = 0.0;
 
-            if (xi_rxn < nuc_el[hit_l]) {
+            cum_rxn += nuc_el[hit_l];
+            if (xi_rxn < cum_rxn) {
                 // ═══ Elastic scattering ═══
 
                 // S(alpha,beta) for H1
@@ -656,7 +864,7 @@ transport_persistent(
                 double cell_kT = (cell==0 && gt==GEOM_PWR) ? 900.0*8.617333262e-5 : 600.0*8.617333262e-5;
                 if (gt==GEOM_GODIVA) cell_kT = 294.0*8.617333262e-5;
 
-                if (E < 400.0*cell_kT && A < 10.0) {
+                if (E < 400.0*cell_kT) {
                     double sigma=sqrt(cell_kT/A), v_n=sqrt(2.0*E);
                     double u1,u2,r_bm,th;
                     u1=pcg_uniform(&rng); u2=pcg_uniform(&rng);
@@ -672,7 +880,10 @@ transport_persistent(
                     double ia1=1.0/(1.0+A);
                     double vcx=(vnx+A*vtx)*ia1, vcy=(vny+A*vty)*ia1, vcz=(vnz+A*vtz)*ia1;
                     double vcn=vr*A*ia1;
-                    double mu_cm=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
+                    // Angular dist at relative energy (matches CPU free_gas_scatter)
+                    double e_rel=0.5*(A/(A+1.0))*vr*vr;
+                    double mu_cm=sample_angular_dist(e_rel,&rng,p,hit_nuc);
+                    double phi=2.0*PI*pcg_uniform(&rng);
                     double st=sqrt(fmax(0.0,1.0-mu_cm*mu_cm));
                     double vrh_x=vrx/vr, vrh_y=vry/vr, vrh_z=vrz/vr;
                     double px2,py2,pz2;
@@ -702,7 +913,52 @@ transport_persistent(
                     rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                 }
 
-            } else if (xi_rxn < nuc_el[hit_l]+nuc_fis[hit_l]) {
+            } else if ((cum_rxn+=nuc_inel[hit_l]), xi_rxn < cum_rxn) {
+                // ═══ Inelastic — proper discrete level sampling ═══
+                goto do_inelastic;
+
+            } else if ((cum_rxn+=nuc_n2n[hit_l]), xi_rxn < cum_rxn) {
+                // ═══ (n,2n) — bank 1 extra neutron, primary continues ═══
+                { double temp=E/10.0;
+                  double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
+                  double e_sec=fmax(fmin(-temp*log(x1*x2),E),1e-5);
+                  int idx2=atomicAdd(fis_count,1);
+                  if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
+                }
+                { double Q_n2n=-E*0.1, e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n2n;
+                  if(e_cm_out<=0.0) e_cm_out=E*0.01;
+                  double mu_cm=2.0*pcg_uniform(&rng)-1.0, ap1=A+1.0;
+                  double e_n=e_cm_out*A/ap1, vni=sqrt(2.0*e_n), vcs=sqrt(2.0*E/(ap1*ap1));
+                  double v2=vni*vni+vcs*vcs+2.0*vni*vcs*mu_cm;
+                  E=fmax(0.5*v2,1e-5);
+                  double den=sqrt(fmax(v2,1e-40));
+                  double ml=(vni+vcs>1e-20)?fmax(-1.0,fmin(1.0,(vcs+vni*mu_cm)/den)):2.0*pcg_uniform(&rng)-1.0;
+                  double phi=2.0*PI*pcg_uniform(&rng);
+                  rotate_direction(&dx,&dy,&dz,ml,phi);
+                }
+
+            } else if ((cum_rxn+=nuc_n3n[hit_l]), xi_rxn < cum_rxn) {
+                // ═══ (n,3n) — bank 2 extra neutrons, primary continues ═══
+                for(int ns3=0;ns3<2;ns3++){
+                  double temp=E/10.0;
+                  double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
+                  double e_sec=fmax(fmin(-temp*log(x1*x2),E),1e-5);
+                  int idx2=atomicAdd(fis_count,1);
+                  if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
+                }
+                { double Q_n3n=-E*0.2, e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n3n;
+                  if(e_cm_out<=0.0) e_cm_out=E*0.01;
+                  double mu_cm=2.0*pcg_uniform(&rng)-1.0, ap1=A+1.0;
+                  double e_n=e_cm_out*A/ap1, vni=sqrt(2.0*e_n), vcs=sqrt(2.0*E/(ap1*ap1));
+                  double v2=vni*vni+vcs*vcs+2.0*vni*vcs*mu_cm;
+                  E=fmax(0.5*v2,1e-5);
+                  double den=sqrt(fmax(v2,1e-40));
+                  double ml=(vni+vcs>1e-20)?fmax(-1.0,fmin(1.0,(vcs+vni*mu_cm)/den)):2.0*pcg_uniform(&rng)-1.0;
+                  double phi=2.0*PI*pcg_uniform(&rng);
+                  rotate_direction(&dx,&dy,&dz,ml,phi);
+                }
+
+            } else if ((cum_rxn+=nuc_fis[hit_l]), xi_rxn < cum_rxn) {
                 // ═══ Fission ═══
                 lcnt_fis++;
                 int nb_off=__ldg(&PTR_I(p, P_NB_OFFSETS)[hit_nuc]);
@@ -721,11 +977,12 @@ transport_persistent(
                 }
                 is_alive=0;
 
-            } else if (xi_rxn < nuc_el[hit_l]+nuc_fis[hit_l]+nuc_cap[hit_l]) {
-                // ═══ Capture ═══
-                is_alive=0;
-
             } else {
+                // ═══ Capture (remainder) ═══
+                is_alive=0;
+                goto end_coll;
+            }
+            if(0) { do_inelastic:
                 // ═══ Inelastic — proper discrete level sampling ═══
                 int lv_off=__ldg(&PTR_I(p, P_LEVEL_OFFSETS)[hit_nuc]);
                 int n_lev=__ldg(&PTR_I(p, P_LEVEL_COUNTS)[hit_nuc]);
@@ -751,23 +1008,49 @@ transport_persistent(
                     }
                 }
                 int sel_mt=(n_lev>0)?__ldg(&PTR_I(p, P_LEVEL_MT)[lv_off+selected]):0;
-                double E_out;
+                // Continuum (MT=91): compute effective Q from evaporation model
                 if(sel_mt==91){
-                    double a_p=A/8.0, ecm=E*A/((A+1.0)*1e6), eex=fmax(ecm,0.1);
+                    double a_p=A/8.0;
+                    double ecm_mev=E*A/((A+1.0)*1e6);
+                    double eex=fmax(ecm_mev,0.1);
                     double T=sqrt(eex/a_p);
                     double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
-                    double eo=-T*log(x1*x2); eo=fmin(eo,ecm);
-                    E_out=fmax(eo*1e6,1e-5);
-                } else {
-                    double ar=A/(A+1.0);
-                    E_out=E*ar*ar+Q*(A+1.0)/A;
-                    if(E_out<=0.0) E_out=E*0.01;
+                    double eo=-T*log(x1*x2);
+                    eo=fmin(eo,ecm_mev*0.9);
+                    Q = -(ecm_mev - eo)*1e6;
                 }
-                E=fmax(E_out,1e-11);
-                double mu_cm=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
-                double st=sqrt(fmax(0.0,1.0-mu_cm*mu_cm));
-                dx=st*cos(phi); dy=st*sin(phi); dz=mu_cm;
-            }
+                // Two-body inelastic kinematics (matches CPU inelastic_scatter)
+                double e_cm = E * A / (A + 1.0);
+                double e_cm_out = e_cm + Q;
+                if(e_cm_out <= 0.0) {
+                    // Below threshold — elastic fallback
+                    double mu_fb = 2.0*pcg_uniform(&rng)-1.0;
+                    double alpha=((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
+                    E=E*(1.0+alpha+(1.0-alpha)*mu_fb)/2.0;
+                    if(E<1e-11) E=1e-11;
+                    double mu_lab=(1.0+A*mu_fb)/sqrt(1.0+A*A+2.0*A*mu_fb);
+                    double phi=2.0*PI*pcg_uniform(&rng);
+                    rotate_direction(&dx,&dy,&dz,mu_lab,phi);
+                } else {
+                    double mu_cm=2.0*pcg_uniform(&rng)-1.0;
+                    double ap1 = A + 1.0;
+                    double e_n_cm = e_cm_out * A / ap1;
+                    double v_n_i = sqrt(2.0 * e_n_cm);
+                    double v_cm_s = sqrt(2.0 * E / (ap1 * ap1));
+                    double v2sum = v_n_i*v_n_i + v_cm_s*v_cm_s + 2.0*v_n_i*v_cm_s*mu_cm;
+                    E = fmax(0.5 * v2sum, 1e-5);
+                    double denom = sqrt(fmax(v2sum, 1e-40));
+                    double mu_lab;
+                    if(v_n_i + v_cm_s > 1e-20) {
+                        mu_lab = (v_cm_s + v_n_i*mu_cm) / denom;
+                        mu_lab = fmax(-1.0, fmin(1.0, mu_lab));
+                    } else {
+                        mu_lab = 2.0*pcg_uniform(&rng)-1.0;
+                    }
+                    double phi=2.0*PI*pcg_uniform(&rng);
+                    rotate_direction(&dx,&dy,&dz,mu_lab,phi);
+                }
+            } // end do_inelastic
             end_coll: ;
         }
     }

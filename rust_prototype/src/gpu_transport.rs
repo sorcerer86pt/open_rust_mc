@@ -148,7 +148,7 @@ impl GpuTransportContext {
         let k_transport_persistent = module.load_function("transport_persistent")?;
         let stream = ctx.default_stream();
 
-        println!("  GPU transport kernels compiled (6 kernels)");
+        println!("  GPU transport kernels compiled (8 kernels)");
 
         Ok(Self {
             _ctx: ctx, stream,
@@ -157,6 +157,182 @@ impl GpuTransportContext {
             k_transport_persistent,
         })
     }
+
+    /// Debug: sample angular distributions at given (energy, xi) pairs.
+    /// Returns (stairstep_mu, interpolated_mu) for comparison with CPU.
+    pub fn debug_angular_sample(
+        &self,
+        energies: &[f64],
+        xis: &[f64],
+        nuc_idx: i32,
+        nuc_data: &GpuNuclideData,
+        mat_data: &GpuMaterialData,
+        sab_data: &GpuSabData,
+        geom_type: i32,
+    ) -> Result<(Vec<f64>, Vec<f64>), Box<dyn std::error::Error>> {
+        let n = energies.len();
+        assert_eq!(n, xis.len());
+
+        let d_energies = self.stream.clone_htod(energies)?;
+        let d_xis = self.stream.clone_htod(xis)?;
+        let mut d_out_ss: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_out_interp: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+
+        // Build params buffer (same as run_batch)
+        macro_rules! dptr {
+            ($slice:expr) => {{
+                let (ptr, _guard) = $slice.device_ptr(&self.stream);
+                ptr
+            }};
+        }
+        let params_vec: Vec<u64> = vec![
+            dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction), dptr!(&nuc_data.coeffs_offsets),
+            nuc_data.rank as u64,
+            dptr!(&mat_data.mat_n_nuclides), dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density), dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.nu_bar_const),
+            dptr!(&nuc_data.nu_bar_energies), dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets), dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies), dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes), dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf), dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.fis_nuc_n_inc),
+            dptr!(&nuc_data.level_q_values), dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets), dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis), dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets), dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel), dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies), dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf), dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes), dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies), dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies), sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets), dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out), dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
+            geom_type as u64,
+        ];
+        assert_eq!(params_vec.len(), N_PARAMS);
+        let d_params = self.stream.clone_htod(&params_vec)?;
+
+        // Load debug kernel
+        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        let module = self._ctx.load_module(ptx)?;
+        let k_debug = module.load_function("debug_angular_sample")?;
+
+        let n_i32 = n as i32;
+        let grid = ((n as u32 + 255) / 256, 1, 1);
+        let block = (256u32, 1, 1);
+        let cfg = cudarc::driver::LaunchConfig { grid_dim: grid, block_dim: block, shared_mem_bytes: 0 };
+
+        unsafe {
+            self.stream.launch_builder(&k_debug)
+                .arg(&d_params)
+                .arg(&d_energies)
+                .arg(&d_xis)
+                .arg(&n_i32)
+                .arg(&nuc_idx)
+                .arg(&mut d_out_ss)
+                .arg(&mut d_out_interp)
+                .launch(cfg)?;
+        }
+
+        let ss = self.stream.clone_dtoh(&d_out_ss)?;
+        let interp = self.stream.clone_dtoh(&d_out_interp)?;
+        Ok((ss, interp))
+    }
+
+    /// Debug: reconstruct XS at given energies for a nuclide on GPU.
+    /// Returns [n * 6] flat array: elastic, inelastic, n2n, n3n, fission, capture per energy.
+    pub fn debug_xs_reconstruct(
+        &self,
+        energies: &[f64],
+        nuc_idx: i32,
+        nuc_data: &GpuNuclideData,
+        mat_data: &GpuMaterialData,
+        sab_data: &GpuSabData,
+        geom_type: i32,
+    ) -> Result<Vec<f64>, Box<dyn std::error::Error>> {
+        let n = energies.len();
+        let d_energies = self.stream.clone_htod(energies)?;
+        let mut d_out: CudaSlice<f64> = self.stream.alloc_zeros(n * 6)?;
+
+        macro_rules! dptr {
+            ($slice:expr) => {{ let (ptr, _guard) = $slice.device_ptr(&self.stream); ptr }};
+        }
+        let params_vec: Vec<u64> = vec![
+            dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction), dptr!(&nuc_data.coeffs_offsets),
+            nuc_data.rank as u64,
+            dptr!(&mat_data.mat_n_nuclides), dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density), dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.nu_bar_const),
+            dptr!(&nuc_data.nu_bar_energies), dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets), dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies), dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes), dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf), dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.fis_nuc_n_inc),
+            dptr!(&nuc_data.level_q_values), dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets), dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis), dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets), dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel), dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies), dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf), dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes), dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies), dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies), sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets), dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out), dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
+            geom_type as u64,
+        ];
+        assert_eq!(params_vec.len(), N_PARAMS);
+        let d_params = self.stream.clone_htod(&params_vec)?;
+
+        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        let module = self._ctx.load_module(ptx)?;
+        let k_debug = module.load_function("debug_xs_reconstruct")?;
+
+        let n_i32 = n as i32;
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: (((n as u32) + 255) / 256, 1, 1),
+            block_dim: (256, 1, 1), shared_mem_bytes: 0,
+        };
+        unsafe {
+            self.stream.launch_builder(&k_debug)
+                .arg(&d_params)
+                .arg(&d_energies)
+                .arg(&n_i32)
+                .arg(&nuc_idx)
+                .arg(&mut d_out)
+                .launch(cfg)?;
+        }
+        Ok(self.stream.clone_dtoh(&d_out)?)
+    }
+
+    /// Expose the CUDA stream for diagnostic buffer downloads.
+    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
 
     /// Upload SVD nuclide data to GPU.
     pub fn upload_nuclide_data(

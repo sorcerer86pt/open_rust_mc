@@ -78,6 +78,21 @@ impl ReactionKernel {
         let log_val = self.kernel.reconstruct_single_log(idx, &self.coeffs);
         f64::exp2(log_val * std::f64::consts::LOG2_10)
     }
+
+    /// Reconstruct with log-log interpolation between grid points (OpenMC scheme).
+    ///
+    /// `idx` is the lower bracket index, `log_frac` is the interpolation fraction
+    /// in log-energy space: `(ln(E) - ln(E_lo)) / (ln(E_hi) - ln(E_lo))`.
+    #[inline]
+    pub fn reconstruct_interp(&self, idx: usize, log_frac: f64) -> f64 {
+        let log_lo = self.kernel.reconstruct_single_log(idx, &self.coeffs);
+        if idx + 1 >= self.kernel.n_energy() || log_frac <= 0.0 {
+            return f64::exp2(log_lo * std::f64::consts::LOG2_10);
+        }
+        let log_hi = self.kernel.reconstruct_single_log(idx + 1, &self.coeffs);
+        let log_interp = log_lo + log_frac * (log_hi - log_lo);
+        f64::exp2(log_interp * std::f64::consts::LOG2_10)
+    }
 }
 
 impl NuclideKernels {
@@ -162,27 +177,43 @@ impl XsProvider for SvdXsProvider {
         let nuc = &self.nuclides[nuclide_idx];
 
         // Single binary search on the shared energy grid — reused by all 6 reactions.
-        // This eliminates 5 redundant binary searches per nuclide per collision.
-        let idx = nuc.elastic.as_ref()
+        let any_kernel = nuc.elastic.as_ref()
             .or(nuc.fission.as_ref())
             .or(nuc.capture.as_ref())
             .or(nuc.inelastic.as_ref())
             .or(nuc.n2n.as_ref())
-            .or(nuc.n3n.as_ref())
-            .map_or(0, |k| k.kernel.energy_index(energy));
+            .or(nuc.n3n.as_ref());
 
+        let (idx, log_frac) = match any_kernel {
+            Some(k) => {
+                let idx = k.kernel.energy_index(energy);
+                let grid = k.kernel.energies();
+                let frac = if idx + 1 < grid.len() && grid[idx] > 0.0 && grid[idx + 1] > grid[idx] {
+                    let log_e = energy.ln();
+                    let log_lo = grid[idx].ln();
+                    let log_hi = grid[idx + 1].ln();
+                    ((log_e - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (idx, frac)
+            }
+            None => (0, 0.0),
+        };
+
+        // Log-log interpolation between grid points (matching OpenMC/pointwise table)
         let elastic = nuc.elastic.as_ref()
-            .map_or(0.0, |k| k.reconstruct_at_index(idx));
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let inelastic = nuc.inelastic.as_ref()
-            .map_or(0.0, |k| k.reconstruct_at_index(idx));
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let n2n = nuc.n2n.as_ref()
-            .map_or(0.0, |k| k.reconstruct_at_index(idx));
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let n3n = nuc.n3n.as_ref()
-            .map_or(0.0, |k| k.reconstruct_at_index(idx));
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let fission = nuc.fission.as_ref()
-            .map_or(0.0, |k| k.reconstruct_at_index(idx));
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let capture = nuc.capture.as_ref()
-            .map_or(0.0, |k| k.reconstruct_at_index(idx));
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
 
         let total = elastic + inelastic + n2n + n3n + fission + capture;
         let nu_bar = nuc.nu_bar_at(energy);
