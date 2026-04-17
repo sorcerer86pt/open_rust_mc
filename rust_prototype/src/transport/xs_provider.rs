@@ -459,7 +459,10 @@ pub fn load_nuclide(
     let n_levels = level_infos.len();
     let mut discrete_levels: Vec<DiscreteLevel> = Vec::with_capacity(n_levels);
     for info in level_infos {
-        let kernel = build_kernel_from_reader(&reader, info.mt, svd_rank.min(2), temp_idx, &shared_grid);
+        // Must match top-level svd_rank so the GPU kernel can use a single
+        // rank value for basis stride (P_RANK). Using a different per-level
+        // rank causes the GPU to read garbage data from wrong basis offsets.
+        let kernel = build_kernel_from_reader(&reader, info.mt, svd_rank, temp_idx, &shared_grid);
         discrete_levels.push(DiscreteLevel { info, kernel });
     }
     let loaded_count = discrete_levels.iter().filter(|l| l.kernel.is_some()).count();

@@ -77,13 +77,13 @@ mod cuda_main {
         );
 
         let fission = kernels.fission.as_ref().expect("U-235 must have fission");
-        let basis = fission.kernel.basis_f32();
+        let basis = fission.kernel.basis_f64();
         let coeffs = &fission.coeffs;
         let n_e = fission.kernel.n_energy();
         let rank = fission.kernel.rank();
 
         println!("  N_E = {n_e}, rank = {rank}");
-        println!("  Basis: {} elements ({:.1} MB f32)",
+        println!("  Basis: {} elements ({:.1} MB f64)",
                  basis.len(), basis.len() as f64 * 4.0 / 1e6);
 
         // Generate random energy indices
@@ -176,7 +176,7 @@ mod cuda_main {
                     None => continue,
                 };
 
-                let basis = kernel.kernel.basis_f32();
+                let basis = kernel.kernel.basis_f64();
                 let coeffs = &kernel.coeffs;
                 let n_e = kernel.kernel.n_energy();
                 let rank = kernel.kernel.rank();

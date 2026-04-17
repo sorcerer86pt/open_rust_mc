@@ -126,7 +126,7 @@
 #define N_PARAMS          73
 
 // Access helpers — read from the flat u64 params buffer
-#define PTR_F(p, idx)   ((const float*)  (p)[(idx)])
+// PTR_F removed — all basis data is now f64 (PTR_D)
 #define PTR_D(p, idx)   ((const double*) (p)[(idx)])
 #define PTR_I(p, idx)   ((const int*)    (p)[(idx)])
 #define SCALAR_I(p, idx) ((int)(p)[(idx)])
@@ -277,22 +277,22 @@ __device__ int energy_index(const double* grid, int n_e, double energy) {
     return lo;
 }
 
-// SVD reconstruct in LOG10 space (no exp2 conversion)
+// SVD reconstruct in LOG10 space
 __device__ double svd_reconstruct_log(
-    const float* __restrict__ basis,
+    const double* __restrict__ basis,
     const double* __restrict__ coeffs,
     int e_idx, int rank)
 {
-    const float* row = &basis[e_idx * rank];
+    const double* row = &basis[e_idx * rank];
     double acc = 0.0;
     for (int j = 0; j < rank; j++)
-        acc = fma((double)__ldg(&row[j]), __ldg(&coeffs[j]), acc);
+        acc = fma(__ldg(&row[j]), __ldg(&coeffs[j]), acc);
     return acc;
 }
 
 // SVD reconstruct with log-log interpolation between grid points (OpenMC scheme)
 __device__ double svd_reconstruct_interp(
-    const float* __restrict__ basis,
+    const double* __restrict__ basis,
     const double* __restrict__ coeffs,
     int e_idx, int n_e, int rank, double log_frac)
 {
@@ -306,7 +306,7 @@ __device__ double svd_reconstruct_interp(
 
 // Legacy: single-point reconstruct (used by discrete levels)
 __device__ double svd_reconstruct(
-    const float* __restrict__ basis,
+    const double* __restrict__ basis,
     const double* __restrict__ coeffs,
     int e_idx, int rank)
 {
@@ -707,13 +707,14 @@ extern "C" __global__ void debug_xs_reconstruct(
         double xs = 0.0;
         if (PTR_I(p, P_HAS_REACTION)[key]) {
             xs = svd_reconstruct(
-                &PTR_F(p, P_BASIS)[PTR_I(p, P_BASIS_OFFSETS)[key]],
+                &PTR_D(p, P_BASIS)[PTR_I(p, P_BASIS_OFFSETS)[key]],
                 &PTR_D(p, P_COEFFS)[PTR_I(p, P_COEFFS_OFFSETS)[key]],
                 e_idx, rank);
         }
         out_xs[tid * N_REACTIONS + r] = xs;
     }
 }
+
 
 extern "C" __global__ void debug_angular_sample(
     Params p,
@@ -859,7 +860,7 @@ transport_persistent(
                     int key = ni*N_REACTIONS+r;
                     if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
                         double s = svd_reconstruct_interp(
-                            &PTR_F(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
+                            &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
                             &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
                             e_idx, n_e, rank, log_frac);
                         if(r==0) s_el=s; else if(r==1) s_inel=s;
@@ -870,8 +871,13 @@ transport_persistent(
                 micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
             }
 
-            // URR
-            apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
+            // URR — modifies s_el, s_fis, s_cap. Recompute micro_t to match CPU behavior.
+            {
+                double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
+                apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
+                // Adjust micro_t by the delta in URR-affected channels
+                micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
+            }
 
             // S(alpha,beta) for H1 (nuclide idx 3 in PWR)
             if (ni==3 && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0 && SCALAR_I(p, P_SAB_N_INC) > 0) {
@@ -882,10 +888,11 @@ transport_persistent(
                     s_el = sab_xs_val;
                 }
             }
-            if (lane==0 && step==0) {
-                printf("  nuc=%d Ni=%.6f el=%.4f inel=%.4f fis=%.4f cap=%.4f tot=%.4f E=%.2f pw=%d\n",
-                    ni, Ni, s_el, s_inel, s_fis, s_cap, micro_t, E, __ldg(&PTR_I(p, P_HAS_PW)[ni]));
-            }
+            // debug: uncomment to trace per-nuclide XS on first step
+            // if (lane==0 && step==0) {
+            //     printf("  nuc=%d Ni=%.6f el=%.4f inel=%.4f fis=%.4f cap=%.4f tot=%.4f E=%.2f pw=%d\n",
+            //         ni, Ni, s_el, s_inel, s_fis, s_cap, micro_t, E, __ldg(&PTR_I(p, P_HAS_PW)[ni]));
+            // }
             nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
             nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
             nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
@@ -991,7 +998,10 @@ transport_persistent(
                     double alpha=((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
                     E=E*(1.0+alpha+(1.0-alpha)*mu_cm)/2.0;
                     if(E<1e-11) E=1e-11;
-                    double mu_lab=(1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm);
+                    // CPU-matching mu_lab: hydrogen (A<=1+eps) uses special case
+                    double mu_lab = (A > 1.0 + 1e-10)
+                        ? (1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm)
+                        : sqrt(fmax(0.0, (1.0+mu_cm)*0.5));
                     double phi=2.0*PI*pcg_uniform(&rng);
                     rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                 }
@@ -1079,7 +1089,7 @@ transport_persistent(
                         int gl=lv_off+l; double lxs=0.0;
                         if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])&&__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
                             lxs=svd_reconstruct(
-                                &PTR_F(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                                &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
                                 &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],e_idx,rank);
                         }
                         lxs_sum+=lxs; lxs_cum[l]=lxs_sum; na++;
@@ -1111,7 +1121,10 @@ transport_persistent(
                     double alpha=((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
                     E=E*(1.0+alpha+(1.0-alpha)*mu_fb)/2.0;
                     if(E<1e-11) E=1e-11;
-                    double mu_lab=(1.0+A*mu_fb)/sqrt(1.0+A*A+2.0*A*mu_fb);
+                    // CPU-matching mu_lab: hydrogen (A<=1+eps) uses special case
+                    double mu_lab = (A > 1.0 + 1e-10)
+                        ? (1.0+A*mu_fb)/sqrt(1.0+A*A+2.0*A*mu_fb)
+                        : sqrt(fmax(0.0, (1.0+mu_fb)*0.5));
                     double phi=2.0*PI*pcg_uniform(&rng);
                     rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                 } else {
@@ -1258,28 +1271,53 @@ extern "C" __global__ void debug_transport_trace(
                 if (log_frac < 0.0) log_frac = 0.0;
                 if (log_frac > 1.0) log_frac = 1.0;
             }
-            double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0;
-            for (int r=0; r<6; r++) {
-                int key = ni*N_REACTIONS+r;
-                if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
-                    double s = svd_reconstruct_interp(
-                        &PTR_F(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                        &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
-                        e_idx, n_e, rank, log_frac);
-                    if(r==0) s_el=s; else if(r==1) s_inel=s;
-                    else if(r==2) s_n2n=s; else if(r==3) s_n3n=s;
-                    else if(r==4) s_fis=s; else if(r==5) s_cap=s;
+            double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0, micro_t=0;
+            if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
+                int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
+                const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
+                const double* pw1 = (e_idx+1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx+1) * 7] : pw0;
+                double xs7[7];
+                for (int ch=0; ch<7; ch++) {
+                    double lo = pw0[ch], hi = pw1[ch];
+                    xs7[ch] = (lo > 1e-30 && hi > 1e-30 && log_frac > 0.0)
+                        ? exp(log(lo) + log_frac * (log(hi) - log(lo))) : lo;
+                }
+                s_el=xs7[0]; s_inel=xs7[1]; s_n2n=xs7[2]; s_n3n=xs7[3];
+                s_fis=xs7[4]; s_cap=xs7[5]; micro_t=xs7[6];
+                double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
+                s_cap = fmax(micro_t - partials, 0.0);
+            } else {
+                for (int r=0; r<6; r++) {
+                    int key = ni*N_REACTIONS+r;
+                    if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
+                        double s = svd_reconstruct_interp(
+                            &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
+                            &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
+                            e_idx, n_e, rank, log_frac);
+                        if(r==0) s_el=s; else if(r==1) s_inel=s;
+                        else if(r==2) s_n2n=s; else if(r==3) s_n3n=s;
+                        else if(r==4) s_fis=s; else if(r==5) s_cap=s;
+                    }
+                }
+                micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+                if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
+                    double missing = PTR_D(p, P_TOTAL_XS)[__ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]) + e_idx];
+                    if (missing > 0.0) { s_cap += missing; micro_t += missing; }
                 }
             }
-            apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
+            // URR — recompute micro_t via delta
+            {
+                double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
+                apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
+                micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
+            }
             if (ni==3 && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0 && SCALAR_I(p, P_SAB_N_INC) > 0) {
                 double sab_xs_val = sab_total_xs(E, p);
-                if (sab_xs_val > 0.0) s_el = sab_xs_val;
-            }
-            double micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
-            if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-                double missing = PTR_D(p, P_TOTAL_XS)[__ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]) + e_idx];
-                if (missing > 0.0) { s_cap += missing; micro_t += missing; }
+                if (sab_xs_val > 0.0) {
+                    double delta = sab_xs_val - s_el;
+                    micro_t += delta;
+                    s_el = sab_xs_val;
+                }
             }
             nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
             nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
@@ -1389,7 +1427,10 @@ extern "C" __global__ void debug_transport_trace(
                         double alpha=((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
                         E=E*(1.0+alpha+(1.0-alpha)*mu_cm)/2.0;
                         if(E<1e-11) E=1e-11;
-                        double mu_lab=(1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm);
+                        // CPU-matching mu_lab: hydrogen (A<=1+eps) uses special case
+                        double mu_lab = (A > 1.0 + 1e-10)
+                            ? (1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm)
+                            : sqrt(fmax(0.0, (1.0+mu_cm)*0.5));
                         double phi=2.0*PI*pcg_uniform(&rng);
                         rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                     }

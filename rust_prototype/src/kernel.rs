@@ -98,8 +98,7 @@ impl EnergyHashTable {
 /// Pre-built reconstruction engine for a single nuclide + reaction.
 pub struct SvdKernel {
     /// U × Σ pre-multiplied basis, row-major: `[n_e][rank]`.
-    /// Stored as f32 to halve memory footprint; promoted to f64 for the dot product.
-    pub(crate) basis: Vec<f32>,
+    pub(crate) basis: Vec<f64>,
     /// V^T coefficients, row-major: `[rank][n_t]`.
     pub(crate) vt_coeffs: Vec<f64>,
     /// Energy grid in eV — shared across all reactions in the same nuclide.
@@ -117,19 +116,15 @@ pub struct SvdKernel {
 impl SvdKernel {
     /// Construct a kernel from pre-multiplied basis and V^T coefficients.
     ///
-    /// `basis_f64` will be converted to f32 for storage (halves memory).
     /// The energy grid is `Arc`-shared across reactions within a nuclide.
     pub fn new(
-        basis_f64: Vec<f64>,
+        basis: Vec<f64>,
         vt_coeffs: Vec<f64>,
         energies: Arc<[f64]>,
         rank: usize,
         n_e: usize,
         n_t: usize,
     ) -> Self {
-        let basis: Vec<f32> = basis_f64.iter().map(|&v| v as f32).collect();
-        // Build hash table for O(1) energy lookup (8192 bins is a good
-        // balance: ~20 grid points per bin for a 186K-point grid).
         let hash_table = if n_e > 100 {
             Some(EnergyHashTable::new(&energies, 8192))
         } else {
@@ -152,7 +147,7 @@ impl SvdKernel {
 
     /// Total memory footprint of the kernel (bytes), excluding shared energy grid.
     pub fn memory_bytes(&self) -> usize {
-        self.basis.len() * std::mem::size_of::<f32>()
+        self.basis.len() * std::mem::size_of::<f64>()
             + self.vt_coeffs.len() * std::mem::size_of::<f64>()
     }
 
@@ -224,8 +219,7 @@ impl SvdKernel {
             let row = &basis[i * rank..(i + 1) * rank];
             let mut acc = 0.0_f64;
             for j in 0..rank {
-                // f32 basis promoted to f64 for accumulation — preserves precision
-                acc = (f64::from(row[j])).mul_add(coeffs[j], acc);
+                acc = row[j].mul_add(coeffs[j], acc);
             }
             out[i] = acc;
         }
@@ -251,7 +245,7 @@ impl SvdKernel {
         let row = &self.basis[energy_idx * self.rank..(energy_idx + 1) * self.rank];
         let mut acc = 0.0_f64;
         for j in 0..self.rank {
-            acc = (f64::from(row[j])).mul_add(coeffs[j], acc);
+            acc = row[j].mul_add(coeffs[j], acc);
         }
         acc
     }
@@ -267,8 +261,8 @@ impl SvdKernel {
         &self.energies
     }
 
-    /// Return the f32 basis (for GPU upload).
-    pub fn basis_f32(&self) -> &[f32] {
+    /// Return the f64 basis (for GPU upload).
+    pub fn basis_f64(&self) -> &[f64] {
         &self.basis
     }
 
@@ -364,8 +358,7 @@ pub fn reconstruct_log_faer(kernel: &SvdKernel, coeffs: &[f64], out: &mut [f64])
     let n_e = kernel.n_e;
     let rank = kernel.rank;
 
-    // Promote f32 basis to f64 for faer matrix multiply
-    let basis = Mat::from_fn(n_e, rank, |i, j| f64::from(kernel.basis[i * rank + j]));
+    let basis = Mat::from_fn(n_e, rank, |i, j| kernel.basis[i * rank + j]);
     let c = Mat::from_fn(rank, 1, |j, _| coeffs[j]);
 
     let result = &basis * &c;

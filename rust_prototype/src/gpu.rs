@@ -18,7 +18,7 @@ pub mod cuda {
     /// CUDA kernel source for SVD reconstruction.
     const SVD_KERNEL_SRC: &str = r#"
 extern "C" __global__ void svd_reconstruct(
-    const float* __restrict__ basis,
+    const double* __restrict__ basis,
     const double* __restrict__ coeffs,
     double* __restrict__ output,
     const int* __restrict__ energy_indices,
@@ -36,10 +36,10 @@ extern "C" __global__ void svd_reconstruct(
     int e_idx = energy_indices[tid];
     if (e_idx < 0 || e_idx >= n_e) return;
 
-    const float* row = &basis[e_idx * rank];
+    const double* row = &basis[e_idx * rank];
     double acc = 0.0;
     for (int j = 0; j < rank; j++) {
-        acc = fma((double)row[j], shared_coeffs[j], acc);
+        acc = fma(row[j], shared_coeffs[j], acc);
     }
     output[tid] = exp2(acc * 3.321928094887362);
 }
@@ -71,11 +71,11 @@ extern "C" __global__ void svd_reconstruct(
 
         /// Batch SVD reconstruction on GPU.
         ///
-        /// Given a basis matrix (f32), coefficients (f64), and energy indices
+        /// Given a basis matrix (f64), coefficients (f64), and energy indices
         /// for N particles, returns N cross-section values (f64, linear scale).
         pub fn reconstruct_batch(
             &self,
-            basis: &[f32],
+            basis: &[f64],
             coeffs: &[f64],
             energy_indices: &[i32],
             n_e: usize,

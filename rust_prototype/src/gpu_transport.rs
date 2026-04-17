@@ -40,7 +40,7 @@ pub struct GpuTransportContext {
 /// SVD data + physics tables uploaded to GPU for all nuclides.
 pub struct GpuNuclideData {
     // SVD basis data
-    pub all_basis: CudaSlice<f32>,
+    pub all_basis: CudaSlice<f64>,
     pub all_coeffs: CudaSlice<f64>,
     pub all_energy_grids: CudaSlice<f64>,
     pub basis_offsets: CudaSlice<i32>,
@@ -65,7 +65,7 @@ pub struct GpuNuclideData {
     pub level_thresholds: CudaSlice<f64>,    // flat: all thresholds concatenated
     pub level_offsets: CudaSlice<i32>,        // per-nuclide offset into level arrays
     pub level_counts: CudaSlice<i32>,         // per-nuclide number of levels
-    pub level_basis: CudaSlice<f32>,          // flat: SVD basis for each level's XS
+    pub level_basis: CudaSlice<f64>,          // flat: SVD basis for each level's XS
     pub level_coeffs: CudaSlice<f64>,         // flat: SVD coefficients for each level
     pub level_basis_offsets: CudaSlice<i32>,  // per-level offset into level_basis
     pub level_coeffs_offsets: CudaSlice<i32>, // per-level offset into level_coeffs
@@ -358,6 +358,7 @@ impl GpuTransportContext {
         Ok(self.stream.clone_dtoh(&d_out)?)
     }
 
+
     /// Expose the CUDA stream for diagnostic buffer downloads.
     pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
 
@@ -371,7 +372,7 @@ impl GpuTransportContext {
         let n_rxn = 7; // elastic, inelastic, n2n, n3n, fission, capture, total
 
         // Concatenate all basis, coefficients, and energy grids
-        let mut all_basis_vec: Vec<f32> = Vec::new();
+        let mut all_basis_vec: Vec<f64> = Vec::new();
         let mut all_coeffs_vec: Vec<f64> = Vec::new();
         let mut all_grids_vec: Vec<f64> = Vec::new();
         let mut basis_offsets_vec = vec![0_i32; n_nuc * n_rxn];
@@ -414,7 +415,7 @@ impl GpuTransportContext {
                 if let Some(rk) = rxn_opt {
                     has_reaction_vec[key] = 1;
                     basis_offsets_vec[key] = all_basis_vec.len() as i32;
-                    all_basis_vec.extend_from_slice(rk.kernel.basis_f32());
+                    all_basis_vec.extend_from_slice(rk.kernel.basis_f64());
                     coeffs_offsets_vec[key] = all_coeffs_vec.len() as i32;
                     all_coeffs_vec.extend_from_slice(&rk.coeffs);
                 } else {
@@ -461,7 +462,7 @@ impl GpuTransportContext {
         let mut lev_thr_vec: Vec<f64> = Vec::new();
         let mut lev_off_vec = vec![0_i32; n_nuc];
         let mut lev_cnt_vec = vec![0_i32; n_nuc];
-        let mut lev_basis_vec: Vec<f32> = Vec::new();
+        let mut lev_basis_vec: Vec<f64> = Vec::new();
         let mut lev_coeffs_vec: Vec<f64> = Vec::new();
         let mut lev_basis_off_vec: Vec<i32> = Vec::new();
         let mut lev_coeffs_off_vec: Vec<i32> = Vec::new();
@@ -478,7 +479,7 @@ impl GpuTransportContext {
                 if let Some(ref rk) = lev.kernel {
                     lev_has_kernel_vec.push(1);
                     lev_basis_off_vec.push(lev_basis_vec.len() as i32);
-                    lev_basis_vec.extend_from_slice(rk.kernel.basis_f32());
+                    lev_basis_vec.extend_from_slice(rk.kernel.basis_f64());
                     lev_coeffs_off_vec.push(lev_coeffs_vec.len() as i32);
                     lev_coeffs_vec.extend_from_slice(&rk.coeffs);
                 } else {
@@ -608,7 +609,7 @@ impl GpuTransportContext {
         if urr_cf_vec.is_empty() { urr_cf_vec.push(0.0); }
 
         println!("  GPU: basis={:.1} MB, grids={:.1} MB, nu-bar={} pts, fis_spec={} pts",
-                 all_basis_vec.len() as f64 * 4.0 / 1e6,
+                 all_basis_vec.len() as f64 * 8.0 / 1e6,
                  all_grids_vec.len() as f64 * 8.0 / 1e6,
                  nb_energies_vec.len(),
                  fis_eout_vec.len());

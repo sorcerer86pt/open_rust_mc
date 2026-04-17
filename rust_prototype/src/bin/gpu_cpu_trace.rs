@@ -153,7 +153,7 @@ mod cuda_main {
         surfaces: &[Surface],
         cells: &[Cell],
         materials: &[Material],
-        xs_provider: &xs_provider::SvdXsProvider,
+        xs_provider: &xs_provider::TableXsProvider,
     ) -> Vec<[f64; 17]> {
         use open_rust_mc::geometry;
         use open_rust_mc::transport::particle::Particle;
@@ -503,15 +503,18 @@ mod cuda_main {
         println!("=== GPU vs CPU Transport Trace ===");
         println!("Particles: {n}, Steps: {max_steps}");
 
-        // Load nuclear data
-        println!("\n── Loading nuclear data ──");
-        let mut kernels = Vec::new();
+        // Load nuclear data — Table mode (matches GPU pointwise)
+        println!("\n── Loading nuclear data (Table mode) ──");
+        let mut svd_kernels = Vec::new();
+        let mut table_nuclides = Vec::new();
         for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS {
             let path = args.data_dir.join(filename);
-            kernels.push(xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar));
+            svd_kernels.push(xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar));
+            table_nuclides.push(xs_provider::load_nuclide_table(&path, nuc_temp_idx, awr, nu_bar));
         }
         let thermal = load_thermal(&args.data_dir);
-        let provider = xs_provider::SvdXsProvider { nuclides: kernels, thermal };
+        let provider = xs_provider::TableXsProvider { nuclides: table_nuclides, thermal: thermal.clone() };
+        let svd_thermal = thermal;
 
         let materials = setup_materials();
         let (surfaces, cells) = setup_geometry();
@@ -520,7 +523,7 @@ mod cuda_main {
         // GPU trace
         println!("\n── GPU trace ──");
         let gpu = GpuTransportContext::new().expect("GPU init");
-        let nuc_data = gpu.upload_nuclide_data(&provider.nuclides, args.rank).expect("upload nuc");
+        let nuc_data = gpu.upload_nuclide_data(&svd_kernels, args.rank).expect("upload nuc");
         let awrs: Vec<f64> = NUCLIDE_SPECS.iter().map(|s| s.1).collect();
         let nu_bars: Vec<f64> = NUCLIDE_SPECS.iter().map(|s| s.2).collect();
         let mat_data = gpu.upload_material_data(&materials, &awrs, &nu_bars).expect("upload mat");
@@ -599,6 +602,29 @@ mod cuda_main {
                     cpu_rows[s][0], cpu_rows[s][9] as i32,
                     cpu_rows[s][6],
                 );
+                // Print detailed trace for first diverging particle
+                if n_diverge == 0 {
+                    let start = if s > 3 { s - 3 } else { 0 };
+                    let end = (s + 2).min(min_steps);
+                    println!("    ── Detail for P{pid} steps {start}..{end} ──");
+                    println!("    step |  E(GPU)      E(CPU)     | cell  mat | d_coll(GPU)  d_coll(CPU) | d_surf(GPU) d_surf(CPU) | ev(G) ev(C) | mt(GPU)    mt(CPU)    | E_out(GPU)  E_out(CPU)");
+                    for st in start..end {
+                        let g = pid * max_steps * cols + st * cols;
+                        let c = &cpu_rows[st];
+                        let mark = if st == s { " <<<" } else { "" };
+                        println!("    {:>4} | {:11.4e} {:11.4e} | {:>4} {:>4} | {:11.5e} {:11.5e} | {:11.5e} {:11.5e} | {:>5} {:>5} | {:10.6e} {:10.6e} | {:11.4e} {:11.4e}{}",
+                            st,
+                            gpu_trace.data[g], c[0],         // energy
+                            gpu_trace.data[g+4] as i32, c[4] as i32, // cell
+                            gpu_trace.data[g+7], c[7],       // d_coll
+                            gpu_trace.data[g+8], c[8],       // d_surf
+                            gpu_trace.data[g+9] as i32, c[9] as i32, // event
+                            gpu_trace.data[g+6], c[6],       // macro_total
+                            gpu_trace.data[g+15], c[15],     // E_out
+                            mark,
+                        );
+                    }
+                }
                 n_diverge += 1;
             } else {
                 n_match += 1;

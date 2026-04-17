@@ -53,14 +53,15 @@ mod cuda_main {
     }
 
     const PWR_NUCLIDES: &[(&str, f64, f64, usize)] = &[
-        ("U235.h5", 233.025, 2.43, 3),  // fuel: 900K
-        ("U238.h5", 236.006, 2.49, 3),  // fuel: 900K
-        ("O16.h5",  15.858,  0.0,  2),  // shared: 600K
-        ("H1.h5",    0.999,  0.0,  2),  // water: 600K
-        ("Zr90.h5", 89.132,  0.0,  2),  // clad: 600K
-        ("Zr91.h5", 90.130,  0.0,  2),  // clad: 600K
-        ("Zr92.h5", 91.126,  0.0,  2),  // clad: 600K
-        ("Zr94.h5", 93.120,  0.0,  2),  // clad: 600K
+        ("U235.h5", 233.025, 2.43, 3),  // 0  fuel: 900K
+        ("U238.h5", 236.006, 2.49, 3),  // 1  fuel: 900K
+        ("O16.h5",  15.858,  0.0,  3),  // 2  fuel O16: 900K
+        ("H1.h5",    0.999,  0.0,  2),  // 3  water: 600K
+        ("Zr90.h5", 89.132,  0.0,  2),  // 4  clad: 600K
+        ("Zr91.h5", 90.130,  0.0,  2),  // 5  clad: 600K
+        ("Zr92.h5", 91.126,  0.0,  2),  // 6  clad: 600K
+        ("Zr94.h5", 93.120,  0.0,  2),  // 7  clad: 600K
+        ("O16.h5",  15.858,  0.0,  2),  // 8  water O16: 600K
     ];
 
     const GODIVA_NUCLIDES: &[(&str, f64, f64, usize)] = &[
@@ -352,17 +353,17 @@ mod cuda_main {
     fn setup_materials() -> Vec<open_rust_mc::transport::material::Material> {
         use open_rust_mc::transport::material::Material;
         let mut fuel = Material::new("UO2", 900.0);
-        fuel.add_nuclide(0.000719, 0);
-        fuel.add_nuclide(0.022482, 1);
-        fuel.add_nuclide(0.046402, 2);
+        fuel.add_nuclide(0.000719, 0);   // U-235
+        fuel.add_nuclide(0.022482, 1);   // U-238
+        fuel.add_nuclide(0.046402, 2);   // O-16 at 900K
         let mut clad = Material::new("Zircaloy", 600.0);
-        clad.add_nuclide(0.022932, 4);
-        clad.add_nuclide(0.004996, 5);
-        clad.add_nuclide(0.007636, 6);
-        clad.add_nuclide(0.007740, 7);
+        clad.add_nuclide(0.022932, 4);   // Zr-90
+        clad.add_nuclide(0.004996, 5);   // Zr-91
+        clad.add_nuclide(0.007636, 6);   // Zr-92
+        clad.add_nuclide(0.007740, 7);   // Zr-94
         let mut water = Material::new("H2O", 600.0);
-        water.add_nuclide(0.049486, 3);
-        water.add_nuclide(0.024743, 2);
+        water.add_nuclide(0.049486, 3);  // H-1
+        water.add_nuclide(0.024743, 8);  // O-16 at 600K (separate from fuel O16)
         vec![fuel, clad, water]
     }
 }
