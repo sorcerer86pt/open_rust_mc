@@ -1139,3 +1139,272 @@ transport_persistent(
         if(lcnt_surf>0)atomicAdd(cnt_surf,lcnt_surf);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// DEBUG TRACE KERNEL — logs every transport step for GPU-CPU comparison
+//
+// Each particle writes max_steps rows. Per row:
+//   [energy, pos_x, pos_y, pos_z, cell, material,
+//    macro_total, d_coll, d_surf, event_type,
+//    hit_nuc, micro_el, micro_inel, micro_fis, micro_cap,
+//    outgoing_energy, rng_uniform_1]
+//
+// event_type: 0=elastic, 1=inelastic, 2=n2n, 3=n3n, 4=fission,
+//             5=capture, 6=reflective, 7=transmission, 8=leak, 9=void_stream
+// ═══════════════════════════════════════════════════════════════════════
+#define TRACE_COLS 17
+
+extern "C" __global__ void debug_transport_trace(
+    Params p,
+    double* pos_x, double* pos_y, double* pos_z,
+    double* dir_x, double* dir_y, double* dir_z,
+    double* energy, int* cell_idx, int* alive,
+    unsigned long long* rng_state_arr, unsigned long long* rng_inc_arr,
+    double* fis_x, double* fis_y, double* fis_z,
+    double* fis_e, double* fis_w,
+    int* fis_count, int max_fis,
+    // Trace output
+    double* trace,          // [n_particles * max_steps * TRACE_COLS]
+    int* step_counts,       // [n_particles]: actual steps taken
+    int n_particles, int max_steps)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_particles) return;
+    int gt = SCALAR_I(p, P_GEOM_TYPE);
+    int rank = SCALAR_I(p, P_RANK);
+
+    double px=pos_x[tid], py=pos_y[tid], pz=pos_z[tid];
+    double dx=dir_x[tid], dy=dir_y[tid], dz=dir_z[tid];
+    double E=energy[tid];
+    int cell=cell_idx[tid], is_alive=alive[tid];
+
+    PcgState rng;
+    rng.state=rng_state_arr[tid]; rng.inc=rng_inc_arr[tid];
+
+    int row_base = tid * max_steps * TRACE_COLS;
+    int actual_steps = 0;
+
+    for (int step=0; step < max_steps && is_alive; step++) {
+        int row = row_base + step * TRACE_COLS;
+        int mat = cell_material(cell, gt);
+
+        // Record pre-step state
+        trace[row+0] = E;
+        trace[row+1] = px; trace[row+2] = py; trace[row+3] = pz;
+        trace[row+4] = (double)cell;
+        trace[row+5] = (double)mat;
+
+        if (mat < 0) {
+            // Void streaming
+            double d_s; int bc, nc;
+            trace_surface(px,py,pz,dx,dy,dz,cell,gt,&d_s,&bc,&nc);
+            trace[row+6] = 0.0;  // no macro_total in void
+            trace[row+7] = 0.0;
+            trace[row+8] = d_s;
+            trace[row+9] = 9.0;  // void_stream
+            if (d_s > 1e19) { trace[row+9]=8.0; is_alive=0; break; }
+            if (bc==BC_REFLECTIVE) {
+                px+=dx*d_s; py+=dy*d_s; pz+=dz*d_s;
+                if(fabs(pz-HALF_PITCH)<1e-6||fabs(pz+HALF_PITCH)<1e-6) dz=-dz;
+                else if(fabs(px-HALF_PITCH)<1e-6||fabs(px+HALF_PITCH)<1e-6) dx=-dx;
+                else if(fabs(py-HALF_PITCH)<1e-6||fabs(py+HALF_PITCH)<1e-6) dy=-dy;
+            } else if (bc==BC_TRANSMISSION) {
+                double nudge=fmax(d_s*1e-8,1e-8);
+                px+=dx*(d_s+nudge); py+=dy*(d_s+nudge); pz+=dz*(d_s+nudge);
+                if (nc>=0) cell=nc; else { trace[row+9]=8.0; is_alive=0; break; }
+            } else { trace[row+9]=8.0; is_alive=0; break; }
+            trace[row+15] = E; // outgoing energy unchanged
+            actual_steps++;
+            continue;
+        }
+
+        // XS lookup — same as transport_persistent
+        int n_nuc = __ldg(&PTR_I(p, P_MAT_N_NUC)[mat]);
+        double sum_t=0;
+        double nuc_t[4]={}, nuc_el[4]={}, nuc_inel[4]={}, nuc_n2n[4]={};
+        double nuc_n3n[4]={}, nuc_fis[4]={}, nuc_cap[4]={};
+        double urr_xi = pcg_uniform(&rng);
+
+        for (int i=0; i<n_nuc; i++) {
+            int ni = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+i]);
+            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+i]);
+            int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
+            int n_e = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
+            const double* grid = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
+            int e_idx = energy_index(grid, n_e, E);
+            double log_frac = 0.0;
+            if (e_idx + 1 < n_e && grid[e_idx] > 0.0) {
+                double log_e = log(E), log_lo = log(grid[e_idx]), log_hi = log(grid[e_idx+1]);
+                if (log_hi > log_lo) log_frac = (log_e - log_lo) / (log_hi - log_lo);
+                if (log_frac < 0.0) log_frac = 0.0;
+                if (log_frac > 1.0) log_frac = 1.0;
+            }
+            double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0;
+            for (int r=0; r<6; r++) {
+                int key = ni*N_REACTIONS+r;
+                if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
+                    double s = svd_reconstruct_interp(
+                        &PTR_F(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
+                        &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
+                        e_idx, n_e, rank, log_frac);
+                    if(r==0) s_el=s; else if(r==1) s_inel=s;
+                    else if(r==2) s_n2n=s; else if(r==3) s_n3n=s;
+                    else if(r==4) s_fis=s; else if(r==5) s_cap=s;
+                }
+            }
+            apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
+            if (ni==3 && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0 && SCALAR_I(p, P_SAB_N_INC) > 0) {
+                double sab_xs_val = sab_total_xs(E, p);
+                if (sab_xs_val > 0.0) s_el = sab_xs_val;
+            }
+            double micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+            if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
+                double missing = PTR_D(p, P_TOTAL_XS)[__ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]) + e_idx];
+                if (missing > 0.0) { s_cap += missing; micro_t += missing; }
+            }
+            nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
+            nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
+            nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
+            sum_t+=Ni*micro_t;
+        }
+        if (sum_t <= 0.0) { trace[row+9]=8.0; is_alive=0; actual_steps++; break; }
+
+        trace[row+6] = sum_t; // macro_total
+
+        double xi_coll = pcg_uniform(&rng);
+        double d_coll = -log(xi_coll) / sum_t;
+        trace[row+16] = xi_coll; // save the RNG value used for collision distance
+
+        double d_s; int bc, nc;
+        trace_surface(px,py,pz,dx,dy,dz,cell,gt,&d_s,&bc,&nc);
+        trace[row+7] = d_coll;
+        trace[row+8] = d_s;
+
+        if (d_s < d_coll) {
+            // Surface crossing
+            if (bc==BC_REFLECTIVE) {
+                trace[row+9] = 6.0;
+                px+=dx*d_s; py+=dy*d_s; pz+=dz*d_s;
+                if(fabs(pz-HALF_PITCH)<1e-6||fabs(pz+HALF_PITCH)<1e-6) dz=-dz;
+                else if(fabs(px-HALF_PITCH)<1e-6||fabs(px+HALF_PITCH)<1e-6) dx=-dx;
+                else if(fabs(py-HALF_PITCH)<1e-6||fabs(py+HALF_PITCH)<1e-6) dy=-dy;
+            } else if (bc==BC_TRANSMISSION) {
+                trace[row+9] = 7.0;
+                double nudge=fmax(d_s*1e-8,1e-8);
+                px+=dx*(d_s+nudge); py+=dy*(d_s+nudge); pz+=dz*(d_s+nudge);
+                if (nc>=0) cell=nc; else { trace[row+9]=8.0; is_alive=0; }
+            } else { trace[row+9]=8.0; is_alive=0; }
+            trace[row+15] = E;
+        } else {
+            // Collision
+            px+=dx*d_coll; py+=dy*d_coll; pz+=dz*d_coll;
+            cell = find_cell(px,py,pz,gt);
+            if (cell<0) { trace[row+9]=8.0; is_alive=0; actual_steps++; break; }
+
+            double xi_nuc = pcg_uniform(&rng) * sum_t;
+            double cum=0.0; int hit_l=0;
+            for (int i=0; i<n_nuc; i++) { cum+=nuc_t[i]; if(xi_nuc<cum){hit_l=i;break;} hit_l=i; }
+            int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+hit_l]);
+            double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
+
+            trace[row+10] = (double)hit_nuc;
+            trace[row+11] = nuc_el[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
+            trace[row+12] = nuc_inel[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
+            trace[row+13] = nuc_fis[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
+            trace[row+14] = nuc_cap[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
+
+            double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
+            double cum_rxn = 0.0;
+
+            cum_rxn += nuc_el[hit_l];
+            if (xi_rxn < cum_rxn) {
+                trace[row+9] = 0.0; // elastic
+                if (hit_nuc==3 && E < SCALAR_D(p, P_SAB_EMAX) && SCALAR_I(p, P_SAB_N_INC) > 0) {
+                    double E_sab, mu_sab;
+                    sab_sample(E, &rng, p, &E_sab, &mu_sab);
+                    E = fmax(E_sab, 1e-11);
+                    double phi=2.0*PI*pcg_uniform(&rng);
+                    rotate_direction(&dx,&dy,&dz,mu_sab,phi);
+                } else {
+                    double cell_kT = (cell==0 && gt==GEOM_PWR) ? 900.0*8.617333262e-5 : 600.0*8.617333262e-5;
+                    if (gt==GEOM_GODIVA) cell_kT = 294.0*8.617333262e-5;
+                    if (E < 400.0*cell_kT) {
+                        double sigma=sqrt(cell_kT/A), v_n=sqrt(2.0*E);
+                        double u1,u2,r_bm,th;
+                        u1=pcg_uniform(&rng); u2=pcg_uniform(&rng);
+                        r_bm=sigma*sqrt(-2.0*log(fmax(u1,1e-30))); th=2.0*PI*u2;
+                        double vtx=r_bm*cos(th), vty=r_bm*sin(th);
+                        u1=pcg_uniform(&rng); u2=pcg_uniform(&rng);
+                        r_bm=sigma*sqrt(-2.0*log(fmax(u1,1e-30))); th=2.0*PI*u2;
+                        double vtz=r_bm*cos(th);
+                        double vnx=dx*v_n, vny=dy*v_n, vnz=dz*v_n;
+                        double vrx=vnx-vtx, vry=vny-vty, vrz=vnz-vtz;
+                        double vr=sqrt(vrx*vrx+vry*vry+vrz*vrz);
+                        if(vr<1e-20) vr=1e-20;
+                        double ia1=1.0/(1.0+A);
+                        double vcx=(vnx+A*vtx)*ia1, vcy=(vny+A*vty)*ia1, vcz=(vnz+A*vtz)*ia1;
+                        double vcn=vr*A*ia1;
+                        double e_rel=0.5*(A/(A+1.0))*vr*vr;
+                        double mu_cm=sample_angular_dist(e_rel,&rng,p,hit_nuc);
+                        double phi=2.0*PI*pcg_uniform(&rng);
+                        double st=sqrt(fmax(0.0,1.0-mu_cm*mu_cm));
+                        double vrh_x=vrx/vr, vrh_y=vry/vr, vrh_z=vrz/vr;
+                        double px2,py2,pz2;
+                        if(fabs(vrh_z)<0.999){
+                            double ip=1.0/sqrt(1.0-vrh_z*vrh_z);
+                            px2=-vrh_y*ip; py2=vrh_x*ip; pz2=0.0;
+                        } else {
+                            double ip=1.0/sqrt(1.0-vrh_x*vrh_x);
+                            px2=0.0; py2=-vrh_z*ip; pz2=vrh_y*ip;
+                        }
+                        double qx=vrh_y*pz2-vrh_z*py2, qy=vrh_z*px2-vrh_x*pz2, qz=vrh_x*py2-vrh_y*px2;
+                        double sx2=mu_cm*vrh_x+st*(cos(phi)*px2+sin(phi)*qx);
+                        double sy2=mu_cm*vrh_y+st*(cos(phi)*py2+sin(phi)*qy);
+                        double sz2=mu_cm*vrh_z+st*(cos(phi)*pz2+sin(phi)*qz);
+                        double vox=vcx+vcn*sx2, voy=vcy+vcn*sy2, voz=vcz+vcn*sz2;
+                        double vo=sqrt(vox*vox+voy*voy+voz*voz);
+                        E=0.5*vo*vo; if(E<1e-11)E=1e-11;
+                        if(vo>1e-20){dx=vox/vo;dy=voy/vo;dz=voz/vo;}
+                    } else {
+                        double mu_cm = sample_angular_dist(E, &rng, p, hit_nuc);
+                        double alpha=((A-1.0)/(A+1.0))*((A-1.0)/(A+1.0));
+                        E=E*(1.0+alpha+(1.0-alpha)*mu_cm)/2.0;
+                        if(E<1e-11) E=1e-11;
+                        double mu_lab=(1.0+A*mu_cm)/sqrt(1.0+A*A+2.0*A*mu_cm);
+                        double phi=2.0*PI*pcg_uniform(&rng);
+                        rotate_direction(&dx,&dy,&dz,mu_lab,phi);
+                    }
+                }
+            } else if ((cum_rxn+=nuc_inel[hit_l]), xi_rxn < cum_rxn) {
+                trace[row+9] = 1.0; // inelastic
+                E = fmax(E * 0.5, 1e-5); // simplified for trace
+                double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
+                rotate_direction(&dx,&dy,&dz,mu,phi);
+            } else if ((cum_rxn+=nuc_n2n[hit_l]), xi_rxn < cum_rxn) {
+                trace[row+9] = 2.0;
+                E = fmax(E * 0.3, 1e-5);
+                double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
+                rotate_direction(&dx,&dy,&dz,mu,phi);
+            } else if ((cum_rxn+=nuc_n3n[hit_l]), xi_rxn < cum_rxn) {
+                trace[row+9] = 3.0;
+                E = fmax(E * 0.2, 1e-5);
+                double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
+                rotate_direction(&dx,&dy,&dz,mu,phi);
+            } else if ((cum_rxn+=nuc_fis[hit_l]), xi_rxn < cum_rxn) {
+                trace[row+9] = 4.0; // fission
+                is_alive = 0;
+            } else {
+                trace[row+9] = 5.0; // capture
+                is_alive = 0;
+            }
+            trace[row+15] = E;
+        }
+        actual_steps++;
+    }
+
+    pos_x[tid]=px; pos_y[tid]=py; pos_z[tid]=pz;
+    dir_x[tid]=dx; dir_y[tid]=dy; dir_z[tid]=dz;
+    energy[tid]=E; cell_idx[tid]=cell; alive[tid]=is_alive;
+    rng_state_arr[tid]=rng.state; rng_inc_arr[tid]=rng.inc;
+    step_counts[tid] = actual_steps;
+}

@@ -124,6 +124,12 @@ pub struct GpuMaterialData {
     pub nu_bar_const: CudaSlice<f64>,
 }
 
+/// Result of debug trace on GPU.
+pub struct GpuTraceResult {
+    pub data: Vec<f64>,       // [n_particles * max_steps * TRACE_COLS]
+    pub step_counts: Vec<i32>, // [n_particles]
+}
+
 /// Result of one batch on GPU.
 pub struct GpuBatchResult {
     pub k_eff: f64,
@@ -1054,5 +1060,147 @@ impl GpuTransportContext {
             surface_crossings: cnt_surf,
             fission_bank,
         })
+    }
+
+    pub fn run_debug_trace(
+        &self,
+        source_bank: &[(f64, f64, f64, f64)],
+        nuc_data: &GpuNuclideData,
+        mat_data: &GpuMaterialData,
+        sab_data: &GpuSabData,
+        max_steps: u32,
+        geom_type: i32,
+    ) -> Result<GpuTraceResult, Box<dyn std::error::Error>> {
+        use cudarc::driver::LaunchConfig;
+        use cudarc::nvrtc;
+
+        let n = source_bank.len();
+        let trace_cols = 17_usize;
+        let trace_size = n * max_steps as usize * trace_cols;
+
+        let sx: Vec<f64> = source_bank.iter().map(|s| s.0).collect();
+        let sy: Vec<f64> = source_bank.iter().map(|s| s.1).collect();
+        let sz: Vec<f64> = source_bank.iter().map(|s| s.2).collect();
+        let se: Vec<f64> = source_bank.iter().map(|s| s.3).collect();
+        let d_sx = self.stream.clone_htod(&sx)?;
+        let d_sy = self.stream.clone_htod(&sy)?;
+        let d_sz = self.stream.clone_htod(&sz)?;
+        let d_se = self.stream.clone_htod(&se)?;
+
+        let mut d_pos_x: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_pos_y: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_pos_z: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_dir_x: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_dir_y: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_dir_z: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_energy: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+        let mut d_cell: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        let mut d_alive: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+        let mut d_rng_state: CudaSlice<u64> = self.stream.alloc_zeros(n)?;
+        let mut d_rng_inc: CudaSlice<u64> = self.stream.alloc_zeros(n)?;
+
+        let max_fis = n * 3;
+        let mut d_fis_x: CudaSlice<f64> = self.stream.alloc_zeros(max_fis)?;
+        let mut d_fis_y: CudaSlice<f64> = self.stream.alloc_zeros(max_fis)?;
+        let mut d_fis_z: CudaSlice<f64> = self.stream.alloc_zeros(max_fis)?;
+        let mut d_fis_e: CudaSlice<f64> = self.stream.alloc_zeros(max_fis)?;
+        let mut d_fis_w: CudaSlice<f64> = self.stream.alloc_zeros(max_fis)?;
+        let mut d_fis_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+
+        let mut d_trace: CudaSlice<f64> = self.stream.alloc_zeros(trace_size)?;
+        let mut d_step_counts: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+
+        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        let module = self._ctx.load_module(ptx)?;
+        let k_init = module.load_function("init_source")?;
+        let k_trace = module.load_function("debug_transport_trace")?;
+
+        let block = 256_u32;
+        let grid = ((n as u32 + block - 1) / block, 1, 1);
+        let cfg = LaunchConfig { grid_dim: grid, block_dim: (block, 1, 1), shared_mem_bytes: 0 };
+
+        let batch_seed = 42_u64;
+        let n_i32 = n as i32;
+        unsafe {
+            self.stream.launch_builder(&k_init)
+                .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
+                .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
+                .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
+                .arg(&d_sx).arg(&d_sy).arg(&d_sz).arg(&d_se)
+                .arg(&n_i32).arg(&batch_seed)
+                .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+                .arg(&geom_type)
+                .launch(cfg)?;
+        }
+
+        macro_rules! dptr {
+            ($slice:expr) => {{ let (ptr, _guard) = $slice.device_ptr(&self.stream); ptr }};
+        }
+        let params_vec: Vec<u64> = vec![
+            dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction), dptr!(&nuc_data.coeffs_offsets),
+            nuc_data.rank as u64,
+            dptr!(&mat_data.mat_n_nuclides), dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density), dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.nu_bar_const),
+            dptr!(&nuc_data.nu_bar_energies), dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets), dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies), dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes), dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf), dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.fis_nuc_n_inc),
+            dptr!(&nuc_data.level_q_values), dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets), dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis), dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets), dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel), dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies), dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf), dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes), dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies), dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies), sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets), dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out), dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&sab_data.pdf_e),
+            dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
+            geom_type as u64,
+            dptr!(&nuc_data.total_xs),
+            dptr!(&nuc_data.total_xs_offsets),
+            dptr!(&nuc_data.has_total_xs),
+        ];
+        assert_eq!(params_vec.len(), N_PARAMS);
+        let d_params = self.stream.clone_htod(&params_vec)?;
+
+        let max_fis_i32 = max_fis as i32;
+        let max_steps_i32 = max_steps as i32;
+
+        unsafe {
+            self.stream.launch_builder(&k_trace)
+                .arg(&d_params)
+                .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
+                .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
+                .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
+                .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+                .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
+                .arg(&mut d_fis_e).arg(&mut d_fis_w)
+                .arg(&mut d_fis_count).arg(&max_fis_i32)
+                .arg(&mut d_trace).arg(&mut d_step_counts)
+                .arg(&n_i32).arg(&max_steps_i32)
+                .launch(cfg)?;
+        }
+
+        let data = self.stream.clone_dtoh(&d_trace)?;
+        let step_counts = self.stream.clone_dtoh(&d_step_counts)?;
+
+        Ok(GpuTraceResult { data, step_counts })
     }
 }
