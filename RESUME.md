@@ -18,76 +18,96 @@ the exact CPU algorithm on GPU. If it exists on CPU, port it correctly to GPU.
 
 ## State
 
-### 10-Seed Results (150 batches, 50k particles, hash-fixed)
+### Current PWR Results (5-seed, 150 batches, 20k particles, rank 6)
 
-| Benchmark | Mode | k | sigma | ns/p | Δ(exp) |
-|-----------|------|---|-------|------|--------|
-| Godiva | Table | 0.99923 | 48 pcm | 1035 | 77 pcm |
-| Godiva | SVD k=5 (interp) | 0.99845 | 42 pcm | 1604 | 155 pcm |
-| Godiva | GPU SVD k=5 (interp) | 0.99700 | 47 pcm | 686 | 300 pcm |
+| Mode | k_inf | σ | Gap to OpenMC |
+|------|-------|---|---------------|
+| **CPU Table** | **1.332 ± 0.001** | 35 pcm | **~180 pcm (stats)** |
+| CPU SVD k=6 | 1.332 ± 0.001 | 94 pcm | ~250 pcm |
+| GPU SVD k=6 | 1.345 ± 0.001 | 50 pcm | ~1700 pcm |
+| GPU pointwise (WIP) | 1.274 | — | broken, temp bug |
+| OpenMC | 1.328 ± 0.001 | 50 pcm | — |
 
-**SVD vs Table gap**: 79 pcm (rank-5 compression error, not interpolation artifact)
-**GPU vs CPU SVD gap**: 145 pcm (remaining transport loop differences)
-**SVD rank does NOT reduce the gap** — tested k=5,8,12, all give ~79 pcm vs Table
+**CPU Table matches OpenMC within statistics.** SVD-Table gap is ~37 pcm.
+**GPU still has ~2000 pcm gap** from SVD reconstruction error (f32 basis overshoot).
 
-### Key Finding: SVD Gap is NOT Rank-Limited
+### Root Cause of GPU-CPU Gap: SVD f32 Overshoot
 
-| Rank | SVD-Table gap | Notes |
-|------|---------------|-------|
-| 5 | 79 pcm | Same as rank 12 |
-| 8 | 79 pcm | Gap is constant |
-| 12 | 79 pcm | Irreducible at this architecture |
+Debug trace (gpu_cpu_trace binary) revealed:
+- H1 SVD elastic at 0.02 eV: **60 barns** (SVD) vs **42 barns** (HDF5 at 600K) — **44% overshoot**
+- U238 SVD sum at 1 MeV: **4.85 barns** vs **7.07 barns** (HDF5) — missing inelastic
+- The Ducru temperature reconstruction amplifies error for nuclides with strong T-dependence
 
-The 79 pcm is the residual from log-log interpolation on SVD-reconstructed values
-vs the Table's native log-log interpolation. Both use the same energy grid and
-interpolation scheme — the difference is SVD's f32 basis quantization.
+CPU fixes this by using `total_table` (exact HDF5 total) for collision distance.
+GPU can't use total_table directly because SVD partials > HDF5 total at some energies,
+making capture negative → proportional scaling distorts reaction ratios.
 
-### Bugs Found and Fixed (this session)
+### Solution In Progress: GPU Pointwise XS Tables
 
-1. **CPU EnergyHashTable lookup bug** (kernel.rs): Hash started scan from
-   bin UPPER edge instead of LOWER edge. Returned indices up to 239 positions
-   off in the resonance region. Caused all previous SVD k_eff values to be wrong
-   (old k=1.00019 was bogus). Fixed by using `bins[bin-1]` as starting index.
+Upload exact pointwise XS from HDF5 (7 channels × n_energy per nuclide, ~18 MB total).
+GPU does binary search + log-log interpolation on uploaded tables — same as CPU Table mode.
 
-2. **U-234 nu_bar fallback = 0** (gpu_pwr_bench.rs): GPU Godiva had nu_bar=0.0
-   for U-234. Since U-234 has no nu_bar table in HDF5, this meant zero fission
-   neutrons from U-234. Fixed to 2.49 (matching CPU). Impact: ~640 pcm.
+**Status**: Infrastructure complete (`compute_pointwise_xs`, upload, GPU lookup).
+Fuel nuclides read correct values. **H1 reads wrong temperature** (59.7 vs 41.7 at 600K).
+Bug is in `compute_pointwise_xs(temp_idx=2)` — the interpolated value at 0.02 eV doesn't
+match `h5py` direct read. Likely the `read_reaction → interpolate_to_grid` path picks up
+wrong temperature data for H1.
 
-3. **Inelastic two-body kinematics** (transport.cu): GPU used simplified formula
-   `E_out = E*A²/(A+1)² + Q*(A+1)/A` (no mu_cm coupling). Replaced with proper
-   velocity-addition kinematics matching CPU's `inelastic_scatter()`.
-   Also fixed MT=91 evaporation 0.9 clamp + Q-value path.
+**Next step**: Debug H1 pointwise temperature mismatch, then GPU should match CPU Table.
 
-4. **Log-log XS interpolation** (xs_provider.rs + transport.cu): SVD mode was
-   stair-stepping XS at grid points. Added log-log interpolation between
-   adjacent SVD reconstructions, matching OpenMC/Table scheme. Closed 44 pcm
-   of the 123 pcm stair-step artifact.
+### Bugs Found and Fixed (this session — ~7650 pcm total correction)
 
-5. **Angular distribution interpolation** (transport.cu): Added correlated
-   sampling between energy brackets (CPU had it, GPU didn't). Verified bit-exact
-   match between CPU and GPU angular dist values via diagnostic.
+10. **GPU S(α,β) kinematic energy scaling** (transport.cu sab_sample):
+    Added OpenMC Eq 31/35 scaling, PDF-based CDF inversion (Eq 33/34),
+    equiprobable angular bins with smearing. Correctness improvement.
 
-6. **Fission spectrum interpolation** (transport.cu): Same correlated sampling
-   pattern for fission outgoing energy between incident energy brackets.
+11. **GPU cell-finding nudge** (transport.cu): 1e-10 → 1e-8 matching CPU.
 
-7. **(n,2n)/(n,3n) neutron banking** (transport.cu): GPU now banks 1/2 extra
-   neutrons and continues primary (matching CPU collision.rs). Was treating
-   these as plain inelastic with no neutron production.
+12. **CPU void_crossings never reset** (simulate.rs): Counter killed thermal
+    neutrons after 100 lifetime gap crossings. PWR neutrons cross the fuel-clad
+    gap ~100+ times → 350 spurious leaks/batch (1.7%). Impact: **~2400 pcm**.
 
-8. **Reaction ordering** (transport.cu): Reordered to match CPU:
-   elastic → inelastic → n2n → n3n → fission → capture (remainder).
+13. **Per-nuclide temperature indices** (pwr_pincell.rs, gpu_pwr_bench.rs):
+    Was loading ALL nuclides at temp_idx=1 (294K room temperature). Now:
+    U235/U238 at 900K (idx 3), O16/H1/Zr at 600K (idx 2).
+    O16 split into fuel (900K) and water (600K) instances. Impact: **~2900 pcm**.
 
-9. **Free-gas thermal scattering** (transport.cu): Removed `A < 10` guard
-   (CPU has no mass cutoff). Added angular distribution at relative energy
-   in free-gas path.
+14. **Atom densities matched to OpenMC** (pwr_pincell.rs, gpu_pwr_bench.rs):
+    Replaced hardcoded values with OpenMC-computed densities. Impact: **~450 pcm**.
+
+15. **U-238 inelastic synthesis** (xs_provider.rs): MT=4 absent in HDF5 for U238.
+    Now summed from discrete levels MT=51-91 at lookup time for both SVD and
+    Table providers. Impact: **~1900 pcm**.
+
+16. **Total XS from HDF5** (hdf5_reader.rs, xs_provider.rs): `compute_total_xs`
+    reads all physics reactions (MT<200): uses MT=2+MT=3 when available, or sums
+    leaf reactions (excluding sum-MTs 1,3,4). Captures missing channels (n,α, n,p,
+    n,nα, etc.) that our 6-channel model omits. CPU Table now matches OpenMC.
+    Impact: **~475 pcm** (Table mode).
+
+17. **GPU missing channel correction** (transport.cu, gpu_transport.rs):
+    Pre-computed `missing_xs = HDF5_total - sum(pointwise MT=2,4,16,17,18,102)`.
+    Uploaded to GPU, added to capture. Partial fix (~400 pcm of ~2000 pcm gap).
+
+### Previous Session Bugs (1-9)
+
+1. CPU EnergyHashTable lookup bug (kernel.rs)
+2. U-234 nu_bar fallback = 0 (gpu_pwr_bench.rs)
+3. Inelastic two-body kinematics (transport.cu)
+4. Log-log XS interpolation (xs_provider.rs + transport.cu)
+5. Angular distribution interpolation (transport.cu)
+6. Fission spectrum interpolation (transport.cu)
+7. (n,2n)/(n,3n) neutron banking (transport.cu)
+8. Reaction ordering (transport.cu)
+9. Free-gas thermal scattering (transport.cu)
 
 ## GPU Architecture
 
 **CUDA kernel**: `gpu/cuda/transport.cu` (loaded via `include_str!`)
 **Rust orchestration**: `src/gpu_transport.rs`
-**Diagnostics**: `src/bin/debug_trace.rs` (CPU vs GPU data validation)
+**Diagnostics**: `src/bin/debug_trace.rs`, `src/bin/gpu_cpu_trace.rs`
 
-### Packed TransportParams (66 u64 fields, one device buffer)
+### Packed TransportParams (73 u64 fields, one device buffer)
 
 ```cuda
 typedef const unsigned long long* Params;
@@ -105,32 +125,34 @@ typedef const unsigned long long* Params;
 | `init_source` | Initialize particles from source bank |
 | `compact_alive` | Atomic compaction of alive indices |
 | `energy_bin_count/scatter` | 256-bin sort for coalesced SVD access |
-| `transport_persistent` | Main: N steps/launch, 104 regs, 0 spill |
+| `transport_persistent` | Main: N steps/launch, pointwise or SVD XS lookup |
 | `debug_angular_sample` | Diagnostic: angular dist CPU/GPU comparison |
 | `debug_xs_reconstruct` | Diagnostic: XS value CPU/GPU comparison |
+| `debug_transport_trace` | Diagnostic: per-step trace (17 cols) for GPU-CPU diff |
 
 ### Physics in transport_persistent
 
-- SVD XS with log-log interpolation between grid points (rank-k FMA × 2)
+- **Pointwise XS** from HDF5 when available (7 channels, log-log interp) — WIP
+- SVD XS fallback with log-log interpolation between grid points
 - Anisotropic angular distributions (correlated interpolation between energies)
 - Fission spectrum (correlated interpolation between incident energies)
-- S(alpha,beta) for H1 <3.75 eV (CDF: 106 E_in, 48k E_out, 771k mu)
+- S(α,β) for H1 <3.75 eV with kinematic scaling (OpenMC Eq 31-35)
 - URR probability tables (band sampling, multiply/absolute)
 - Discrete levels (SVD per-level XS, proportional sampling, real Q-values)
 - Continuum inelastic MT=91 (evaporation: T=sqrt(E*/a), a=A/8, 0.9 clamp)
-- (n,2n)/(n,3n) with neutron banking (1/2 evaporation neutrons + primary continues)
-- Free-gas thermal (Box-Muller target velocity, angular dist at E_rel, no mass cutoff)
-- Energy-dependent nu-bar (linear interpolation on per-nuclide tables)
-- Warp-level counter reduction (`__shfl_down_sync`)
-- `__launch_bounds__(256, 2)`
+- (n,2n)/(n,3n) with neutron banking
+- Free-gas thermal (Box-Muller target velocity, angular dist at E_rel)
+- Energy-dependent nu-bar
+- Warp-level counter reduction, `__launch_bounds__(256, 2)`
 
 ### GPU Memory
 
 | Data | Size |
 |------|------|
-| SVD basis (f32) | ~32 MB (8 PWR nuclides) |
-| Discrete level basis | ~100 MB |
-| Energy grids | ~2.5 MB |
+| **Pointwise XS (f64)** | **~18 MB (9 PWR nuclides × 7 channels)** |
+| SVD basis (f32) | ~39 MB (9 PWR nuclides) |
+| Discrete level basis | ~93 MB |
+| Energy grids | ~2.6 MB |
 | S(alpha,beta) | ~8 MB/temp |
 | Angular dist + URR + nu-bar + fission CDF | ~0.5 MB |
 
@@ -140,59 +162,30 @@ typedef const unsigned long long* Params;
 rust_prototype/src/bin/godiva.rs          CPU Godiva (--mode svd|table|both --seeds N)
 rust_prototype/src/bin/pwr_pincell.rs     CPU PWR (--mode svd|table|both --seeds N)
 rust_prototype/src/bin/gpu_pwr_bench.rs   GPU benchmark (--geometry pwr|godiva --seeds N)
+rust_prototype/src/bin/gpu_cpu_trace.rs   GPU vs CPU step-by-step trace comparison
 rust_prototype/src/bin/debug_trace.rs     CPU vs GPU physics diagnostic
 rust_prototype/src/gpu_transport.rs       Rust GPU orchestration (packed params, upload, launch)
 rust_prototype/gpu/cuda/transport.cu      CUDA kernels (persistent transport + diagnostics)
-rust_prototype/src/transport/simulate.rs  CPU transport loop (surface + delta tracking)
-rust_prototype/src/transport/xs_provider.rs  SVD + Table XS providers (with log-log interp)
-rust_prototype/src/hdf5_reader.rs         HDF5 reader (XS, angular, URR, thermal, nu-bar)
+rust_prototype/src/transport/simulate.rs  CPU transport loop (surface tracking)
+rust_prototype/src/transport/xs_provider.rs  SVD + Table XS providers (total from HDF5)
+rust_prototype/src/hdf5_reader.rs         HDF5 reader (XS, angular, URR, thermal, nu-bar, pointwise)
 rust_prototype/src/thermal.rs             S(alpha,beta) sampling
 rust_prototype/src/kernel.rs              SVD kernel (f32 basis, hash lookup, Ducru interp)
 paper/svd_cross_section_compression.tex   Manuscript
 scripts/paper_openmc_benchmark.py         Multi-seed OpenMC runner
-run_paper_full.ps1                        Full benchmark script (CPU + GPU + scaling)
 ```
-
-### Bugs Found and Fixed (PWR GPU session)
-
-10. **GPU S(α,β) missing kinematic energy scaling** (transport.cu sab_sample):
-    GPU sampled outgoing energy directly from one bounding table without
-    OpenMC Eq 31/35 scaling to the actual incident energy's kinematic bounds.
-    CPU's `sample_continuous_inelastic()` in thermal.rs:346-361 does:
-    `e_out = e_min + (e_hat - e_ell_min)/(e_ell_max - e_ell_min) * (e_max - e_min)`
-    This affected ALL ~164,000 thermal scatters/batch (28% of collisions).
-    Also added PDF-based CDF inversion (Eq 33/34) replacing simple linear interp.
-    Also switched angular sampling from CDF to equiprobable bins + smearing
-    (matching CPU algorithm). Expected impact: ~1000-2000 pcm.
-
-11. **GPU cell-finding nudge too tight** (transport.cu trace_surface):
-    `best_t + 1e-10` for determining next cell — CPU uses `1e-8` everywhere.
-    At fuel/gap boundary (r ≈ 0.41 cm), 1e-10 may not clear double-precision
-    ambiguity, causing occasional cell misassignment → surface stuckness.
-    Changed to `best_t + 1e-8`. Expected impact: ~100-500 pcm.
 
 ## Next Steps
 
-1. Run PWR GPU benchmark with fixes, compare to CPU k=1.355
-2. Rank sweep (k=1..6) for paper accuracy/speed tradeoff curve
-3. Run OpenMC 10-seed reference via WSL (verify Table mode matches)
-4. Update paper tables + appendix with corrected numbers
-5. OpenCL port (gpu/opencl/)
+1. **Fix H1 pointwise temperature bug** — `compute_pointwise_xs(temp_idx=2)` gives
+   59.7 b elastic at 0.02 eV, should be 41.7 b (600K). Check `read_reaction` →
+   `interpolate_to_grid` temperature selection. Once fixed, GPU pointwise should
+   match CPU Table (~1.33).
 
-### Investigation notes (resolved)
-1. Thermal Scattering Replacement (S(α,β))This is a high-risk area for bias. In your Rust code:Rustif let Some(tsl) = xs_provider.thermal_scattering(nuc_idx) {
-    if particle.energy < tsl.energy_max {
-        // ... replaces free-atom elastic with thermal total ...
-        xs.total += delta;
-        thermal_xs_add[i] = thermal_total;
-        xs.elastic = 0.0; // Elastic is suppressed
-    }
-}
-Check in CUDA:Does the GPU kernel correctly suppress the elastic scattering cross-section when S(α,β) is active?If the GPU adds the thermal scattering XS on top of the SVD-reconstructed elastic XS (instead of replacing it), you will have an artificially high scattering rate, leading to a significant $k_{eff}$ bias.2. Surface "Nudging" and PrecisionYour Rust code handles surface crossings with a specific nudge:Rustlet nudge = (hit.distance * 1e-8).max(1e-8);
-particle.advance(hit.distance + nudge);
-Check in CUDA:The CUDA kernel uses d_s + 1e-10 or best_t + 1e-10.If the GPU nudge is too small (e.g., 1e-10 vs the Rust 1e-8), floating-point errors in the find_cell function might cause "surface stuckness," where a particle thinks it is in the wrong cell after a crossing. In a PWR pin cell, if a neutron "sticks" in the fuel instead of entering the moderator, the spectrum will be much harder, raising $k_{eff}$.3. Reaction Sampling OrderIn the Rust code, you calculate a macro_total and then sample the nuclide, then the reaction.Check in CUDA:Ensure the GPU samples reactions in the exact same branching order. If the GPU samples Fission before Capture, but the CPU does the opposite (or uses different cumulative probability logic), small differences in the RNG or precision will accumulate into a large pcm bias over millions of histories.4. Tracking Mode DivergenceYour Rust code has an auto-detector for Delta Tracking (Woodcock) vs Surface Tracking:Rustlet tracking = detect_tracking_mode(cells, materials, xs_provider);
-The Trap:If your Rust CPU run is using TrackingMode::Surface but your GPU implementation is effectively using a different logic (or a fixed majorant), they will diverge. Surface tracking is generally more "exact" regarding boundary locations, whereas Delta Tracking can be sensitive to the MajorantTable precision.Action: Force your Rust code to use the same tracking logic as the GPU (likely Surface Tracking based on your transport.cu snippet) to ensure you are comparing apples to apples.5. Log-Log Interpolation BaseIn your Rust XsProvider, check how the interpolation fraction is calculated. Your CUDA kernel uses:C++double log_e = log(E);
-double log_lo = log(grid[e_idx]);
-double log_hi = log(grid[e_idx+1]);
-log_frac = (log_e - log_lo) / (log_hi - log_lo);
-This is natural log ($\ln$). If your Rust code uses log10 or log2 to calculate the interpolation fraction for the SVD coefficients, the reconstructed cross-sections will differ slightly at every energy point. Over the U238 resonance range, these "slight" differences total up to thousands of pcm.Summary for your MEM file:FeatureRust (CPU)CUDA (GPU)Thermal XSReplaces ElasticCheck if Added or ReplacedNudge1e-81e-10 (Check for cell-finding errors)InterpolationCheck Base ($\ln$ vs $\log_{10}$)Uses $\ln$TrackingSurface/Delta AutoSurface (Check trace_surface)Tomorrow's Priority: Focus on the S(α,β) replacement logic and the U238 capture tally. If the GPU $k$ is 1.38 and CPU is 1.35, the GPU is missing about 2-3% of the total captures.
+2. **5-seed GPU pointwise benchmark** — validate GPU matches CPU Table within stats.
+
+3. **Rank sweep (k=1..6)** for paper accuracy/speed tradeoff curve.
+
+4. **Update paper tables** with corrected numbers (CPU Table matches OpenMC).
+
+5. **OpenCL port** (gpu/opencl/).
