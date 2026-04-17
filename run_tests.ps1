@@ -1,96 +1,225 @@
 <#
 .SYNOPSIS
-    Test suite for open-rust-mc. Handles Unit tests, Physics benchmarks, and GPU acceleration.
+    Developer test runner for open-rust-mc.
+
+.DESCRIPTION
+    Runs unit tests and short integration benchmarks. All paths are resolved
+    relative to this script's location, so the script can be invoked from
+    anywhere.
+
+    Use -Tests to select which suites to run. Valid values:
+        unit      Cargo unit tests (src/lib.rs).
+        godiva    Godiva (HEU-MET-FAST-001) smoke/integration run.
+        pwr       PWR pin cell smoke/integration run.
+        jeff      JEFF-3.3 SVD validation (skipped if data missing).
+        gpu       GPU PWR + Godiva smoke runs (requires CUDA feature).
+        mem       Memory comparison (bench_mem binary).
+        xs        XS reconstruction Pareto (pareto_bench binary).
+        all       Every suite above.
+
+    -Quick and -Full are presets that scale particle counts and seeds.
+
+.EXAMPLE
+    ./run_tests.ps1
+    Run the default suite (unit, godiva, jeff, mem).
+
+.EXAMPLE
+    ./run_tests.ps1 -Tests pwr,gpu -Full
+    Run the PWR and GPU suites at full statistics.
+
+.EXAMPLE
+    ./run_tests.ps1 -Tests unit -Filter kernel
+    Run only unit tests whose name matches "kernel".
 #>
+[CmdletBinding()]
 param(
-    [switch]$Quick, 
-    [switch]$Full, 
-    [switch]$Unit, 
-    [switch]$Godiva,
-    [switch]$Pwr, 
-    [switch]$Jeff, 
-    [switch]$Cuda, 
-    [switch]$Mem,
-    [string]$Filter = "", 
-    [string]$Output = ""
+    [ValidateSet("unit", "godiva", "pwr", "jeff", "gpu", "mem", "xs", "all")]
+    [string[]]$Tests = @("unit", "godiva", "jeff", "mem"),
+
+    [switch]$Quick,
+    [switch]$Full,
+
+    [int]$Rank = 5,
+    [int]$Seeds,
+    [int]$Particles,
+    [int]$Batches,
+    [int]$Inactive,
+
+    [string]$Filter = "",
+    [string]$Output = "",
+
+    [string]$DataDir = (Join-Path $PSScriptRoot "data\endfb-vii.1-hdf5\neutron")
 )
 
 $ErrorActionPreference = "Stop"
-$OriginalLocation = $PSScriptRoot
-$RustDir = "$PSScriptRoot\rust_prototype"
-# Updated to the specific neutron data directory
-$DataDir = "$PSScriptRoot\data\endfb-vii.1-hdf5\neutron"
 
-# Default suite: Unit, Godiva, Jeff, and Mem
-$AnyTestPicked = $Unit -or $Godiva -or $Jeff -or $Cuda -or $Mem -or $Pwr
-if (-not $AnyTestPicked) { $Unit = $Godiva = $Jeff = $Mem = $true }
+# ── Resolve paths relative to script location ─────────────────────────────
+$RepoRoot = $PSScriptRoot
+$RustDir  = Join-Path $RepoRoot "rust_prototype"
+$Manifest = Join-Path $RustDir  "Cargo.toml"
+$DataDir  = (Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue) ?? $DataDir
 
-if ($Output) {
-    Write-Host "Logging output to: $Output" -ForegroundColor Cyan
-    Start-Transcript -Path $Output -Append -Force | Out-Null
+# ── Presets ───────────────────────────────────────────────────────────────
+if ($Quick -and $Full) {
+    throw "Choose at most one of -Quick and -Full."
 }
 
-Push-Location $OriginalLocation
+# Default, -Quick, -Full presets for each knob; explicit CLI overrides win.
+$defaults = if ($Full) {
+    @{ Seeds = 5; Particles = 20000; Batches = 100; Inactive = 20 }
+} elseif ($Quick) {
+    @{ Seeds = 1; Particles = 2000;  Batches = 20;  Inactive = 5  }
+} else {
+    @{ Seeds = 2; Particles = 5000;  Batches = 30;  Inactive = 5  }
+}
+if (-not $PSBoundParameters.ContainsKey('Seeds'))     { $Seeds     = $defaults.Seeds }
+if (-not $PSBoundParameters.ContainsKey('Particles')) { $Particles = $defaults.Particles }
+if (-not $PSBoundParameters.ContainsKey('Batches'))   { $Batches   = $defaults.Batches }
+if (-not $PSBoundParameters.ContainsKey('Inactive'))  { $Inactive  = $defaults.Inactive }
+
+# Expand "all".
+if ($Tests -contains "all") {
+    $Tests = @("unit", "godiva", "pwr", "jeff", "gpu", "mem", "xs")
+}
+
+# ── Logging ───────────────────────────────────────────────────────────────
+if ($Output) {
+    $stamp   = Get-Date -Format "yyyyMMdd_HHmmss"
+    $logPath = if ($Output.EndsWith(".txt") -or $Output.EndsWith(".log")) {
+        $Output
+    } else {
+        "${Output}_${stamp}.txt"
+    }
+    Write-Host "Logging to: $logPath" -ForegroundColor Cyan
+    Start-Transcript -Path $logPath -Append -Force | Out-Null
+}
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+function Write-Banner {
+    param([string]$Text, [ConsoleColor]$Color = "Yellow")
+    Write-Host ""
+    Write-Host ("── {0} ──" -f $Text) -ForegroundColor $Color
+}
+
+function Invoke-Cargo {
+    param([string[]]$CargoArgs)
+    $allArgs = @("--manifest-path", $Manifest) + $CargoArgs
+    Write-Verbose ("cargo " + ($allArgs -join " "))
+    & cargo @allArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo exited with code $LASTEXITCODE"
+    }
+}
+
+# Verify nuclear data except when only running unit/xs/mem.
+$needData = @("godiva", "pwr", "gpu") | Where-Object { $Tests -contains $_ }
+if ($needData -and -not (Test-Path (Join-Path $DataDir "U235.h5"))) {
+    throw "Nuclear data not found at ${DataDir}. Pass -DataDir or place ENDF/B-VII.1 HDF5 there."
+}
+
+Write-Host ""
+Write-Host "=== open-rust-mc test runner ===" -ForegroundColor Cyan
+Write-Host ("  Suites    : {0}" -f ($Tests -join ", "))
+Write-Host ("  Rank      : {0}" -f $Rank)
+Write-Host ("  Seeds     : {0}" -f $Seeds)
+Write-Host ("  Particles : {0}" -f $Particles)
+Write-Host ("  Batches   : {0} ({1} inactive)" -f $Batches, $Inactive)
+Write-Host ("  Data      : {0}" -f $DataDir)
+Write-Host ""
 
 try {
-    Write-Host "`n=== open_rust_mc Test Suite ===" -ForegroundColor Cyan
-    Set-Location $RustDir
-
-    # 1. Unit Tests
-    if ($Unit) {
-        Write-Host "`n── 1. Unit tests ──" -ForegroundColor Yellow
-        cargo test --lib $Filter 2>&1 | Out-String -Stream
+    # ── 1. Unit tests ─────────────────────────────────────────────────────
+    if ($Tests -contains "unit") {
+        Write-Banner "Unit tests"
+        $testArgs = @("test", "--lib")
+        if ($Filter) { $testArgs += $Filter }
+        Invoke-Cargo $testArgs
     }
 
-    # 2. Godiva Eigenvalue
-    if ($Godiva) {
-        Write-Host "`n── 2. Godiva eigenvalue ──" -ForegroundColor Yellow
-        $GArgs = if ($Full) { 
-            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "150", "--inactive", "20", "--particles", "20000", "--seeds", "3") 
-        } else { 
-            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "30", "--inactive", "5", "--particles", "5000") 
-        }
-        cargo run --release --bin godiva -- $GArgs 2>&1 | Out-String -Stream
+    # ── 2. Godiva ─────────────────────────────────────────────────────────
+    if ($Tests -contains "godiva") {
+        Write-Banner "Godiva eigenvalue"
+        Invoke-Cargo @(
+            "run", "--release", "--bin", "godiva", "--",
+            $DataDir,
+            "--mode", "both", "--rank", $Rank,
+            "--batches", $Batches, "--inactive", $Inactive,
+            "--particles", $Particles, "--seeds", $Seeds
+        )
     }
 
-    # 3. PWR Pin Cell
-    if ($Pwr) {
-        Write-Host "`n── 3. PWR pin cell ──" -ForegroundColor Yellow
-        $PArgs = if ($Full) { 
-            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "100", "--inactive", "20", "--particles", "50000", "--seeds", "5") 
-        } else { 
-            @("$DataDir", "--mode", "both", "--rank", "5", "--batches", "30", "--inactive", "5", "--particles", "5000") 
-        }
-        cargo run --release --bin pwr_pincell -- $PArgs 2>&1 | Out-String -Stream
+    # ── 3. PWR pin cell ───────────────────────────────────────────────────
+    if ($Tests -contains "pwr") {
+        Write-Banner "PWR pin cell"
+        Invoke-Cargo @(
+            "run", "--release", "--bin", "pwr_pincell", "--",
+            $DataDir,
+            "--mode", "both", "--rank", $Rank,
+            "--batches", $Batches, "--inactive", $Inactive,
+            "--particles", $Particles, "--seeds", $Seeds
+        )
     }
 
-    # 5. JEFF-3.3 SVD Validation
-    if ($Jeff) {
-        # Fix: Look in the DataDir where the .npy files were extracted
-        $JeffFile = Join-Path $DataDir "jeff33_fission_energies.npy"
-        
-        if (Test-Path $JeffFile) {
-            Write-Host "`n── 5. JEFF-33 SVD validation ──" -ForegroundColor Yellow
-            cargo run --release -- npy --prefix jeff33_ 2>&1 | Out-String -Stream
+    # ── 4. JEFF-3.3 ───────────────────────────────────────────────────────
+    if ($Tests -contains "jeff") {
+        $jeffFile = Join-Path $RepoRoot "data\jeff33_fission_energies.npy"
+        if (Test-Path $jeffFile) {
+            Write-Banner "JEFF-3.3 SVD validation"
+            Invoke-Cargo @(
+                "run", "--release", "--",
+                "npy", "--prefix", (Join-Path $RepoRoot "data\jeff33_")
+            )
         } else {
-            Write-Host "`n── 5. JEFF-33 SVD validation (Skipped: $JeffFile not found) ──" -ForegroundColor Gray
+            Write-Banner "JEFF-3.3 SVD validation (skipped: data not found)" "DarkGray"
         }
     }
 
-    # 7. Memory Benchmark
-    if ($Mem) {
-        Write-Host "`n── 7. Memory comparison ──" -ForegroundColor Yellow
-        # Passing the directory directly; bench_mem now correctly filters internal files
-        cargo run --release --bin bench_mem -- "$DataDir" --rank 5 2>&1 | Out-String -Stream
+    # ── 5. GPU (CUDA) ─────────────────────────────────────────────────────
+    if ($Tests -contains "gpu") {
+        Write-Banner "GPU PWR"
+        Invoke-Cargo @(
+            "run", "--release", "--features", "cuda",
+            "--bin", "gpu_pwr_bench", "--",
+            $DataDir,
+            "--rank", $Rank, "-B", $Batches, "--inactive", $Inactive,
+            "--particles", $Particles, "--seeds", $Seeds,
+            "--geometry", "pwr"
+        )
+        Write-Banner "GPU Godiva"
+        Invoke-Cargo @(
+            "run", "--release", "--features", "cuda",
+            "--bin", "gpu_pwr_bench", "--",
+            $DataDir,
+            "--rank", $Rank, "-B", $Batches, "--inactive", $Inactive,
+            "--particles", $Particles, "--seeds", $Seeds,
+            "--geometry", "godiva"
+        )
     }
 
-    Write-Host "`n=== All Selected Tests Passed ===`n" -ForegroundColor Green
-}
-catch {
-    Write-Host "`nTEST SUITE FAILED: $($_.Exception.Message)" -ForegroundColor Red
-    exit 1
+    # ── 6. Memory comparison ──────────────────────────────────────────────
+    if ($Tests -contains "mem") {
+        Write-Banner "Memory comparison"
+        Invoke-Cargo @(
+            "run", "--release", "--bin", "bench_mem", "--",
+            $DataDir, "--rank", $Rank
+        )
+    }
+
+    # ── 7. XS Pareto ──────────────────────────────────────────────────────
+    if ($Tests -contains "xs") {
+        Write-Banner "XS reconstruction Pareto (pareto_bench)"
+        $outDir = Join-Path $RepoRoot "outputs\pareto"
+        if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
+        $csv = Join-Path $outDir "xs_accuracy.csv"
+        Write-Host "  writing $csv"
+        # pareto_bench prints CSV to stdout; redirect to the canonical path.
+        Invoke-Cargo @("run", "--release", "--bin", "pareto_bench", "--", $DataDir) `
+            *> $csv
+    }
+
+    Write-Host ""
+    Write-Host "=== All selected suites passed ===" -ForegroundColor Green
 }
 finally {
-    Pop-Location
-    if ($Output) { Stop-Transcript }
+    if ($Output) { Stop-Transcript | Out-Null }
 }

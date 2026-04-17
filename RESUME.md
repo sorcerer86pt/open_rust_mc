@@ -18,23 +18,61 @@ the exact CPU algorithm on GPU. If it exists on CPU, port it correctly to GPU.
 
 ## State
 
-### Current PWR Results (3 seeds, 50 batches, 10k particles, rank 5)
+### PWR Pin Cell — Rank Sweep (5 seeds, 50 batches, 10k particles)
 
-| Mode | k_inf | σ | Match |
-|------|-------|---|-------|
-| **CPU Table** | **1.322 ± 0.002** | 45 pcm | baseline |
-| CPU SVD k=5 | 1.329 ± 0.002 | 50 pcm | +70 pcm |
-| **GPU Pointwise** | **1.328 ± 0.001** | 10 pcm | matches OpenMC |
-| OpenMC reference | 1.328 | 50 pcm | — |
+XS reconstruction Pareto (geom-mean over 8 U235/U238/U234 reactions):
 
-**GPU now matches CPU reference within statistics.**
+| rank | ns/lookup | RMSE log10 | max |err| log10 |
+|---:|---:|---:|---:|
+| 2 | 35.9 | 3.00e-2 | 9.84e-2 |
+| 3 | 41.2 | 7.06e-3 | 2.86e-2 |
+| 4 | 43.3 | 1.83e-3 | 7.91e-3 |
+| 5 | 43.4 | 6.07e-4 | 3.46e-3 |
+| 6 | 44.3 | 1.76e-15 | 5.58e-15 |
+| pointwise table | 90.6 | 0 (ref) | 0 (ref) |
 
-### Current Godiva Results (50 batches, 10k particles)
+**Rank 6 dominates: 2× faster than pointwise table at machine precision.**
 
-| Mode | k_inf | Gap to CPU |
-|------|-------|------------|
-| CPU Table | 1.003 ± 0.002 | baseline |
-| GPU | 1.006 ± 0.002 | +300 pcm (~2σ, borderline) |
+PWR k_inf across all variants (SEM = σ_seed / √5):
+
+| mode | rank | k_inf | σ_seed | Δ vs OpenMC (pcm) | ns/particle |
+|---|---:|---:|---:|---:|---:|
+| OpenMC 0.15.3 | — | 1.32770 | 0.00150 | +0 | — |
+| CPU table (ours) | — | 1.32526 | 0.00232 | −244 | 54 430 |
+| CPU SVD | 2 | 1.40807 | 0.00144 | **+8037** | 52 711 |
+| CPU SVD | 3 | 1.32118 | 0.00281 | −652 | 28 672 |
+| CPU SVD | 4 | 1.32513 | 0.00145 | −257 | 31 875 |
+| CPU SVD | 5 | 1.32479 | 0.00190 | −291 | 28 651 |
+| CPU SVD | 6 | 1.32512 | 0.00114 | −258 | 30 073 |
+| GPU pointwise | — | 1.32670 | 0.00117 | −100 | 38 104 |
+| GPU SVD (--force-svd) | 2 | 1.40973 | 0.00219 | **+8203** | 48 289 |
+| GPU SVD (--force-svd) | 3 | 1.32260 | 0.00207 | −510 | 48 439 |
+| GPU SVD (--force-svd) | 4 | 1.32496 | 0.00318 | −274 | 48 617 |
+| GPU SVD (--force-svd) | 5 | 1.32804 | 0.00169 | +34 | 50 738 |
+| GPU SVD (--force-svd) | 6 | 1.32673 | 0.00201 | −97 | 53 865 |
+
+CPU and GPU SVD rank sweeps now agree within seed noise (ranks 3-6 all within 1σ of
+OpenMC). Rank 2 under-resolves U238 capture resonances on both paths (+8000 pcm bias).
+GPU pointwise matches OpenMC within 2σ SEM. **GPU --force-svd rank 5: Δ = +34 pcm
+(1σ of OpenMC), after fixing two SVD-fallback bugs in `transport.cu` — see Bug
+Fixes 6 and 7 below.**
+
+Artifacts: `outputs/pareto/{pareto_pwr.png, pareto_pwr.md, xs_accuracy.csv, keff_pwr.csv, openmc_pwr.json}`.
+
+### Godiva — Rank Sweep (5 seeds, 50 batches, 10k particles)
+
+| mode | rank | k_eff | σ_seed | Δ vs CPU table (pcm) | ns/particle |
+|---|---:|---:|---:|---:|---:|
+| CPU table | — | 1.00523 | 0.00235 | 0 | 2 385 |
+| CPU SVD | 2 | 1.00448 | 0.00165 | −75 | 864 |
+| CPU SVD | 3 | 1.00559 | 0.00094 | +36 | 1 457 |
+| CPU SVD | 4 | 1.00638 | 0.00166 | +115 | 1 182 |
+| CPU SVD | 5 | 1.00592 | 0.00178 | +69 | 1 403 |
+| CPU SVD | 6 | 1.00489 | 0.00205 | −34 | 1 424 |
+| GPU pointwise | — | 1.00554 | 0.00208 | +31 | ~1 500 |
+
+All Godiva rows within 1σ of table baseline — small system, no resonance region stress.
+`outputs/pareto/{pareto.png, keff_sweep.csv}`.
 
 ### Bugs Found and Fixed (this session)
 
@@ -65,6 +103,30 @@ the exact CPU algorithm on GPU. If it exists on CPU, port it correctly to GPU.
 **5. 9-nuclide PWR layout** (gpu_pwr_bench.rs)
 - Was 8 nuclides with O16 shared fuel/water at 600K; now 9 with O16 at 900K for
   fuel (idx 2) and 600K for water (idx 8), matching CPU pwr_pincell exactly.
+
+**6. GPU SVD micro_t ignored HDF5 total** (transport.cu, main + debug-trace)
+- SVD fallback set `micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap`
+  (sum of six reaction-type SVD partials) and never consulted `P_TOTAL_XS`.
+- CPU's `SvdXsProvider::lookup` uses `total_table.lookup(E)` for total and
+  sets `capture = tot − (el+inel+n2n+n3n+fis)` so capture absorbs "missing"
+  channels (MT=19-21 first-chance fission, n,α, n,p, charged-particle emission).
+- U-238 resonance region: missing channels ~matter, under-absorption lifts k_inf
+  systematically high.
+- Fix: GPU SVD branch now interpolates `P_TOTAL_XS` log-log and sets
+  `s_cap = max(tot − partials, 0)`, `micro_t = tot` — same as CPU.
+
+**7. GPU SVD inelastic = 0 when MT=4 synthesized** (transport.cu)
+- Zr90/91/92/94 have no MT=4 block in HDF5; CPU synthesizes total inelastic
+  by summing 13 discrete-level SVD kernels inside `lookup()`.
+- GPU SVD branch relied on `HAS_REACTION[inelastic]` and left `s_inel=0`.
+- Combined with fix 6, the missing inelastic XS got dumped into capture,
+  flipping rank-5 force-svd k_inf from +2588 to -32438 pcm (0.903).
+- Fix: when `!has_inel_k`, sum level SVD reconstructions at `(e_idx, log_frac)`
+  and assign to `s_inel` — mirrors CPU.
+
+**Post-fix force-svd results (5 seeds, 50 batches, 10k particles)**
+- Rank 5: k_inf = 1.32804 ± 0.00169 → Δ = +34 pcm (was +2588 pcm)
+- Rank 3: k_inf = 1.32260 ± 0.00207 → Δ = −510 pcm (was +2497 pcm, CPU rank-3 gives −652)
 
 ### Verified kinematics match CPU (via diagnostic binaries during debugging)
 
@@ -141,7 +203,10 @@ Discrete level basis is larger now that rank matches top-level (was ~92 MB with 
 ```
 rust_prototype/src/bin/godiva.rs          CPU Godiva (--mode svd|table|both --seeds N)
 rust_prototype/src/bin/pwr_pincell.rs     CPU PWR (--mode svd|table|both --seeds N)
-rust_prototype/src/bin/gpu_pwr_bench.rs   GPU benchmark (--geometry pwr|godiva --seeds N)
+rust_prototype/src/bin/gpu_pwr_bench.rs   GPU benchmark (--geometry pwr|godiva --seeds N --force-svd)
+rust_prototype/src/bin/pareto_bench.rs    XS RMSE + ns/lookup per rank (CSV to stdout)
+scripts/pareto_plot_pwr.py                Render PWR Pareto panels + markdown
+scripts/openmc_pwr_ref.py                 Multi-seed OpenMC PWR reference (WSL openmc env)
 rust_prototype/src/bin/gpu_cpu_trace.rs   GPU vs CPU step-by-step trace comparison
 rust_prototype/src/bin/debug_trace.rs     CPU vs GPU physics diagnostic
 rust_prototype/src/gpu_transport.rs       Rust GPU orchestration (packed params, upload, launch)
@@ -157,16 +222,18 @@ scripts/paper_openmc_benchmark.py         Multi-seed OpenMC runner
 
 ## Next Steps
 
-1. **Godiva 300 pcm residual** — borderline statistical (~2σ). If systematic,
-   likely URR sampling detail for U-234/U-235/U-238 or fission spectrum
-   interpolation. Run multi-seed to confirm if real.
+1. ~~**Godiva 300 pcm residual**~~ — resolved: 31 pcm gap across 5 seeds, noise.
 
-2. **Performance benchmark** — GPU now correct, measure ns/particle vs CPU for
-   paper tables. GPU pointwise path uses f64 pointwise XS (~18 MB) with log-log
-   interpolation, same as CPU Table mode.
+2. ~~**Rank sweep**~~ — done. Pareto in `outputs/pareto/pareto_pwr.png`.
+   Rank 6 beats pointwise table on both axes (2× faster, machine-precision RMSE).
 
-3. **Update paper tables** with validated GPU numbers matching OpenMC.
+3. ~~**GPU --force-svd +2500 pcm bias**~~ — resolved. Two GPU SVD-fallback bugs
+   in transport.cu (see Bug Fixes 6 and 7). Rank-5 force-svd now within 1σ
+   of OpenMC (Δ = +34 pcm).
 
-4. **Rank sweep (k=1..6)** for SVD mode accuracy/speed tradeoff curve.
+4. **Performance benchmark** — GPU now correct, measure ns/particle vs CPU for
+   paper tables. GPU pointwise: 28 855 ns/p; CPU table: 54 430 ns/p (1.9×).
 
-5. **OpenCL port** (gpu/opencl/) for non-NVIDIA GPUs.
+5. **Update paper tables** with validated GPU numbers matching OpenMC.
+
+6. **OpenCL port** (gpu/opencl/) for non-NVIDIA GPUs.

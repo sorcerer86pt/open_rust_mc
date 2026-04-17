@@ -856,6 +856,7 @@ transport_persistent(
                 s_cap = fmax(micro_t - partials, 0.0);
             } else {
                 // SVD fallback
+                bool has_inel_k = false;
                 for (int r=0; r<6; r++) {
                     int key = ni*N_REACTIONS+r;
                     if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
@@ -863,12 +864,49 @@ transport_persistent(
                             &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
                             &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
                             e_idx, n_e, rank, log_frac);
-                        if(r==0) s_el=s; else if(r==1) s_inel=s;
+                        if(r==0) s_el=s; else if(r==1) { s_inel=s; has_inel_k=true; }
                         else if(r==2) s_n2n=s; else if(r==3) s_n3n=s;
                         else if(r==4) s_fis=s; else if(r==5) s_cap=s;
                     }
                 }
-                micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+                // Match CPU: when MT=4 kernel is absent, synthesize inelastic by
+                // summing discrete-level SVD reconstructions at this energy.
+                if (!has_inel_k) {
+                    int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[ni]);
+                    int n_lev  = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[ni]);
+                    double lsum = 0.0;
+                    for (int l=0; l<n_lev; l++) {
+                        int gl = lv_off + l;
+                        if (!__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) continue;
+                        if (E < __ldg(&PTR_D(p, P_LEVEL_THR)[gl])) continue;
+                        double lxs = svd_reconstruct_interp(
+                            &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                            &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                            e_idx, n_e, rank, log_frac);
+                        if (lxs > 0.0) lsum += lxs;
+                    }
+                    s_inel = lsum;
+                }
+                // Match CPU: if HDF5 total is available, set micro_t to the HDF5
+                // total and reabsorb the delta into capture. This captures the
+                // "missing" absorption channels (n,a / n,p / MT=19-21 etc.) that
+                // the 6-channel SVD basis does not represent. Without this step,
+                // U-238 resonance-region absorption is underestimated and k_inf
+                // comes in ~+2500 pcm high.
+                if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
+                    int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
+                    const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
+                    double tot_lo = tot_grid[e_idx];
+                    double tot_hi = (e_idx+1 < n_e) ? tot_grid[e_idx+1] : tot_lo;
+                    double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
+                        ? exp(log(tot_lo) + log_frac*(log(tot_hi)-log(tot_lo)))
+                        : tot_lo;
+                    double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
+                    s_cap = fmax(tot - partials, 0.0);
+                    micro_t = tot;
+                } else {
+                    micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+                }
             }
 
             // URR — modifies s_el, s_fis, s_cap. Recompute micro_t to match CPU behavior.
@@ -1299,10 +1337,21 @@ extern "C" __global__ void debug_transport_trace(
                         else if(r==4) s_fis=s; else if(r==5) s_cap=s;
                     }
                 }
-                micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+                // Same CPU-parity fix as main transport: set micro_t to HDF5 total
+                // and reabsorb delta into capture.
                 if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-                    double missing = PTR_D(p, P_TOTAL_XS)[__ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]) + e_idx];
-                    if (missing > 0.0) { s_cap += missing; micro_t += missing; }
+                    int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
+                    const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
+                    double tot_lo = tot_grid[e_idx];
+                    double tot_hi = (e_idx+1 < n_e) ? tot_grid[e_idx+1] : tot_lo;
+                    double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
+                        ? exp(log(tot_lo) + log_frac*(log(tot_hi)-log(tot_lo)))
+                        : tot_lo;
+                    double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
+                    s_cap = fmax(tot - partials, 0.0);
+                    micro_t = tot;
+                } else {
+                    micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
                 }
             }
             // URR — recompute micro_t via delta

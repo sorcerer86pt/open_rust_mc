@@ -1,174 +1,221 @@
-# ============================================================================
-# Rank sweep: SVD accuracy vs speed tradeoff for paper
-#
-# Runs both Godiva and PWR pin cell at ranks 1-6, measuring:
-#   - SVD vs Table k_eff gap (pcm) — the SVD compression error
-#   - SVD speedup vs Table
-#   - Absolute delta from experiment
-#
-# Output: results/rank_sweep_godiva.csv, results/rank_sweep_pwr.csv
-#
-# Usage:
-#   .\scripts\run_rank_sweep.ps1                    # default: 5 seeds, 50k Godiva / 20k PWR
-#   .\scripts\run_rank_sweep.ps1 -Seeds 10 -Quick   # 10 seeds, reduced particles
-# ============================================================================
+<#
+.SYNOPSIS
+    SVD rank sweep for Godiva and PWR pin cell (CPU and GPU).
 
+.DESCRIPTION
+    Iterates the transport benchmarks across multiple SVD ranks and writes
+    one CSV row per (geometry, platform, rank) to the results directory.
+    Paths are resolved relative to this script's location, so the script
+    works regardless of the shell's current directory.
+
+    -Geometries   Subset of {godiva, pwr} to sweep. Default: both.
+    -Platforms    Subset of {cpu, gpu} to sweep. Default: cpu.
+    -Ranks        SVD ranks to test. Default: 2..6.
+
+    For the CPU path, the same engine also runs the pointwise-table
+    baseline (once, rank-independent).
+
+.EXAMPLE
+    ./scripts/run_rank_sweep.ps1
+    CPU sweep, ranks 2..6, both geometries, 5 seeds.
+
+.EXAMPLE
+    ./scripts/run_rank_sweep.ps1 -Platforms cpu,gpu -Geometries pwr -Ranks 3,5,6
+    CPU and GPU, PWR only, ranks 3/5/6.
+#>
+[CmdletBinding()]
 param(
-    [int]$Seeds = 5,
-    [int]$GodivaParticles = 50000,
-    [int]$PwrParticles = 20000,
-    [int]$Batches = 150,
-    [int]$Inactive = 20,
-    [switch]$Quick,       # Reduced stats for quick testing
-    [switch]$GpuGodiva,   # Also run GPU Godiva at each rank
-    [switch]$GpuPwr,      # Also run GPU PWR at each rank
-    [string]$DataDir = "../data/endfb-vii.1-hdf5/neutron"
+    [ValidateSet("godiva", "pwr")]
+    [string[]]$Geometries = @("godiva", "pwr"),
+
+    [ValidateSet("cpu", "gpu")]
+    [string[]]$Platforms = @("cpu"),
+
+    [int[]]$Ranks = @(2, 3, 4, 5, 6),
+
+    [switch]$Quick,
+    [switch]$Full,
+
+    [int]$Seeds,
+    [int]$Particles,
+    [int]$Batches,
+    [int]$Inactive,
+
+    [string]$DataDir     = (Join-Path $PSScriptRoot "..\data\endfb-vii.1-hdf5\neutron"),
+    [string]$ResultsDir  = (Join-Path $PSScriptRoot "..\outputs\rank_sweep")
 )
 
-if ($Quick) {
-    $Seeds = 3
-    $GodivaParticles = 20000
-    $PwrParticles = 10000
-    $Batches = 80
-    $Inactive = 15
-}
-
 $ErrorActionPreference = "Stop"
-$ResultsDir = "results"
-if (-not (Test-Path $ResultsDir)) { New-Item -ItemType Directory -Path $ResultsDir | Out-Null }
 
-$Ranks = 1..6
-$Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+# ── Resolve paths ─────────────────────────────────────────────────────────
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+$Manifest = Join-Path $RepoRoot "rust_prototype\Cargo.toml"
+$DataDir  = (Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue) ?? $DataDir
 
-# ── Godiva rank sweep ──
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  Godiva Rank Sweep (ranks 1-6)" -ForegroundColor Cyan
-Write-Host "  Seeds=$Seeds, Particles=$GodivaParticles, Batches=$Batches" -ForegroundColor Cyan
-Write-Host "========================================`n"
-
-$GodivaFile = "$ResultsDir/rank_sweep_godiva_${Timestamp}.csv"
-"rank,svd_k,svd_sigma_pcm,table_k,table_sigma_pcm,svd_table_gap_pcm,svd_delta_exp_pcm,table_delta_exp_pcm,svd_nsp,table_nsp,speedup" | Out-File $GodivaFile -Encoding utf8
-
-foreach ($rank in $Ranks) {
-    Write-Host "--- Godiva rank=$rank ---" -ForegroundColor Yellow
-    $output = & cargo run --release --bin godiva -- $DataDir `
-        --mode both --rank $rank `
-        --batches $Batches --inactive $Inactive `
-        --particles $GodivaParticles --seeds $Seeds 2>&1 | Out-String
-
-    # Parse output
-    $svdK = if ($output -match "SVD \(rank=\d+\):\s*\n\s*k_eff\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $svdSigma = if ($output -match "SVD \(rank=\d+\):\s*\n\s*k_eff\s*=\s*[\d.]+\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $tblK = if ($output -match "Pointwise Table:\s*\n\s*k_eff\s*=\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $tblSigma = if ($output -match "Pointwise Table:\s*\n\s*k_eff\s*=\s*[\d.]+\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $gap = if ($output -match "k_eff gap.*=\s*(\d+)\s*pcm") { $Matches[1] } else { "?" }
-    $svdDelta = if ($output -match "SVD delta\(exp\)\s*=\s*(\d+)\s*pcm") { $Matches[1] } else { "?" }
-    $tblDelta = if ($output -match "Table delta\(exp\)\s*=\s*(\d+)\s*pcm") { $Matches[1] } else { "?" }
-    $speedup = if ($output -match "SVD speedup\s*=\s*([\d.]+)x\s*\(([\d.]+)\s*vs\s*([\d.]+)") {
-        "$($Matches[1]),$($Matches[2]),$($Matches[3])"
-    } else { "?,?,?" }
-
-    $line = "$rank,$svdK,$svdSigma,$tblK,$tblSigma,$gap,$svdDelta,$tblDelta,$speedup"
-    $line | Out-File $GodivaFile -Append -Encoding utf8
-    Write-Host "  rank=$rank  SVD-Table gap=${gap} pcm  SVD delta=${svdDelta} pcm  speedup=$($speedup.Split(',')[0])x"
+if (-not (Test-Path (Join-Path $DataDir "U235.h5"))) {
+    throw "Nuclear data not found at ${DataDir}. Pass -DataDir."
 }
 
-Write-Host "`nGodiva results written to $GodivaFile"
-
-# ── PWR pin cell rank sweep ──
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  PWR Pin Cell Rank Sweep (ranks 1-6)" -ForegroundColor Cyan
-Write-Host "  Seeds=$Seeds, Particles=$PwrParticles, Batches=$Batches" -ForegroundColor Cyan
-Write-Host "========================================`n"
-
-$PwrFile = "$ResultsDir/rank_sweep_pwr_${Timestamp}.csv"
-"rank,svd_k,svd_sigma_pcm,table_k,table_sigma_pcm,svd_table_gap_pcm,svd_nsp,table_nsp,speedup" | Out-File $PwrFile -Encoding utf8
-
-foreach ($rank in $Ranks) {
-    Write-Host "--- PWR rank=$rank ---" -ForegroundColor Yellow
-    $output = & cargo run --release --bin pwr_pincell -- $DataDir `
-        --mode both --rank $rank `
-        --batches $Batches --inactive $Inactive `
-        --particles $PwrParticles --seeds $Seeds 2>&1 | Out-String
-
-    $svdK = if ($output -match "SVD \(rank=\d+\):\s*\n\s*k_eff\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $svdSigma = if ($output -match "SVD \(rank=\d+\):\s*\n\s*k_eff\s*=\s*[\d.]+\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $tblK = if ($output -match "Pointwise Table:\s*\n\s*k_eff\s*=\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $tblSigma = if ($output -match "Pointwise Table:\s*\n\s*k_eff\s*=\s*[\d.]+\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-    $gap = if ($output -match "k_eff gap.*=\s*(\d+)\s*pcm") { $Matches[1] } else { "?" }
-    $speedup = if ($output -match "SVD speedup\s*=\s*([\d.]+)x\s*\(([\d.]+)\s*vs\s*([\d.]+)") {
-        "$($Matches[1]),$($Matches[2]),$($Matches[3])"
-    } else { "?,?,?" }
-
-    $line = "$rank,$svdK,$svdSigma,$tblK,$tblSigma,$gap,$speedup"
-    $line | Out-File $PwrFile -Append -Encoding utf8
-    Write-Host "  rank=$rank  SVD-Table gap=${gap} pcm  speedup=$($speedup.Split(',')[0])x"
+if (-not (Test-Path $ResultsDir)) {
+    New-Item -ItemType Directory -Path $ResultsDir | Out-Null
 }
 
-Write-Host "`nPWR results written to $PwrFile"
+# ── Presets ───────────────────────────────────────────────────────────────
+if ($Quick -and $Full) {
+    throw "Choose at most one of -Quick and -Full."
+}
+$defaults = if ($Full) {
+    @{ Seeds = 10; Particles = 50000; Batches = 150; Inactive = 20 }
+} elseif ($Quick) {
+    @{ Seeds = 2;  Particles = 3000;  Batches = 30;  Inactive = 5  }
+} else {
+    @{ Seeds = 5;  Particles = 10000; Batches = 50;  Inactive = 20 }
+}
+if (-not $PSBoundParameters.ContainsKey('Seeds'))     { $Seeds     = $defaults.Seeds }
+if (-not $PSBoundParameters.ContainsKey('Particles')) { $Particles = $defaults.Particles }
+if (-not $PSBoundParameters.ContainsKey('Batches'))   { $Batches   = $defaults.Batches }
+if (-not $PSBoundParameters.ContainsKey('Inactive'))  { $Inactive  = $defaults.Inactive }
 
-# ── GPU benchmarks (optional) ──
-if ($GpuGodiva) {
-    Write-Host "`n========================================" -ForegroundColor Green
-    Write-Host "  GPU Godiva Rank Sweep" -ForegroundColor Green
-    Write-Host "========================================`n"
+$stamp = Get-Date -Format "yyyyMMdd_HHmmss"
 
-    $GpuGodivaFile = "$ResultsDir/rank_sweep_gpu_godiva_${Timestamp}.csv"
-    "rank,gpu_k,gpu_sigma_pcm,gpu_nsp" | Out-File $GpuGodivaFile -Encoding utf8
+function Invoke-Cargo {
+    param([string[]]$CargoArgs)
+    $allArgs = @("--manifest-path", $Manifest) + $CargoArgs
+    Write-Verbose ("cargo " + ($allArgs -join " "))
+    & cargo @allArgs 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "cargo exited with code $LASTEXITCODE"
+    }
+}
+
+# Parse k_eff mean and sigma from a standalone-engine stdout blob.
+function Parse-CpuResult {
+    param([string]$Text, [string]$Mode)
+    $patterns = @{
+        "svd"   = '(?s)SVD.*?k_inf\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+).*?ns/particle\s*=\s*([\d.]+)'
+        "table" = '(?s)Pointwise Table.*?k_inf\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+).*?ns/particle\s*=\s*([\d.]+)'
+    }
+    if ($Text -match $patterns[$Mode]) {
+        return [pscustomobject]@{
+            k     = [double]$Matches[1]
+            sigma = [double]$Matches[2]
+            nsp   = [double]$Matches[3]
+        }
+    }
+    # Godiva binary uses "k_eff" in place of "k_inf".
+    $altPatterns = @{
+        "svd"   = '(?s)SVD.*?k_eff\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+).*?ns/particle\s*=\s*([\d.]+)'
+        "table" = '(?s)Pointwise Table.*?k_eff\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+).*?ns/particle\s*=\s*([\d.]+)'
+    }
+    if ($Text -match $altPatterns[$Mode]) {
+        return [pscustomobject]@{
+            k     = [double]$Matches[1]
+            sigma = [double]$Matches[2]
+            nsp   = [double]$Matches[3]
+        }
+    }
+    return $null
+}
+
+function Parse-GpuResult {
+    param([string]$Text)
+    if ($Text -match '(?s)k_inf\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+).*?ns/particle\s*=\s*([\d.]+)') {
+        return [pscustomobject]@{
+            k     = [double]$Matches[1]
+            sigma = [double]$Matches[2]
+            nsp   = [double]$Matches[3]
+        }
+    }
+    return $null
+}
+
+function Run-CpuSweep {
+    param([string]$Geom)
+    $bin = if ($Geom -eq "godiva") { "godiva" } else { "pwr_pincell" }
+    $csv = Join-Path $ResultsDir "sweep_cpu_${Geom}_${stamp}.csv"
+    "rank,mode,k,sigma_seed,ns_per_particle" | Out-File $csv -Encoding utf8
+
+    Write-Host ""
+    Write-Host ("── CPU sweep on {0} ({1}) ──" -f $Geom, $bin) -ForegroundColor Yellow
+    Write-Host ("   ranks={0}  seeds={1}  particles={2}  batches={3}" `
+        -f ($Ranks -join ","), $Seeds, $Particles, $Batches)
 
     foreach ($rank in $Ranks) {
-        Write-Host "--- GPU Godiva rank=$rank ---" -ForegroundColor Yellow
-        $output = & cargo run --release --features cuda --bin gpu_pwr_bench -- $DataDir `
-            --geometry godiva --rank $rank `
-            --batches $Batches --inactive $Inactive `
-            -B $Batches `
-            --particles $GodivaParticles --seeds $Seeds 2>&1 | Out-String
-
-        $gpuK = if ($output -match "k_inf\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-        $gpuSigma = if ($output -match "k_inf\s*=\s*[\d.]+\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-        $gpuNsp = if ($output -match "ns/particle\s*=\s*([\d.]+)") { $Matches[1] } else { "?" }
-
-        "$rank,$gpuK,$gpuSigma,$gpuNsp" | Out-File $GpuGodivaFile -Append -Encoding utf8
-        Write-Host "  rank=$rank  GPU k=$gpuK  ns/p=$gpuNsp"
+        Write-Host ("   rank={0}..." -f $rank) -ForegroundColor DarkYellow
+        $out = Invoke-Cargo @(
+            "run", "--release", "--bin", $bin, "--",
+            $DataDir,
+            "--mode", "both", "--rank", $rank,
+            "--batches", $Batches, "--inactive", $Inactive,
+            "--particles", $Particles, "--seeds", $Seeds
+        )
+        $svd = Parse-CpuResult -Text $out -Mode "svd"
+        $tbl = Parse-CpuResult -Text $out -Mode "table"
+        if ($svd) { "${rank},svd,$($svd.k),$($svd.sigma),$($svd.nsp)" | Out-File $csv -Append -Encoding utf8 }
+        # Write table only on the first rank (it's rank-independent).
+        if ($tbl -and $rank -eq $Ranks[0]) {
+            "-,table,$($tbl.k),$($tbl.sigma),$($tbl.nsp)" | Out-File $csv -Append -Encoding utf8
+        }
     }
-    Write-Host "`nGPU Godiva results written to $GpuGodivaFile"
+    Write-Host ("   -> {0}" -f $csv)
 }
 
-if ($GpuPwr) {
-    Write-Host "`n========================================" -ForegroundColor Green
-    Write-Host "  GPU PWR Pin Cell Rank Sweep" -ForegroundColor Green
-    Write-Host "========================================`n"
+function Run-GpuSweep {
+    param([string]$Geom)
+    $csv = Join-Path $ResultsDir "sweep_gpu_${Geom}_${stamp}.csv"
+    "rank,mode,k,sigma_seed,ns_per_particle" | Out-File $csv -Encoding utf8
 
-    $GpuPwrFile = "$ResultsDir/rank_sweep_gpu_pwr_${Timestamp}.csv"
-    "rank,gpu_k,gpu_sigma_pcm,gpu_nsp" | Out-File $GpuPwrFile -Encoding utf8
+    Write-Host ""
+    Write-Host ("── GPU sweep on {0} ──" -f $Geom) -ForegroundColor Magenta
+    Write-Host ("   ranks={0}  seeds={1}  particles={2}  batches={3}" `
+        -f ($Ranks -join ","), $Seeds, $Particles, $Batches)
+
+    # Pointwise baseline (rank-independent): one run.
+    Write-Host "   pointwise..." -ForegroundColor DarkMagenta
+    $outPw = Invoke-Cargo @(
+        "run", "--release", "--features", "cuda",
+        "--bin", "gpu_pwr_bench", "--",
+        $DataDir,
+        "--rank", $Ranks[0], "-B", $Batches, "--inactive", $Inactive,
+        "--particles", $Particles, "--seeds", $Seeds,
+        "--geometry", $Geom
+    )
+    $pw = Parse-GpuResult -Text $outPw
+    if ($pw) { "-,pointwise,$($pw.k),$($pw.sigma),$($pw.nsp)" | Out-File $csv -Append -Encoding utf8 }
 
     foreach ($rank in $Ranks) {
-        Write-Host "--- GPU PWR rank=$rank ---" -ForegroundColor Yellow
-        $output = & cargo run --release --features cuda --bin gpu_pwr_bench -- $DataDir `
-            --geometry pwr --rank $rank `
-            --batches $Batches --inactive $Inactive `
-            -B $Batches `
-            --particles $PwrParticles --seeds $Seeds 2>&1 | Out-String
-
-        $gpuK = if ($output -match "k_inf\s*=\s*([\d.]+)\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-        $gpuSigma = if ($output -match "k_inf\s*=\s*[\d.]+\s*\+/-\s*([\d.]+)") { $Matches[1] } else { "?" }
-        $gpuNsp = if ($output -match "ns/particle\s*=\s*([\d.]+)") { $Matches[1] } else { "?" }
-
-        "$rank,$gpuK,$gpuSigma,$gpuNsp" | Out-File $GpuPwrFile -Append -Encoding utf8
-        Write-Host "  rank=$rank  GPU k=$gpuK  ns/p=$gpuNsp"
+        Write-Host ("   force-svd rank={0}..." -f $rank) -ForegroundColor DarkMagenta
+        $out = Invoke-Cargo @(
+            "run", "--release", "--features", "cuda",
+            "--bin", "gpu_pwr_bench", "--",
+            $DataDir,
+            "--rank", $rank, "-B", $Batches, "--inactive", $Inactive,
+            "--particles", $Particles, "--seeds", $Seeds,
+            "--geometry", $Geom,
+            "--force-svd"
+        )
+        $r = Parse-GpuResult -Text $out
+        if ($r) { "${rank},force-svd,$($r.k),$($r.sigma),$($r.nsp)" | Out-File $csv -Append -Encoding utf8 }
     }
-    Write-Host "`nGPU PWR results written to $GpuPwrFile"
+    Write-Host ("   -> {0}" -f $csv)
 }
 
-Write-Host "`n========================================" -ForegroundColor Cyan
-Write-Host "  DONE — all results in $ResultsDir/" -ForegroundColor Cyan
-Write-Host "========================================`n"
+# ── Banner ────────────────────────────────────────────────────────────────
+Write-Host ""
+Write-Host "=== open-rust-mc rank sweep ===" -ForegroundColor Cyan
+Write-Host ("  Geometries : {0}" -f ($Geometries -join ", "))
+Write-Host ("  Platforms  : {0}" -f ($Platforms -join ", "))
+Write-Host ("  Ranks      : {0}" -f ($Ranks -join ", "))
+Write-Host ("  Seeds      : {0}" -f $Seeds)
+Write-Host ("  Particles  : {0}/batch" -f $Particles)
+Write-Host ("  Batches    : {0} ({1} inactive)" -f $Batches, $Inactive)
+Write-Host ("  Results    : {0}" -f $ResultsDir)
+Write-Host ""
 
-# Print Godiva summary table
-Write-Host "Godiva SVD Rank vs Accuracy (from $GodivaFile):"
-Write-Host "Rank | SVD-Table Gap | Δ(exp) | Speedup"
-Write-Host "-----|---------------|--------|--------"
-Get-Content $GodivaFile | Select-Object -Skip 1 | ForEach-Object {
-    $cols = $_ -split ","
-    Write-Host ("{0,4} | {1,13} | {2,6} | {3}" -f $cols[0], "$($cols[5]) pcm", "$($cols[6]) pcm", "$($cols[8])x")
+foreach ($g in $Geometries) {
+    if ($Platforms -contains "cpu") { Run-CpuSweep -Geom $g }
+    if ($Platforms -contains "gpu") { Run-GpuSweep -Geom $g }
 }
+
+Write-Host ""
+Write-Host "=== Rank sweep complete ===" -ForegroundColor Green

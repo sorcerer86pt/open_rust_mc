@@ -31,3 +31,6 @@ paper/*.synctex.gz
 
 # OpenMC statepoints (large)
 openmc_benchmark/
+
+# Claude Code local config
+.claude/

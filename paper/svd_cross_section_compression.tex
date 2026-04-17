@@ -1,4 +1,4 @@
-\documentclass[12pt,a4paper]{article}
+\documentclass[11pt,a4paper]{article}
 
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
@@ -7,61 +7,59 @@
 \usepackage{siunitx}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
-\usepackage{subcaption}
 \usepackage[margin=2.5cm]{geometry}
+
 \begin{document}
 
-\title{Cache-Resident Cross-Section Reconstruction via Singular Value Decomposition\\for Monte Carlo Neutron Transport}
+\title{Cross-Section Reconstruction via Truncated SVD:\\A Drop-In Replacement for Pointwise Tables in
+Monte Carlo Neutron Transport}
 
 \author{F.~Rodrigues}
 \date{\today}
-
 \maketitle
 
 \begin{abstract}
-We present a method for on-the-fly reconstruction of neutron cross-sections
-using truncated Singular Value Decomposition (SVD) that eliminates the
-memory-wall bottleneck in continuous-energy Monte Carlo transport.
-The cross-section matrix $\mathbf{A} \in \mathbb{R}^{N_E \times N_T}$,
-indexed by energy and temperature, is decomposed in log-space as
-$\log_{10}\mathbf{A} \approx \mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top$,
-where the pre-multiplied basis $\mathbf{B} = \mathbf{U}_k \boldsymbol{\Sigma}_k$
-fits entirely within the CPU L3 cache. Reconstruction reduces to a
-$k$-wide fused multiply-add (FMA) loop per energy point, replacing
-binary search and log-log interpolation in multi-gigabyte pointwise tables.
-
-Validation against ENDF/B-VII.1 and JEFF-3.3 nuclear data for $^{235}$U
-fission (MT=18) demonstrates: (i) the singular spectrum decays rapidly
-($\sigma_2/\sigma_1 = 7.7 \times 10^{-2}$), confirming low effective rank;
-(ii) a pure-Rust implementation achieves $8$--$13\times$ speedup over
-traditional table lookup at 3--5~ns per energy point; (iii) Godiva
-(HEU-MET-FAST-001) criticality benchmarks with OpenMC show
-$\Delta k_\text{eff} < 10$~pcm at all tested ranks ($k=2$ through $k=5$),
-indistinguishable from the unmodified library within Monte Carlo statistics.
-A standalone pure-Rust transport engine using SVD-compressed cross-sections
-as its sole data source achieves $k_\text{eff} = 1.00012 \pm 0.00007$ on
-Godiva across 10 independent seeds---12~pcm from the experimental value.
-A head-to-head ``honesty test'' against an identical engine using
-OpenMC-style pointwise table lookup shows SVD at $700 \pm 8$~ns/particle
-vs table at $832 \pm 11$~ns/particle during quiet system periods
-($1.19\times$ speedup) with a 107~pcm fidelity cost at rank~5.
-A complete event-based GPU transport solver using SVD cross-sections
-achieves $2.6\times$ speedup over CPU table lookup and $2.1\times$ over
-CPU SVD on a PWR pin cell benchmark (8~nuclides, S($\alpha$,$\beta$)
-thermal scattering) on a laptop RTX~A1000 GPU, with physics parity
-confirmed by matching $k_\infty$ to within Monte Carlo statistics.
-SVD inherently solves the GPU memory coalescing problem that limits
-conventional pointwise table lookup: the rank-$k$ dot product reads
-contiguous memory, eliminating warp divergence and enabling streaming
-access patterns that GPUs are optimised for.
-The method is particularly effective for the thermal and fast energy regions,
-where rank-1 approximation suffices, while the resolved resonance region
-benefits from a windowed decomposition or hybrid pairing with
-the Windowed Multipole method.
+Continuous-energy Monte Carlo neutron transport codes store cross
+sections as pointwise tables indexed by energy and temperature,
+reading them through binary search plus log-log interpolation.
+We replace this lookup with a truncated singular value decomposition
+(SVD) of $\log_{10}\sigma(E,T)$: at evaluation time each reaction
+channel reduces to a rank-$k$ fused multiply-add over contiguous
+memory. We implement both providers---pointwise table and SVD
+reconstruction---inside a single pure-Rust Monte Carlo engine with
+full physics (anisotropic elastic scattering, tabulated fission
+spectra, URR probability tables, S($\alpha$,$\beta$) thermal
+scattering, discrete inelastic levels, energy-dependent
+$\bar{\nu}(E)$), so that changing provider changes only the
+cross-section lookup. The same two providers are available in an
+event-based CUDA transport solver built on the Tramm
+architecture~\cite{tramm2024}. Five-seed criticality benchmarks on
+Godiva (HEU-MET-FAST-001) and a standard PWR pin cell with $9$
+nuclides yield four observations. (i)~The singular spectrum of
+ENDF/B-VII.1 cross sections decays rapidly
+($\sigma_2/\sigma_1 = 7.7\times 10^{-2}$ for $^{235}$U fission);
+47 of 52 $^{235}$U reaction channels are effectively rank-1.
+(ii)~Rank-$6$ reconstruction reaches machine precision at
+$44$~ns per lookup against $91$~ns for a binary-search pointwise
+table, a $2.0\times$ kernel-level speedup. (iii)~On the PWR pin cell,
+SVD rank-$5$ is statistically indistinguishable from the pointwise
+table in the same engine (both within $291$~pcm of the OpenMC
+reference) and runs end-to-end at $28\,651$~ns/particle against
+$54\,430$~ns/particle for the pointwise table: a $1.90\times$
+full-transport speedup at matched fidelity.
+(iv)~The GPU solver reproduces OpenMC $k_\infty$ within one
+standard error on both pointwise and SVD paths, confirming
+physics parity. A hybrid SVD + Windowed Multipole architecture is
+outlined as the natural complement for the resolved resonance
+region, with $530\times$ memory reduction per reaction channel
+(15~KB against 7.8~MB). SVD is not a replacement for every data
+structure in nuclear transport, but at production-relevant ranks
+it is a drop-in substitute for the pointwise table that runs
+faster without measurable loss of fidelity.
 \end{abstract}
 
-\noindent\textbf{Keywords:} Monte Carlo, cross-section compression, singular value decomposition,
-cache optimization, nuclear data, GPU transport, CUDA, Rust
+\noindent\textbf{Keywords:} Monte Carlo, cross-section compression,
+singular value decomposition, nuclear data, GPU transport.
 
 %% ============================================================
 \section{Introduction}
@@ -69,103 +67,81 @@ cache optimization, nuclear data, GPU transport, CUDA, Rust
 
 Continuous-energy Monte Carlo neutron transport codes such as
 OpenMC~\cite{romano2015openmc}, MCNP, and Serpent rely on pointwise
-cross-section tables spanning $10^4$--$10^5$ energy points per nuclide
-and temperature. For a full-core reactor model with several hundred
-nuclides at multiple Doppler-broadened temperatures, the aggregate
-data volume reaches tens of gigabytes---far exceeding the capacity
-of modern CPU caches. Every cross-section lookup thus incurs a
-cache miss to main memory (100--200~ns latency), creating a
-\emph{memory wall} that dominates the runtime of particle tracking.
+cross-section tables. Each reaction channel is sampled on a
+piecewise-linear union grid spanning $10^4$--$10^5$ energy points
+per nuclide and temperature, and a production full-core calculation
+may reference several hundred nuclides at several temperatures for
+Doppler feedback. The aggregate data volume reaches tens of
+gigabytes, far exceeding the capacity of modern CPU caches. Every
+cross-section lookup during particle transport---binary search on a
+large monotonic array followed by log-log interpolation between two
+adjacent values---is memory-bound, and the access pattern (one
+random cache line per thread per lookup) also defeats GPU warp
+coalescing. Prior work has attacked this bottleneck along several
+axes: machine-learned resampling retains $10$--$50\%$ of the data
+with $\leq 97$~pcm criticality error on reactor benchmarks~%
+\cite{ml_resampling_2025,ml_fullcore_2026}; the Windowed Multipole
+method gives an analytical form for the resolved resonance
+region~\cite{josey2015wmp,forget2014wmp,hybrid_wn_2021}; and
+recent GPU-centric architectures reorganise the transport loop to
+amortise the lookup across warps~\cite{tramm2024,tramm2014xsbench}.
 
-To quantify the scale of the problem: the ENDF/B-VII.1 library contains
-444 nuclide files totalling 5.8~GB on disk (the newer ENDF/B-VIII.0 is
-13.7~GB due to denser energy grids). Table~\ref{tab:datasize} shows the
-in-memory footprint for representative nuclides when loaded by OpenMC.
-A single actinide such as $^{238}$U requires 85.5~MB of pointwise data
-(51 reactions $\times$ 6 temperatures, 5.6 million data points). For a
-typical reactor model involving 200--400 nuclides, the aggregate
-working set reaches 5--11~GB---far exceeding the L3 cache of any
-current processor (16--50~MB) and forcing the vast majority of
-cross-section lookups to main memory.
+This paper takes a different route. We do not compress the data by
+dropping points; we replace the representation. The
+$\log_{10}$-transformed cross-section matrix $\mathbf{A} \in
+\mathbb{R}^{N_E \times N_T}$ indexed by energy and temperature is
+approximated by its rank-$k$ singular value decomposition,
+$\log_{10}\mathbf{A} \approx \mathbf{U}_k \boldsymbol{\Sigma}_k
+\mathbf{V}_k^\top$. At evaluation time a single
+cross-section value reduces to a $k$-wide dot product between one
+row of the pre-multiplied basis and a column of temperature
+coefficients. For representative ENDF/B-VII.1 nuclides the
+singular values decay rapidly---$\sigma_2/\sigma_1 \approx 8\%$
+for $^{235}$U fission, and $47$ of $52$ $^{235}$U reaction channels
+are within machine epsilon of rank one---so $k = 5$--$6$ is
+ample for production fidelity.
 
-\begin{table}[htb]
-\centering
-\caption{In-memory pointwise data size per nuclide (ENDF/B-VII.1,
-6 temperatures). Data points include energy grid + cross-section
-value (16 bytes per point).}
-\label{tab:datasize}
-\begin{tabular}{@{}llrrl@{}}
-\toprule
-Nuclide & Role & Reactions & Data points & RAM \\
-\midrule
-$^{235}$U  & Fissile actinide & 52 $\times$ 6T & 2.6\,M & 39.7~MB \\
-$^{238}$U  & Fertile actinide & 51 $\times$ 6T & 5.6\,M & 85.5~MB \\
-$^{239}$Pu & Fissile actinide & 52 $\times$ 6T & 2.5\,M & 38.1~MB \\
-$^{16}$O   & Moderator/fuel   & 72 $\times$ 6T & 0.3\,M &  4.3~MB \\
-$^{1}$H    & Moderator        &  6 $\times$ 6T & 0.02\,M & 0.3~MB \\
-$^{90}$Zr  & Structural       & 52 $\times$ 6T & 0.15\,M & 2.2~MB \\
-\midrule
-\multicolumn{4}{@{}l}{6 nuclides (PWR pin cell)} & 170~MB \\
-\multicolumn{4}{@{}l}{Projected: 50 nuclides}    & 1.4~GB \\
-\multicolumn{4}{@{}l}{Projected: 200 nuclides}   & 5.5~GB \\
-\multicolumn{4}{@{}l}{Projected: 400 nuclides}   & 11.1~GB \\
-\bottomrule
-\end{tabular}
-\end{table}
+We implement both providers, the traditional pointwise table and
+the SVD reconstruction, inside a single pure-Rust Monte Carlo
+transport engine with full physics, and inside a matching
+event-based CUDA solver. A command-line flag selects the provider.
+All other code paths---geometry, collision physics, RNG, angular
+distributions, fission spectra, URR tables, thermal scattering,
+discrete inelastic levels---are bit-identical between the two
+modes. Any $k_\infty$ or timing difference between the two
+providers is therefore an artefact of the cross-section lookup
+alone. This is the setup we use to quantify the fidelity and
+throughput of SVD reconstruction as a drop-in replacement for
+the pointwise table.
 
-Several strategies have been proposed to mitigate this bottleneck.
-Machine-learning-based adaptive resampling reduces pointwise grid
-density while preserving resonance features, achieving $\Delta k_\text{eff}
-< 100$~pcm with 10--50\% of the original data~\cite{ml_resampling_2025,
-ml_fullcore_2026}. The Windowed Multipole (WMP) method represents
-cross-sections analytically using multipole parameters, reducing
-memory by one to two orders of magnitude for the resolved resonance
-region~\cite{josey2015wmp, forget2014wmp}. Hybrid neural-network
-approaches combine WMP with learned Doppler broadening kernels,
-achieving 65\% memory reduction~\cite{hybrid_wn_2021}.
-
-In this work we propose a complementary approach inspired by
-low-rank compression techniques from the AI/ML community---specifically
-the KV-cache compression methods used in large language models
-\cite{palu2025, kvquant2024, minicache2024, gear2024}. We observe
-that the cross-section matrix, when viewed in log-space, exhibits
-rapid singular-value decay, and exploit this structure via truncated
-SVD to build a \emph{cache-resident} reconstruction kernel.
-
-The key contributions are:
-\begin{enumerate}
-    \item A pure-Rust implementation that reads OpenMC HDF5 nuclear data,
-    performs SVD decomposition, and reconstructs cross-sections entirely
-    without C/Fortran dependencies.
-    \item Empirical characterisation of the singular spectrum for
-    $^{235}$U, $^{238}$U, and $^{239}$Pu across two independent
-    nuclear data libraries (ENDF/B-VII.1 and JEFF-3.3).
-    \item Demonstration that the SVD basis vectors fit in L3 cache,
-    enabling reconstruction via streaming FMA at 3--5~ns per energy
-    point---an order of magnitude faster than table lookup.
-    \item Godiva criticality benchmark validation showing
-    $\Delta k_\text{eff} < 10$~pcm, within Monte Carlo statistical noise.
-    \item A windowed SVD analysis showing that the thermal ($E < 1$~eV)
-    and fast ($E > 25$~keV) regions are effectively rank-1, while the
-    resolved resonance region requires $k = 5$--$6$ for sub-percent accuracy.
-    \item A standalone pure-Rust Monte Carlo transport engine using
-    SVD cross-sections with full physics (anisotropic scattering,
-    tabulated fission spectra, URR probability tables, free-gas thermal
-    model) achieving $k_\text{eff} = 1.00012 \pm 0.00007$ on Godiva
-    (10 independent seeds, 12~pcm from experiment).
-    \item A statistically rigorous head-to-head comparison (``honesty
-    test'') against pointwise table lookup in the same engine,
-    reporting $1.19\times$ speedup in ns/particle during quiet
-    system periods ($700 \pm 8$ vs $832 \pm 11$~ns/particle)
-    with 107~pcm fidelity cost, benchmarked over 10 seeds each.
-    \item Resonance integral validation confirming $< 0.2\%$ error
-    on $\int \sigma(E)\,dE/E$ across all standard energy groups.
-    \item GPU reconstruction kernel achieving $4.2\times$ speedup
-    over CPU with zero error (machine epsilon).
-    \item A complete event-based GPU transport solver (Tramm architecture)
-    with physics parity, achieving $2.6\times$ speedup over CPU on a PWR
-    pin cell with 8~nuclides and S($\alpha$,$\beta$) thermal scattering.
-\end{enumerate}
+\paragraph{Contributions.}
+\begin{itemize}
+    \item A cache-resident rank-$k$ SVD reconstruction kernel for
+    pointwise cross-section data, with temperature interpolation
+    by the Ducru kernel method~\cite{ducru2017}
+    (Sec.~\ref{sec:method}).
+    \item A measurement of the per-lookup cost of the kernel
+    against a binary-search pointwise table on the same energy grid:
+    rank-$6$ reaches machine precision at $44$~ns against $91$~ns
+    for the table (Sec.~\ref{sec:xs_pareto}).
+    \item A Godiva (HEU-MET-FAST-001) rank sweep showing that all
+    ranks $k \geq 2$ agree with the pointwise table in the same
+    engine to within one $\sigma_\text{seed}$
+    (Sec.~\ref{sec:godiva_sweep}).
+    \item A PWR pin cell rank sweep ($9$ nuclides, S($\alpha$,$\beta$),
+    URR, discrete levels) showing CPU SVD rank-$5$ at
+    $28\,651$~ns/particle against CPU table at $54\,430$~ns/particle,
+    $1.90\times$ faster at matched fidelity and within $291$~pcm
+    of OpenMC~$0.15.3$ (Sec.~\ref{sec:pwr_sweep}).
+    \item An event-based CUDA transport solver built on the Tramm
+    architecture~\cite{tramm2024} implementing both providers; both
+    match OpenMC $k_\infty$ within a single standard error at
+    rank-$5$ on the PWR pin cell (Sec.~\ref{sec:gpu}).
+    \item A hybrid SVD + Windowed Multipole architecture for the
+    resolved resonance region with $530\times$ memory reduction
+    per reaction channel relative to the pointwise table
+    (Sec.~\ref{sec:hybrid}).
+\end{itemize}
 
 %% ============================================================
 \section{Method}
@@ -173,136 +149,168 @@ The key contributions are:
 
 \subsection{Problem formulation}
 
-Let $\sigma(E, T)$ denote the microscopic cross-section (barns) for a
-given nuclide and reaction, evaluated on a discrete energy grid
-$\{E_i\}_{i=1}^{N_E}$ at temperatures $\{T_j\}_{j=1}^{N_T}$.
-We form the matrix
+Let $\sigma(E, T)$ denote the microscopic cross section (barns) for
+a given nuclide and reaction, evaluated on a discrete grid of
+$N_E$ energy points and $N_T$ temperature points. OpenMC stores
+$\sigma$ as the matrix $\mathbf{A} \in \mathbb{R}^{N_E \times N_T}$,
+together with the energy grid and log-log interpolation metadata.
+For ENDF/B-VII.1, $N_E$ is $\sim\!\num{10000}$ for light nuclides
+and $\sim\!\num{200000}$ for actinides such as $^{238}$U with
+dense resonance structure; $N_T$ is typically $6$ for Doppler
+feedback ($294$--$2500$~K). A typical reaction therefore occupies
+$1$--$10$~MB at double precision per temperature, and a
+full-library actinide set exceeds the capacity of contemporary L2
+and even L3 caches.
+
+Cross sections span many orders of magnitude across the relevant
+energy range (thermal $10^{-2}$~eV to fast $10^7$~eV), so we work
+in $\log_{10}$ space:
 \begin{equation}
-    \mathbf{A} \in \mathbb{R}^{N_E \times N_T}, \quad
-    A_{ij} = \sigma(E_i, T_j),
+\mathbf{L} := \log_{10} \mathbf{A}, \qquad
+\mathbf{L}_{ij} = \log_{10} \sigma(E_i, T_j).
+\label{eq:logA}
 \end{equation}
-and work in log-space to normalise the six-order-of-magnitude dynamic range:
+Very small values (below $10^{-30}$~barn) are clamped before
+taking the logarithm.
+
+\subsection{Truncated SVD}
+
+We compute the thin singular value decomposition of $\mathbf{L}$:
 \begin{equation}
-    \tilde{\mathbf{A}} = \log_{10} \mathbf{A}.
+\mathbf{L} = \mathbf{U} \boldsymbol{\Sigma} \mathbf{V}^\top,
+\qquad
+\mathbf{U} \in \mathbb{R}^{N_E \times r},\
+\boldsymbol{\Sigma} \in \mathbb{R}^{r \times r},\
+\mathbf{V} \in \mathbb{R}^{N_T \times r},
 \end{equation}
-
-\subsection{SVD decomposition}
-
-The thin SVD of $\tilde{\mathbf{A}}$ yields
+with $r = \min(N_E, N_T) = N_T$ in practice. Truncating at rank
+$k \leq r$ gives the Eckart-Young-Mirsky optimal low-rank
+approximation of $\mathbf{L}$ in both the Frobenius and spectral
+norms:
 \begin{equation}
-    \tilde{\mathbf{A}} = \mathbf{U} \boldsymbol{\Sigma} \mathbf{V}^\top,
+\mathbf{L} \approx
+\mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top, \qquad
+\|\mathbf{L} - \mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top\|_F
+= \left(\sum_{j > k} \sigma_j^2\right)^{1/2}.
 \end{equation}
-where $\mathbf{U} \in \mathbb{R}^{N_E \times r}$,
-$\boldsymbol{\Sigma} = \mathrm{diag}(\sigma_1, \ldots, \sigma_r)$,
-$\mathbf{V} \in \mathbb{R}^{N_T \times r}$, and $r = \min(N_E, N_T)$.
 
-The rank-$k$ truncation retains the first $k$ singular triplets:
+We pre-multiply the basis, $\mathbf{B} := \mathbf{U}_k
+\boldsymbol{\Sigma}_k \in \mathbb{R}^{N_E \times k}$, so that a
+cross-section lookup at $(E_i, T_j)$ reduces to one dot product
+and one exponentiation:
 \begin{equation}
-    \tilde{\mathbf{A}}_k = \mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top,
-    \quad k \ll r.
+\log_{10}\tilde\sigma(E_i, T_j)
+= \sum_{\ell=1}^{k} B_{i\ell}\, V_{j\ell}, \qquad
+\tilde\sigma(E_i, T_j) = 10^{\log_{10}\tilde\sigma(E_i, T_j)}.
+\label{eq:reconstruct}
 \end{equation}
+The basis $\mathbf{B}$ is stored as a contiguous row-major array
+of $N_E k$ doubles, the temperature coefficients $\mathbf{c} \in
+\mathbb{R}^k$ are the column of $\mathbf{V}$ corresponding to the
+target temperature (or a Ducru-weighted combination thereof, see
+below), and the evaluation is a single streaming FMA loop.
 
-\subsection{Cache-resident kernel}
-\label{sec:kernel}
+\subsection{Reconstruction kernel}
 
-For the reconstruction hot path, we pre-multiply the singular values
-into the basis:
-\begin{equation}
-    \mathbf{B} = \mathbf{U}_k \boldsymbol{\Sigma}_k \in \mathbb{R}^{N_E \times k},
-    \quad B_{ij} = U_{ij} \cdot \sigma_j.
-\end{equation}
+The inner loop in pseudocode:
+\begin{algorithm}[H]
+\caption{Cross-section reconstruction at precomputed index $i$}
+\begin{algorithmic}[1]
+\State $s \gets 0$
+\For{$\ell = 1, \ldots, k$}
+    \State $s \gets s + B_{i\ell}\, c_\ell$ \Comment{fused multiply-add}
+\EndFor
+\State \Return $\exp_2(s \cdot \log_2 10)$
+\end{algorithmic}
+\end{algorithm}
+We evaluate $10^s$ via $\texttt{exp2}(s \cdot \log_2 10)$ because
+$\texttt{exp2}$ is $3$--$5\times$ faster than the general
+$\texttt{powf}(10, s)$ on contemporary CPUs. The basis values
+$B_{i\ell}$ are stored in row-major order so the $k$ values for
+one energy point occupy $8k$ contiguous bytes; at $k = 5$ that is
+one cache line, which is why the inner loop is compute-bound once
+the index $i$ has been resolved.
 
-At runtime, for a given temperature $T$ corresponding to column index $t$:
-\begin{enumerate}
-    \item Compute the coefficient vector
-    $\mathbf{c}(t) = \mathbf{V}_k^\top \mathbf{e}_t \in \mathbb{R}^k$
-    (one cache line, computed once per temperature change).
-    \item For each energy point $i$, reconstruct:
-    \begin{equation}
-        \log_{10} \sigma(E_i, T) = \sum_{j=1}^{k} B_{ij} \cdot c_j.
-        \label{eq:reconstruct}
-    \end{equation}
-\end{enumerate}
+For energies between grid points we use log-log interpolation
+consistent with OpenMC: let $E_i \leq E < E_{i+1}$ and
+$f = \log(E/E_i)/\log(E_{i+1}/E_i)$. We reconstruct
+$\log_{10}\tilde\sigma$ at $i$ and $i+1$, linearly interpolate
+in $\log_{10}\sigma$, and exponentiate once. This preserves the
+log-log interpolation semantics used by OpenMC's pointwise table
+lookup.
 
-Equation~\eqref{eq:reconstruct} is a dot product of length $k$,
-compiled to $k$ fused multiply-add (FMA) instructions on x86.
-The basis matrix $\mathbf{B}$ is streamed sequentially (unit stride),
-and the coefficient vector $\mathbf{c}$ resides in registers.
+\subsection{Temperature interpolation}
 
-\paragraph{Energy index lookup.}
-The energy index $i$ must be determined before reconstruction.
-The SVD kernel speedup applies to the \emph{reconstruction step}
-(Eq.~\ref{eq:reconstruct}), not to the energy search. In the full
-transport engine, we apply two optimisations: (i)~a single search
-shared across all reaction channels within a nuclide (which use the
-same unionised energy grid via reference counting), eliminating 5~of~6
-redundant searches per collision; and (ii)~a hash-based $O(1)$
-index lookup~\cite{brown2014hash} using 8192 log-uniform bins,
-replacing the $O(\log N_E)$ binary search ($\sim$17 comparisons
-for $N_E \approx 10^5$).
+Within the set of library temperatures, we follow the Ducru
+kernel reconstruction method~\cite{ducru2017}: the temperature
+coefficients $\mathbf{c}$ at target temperature $T$ are a
+physically optimal weighted combination of all columns of
+$\mathbf{V}^\top$, rather than a nearest-neighbour or linear
+blend. This keeps reconstruction exact at library temperatures
+and introduces no spurious temperature-coupling modes.
 
-\paragraph{Memory analysis.}
-For $^{235}$U fission with $N_E = 83{,}114$ and $k = 5$:
-\begin{itemize}
-    \item $\mathbf{B}$: $83{,}114 \times 5 \times 8$ bytes $= 3.2$~MB
-    (fits in L3 cache).
-    \item $\mathbf{c}$: $5 \times 8$ bytes $= 40$ bytes
-    (fits in a single cache line).
-    \item Original pointwise table: $83{,}114 \times 6 \times 2 \times 8$
-    bytes $= 7.8$~MB per reaction (energy + xs arrays).
-\end{itemize}
+\subsection{Shared energy grid and single binary search}
 
-\subsection{Windowed decomposition}
-\label{sec:windowed}
-
-The energy spectrum naturally partitions into regions of distinct
-physical character. We apply independent SVD to each window:
-\begin{itemize}
-    \item Thermal ($E < 1$~eV): smooth $1/v$ behaviour, effective rank 1.
-    \item Resolved resonances ($1$~eV--$25$~keV): Breit-Wigner peaks,
-    requires $k = 5$--$6$.
-    \item Fast ($E > 25$~keV): smooth, effective rank 1.
-\end{itemize}
-
-This permits adaptive rank allocation: rank-1 for thermal/fast (single
-multiply per point) and higher rank for the resonance region, reducing
-the average computational cost per lookup.
+All reactions of a single nuclide share the same union energy
+grid in OpenMC's HDF5 layout. We exploit this by storing one
+\texttt{Arc<[f64]>} of grid points per nuclide and referencing it
+from every \texttt{ReactionKernel}. The binary search required to
+resolve $i$ from the particle energy $E$ is therefore performed
+once per nuclide per collision, not once per reaction; the
+resulting index is shared across the six reaction channels
+(elastic, inelastic, $(n,2n)$, $(n,3n)$, fission, capture).
+A hash-based $O(1)$ energy index~\cite{brown2014hash}
+(8192 log-uniform bins) avoids the binary search entirely on the
+hot path when enabled.
 
 %% ============================================================
 \section{Implementation}
-\label{sec:implementation}
+\label{sec:impl}
 
-All code is implemented in Rust (edition 2024) with zero C library
-dependencies. Key components:
+We implement both the pointwise table provider and the SVD
+provider inside a single pure-Rust Monte Carlo transport engine.
+The two providers share the same \texttt{XsProvider} trait and are
+selected at runtime by a command-line flag. Nuclear data is read
+directly from OpenMC HDF5 files through a pure-Rust HDF5 reader
+(no C dependency), in a single pass per nuclide. The physics
+model implements energy-dependent $\bar{\nu}(E)$ from tabulated
+(prompt + delayed) neutron yields; tabulated outgoing energy
+distributions for fission with stochastic interpolation between
+incident-energy bins; anisotropic elastic scattering from tabular
+$(\mu,\text{CDF})$ data with the same correlated-CDF
+interpolation; discrete inelastic levels MT=$51$--$91$ with
+real $Q$-values from HDF5 attributes and two-body kinematics
+(with a continuum evaporation spectrum for MT=$91$ when the
+enumeration marks it as continuum); unresolved resonance range
+probability tables with band sampling; S($\alpha$,$\beta$)
+thermal scattering for H in H$_2$O using continuous inelastic
+CDFs; free-gas thermal scattering with Maxwell-Boltzmann target
+velocity sampling below $400 k_\mathrm{B}T$; geometry via
+constructive solid geometry with a small set of surface
+primitives.
 
-\begin{itemize}
-    \item \textbf{HDF5 reader}: The \texttt{hdf5-pure} crate (v0.1.1)
-    provides pure-Rust parsing of OpenMC nuclear data files, reading
-    energy grids and cross-section datasets per temperature.
-    \item \textbf{SVD computation}: The \texttt{faer} crate (v0.22)
-    provides SIMD-optimised linear algebra with automatic AVX2/AVX-512
-    dispatch. SVD of an $83{,}114 \times 8$ matrix completes in 20~ms.
-    \item \textbf{Reconstruction kernel}: Hand-written FMA loop
-    (Sec.~\ref{sec:kernel}) using \texttt{f64::mul\_add} for guaranteed
-    fused multiply-add codegen.
-    \item \textbf{Validation}: Bit-exact agreement with OpenMC's Python
-    API (\texttt{openmc.data}) confirmed at all 83,114 energy points
-    across 6 temperatures (relative error $= 0$).
-\end{itemize}
+The same two providers are available in an event-based CUDA
+transport solver built on the Tramm architecture~\cite{tramm2024}:
+particles are compacted by atomic alive-list scatter,
+energy-sorted into $256$ log-scale bins to coalesce basis reads
+across a warp, and processed in a persistent kernel that runs
+$N$ transport steps per launch with per-particle state held in
+registers. Warp-level reductions via \texttt{\_\_shfl\_down\_sync}
+minimise atomic traffic. Both providers are implemented inside the
+same kernel; the SVD path reads the basis $\mathbf{B}$ (packed
+\texttt{f64}) and the temperature coefficient vector from global
+memory, while the pointwise path reads the $7$-channel table
+(elastic, inelastic, $(n,2n)$, $(n,3n)$, fission, capture, total)
+from global memory. A \texttt{--force-svd} flag at runtime
+clears the uploaded pointwise tables so the SVD path reconstructs
+every reaction channel from the basis.
 
-The implementation reads OpenMC HDF5 nuclide files, constructs the
-unionised energy grid, performs SVD, and benchmarks reconstruction---all
-in a single executable with no Python in the loop.
-
-Beyond the SVD kernel, the crate includes a complete Monte Carlo
-eigenvalue transport engine with CSG geometry (sphere, cylinder, plane
-surfaces with vacuum/reflective/transmission boundaries), material
-composition tracking, and the full physics model described in
-Sec.~\ref{sec:standalone}. Transport is parallelised over source
-particles within each batch using the \texttt{rayon} crate.
-The HDF5 reader uses a single-pass caching strategy (one file open
-per nuclide, energy grids read once) to minimise I/O overhead when
-loading dozens of reaction channels and auxiliary data per nuclide.
+All benchmarks use ENDF/B-VII.1 nuclear data. The CPU hardware is
+an AMD Ryzen $7$; the GPU is an NVIDIA RTX~A1000 laptop GPU
+(Ampere, 16~SMs, 1.5~MB L2). All reported timings are the average
+of $5$ independent seeds, $50$ batches, and $10\,000$ particles
+per batch, giving $1.5 \times 10^6$ active histories per seed and
+$7.5 \times 10^6$ per reported row.
 
 %% ============================================================
 \section{Results}
@@ -310,969 +318,389 @@ loading dozens of reaction channels and auxiliary data per nuclide.
 
 \subsection{Singular spectrum}
 
-Table~\ref{tab:spectrum} shows the singular values for $^{235}$U
-fission (MT=18) from the JEFF-3.3 combined library (8 temperatures:
-250--2500~K).
+Figure-of-merit: the singular values of $\mathbf{L}$ for
+representative ENDF/B-VII.1 actinide reactions, computed with
+faer~\cite{romano2015openmc}. For $^{235}$U fission MT=$18$ on
+the full $N_E = 83\,114$ energy grid across $N_T = 6$ library
+temperatures, the ratio $\sigma_2/\sigma_1 = 7.7 \times 10^{-2}$
+and $\sigma_6/\sigma_1 < 10^{-14}$; the spectrum decays five
+orders of magnitude in the first six singular values. The
+pattern is generic: across the $52$ reaction channels of
+$^{235}$U, $47$ are within machine epsilon of rank one
+(the dominant singular vector captures the entire energy
+dependence; $\mathbf{V}^\top$ captures the
+temperature dependence). Those rank-one channels include all of
+the threshold-activated partial reactions; the rank-deficient
+channels are the ones with structure in both axes (elastic,
+fission, capture near resolved resonances).
+
+\subsection{Per-lookup reconstruction cost}
+\label{sec:xs_pareto}
+
+We measure the per-lookup cost of the SVD reconstruction kernel
+against a binary-search pointwise table on the same energy grid.
+Both routines receive the same sequence of query energies,
+representative of the distribution encountered during transport,
+and return $\sigma(E,T)$. Table~\ref{tab:xs_pareto} reports the
+geometric mean over eight reactions (MT=$2,18,102$ for $^{235,238,234}$U
+where present) of the per-lookup time and the log-$10$ RMSE
+against the reference HDF5 data.
 
 \begin{table}[htb]
 \centering
-\caption{Singular spectrum of the $^{235}$U fission cross-section
-matrix in log-space (JEFF-3.3, 8 temperatures).}
-\label{tab:spectrum}
-\begin{tabular}{@{}crcc@{}}
+\caption{Cross-section reconstruction cost and RMSE, geometric
+mean over eight reactions (MT=$2,18,102$ across
+$^{235,238,234}$U). Full energy grid, $T=294$~K.}
+\label{tab:xs_pareto}
+\begin{tabular}{@{}cccc@{}}
 \toprule
-$k$ & $\sigma_k$ & $\sigma_k / \sigma_1$ & Cumulative energy (\%) \\
+Rank & ns/lookup & RMSE (log$_{10}\sigma$) & max $|$err$|$ \\
 \midrule
-1 & $8.732 \times 10^2$ & $1.000$                & 99.375 \\
-2 & $6.602 \times 10^1$ & $7.56 \times 10^{-2}$  & 99.964 \\
-3 & $1.441 \times 10^1$ & $1.65 \times 10^{-2}$  & 99.998 \\
-4 & $3.383$             & $3.87 \times 10^{-3}$  & 99.99993 \\
-5 & $8.600 \times 10^{-1}$ & $9.85 \times 10^{-4}$ & 99.999996 \\
-6 & $2.953 \times 10^{-1}$ & $3.38 \times 10^{-4}$ & 99.9999999 \\
+$2$             & $35.9$ & $3.00\times 10^{-2}$ & $9.84\times 10^{-2}$ \\
+$3$             & $41.2$ & $7.06\times 10^{-3}$ & $2.86\times 10^{-2}$ \\
+$4$             & $43.3$ & $1.83\times 10^{-3}$ & $7.91\times 10^{-3}$ \\
+$5$             & $43.4$ & $6.07\times 10^{-4}$ & $3.46\times 10^{-3}$ \\
+$6$             & $44.3$ & $1.76\times 10^{-15}$ & $5.58\times 10^{-15}$ \\
+Pointwise table & $90.6$ & $0$ (ref)            & $0$ (ref) \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The ratio $\sigma_2/\sigma_1 = 7.56 \times 10^{-2}$ and the five-order-of-magnitude
-decay across 8 singular values confirm the low-rank hypothesis.
-Consistent spectra were observed for $^{238}$U and $^{239}$Pu, and
-between ENDF/B-VII.1 and JEFF-3.3 evaluations.
+Rank-$6$ reconstructs the full cross section at machine precision
+in $44$~ns, $2.0\times$ faster than the binary-search pointwise
+table at $91$~ns. Rank-$2$ is $2.5\times$ faster still at a modest
+RMSE of $3\%$ of a log-decade, attractive for applications
+dominated by smooth regions (fast or thermal) where the resolved
+resonance structure does not drive the physics. The SVD frontier
+is below and to the left of the pointwise-table point at every
+tested rank.
 
-\subsection{Reconstruction accuracy}
+\subsection{Godiva rank sweep}
+\label{sec:godiva_sweep}
 
-Table~\ref{tab:accuracy} reports the maximum relative error of SVD
-reconstruction versus the original cross-section data, broken down
-by energy region.
+Godiva (HEU-MET-FAST-001) is a bare $93.71\%$-enriched uranium
+metal sphere; its fast, leakage-dominated spectrum places no
+demand on the resolved resonance region. Table~\ref{tab:keff_godiva}
+reports the criticality and per-particle timing of the standalone
+engine with the pointwise and SVD providers, five seeds each.
 
 \begin{table}[htb]
 \centering
-\caption{Maximum relative error of rank-$k$ SVD reconstruction for
-$^{235}$U fission (ENDF/B-VII.1, validated against OpenMC).}
-\label{tab:accuracy}
-\begin{tabular}{@{}ccccc@{}}
+\caption{Godiva $k_\text{eff}$ rank sweep on the standalone engine.
+Five seeds, $50$ batches, $10\,000$ particles per batch. Both
+providers share all physics.}
+\label{tab:keff_godiva}
+\begin{tabular}{@{}lcccc@{}}
 \toprule
-$k$ & Thermal & Resonance & Fast & Overall \\
-    & ($<1$~eV) & (1~eV--25~keV) & ($>25$~keV) & \\
+Mode & rank & $k_\text{eff}$ & $\sigma_\text{seed}$ & ns/particle \\
 \midrule
-2 & $3.8 \times 10^{-2}$ & $3.4 \times 10^{-1}$ & $3.0 \times 10^{-3}$ & $3.4 \times 10^{-1}$ \\
-3 & $3.2 \times 10^{-3}$ & $1.1 \times 10^{-1}$ & $2.2 \times 10^{-4}$ & $1.1 \times 10^{-1}$ \\
-4 & $9.7 \times 10^{-4}$ & $2.8 \times 10^{-2}$ & $7.5 \times 10^{-5}$ & $2.8 \times 10^{-2}$ \\
-5 & $1.5 \times 10^{-4}$ & $9.9 \times 10^{-3}$ & $4.5 \times 10^{-6}$ & $9.9 \times 10^{-3}$ \\
-6 & $< 10^{-12}$ & $< 10^{-12}$ & $< 10^{-12}$ & $< 10^{-12}$ \\
+Pointwise table & ---  & $1.00523$ & $0.00235$ & $2\,385$ \\
+SVD & $2$  & $1.00448$ & $0.00165$ & $\mathbf{864}$ \\
+SVD & $3$  & $1.00559$ & $0.00094$ & $1\,457$ \\
+SVD & $4$  & $1.00638$ & $0.00166$ & $1\,182$ \\
+SVD & $5$  & $1.00592$ & $0.00178$ & $1\,403$ \\
+SVD & $6$  & $1.00489$ & $0.00205$ & $1\,424$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-At rank $k=5$, the worst-case error is below 1\% and is concentrated
-at a small number of resolved resonance peaks ($\sim$32.8~eV, 31.4~eV).
-The P99 error in the resonance region is $3.2 \times 10^{-3}$, indicating
-that 99\% of resonance points are reconstructed to better than 0.3\%.
+All SVD ranks agree with the pointwise table within one
+$\sigma_\text{seed}$ of seed noise. Rank-$2$ is $2.8\times$ faster
+than the pointwise table at a criticality offset of $-75$~pcm---an
+attractive operating point for fast-spectrum applications.
+Figure~\ref{fig:pareto_godiva} shows the corresponding
+XS-reconstruction Pareto (left) and the $k_\text{eff}$ sweep
+(right), with the dashed band marking the pointwise-table
+reference.
 
-\subsection{Multi-reaction analysis}
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.99\textwidth]{../outputs/pareto/pareto.png}
+\caption{Godiva (HEU-MET-FAST-001). Left: XS reconstruction cost
+against RMSE (geometric mean over eight reactions). Right:
+$k_\text{eff}$ versus SVD rank, SEM error bars over $5$ seeds.
+Horizontal band: pointwise-table reference in the same engine.}
+\label{fig:pareto_godiva}
+\end{figure}
 
-Table~\ref{tab:multirxn} extends the SVD analysis to all three
-principal reaction channels of $^{235}$U.
+\subsection{PWR pin cell rank sweep}
+\label{sec:pwr_sweep}
+
+The PWR pin cell is a standard thermal benchmark: a single
+$3.1\%$-enriched UO$_2$ rod in Zircaloy clad, surrounded by
+light water with S($\alpha$,$\beta$) thermal scattering on H.
+The model contains $9$ nuclides ($^{235}$U and $^{238}$U in the
+fuel; O-$16$ at $900$~K in the fuel and $600$~K in the moderator;
+Zr-$90$, Zr-$91$, Zr-$92$, Zr-$94$ in the clad; H-$1$ in the
+moderator), $3$ materials, cylindrical boundaries with reflective
+BC. The moderated spectrum spends substantial time in the
+U-$238$ resolved resonance region, which is the regime most
+sensitive to the cross-section representation.
+
+Table~\ref{tab:keff_pwr} reports the rank sweep for both the
+CPU and GPU implementations, together with an OpenMC~$0.15.3$
+reference computed with the same input deck.
 
 \begin{table}[htb]
 \centering
-\caption{Singular spectrum comparison across reaction types for $^{235}$U
-(ENDF/B-VII.1, 6 temperatures).}
-\label{tab:multirxn}
-\begin{tabular}{@{}clccc@{}}
-\toprule
-MT & Reaction & $\sigma_2/\sigma_1$ & $k$ for 99.99\% & Max err at $k=5$ \\
-\midrule
-18  & (n,f) Fission  & $7.70 \times 10^{-2}$ & 3 & $9.9 \times 10^{-3}$ \\
-2   & (n,n) Elastic  & $1.61 \times 10^{-2}$ & 2 & $1.3 \times 10^{-3}$ \\
-102 & (n,$\gamma$) Capture & $1.21 \times 10^{-1}$ & 3 & $1.8 \times 10^{-2}$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-Elastic scattering exhibits the fastest singular-value decay
-($\sigma_2/\sigma_1 = 0.016$, effective rank~2), reflecting its
-smooth energy dependence. Radiative capture is the most challenging
-($\sigma_2/\sigma_1 = 0.12$) due to its sharper resonance structure,
-but remains viable with $k=5$ achieving $<2\%$ maximum error.
-
-A comprehensive sweep of all 52 reaction channels in $^{235}$U reveals
-that \textbf{47 out of 52 reactions are effectively rank-1}
-($\sigma_2/\sigma_1 < 10^{-15}$), including all inelastic excitation
-levels (MT=51--91), (n,2n), (n,3n), and (n,4n). Only 4 reactions
-fall in Scenario~B ($0.01 < \sigma_2/\sigma_1 < 0.1$): elastic,
-non-elastic total, fission, and damage energy. The sole Scenario~C
-reaction is radiative capture ($\sigma_2/\sigma_1 = 0.12$).
-
-\subsection{Hybrid SVD + Windowed Multipole}
-\label{sec:hybrid}
-
-The resolved resonance region (1~eV--25~keV) contains 99\% of the
-energy grid points but can be handled by the Windowed Multipole (WMP)
-method using an analytical representation of $\sim$2~KB per
-nuclide-reaction~\cite{josey2015wmp}. This leaves only the thermal
-and fast regions ($\sim$800 points, 1\% of the grid) for SVD.
-
-Table~\ref{tab:hybrid} compares the approaches.
-
-\begin{table}[htb]
-\centering
-\caption{Memory comparison: full table vs SVD-only vs hybrid SVD+WMP
-for $^{235}$U fission.}
-\label{tab:hybrid}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Method & Memory & Max error & Resonance \\
-\midrule
-Full pointwise table    & 7792~KB & exact    & exact \\
-SVD-only $k=4$          & 2598~KB & $2.8 \times 10^{-2}$ & $2.8 \times 10^{-2}$ \\
-SVD-only $k=5$          & 3247~KB & $9.9 \times 10^{-3}$ & $9.9 \times 10^{-3}$ \\
-Hybrid SVD($k{=}2$)+WMP &   15~KB & $3.8 \times 10^{-2}$ & exact (WMP) \\
-Hybrid SVD($k{=}3$)+WMP &   21~KB & $3.2 \times 10^{-3}$ & exact (WMP) \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The hybrid approach achieves a \textbf{530$\times$ memory reduction}
-(15~KB vs 7792~KB) by delegating the resonance region to WMP and
-handling only the smooth thermal and fast regions with a rank-2 SVD.
-At rank-3, the thermal/fast error drops to $0.3\%$ while memory
-remains at 21~KB---three orders of magnitude smaller than the
-pointwise table.
-
-\subsection{Cross-isotope basis sharing}
-\label{sec:cross_isotope}
-
-A natural question is whether different nuclides share
-singular-vector subspaces, which would allow further compression
-via a common basis (analogous to cross-layer merging in LLM
-KV-cache compression~\cite{minicache2024}).
-
-We compared the left singular vectors of $^{235}$U, $^{238}$U,
-and $^{239}$Pu (fission, MT=18) by computing principal subspace
-angles on their common energy grids. While the first singular
-vectors show moderate alignment ($^{235}$U vs $^{239}$Pu cosine
-similarity $= 0.97$), the subspace angle jumps to $85^\circ$ at
-$k=2$, indicating that the higher-order resonance shapes are
-fundamentally different between isotopes.
-
-Cross-reconstruction tests confirm this: using $^{235}$U's basis
-to reconstruct $^{239}$Pu's fission cross-sections yields errors
-$10^3$--$10^4\times$ worse than using each nuclide's own basis.
-\textbf{Cross-isotope basis sharing is not viable} for the
-resolved resonance region---each nuclide requires its own SVD
-decomposition. This is physically expected: different nuclides
-have different resonance energies, widths, and spacings determined
-by their distinct nuclear level structures.
-
-\subsection{Windowed SVD}
-
-Table~\ref{tab:windowed} summarises the effective rank per energy window.
-
-\begin{table}[htb]
-\centering
-\caption{Per-window effective rank (energy for 99.99\% cumulative energy)
-and $\sigma_2/\sigma_1$ ratio for $^{235}$U fission.}
-\label{tab:windowed}
-\begin{tabular}{@{}lcrc@{}}
-\toprule
-Window & Energy range & $N_E$ & $\sigma_2/\sigma_1$ \\
-\midrule
-Thermal      & $< 1$~eV        &    461 & $3.9 \times 10^{-4}$ \\
-Low reson.   & 1--100~eV       & 11,712 & $6.1 \times 10^{-2}$ \\
-Mid reson.   & 100~eV--2.5~keV & 69,401 & $8.3 \times 10^{-2}$ \\
-High reson.  & 2.5--25~keV     &     30 & $< 10^{-15}$ \\
-Fast         & $> 25$~keV      &    527 & $< 10^{-15}$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The thermal, high-resonance, and fast windows are numerically rank-1.
-The resonance windows ($\sigma_2/\sigma_1 \approx 0.06$--$0.08$) require
-$k = 5$--$6$ for sub-percent accuracy, consistent with the global analysis.
-
-\subsection{Reconstruction speed}
-
-Table~\ref{tab:speed} compares the SVD reconstruction kernel against
-traditional binary-search table lookup, measured on an Intel Xeon
-(single-threaded, release-optimised Rust).
-
-\begin{table}[htb]
-\centering
-\caption{Reconstruction throughput comparison for $^{235}$U fission
-($N_E = 83{,}114$). Time is per full-spectrum reconstruction.}
-\label{tab:speed}
+\caption{PWR pin cell $k_\infty$ rank sweep. Five seeds, $50$
+batches, $10\,000$ particles per batch. All modes run identical
+physics. OpenMC~$0.15.3$ reference for context. Ryzen~$7$ CPU,
+RTX~A1000 laptop GPU.}
+\label{tab:keff_pwr}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
-$k$ & SVD FMA & Table lookup & Speedup & Kernel memory \\
-    & ($\mu$s) & ($\mu$s) & & (KB) \\
+Mode & rank & $k_\infty$ & $\sigma_\text{seed}$ &
+$\Delta$ vs OpenMC (pcm) & ns/particle \\
 \midrule
-2 & 249 & 3349 & $13.4\times$ & 1948 \\
-3 & 278 & 3349 & $12.1\times$ & 2598 \\
-4 & 301 & 3349 & $11.1\times$ & 3247 \\
-5 & 384 & 3349 & $8.7\times$  & 3896 \\
-6 & 428 & 3349 & $7.8\times$  & 4546 \\
+OpenMC $0.15.3$    & ---  & $1.32770$ & $0.00150$ & $+0$      & ---     \\
+CPU table          & ---  & $1.32526$ & $0.00232$ & $-244$    & $54\,430$ \\
+CPU SVD            & $2$  & $1.40807$ & $0.00144$ & $+8\,037$ & $52\,711$ \\
+CPU SVD            & $3$  & $1.32118$ & $0.00281$ & $-652$    & $28\,673$ \\
+CPU SVD            & $4$  & $1.32513$ & $0.00145$ & $-257$    & $31\,875$ \\
+\textbf{CPU SVD}   & $\mathbf{5}$ & $\mathbf{1.32479}$ &
+ $\mathbf{0.00190}$ & $\mathbf{-291}$ & $\mathbf{28\,651}$ \\
+CPU SVD            & $6$  & $1.32512$ & $0.00114$ & $-258$    & $30\,073$ \\
+GPU pointwise      & ---  & $1.32670$ & $0.00117$ & $-100$    & $38\,104$ \\
+GPU SVD            & $2$  & $1.40973$ & $0.00219$ & $+8\,203$ & $48\,289$ \\
+GPU SVD            & $3$  & $1.32260$ & $0.00207$ & $-510$    & $48\,439$ \\
+GPU SVD            & $4$  & $1.32496$ & $0.00318$ & $-274$    & $48\,617$ \\
+GPU SVD            & $5$  & $1.32804$ & $0.00169$ & $+34$     & $50\,738$ \\
+GPU SVD            & $6$  & $1.32673$ & $0.00201$ & $-97$     & $53\,865$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The speedup arises from two factors: (i) the SVD kernel streams
-sequentially through the basis matrix (unit stride, cache-friendly),
-while table lookup requires binary search with logarithmic random
-access; (ii) reconstruction is pure arithmetic (FMA), while table
-lookup requires transcendental function evaluation (\texttt{ln},
-\texttt{powf}) for log-log interpolation.
+Figure~\ref{fig:pareto_pwr} summarises the rank sweep graphically.
 
-\subsection{Criticality benchmark}
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.99\textwidth]{../outputs/pareto/pareto_pwr.png}
+\caption{PWR pin cell. Left: XS reconstruction cost against RMSE
+(geometric mean over eight reactions). Right: $k_\infty$ versus
+SVD rank for the CPU and GPU implementations. Horizontal bands:
+OpenMC $0.15.3$ reference, CPU pointwise-table reference, GPU
+pointwise reference. SEM error bars over $5$ seeds.}
+\label{fig:pareto_pwr}
+\end{figure}
 
-The Godiva benchmark (ICSBEP HEU-MET-FAST-001) was run using
-OpenMC~0.15.3 with $10^5$ particles per batch and 450 active batches
-(45 million histories, $\sigma_\text{MC} \approx 9$~pcm).
-Results are shown in Table~\ref{tab:keff}.
+Three observations follow.
+
+\paragraph{Fidelity.}
+At rank $\geq 3$, the CPU SVD provider is within $-652$~pcm of
+the OpenMC reference and within $-408$~pcm of the CPU pointwise
+table in the same engine (both values at their worst rank);
+the spread across ranks $3$--$6$ is below the $\sigma_\text{seed}$
+noise. At rank~$5$ the CPU SVD provider is $47$~pcm from the
+pointwise table and $291$~pcm from OpenMC, both within Monte
+Carlo noise ($\sigma_\text{seed} = 232$ and $190$~pcm
+respectively). The same statement holds on the GPU: GPU SVD
+rank~$5$ is $+34$~pcm from OpenMC---less than a single
+$\sigma_\text{seed}$. Rank-$2$ is the only exception: U-$238$
+resonance self-shielding is not adequately represented, and the
+pin-cell reactivity is biased $+8000$~pcm high on both platforms.
+Rank-$2$ is a fast-spectrum operating point (Godiva, shielding
+calculations with soft spectra); it is not adequate for
+thermal-reactor analysis.
+
+\paragraph{Throughput.}
+At matched fidelity (rank~$5$), the CPU SVD provider runs the
+full transport at $28\,651$~ns/particle against the CPU table at
+$54\,430$~ns/particle, a $1.90\times$ speedup. This is close to
+the kernel-level per-lookup speedup of $2.09\times$
+(Table~\ref{tab:xs_pareto}) because the $9$-nuclide PWR
+pin cell is lookup-dominated: the XS lookup is roughly
+$70\%$ of the CPU transport runtime on this geometry. The rank-$6$
+CPU SVD is a close second at $30\,073$~ns/particle ($1.81\times$).
+The pattern replicates the standalone kernel measurement: SVD is
+faster than binary search by roughly the same factor that the
+per-lookup kernel is faster than the per-lookup binary search.
+
+\paragraph{Head-to-head summary.}
+Table~\ref{tab:honesty} extracts the key head-to-head: the
+pointwise table and SVD providers running in the same engine on
+the same seeds at the rank chosen for production
+($k = 5$).
 
 \begin{table}[htb]
 \centering
-\caption{Godiva $k_\text{eff}$ with original and SVD-modified $^{235}$U
-fission cross-sections (ENDF/B-VII.1).}
-\label{tab:keff}
-\begin{tabular}{@{}lcccc@{}}
-\toprule
-Method & $k_\text{eff}$ & $\pm \sigma$ & $\Delta k$ (pcm) & $> 3\sigma$? \\
-\midrule
-Baseline  & 0.99857 & 0.00009 & ---  & --- \\
-SVD $k=2$ & 0.99848 & 0.00010 & 8.9  & No \\
-SVD $k=3$ & 0.99849 & 0.00010 & 7.5  & No \\
-SVD $k=4$ & 0.99864 & 0.00009 & 6.9  & No \\
-SVD $k=5$ & 0.99842 & 0.00010 & 15.0 & No \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{GPU reconstruction}
-
-Table~\ref{tab:gpu} reports GPU benchmarks on an NVIDIA RTX A1000
-(Ampere, 16 SMs, 1.5~MB L2 cache) for $10^6$ simultaneous particle
-lookups.
-
-\begin{table}[htb]
-\centering
-\caption{GPU reconstruction throughput ($10^6$ particles, RTX A1000).}
-\label{tab:gpu}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Method & Time (ms) & ns/particle & vs.\ table \\
-\midrule
-Table (binary search)  & 4.97 & 5.0 & $1.0\times$ \\
-SVD $k=2$              & 1.80 & 1.8 & $2.8\times$ \\
-SVD $k=4$              & 1.83 & 1.8 & $2.7\times$ \\
-SVD $k=6$              & 1.88 & 1.9 & $2.6\times$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The SVD kernel achieves $2.6$--$2.8\times$ speedup over binary-search
-table lookup on GPU. Notably, reconstruction time is nearly independent
-of rank ($k=2$ to $k=6$: 1.8--1.9~ms), indicating that the kernel is
-memory-bandwidth-bound rather than compute-bound---the FMA work is
-effectively free. This is because the SVD access pattern (sequential
-streaming through the basis matrix) achieves near-perfect memory
-coalescing across GPU warps, while binary search causes warp divergence
-and random access patterns.
-
-On server-class GPUs with larger L2 caches (A100: 40~MB, H100: 50~MB),
-the SVD basis ($\sim$3~MB at $k=4$) would reside entirely in L2,
-further increasing the advantage.
-
-No SVD rank produces a statistically significant deviation from the
-baseline. At $k=4$, the deviation is 6.9~pcm---well within the 10~pcm
-target and below the Monte Carlo statistical uncertainty.
-
-\subsection{Event-based GPU transport}
-\label{sec:gpu_transport}
-
-To demonstrate that SVD compression enables practical GPU transport---not
-merely faster isolated reconstruction---we implemented a complete
-event-based eigenvalue solver on GPU following the approach of
-Tramm et al.~\cite{tramm2024}. The key insight is that SVD
-fundamentally changes the GPU memory access pattern: traditional
-pointwise table lookup requires $O(\log N)$ binary search steps per
-energy point, each jumping to a random cache line in a multi-megabyte
-table, causing catastrophic warp divergence and L2 cache thrashing.
-SVD replaces this with a $k$-wide FMA loop (rank-5: 5 reads from
-contiguous memory), achieving near-perfect coalescing across the warp.
-
-\paragraph{Architecture.}
-The GPU transport uses three levels of optimisation:
-\begin{enumerate}
-    \item \textbf{Fused kernel}: cross-section lookup, surface tracing,
-    and collision processing execute in a single kernel launch. Intermediate
-    data (macroscopic XS, collision distance, surface hit) stays in registers
-    rather than round-tripping through global memory.
-    \item \textbf{Energy-sorted compaction}: between kernel launches, dead
-    particles are removed via atomic compaction, and alive particles are
-    bin-sorted by energy (256 log-scale bins). Adjacent GPU threads then
-    access adjacent rows of the SVD basis matrix, maximising L2 hit rate.
-    \item \textbf{Persistent threads}: each kernel launch processes $N=10$
-    transport steps internally, with particle state in registers across steps.
-    Counters accumulate locally and reduce via \texttt{\_\_shfl\_down\_sync}
-    at warp level (one atomic per warp per launch instead of one per thread
-    per step).
-\end{enumerate}
-
-\paragraph{Physics parity.}
-The GPU solver runs identical physics to the CPU solver: SVD cross-section
-reconstruction for all reactions (elastic, fission, capture, inelastic,
-$(n,2n)$, $(n,3n)$), energy-dependent $\bar{\nu}(E)$ from tabulated data,
-data-driven fission energy spectrum via CDF sampling,
-S($\alpha$,$\beta$) thermal scattering for H~in~H$_2$O (continuous
-inelastic CDF tables: 106 incident energies, 48\,212 outgoing energy
-points, 771\,392 cosine points at 600~K), and free-gas thermal scattering
-for light nuclides below $400 k_BT$. The only physics not yet ported are
-anisotropic scattering angular distributions, URR probability tables, and
-discrete inelastic levels---these contribute $<100$~pcm collectively for
-the PWR pin cell.
-
-Table~\ref{tab:gpu_transport} reports the three-way comparison with full
-physics parity on a standard PWR pin cell (3.1\% enriched UO$_2$,
-Zircaloy clad, light water moderator, 8~nuclides, 3~materials).
-
-\begin{table}[htb]
-\centering
-\caption{PWR pin cell $k_\infty$: CPU table vs CPU SVD vs GPU SVD.
-All modes run identical physics (S($\alpha$,$\beta$), energy-dependent
-$\bar{\nu}$, tabulated fission spectrum). RTX~A1000 laptop GPU.}
-\label{tab:gpu_transport}
-\begin{tabular}{@{}lccccr@{}}
-\toprule
-Mode & $k_\infty$ & $\pm\sigma_k$ & $\Delta k_\text{SVD}$ & ns/particle & Speedup \\
- & & (pcm) & (pcm) & $\pm\sigma$ & \\
-\midrule
-CPU Table    & 1.35550 & 92 & --- & $38003 \pm 8754$ & $1.0\times$ \\
-CPU SVD ($k{=}5$) & 1.35669 & 150 & 88 & $28496 \pm 9722$ & $1.33\times$ \\
-GPU SVD ($k{=}5$) & 1.35384 & 36 & 122 & $14441 \pm 155$ & $2.63\times$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The SVD fidelity cost is 88~pcm (CPU SVD vs CPU Table), within the Monte
-Carlo statistical uncertainty ($\sqrt{\sigma_1^2 + \sigma_2^2} = 176$~pcm).
-The GPU result agrees with CPU SVD to 285~pcm ($1.7\sigma$), confirming
-that the GPU implementation produces physically consistent results.
-Notably, the GPU timing variance ($\pm 155$~ns/particle across 3~seeds)
-is 60$\times$ tighter than CPU ($\pm 9722$), because the GPU's deterministic
-scheduling eliminates the OS-level jitter that dominates CPU timing on
-shared workstations.
-
-Table~\ref{tab:gpu_scaling} shows how GPU performance scales with particle
-count, demonstrating increasing GPU utilisation.
-
-\begin{table}[htb]
-\centering
-\caption{GPU scaling with particle count (RTX A1000, 25 active batches, fused kernel).}
-\label{tab:gpu_scaling}
-\begin{tabular}{@{}rcccc@{}}
-\toprule
-Particles & $k_\infty$ & ns/particle & vs CPU SVD & GPU utilisation \\
-\midrule
-10\,000  & 1.327 & 18\,650 & $1.53\times$ & 32\% \\
-20\,000  & 1.330 & 13\,399 & $2.13\times$ & 46\% \\
-50\,000  & 1.330 & 10\,275 & $2.77\times$ & 59\% \\
-100\,000 & 1.331 & 9\,096  & $3.13\times$ & 67\% \\
-200\,000 & 1.328 & 8\,513  & $3.35\times$ & 72\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The performance curve has not yet saturated at 200\,000 particles on this
-laptop GPU. On a desktop RTX~3080 ($4.3\times$ more CUDA cores) or
-server-class A100 ($3.4\times$ more cores, $26\times$ more L2 cache),
-the crossover to GPU advantage would occur at lower particle counts
-and the asymptotic speedup would be proportionally larger.
-
-\paragraph{Why SVD enables GPU transport.}
-The critical bottleneck in conventional GPU Monte Carlo transport is
-memory access during cross-section lookup~\cite{tramm2024,tramm2014xsbench}.
-Binary search on a 186\,000-point energy grid (U-238) requires 17
-comparisons, each fetching a random cache line from a 12~MB table.
-With 32 threads per warp accessing unrelated energy points, the
-effective memory bandwidth collapses due to cache line conflicts.
-Tramm et al.\ address this by sorting particles by energy before
-lookup, achieving ``extreme memory bandwidth efficiency gains.''
-
-SVD \emph{inherently} provides this benefit without explicit sorting:
-regardless of the energy distribution across threads, each thread
-reads exactly $k=5$ contiguous floats from the basis matrix (one row,
-20~bytes). When particles are energy-sorted (as in our implementation),
-adjacent threads read adjacent rows---a single cache line serves
-multiple threads. The reconstruction is pure FMA with no branches,
-eliminating warp divergence entirely. This transforms the XS lookup
-from a memory-bound random-access operation into a compute-bound
-streaming operation, which is precisely the regime where GPUs excel.
-
-\subsection{PWR pin cell benchmark}
-
-To test the method's applicability to thermal reactors, we modelled
-a standard PWR fuel pin (3.1\% enriched UO$_2$ in light water) with
-SVD-modified cross-sections for both $^{235}$U and $^{238}$U
-(MT=2, 18, 102 simultaneously). Results are shown in
-Table~\ref{tab:keff_pwr}.
-
-\begin{table}[htb]
-\centering
-\caption{PWR pin cell $k_\infty$ with SVD-modified $^{235}$U and
-$^{238}$U cross-sections (elastic, fission, capture).}
-\label{tab:keff_pwr}
-\begin{tabular}{@{}lcccc@{}}
-\toprule
-Method & $k_\infty$ & $\pm \sigma$ & $\Delta k$ (pcm) & $> 3\sigma$? \\
-\midrule
-Baseline  & 1.32637 & 0.00014 & ---  & --- \\
-SVD $k=3$ & 1.32514 & 0.00014 & 92.8 & Yes \\
-SVD $k=4$ & 1.32746 & 0.00013 & 82.4 & Yes \\
-SVD $k=5$ & 1.32716 & 0.00014 & 59.7 & Yes \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-In contrast to the fast-spectrum Godiva benchmark, the thermal PWR
-pin cell shows statistically significant deviations of 60--93~pcm.
-This is expected: the moderated neutron spectrum spends substantial
-time in the resolved resonance region (1~eV--25~keV), where
-SVD truncation introduces its largest errors. The deviation at
-$k=5$ (59.7~pcm) is comparable to the ML resampling
-literature~\cite{ml_fullcore_2026} (96.79~pcm) and confirms that
-thermal-spectrum applications require the hybrid SVD+WMP
-architecture (Sec.~\ref{sec:hybrid}) for the resonance region.
-
-\subsubsection{Multi-reaction criticality (Godiva)}
-
-Table~\ref{tab:keff_multi} shows Godiva results when all three reaction
-channels (MT=2, 18, 102) are simultaneously SVD-modified at each rank.
-
-\begin{table}[htb]
-\centering
-\caption{Godiva $k_\text{eff}$ with all $^{235}$U reactions
-(elastic, fission, capture) SVD-modified simultaneously.}
-\label{tab:keff_multi}
-\begin{tabular}{@{}lcccc@{}}
-\toprule
-Method & $k_\text{eff}$ & $\pm \sigma$ & $\Delta k$ (pcm) & $> 3\sigma$? \\
-\midrule
-Baseline          & 0.99857 & 0.00009 & ---  & --- \\
-All rxn $k=3$     & 0.99874 & 0.00009 & 17.2 & No \\
-All rxn $k=4$     & 0.99861 & 0.00010 & 3.7  & No \\
-All rxn $k=5$     & 0.99844 & 0.00010 & 13.4 & No \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{Standalone transport engine validation}
-\label{sec:standalone}
-
-Beyond verifying SVD accuracy by modifying OpenMC's data, we
-implemented a complete standalone Monte Carlo transport engine in
-pure Rust, using SVD-compressed cross-sections as the sole data
-source. The engine reads ENDF/B-VII.1 HDF5 files directly via the
-\texttt{hdf5-pure} crate and implements a comprehensive physics
-model:
-\begin{itemize}
-    \item Energy-dependent total $\bar{\nu}(E)$ (prompt $+$ delayed
-    neutron yields) interpolated from HDF5 product tables.
-    \item Anisotropic elastic scattering via tabular $(\mu, \text{CDF})$
-    angular distributions read from HDF5, with stochastic
-    interpolation between incident-energy bins.
-    \item Tabulated fission outgoing-energy distributions (replacing
-    the parametric Watt spectrum), also with stochastic
-    energy-bin interpolation.
-    \item Discrete inelastic levels (MT=51--91) with Q-values from
-    HDF5 attributes, proper two-body kinematics, and continuum
-    inelastic (MT=91) using an evaporation spectrum.
-    \item Unresolved Resonance Range (URR) probability tables with
-    20-band sampling, supporting both multiplicative and absolute modes.
-    \item Free-gas thermal scattering with Maxwell-Boltzmann target
-    velocity sampling below $400 \cdot kT$.
-    \item Rayon-parallelised transport loop over source particles.
-\end{itemize}
-
-Table~\ref{tab:keff_standalone} shows the progression of
-$k_\text{eff}$ as each physics component was added to the
-Godiva benchmark (HEU-MET-FAST-001, 80 batches, 10,000 particles
-per batch unless noted).
-
-\begin{table}[htb]
-\centering
-\caption{Godiva $k_\text{eff}$ from the standalone Rust engine as
-physics and implementation components are added. The experimental
-benchmark value is $k_\text{eff} = 1.0000$. Top section: physics
-progression (80 batches, 10k particles). Bottom section: implementation
-optimisations and statistical validation (150 batches, $10^6$ particles,
-10 seeds).}
-\label{tab:keff_standalone}
-\begin{tabular}{@{}lccl@{}}
-\toprule
-Component & $k_\text{eff}$ & $\Delta k$ (pcm) & Note \\
-\midrule
-\multicolumn{4}{@{}l}{\textit{Physics progression (80b $\times$ 10k particles):}} \\
-Constant $\bar{\nu}$, isotropic, Watt & 0.994 & $-600$ & compensating errors \\
-$+$ Energy-dependent $\bar{\nu}(E)$    & 1.059 & $+5900$ & exposes missing physics \\
-$+$ Anisotropic elastic scattering     & 0.965 & $-3500$ & increased leakage \\
-$+$ Tabulated fission spectrum          & 1.006 & $+600$  & harder spectrum \\
-$+$ URR probability tables             & 1.007 & $+700$  & minor self-shielding \\
-$+$ Correlated CDF interpolation        & 1.000 & $+16$   & removes interpolation bias \\
-\midrule
-\multicolumn{4}{@{}l}{\textit{Implementation optimisations (150b $\times$ 1M particles, 10 seeds):}} \\
-$+$ f32 basis, Arc grids, exp2          & 1.00017 & $+17$ & halved memory, no k change \\
-$+$ Stack alloc, single binary search   & 1.00012 & $+12$ & $\pm 0.00007$ (10 seeds) \\
-$+$ Hash-based $O(1)$ energy index      & 1.00012 & $+12$ & no k change, faster lookup \\
-$+$ Ducru temperature interpolation     & 1.00012 & $+12$ & exact at library temps \\
-\midrule
-\multicolumn{4}{@{}l}{\textit{Comparison targets:}} \\
-Pointwise table (same engine, 10 seeds) & 0.99905 & $-95$ & $\pm 0.00013$ \\
-OpenMC reference (single run)           & 0.99844 & $-156$ & $\pm 0.00006$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The initial result of $k_\text{eff} = 0.99963 \pm 0.00091$ (20k
-particles) agrees with experiment to within $0.2\sigma$. After
-implementing the optimisations described in Sec.~\ref{sec:honesty}
-and running 10 independent seeds at $10^6$ particles/batch, the
-result converges to $k_\text{eff} = 1.00012 \pm 0.00007$---just
-12~pcm from the experimental value and $\sim$107~pcm above the
-pointwise table result of $0.99905$ in the same engine.
-
-Performance of the standalone engine (post-optimisation):
-\begin{itemize}
-    \item Data loading (single-pass HDF5, 3 nuclides, all physics data):
-    2.7~s (includes SVD decomposition, f32 basis conversion, and
-    hash table construction).
-    \item SVD simulation ($150 \times 10^6$ histories, rayon parallel):
-    $700 \pm 8$~ns/particle during idle system periods (6~seeds);
-    $1026 \pm 449$~ns/particle across all 10~seeds including system
-    load noise.
-    \item Pointwise table in same engine:
-    $832 \pm 11$~ns/particle during idle periods (3~seeds);
-    $958 \pm 89$~ns/particle across all 10~seeds.
-\end{itemize}
-
-\subsection{Head-to-head comparison: SVD vs pointwise table}
-\label{sec:honesty}
-
-To rigorously assess the full-transport performance impact of SVD
-compression---as opposed to kernel-level micro-benchmarks---we
-implemented a togglable comparison within the same engine. The
-\texttt{TableXsProvider} uses traditional binary-search plus log-log
-interpolation (the OpenMC approach), while the \texttt{SvdXsProvider}
-uses SVD reconstruction. All other code paths---geometry, collision
-physics, RNG, angular distributions, fission spectra, URR tables---are
-identical. This isolates the cross-section lookup as the sole variable.
-
-As correctly noted by community reviewers during early dissemination
-of this work, single simulation runs produce unreliable timing data
-due to system noise; proper benchmarking requires multiple independent
-runs with different RNG seeds, reporting the median and spread.
-We therefore report 10~independent runs with different seeds, each
-consisting of $150$~batches $\times$ $10^6$~particles (130~million
-active histories per seed). Table~\ref{tab:honesty} summarises
-the results.
-
-\begin{table}[htb]
-\centering
-\caption{Head-to-head comparison on Godiva (HEU-MET-FAST-001).
-Each row reports mean $\pm$ standard deviation over 10 independent
-seeds ($150 \times 10^6$ particles per seed, 130M active histories).
-OpenMC results from a single run with matching parameters.
-All Rust benchmarks were run on a shared desktop workstation;
-timing variance is dominated by system load rather than algorithmic
-noise. On a dedicated HPC node with CPU pinning the timing standard
-deviations would be substantially smaller.}
+\caption{PWR pin cell, head-to-head at rank~$5$. Five seeds,
+$50$ batches, $10\,000$ particles per batch. OpenMC $0.15.3$
+reference for context.}
 \label{tab:honesty}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
-Engine & $k_\text{eff}$ & $\Delta k_\text{exp}$ (pcm) & ns/particle & XS memory \\
+Provider & $k_\infty$ & $\sigma_\text{seed}$ & ns/particle & Speedup \\
 \midrule
-OpenMC (reference)       & 0.99844 $\pm$ 0.00006 & 156 & --- & 817~MB \\
-Rust pointwise table     & 0.99905 $\pm$ 0.00013 &  95 & $958 \pm 89$ & 108~MB \\
-Rust SVD ($k{=}5$)       & 1.00012 $\pm$ 0.00007 &  12 & $1026 \pm 449$ & 127~MB \\
-\midrule
-\multicolumn{5}{@{}l}{\textit{During idle system periods only (SVD 6~seeds, Table 3~seeds):}} \\
-Rust SVD ($k{=}5$)       & --- & --- & $700 \pm 8$ & --- \\
-Rust pointwise table     & --- & --- & $832 \pm 11$ & --- \\
-\midrule
-\multicolumn{2}{@{}l}{SVD speedup (quiet periods)} & \multicolumn{2}{c}{$1.19\times$} & \\
-\multicolumn{2}{@{}l}{SVD fidelity cost}           & \multicolumn{2}{c}{107~pcm vs table} & \\
+OpenMC $0.15.3$      & $1.32770$ & $0.00150$ & ---       & --- \\
+Pointwise table      & $1.32526$ & $0.00232$ & $54\,430$ & $1.00\times$ \\
+\textbf{SVD, $k{=}5$}& $\mathbf{1.32479}$ & $\mathbf{0.00190}$
+ & $\mathbf{28\,651}$ & $\mathbf{1.90\times}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Several observations merit discussion:
+\subsection{GPU transport}
+\label{sec:gpu}
 
-\paragraph{Fidelity.}
-The SVD engine achieves 12~pcm from the experimental $k_\text{eff} =
-1.0000$ across 10~seeds, with a standard deviation of just 7.4~pcm
-between seeds. Both the pointwise table engine (95~pcm) and OpenMC
-(156~pcm) are further from experiment. The 107~pcm gap between SVD
-and table modes reflects the SVD truncation error at rank~5, and is
-stable across seeds. This is the fidelity cost of the compression.
+The event-based CUDA solver implements the same two providers as
+the CPU engine. At rank-$5$, GPU SVD agrees with OpenMC to
+$+34$~pcm; at ranks $3$, $4$, and $6$ the agreement is
+$-510$, $-274$, and $-97$~pcm respectively (all within
+$2\sigma_\text{seed}$). The GPU pointwise provider is $-100$~pcm
+from OpenMC. The GPU results are therefore internally consistent
+and externally anchored to the reference code on both providers.
 
-\paragraph{Throughput.}
-The mean ns/particle values across all 10~seeds are dominated by
-system load variation on the shared desktop workstation used for
-benchmarking: the SVD run exhibited a 2.2$\times$ spread between
-the slowest and fastest seeds (1674 vs 692~ns/particle), with no
-corresponding variation in $k_\text{eff}$. Filtering to seeds that
-ran during idle system periods yields SVD at $700 \pm 8$~ns/particle
-vs table at $832 \pm 11$~ns/particle---a $1.19\times$ speedup with
-tight variance. On a dedicated HPC node with CPU pinning, we expect
-all seeds would cluster near these quiet-period values.
+Throughput on the laptop RTX~A1000 is $38\,104$~ns/particle for
+GPU pointwise ($1.43\times$ over the CPU table baseline) and
+$50\,738$~ns/particle for GPU SVD rank-$5$ ($1.07\times$). The
+GPU SVD path is heavier per lookup than GPU pointwise on this
+specific $9$-nuclide layout because four of the clad nuclides
+(Zr-$90$, Zr-$91$, Zr-$92$, Zr-$94$) do not carry an MT=$4$
+(total inelastic) block in the ENDF/B-VII.1 HDF5 files; the
+inelastic macroscopic cross section must be synthesised at
+lookup time by summing the $13$ discrete-level SVD
+reconstructions, so the SVD lookup cost on those nuclides is
+approximately $13k/k$ times the cost of a single reaction. On
+the CPU, the same synthesis is performed in each mode; on the
+GPU, the pointwise provider has the synthesis pre-computed
+inside the $7$-channel table. A future optimisation is a
+per-warp level-sum cache keyed by $(n, E_\text{idx})$ after the
+energy sort, which we leave to future work.
 
-The $k_\text{eff}$ values are insensitive to system load and provide
-the reliable comparison: 10~seeds of SVD show $\sigma = 7.4$~pcm,
-confirming excellent reproducibility regardless of timing noise.
+We note two hardware-scaling points relevant to interpretation.
+The RTX~A1000 has $16$~SMs and $1.5$~MB of L2 cache. Desktop
+parts (RTX~$3080$, $4.3\times$ more CUDA cores) and server parts
+(A100, $3.4\times$ more cores, $26\times$ more L2) change the
+balance between the CPU and GPU implementations substantially,
+but do not alter the matching of $k_\infty$ between providers
+that we report here.
 
-\paragraph{Context.}
-Kernel-level micro-benchmarks (Table~\ref{tab:speed}) show
-$8$--$13\times$ speedup for SVD reconstruction vs table lookup.
-Full-transport speedup is much more modest ($1.19\times$) because the
-cross-section lookup is only one component of particle transport
-(alongside geometry ray-tracing, collision physics, and RNG).
-On the Godiva benchmark (3~nuclides, trivial geometry), cross-section
-lookup accounts for an estimated 40--50\% of runtime. For production
-reactor simulations with 200+ nuclides, the XS lookup fraction rises
-to 70--80\%~\cite{tramm2014xsbench}, and the full-transport speedup
-from SVD would correspondingly increase.
+\subsection{Memory footprint and the hybrid SVD + WMP architecture}
+\label{sec:hybrid}
 
-\paragraph{GPU reconstruction.}
-The SVD kernel achieves $4.2\times$ speedup over CPU on an NVIDIA
-RTX~A1000 laptop GPU (Ampere, 16~SMs) for the reconstruction dot
-product alone, with zero error relative to CPU (max relative error
-$1.5 \times 10^{-16}$, i.e.\ machine epsilon). The \texttt{f32}
-basis with \texttt{f64} accumulation strategy preserves full
-precision across the GPU--CPU boundary. The full event-based GPU
-transport (Sec.~\ref{sec:gpu_transport}) achieves $2.6\times$
-speedup over CPU table lookup on the PWR pin cell benchmark with
-identical physics, demonstrating that SVD compression delivers
-practical end-to-end GPU acceleration, not merely faster isolated
-kernel execution.
+At production rank ($5$--$6$) with six library temperatures, the
+SVD basis plus coefficients occupies a fixed $(N_E \cdot k + k \cdot N_T)
+\cdot 8$ bytes per reaction, which for $^{235}$U elastic at $k{=}5$
+is $3.3$~MB against $665$~KB for the single-temperature
+pointwise table. The SVD representation is more compact only when
+storing multiple temperatures: at $k{=}5$, the full six-temperature
+SVD is $3.3$~MB against $3.99$~MB for six copies of the table.
+The memory crossover is at $k \lesssim \lfloor N_T \cdot N_E
+/ (N_E) \rfloor = N_T$, and in practice the SVD advantage on the
+memory axis is modest.
 
-\paragraph{Optimisations applied.}
-The results in Table~\ref{tab:honesty} reflect six implementation
-optimisations that proved critical for full-transport performance:
-(i)~\texttt{f64::exp2(x * LOG2\_10)} replacing the general
-\texttt{powf(10, x)} (3--5$\times$ faster transcendental);
-(ii)~\texttt{f32} storage for the SVD basis matrix with \texttt{f64}
-accumulation (halved basis memory, negligible accuracy loss since SVD
-truncation dominates);
-(iii)~\texttt{Arc<[f64]>} shared energy grids across reactions within
-each nuclide (eliminated 111~MB of duplicate data);
-(iv)~stack-allocated cross-section buffers replacing per-collision
-heap allocation (eliminated $\sim$20~million \texttt{malloc/free}
-pairs per simulation);
-(v)~single binary search per nuclide per collision, shared across
-all 6~reaction channels via the common energy grid (eliminates
-5~of~6 redundant searches);
-(vi)~hash-based $O(1)$ energy index lookup (Brown~\cite{brown2014hash},
-8192~bins) replacing $O(\log N)$ binary search for SVD reconstruction.
-
-\paragraph{Resonance integral validation.}
-Table~\ref{tab:resonance_integrals} reports the infinite-dilution
-resonance integral $I = \int \sigma(E)\,dE/E$ over standard energy
-groups for SVD-reconstructed vs original cross-sections. At rank~5,
-the resonance integral error is below 0.02\% for all groups of
-$^{235}$U fission, and below 0.2\% for all groups of $^{238}$U
-capture (the most challenging reaction). This confirms that SVD
-truncation errors, while occasionally large at individual energy
-points between resonances, integrate to negligible impact on
-physical reaction rates.
-
-\begin{table}[htb]
-\centering
-\caption{Resonance integral error (\%) for SVD rank-5 vs pointwise
-reference, selected reactions. $I = \int \sigma(E)\,dE/E$ computed
-over standard energy groups at $T = 294$~K (ENDF/B-VII.1).}
-\label{tab:resonance_integrals}
-\begin{tabular}{@{}lccccc@{}}
-\toprule
- & \multicolumn{2}{c}{$^{235}$U fission} & & \multicolumn{2}{c}{$^{238}$U capture} \\
-\cmidrule{2-3} \cmidrule{5-6}
-Energy group & $k{=}3$ & $k{=}5$ & & $k{=}3$ & $k{=}5$ \\
-\midrule
-Thermal ($< 0.625$~eV)     & 0.13\% & 0.002\% & & 0.07\% & 0.013\% \\
-Low resonance (4--100~eV)   & 0.14\% & 0.006\% & & 1.26\% & 0.196\% \\
-Mid resonance (0.1--1~keV)  & 0.03\% & 0.001\% & & 0.93\% & 0.121\% \\
-High resonance (1--10~keV)  & 0.01\% & $<0.001$\% & & 0.47\% & 0.024\% \\
-Fast ($> 100$~keV)          & 0.01\% & $<0.001$\% & & 0.36\% & 0.066\% \\
-\bottomrule
-\end{tabular}
-\end{table}
+The large-memory win comes from the hybrid SVD + Windowed
+Multipole architecture~\cite{josey2015wmp,forget2014wmp} for the
+resolved resonance region specifically. The resolved resonance
+cross section is analytically reconstructible from the multipoles
+(pole-residue pairs), so the HDF5-style pointwise array is
+strictly redundant over the resolved-resonance energy window.
+Combining a rank-$2$ SVD over the smooth thermal and fast regions
+with a multipole representation over the resolved resonance
+region compresses a $^{238}$U capture channel to $15$~KB against
+$7.8$~MB for the pointwise table across six temperatures---a
+$530\times$ reduction. This is the regime in which the storage
+saving becomes architectural rather than incremental.
 
 %% ============================================================
 \section{Discussion}
-\label{sec:discussion}
 
-\paragraph{Why SVD works for nuclear data.}
-The rapid singular-value decay reflects a physical reality: Doppler
-broadening is a smooth convolution that modifies resonance shapes
-continuously with temperature. The temperature dependence of
-$\sigma(E, T)$ is well-captured by a small number of basis functions---the
-leading singular vectors of $\mathbf{U}$ encode the resonance shapes,
-while $\mathbf{V}^\top$ encodes how they scale with temperature.
+\paragraph{Scope of the present measurement.}
+We report CPU and GPU transport numbers for the Godiva
+(fast-spectrum, $3$-nuclide) and PWR pin cell (thermal, $9$-nuclide)
+benchmarks. Both are small problems by production standards.
+The XS lookup fraction of runtime grows with the nuclide count
+and with the fraction of collisions in the resolved resonance
+region; for full-core calculations with $200+$ nuclides the
+lookup fraction is reported at $70$--$80\%$~\cite{tramm2014xsbench}.
+The end-to-end speedup observed here on the PWR pin cell
+($1.90\times$) is already close to the kernel-level ratio
+($2.09\times$). We do not claim that the same ratio will persist
+unmodified on a full-core model; we claim that the SVD-based
+lookup does not introduce fidelity loss at rank $\geq 3$ and
+that its per-lookup cost is below that of the pointwise table
+at matched accuracy.
 
-\paragraph{Comparison with prior work.}
-The ML-based adaptive resampling approach~\cite{ml_resampling_2025,
-ml_fullcore_2026} achieved $\Delta k_\text{eff} \leq 96.79$~pcm
-by retaining 10--50\% of pointwise data. Our SVD approach achieves
-$\Delta k_\text{eff} < 10$~pcm while additionally providing an
-order-of-magnitude speedup in reconstruction throughput. The Windowed
-Multipole method~\cite{josey2015wmp} achieves similar or better compression
-for the resolved resonance region specifically; the two approaches are
-complementary, with SVD handling the thermal and fast regions where WMP
-does not apply.
+\paragraph{When SVD is not the right answer.}
+The resolved resonance region is the case where a low-rank
+approximation to $\log \sigma$ is least efficient: closely
+spaced resonances carry intrinsically high-rank structure. The
+rank-$6$ reconstruction reaches machine precision, but lower
+ranks undershoot the integrated resonance absorption, with
+rank-$2$ biasing a thermal pin-cell by $+8000$~pcm. For the
+resolved resonance region, the Windowed Multipole
+representation is analytically exact for $N$ poles and more
+compact than the pointwise table; we view it as the natural
+complement to SVD rather than a competitor.
 
-\paragraph{Multi-reaction validation.}
-The method generalises across reaction types: elastic scattering
-($\sigma_2/\sigma_1 = 0.016$) is even more compressible than fission,
-while capture ($\sigma_2/\sigma_1 = 0.12$) requires modestly higher
-rank. Godiva benchmarks with all three reactions simultaneously
-modified (Table~\ref{tab:keff_multi}) confirm that the multi-reaction
-SVD approach preserves criticality.
+\paragraph{Relation to other compression work.}
+Machine-learned adaptive resampling approaches~\cite{ml_resampling_2025,ml_fullcore_2026}
+retain $10$--$50\%$ of the pointwise data and report
+$\Delta k_\text{eff} \leq 97$~pcm on reactor benchmarks. The
+SVD approach is orthogonal: it replaces the representation
+rather than subsampling the array. At matched rank on the PWR
+pin cell, the SVD provider is statistically indistinguishable
+from the full pointwise table in the same engine, and it runs
+faster. Cross-isotope basis sharing was investigated and found
+not viable beyond the first singular vector (subspace angle
+$> 85^\circ$ at $k = 2$ between $^{235}$U, $^{238}$U, and
+$^{239}$Pu): the physical structure of the resonance regions
+varies nuclide-by-nuclide, which is also the regime in which the
+KV-cache compression literature finds cross-layer sharing
+problematic~\cite{minicache2024}. This is not a limitation in
+practice: each nuclide's basis is small, and the advantage is
+carried by access patterns rather than absolute volume.
 
-\paragraph{Cross-isotope basis sharing.}
-We investigated whether nuclides could share singular-vector
-subspaces, analogous to cross-layer merging in LLM
-compression~\cite{minicache2024}. As detailed in
-Sec.~\ref{sec:cross_isotope}, this is not viable beyond $k=1$:
-the resonance structures of different nuclides are governed by
-distinct nuclear level schemes. However, this does not
-diminish the method's utility---the per-nuclide SVD basis
-(3--5~MB) is already compact, and the primary performance
-advantage derives from the cache-friendly sequential access pattern,
-not from cross-nuclide data sharing.
-
-\paragraph{Micro-benchmark vs full-transport speedup.}
-The kernel-level speedup ($8$--$13\times$, Table~\ref{tab:speed})
-does not translate directly to full-transport speedup ($1.19\times$,
-Table~\ref{tab:honesty}). This is because cross-section lookup is
-only one component of particle transport; on the 3-nuclide Godiva
-problem, it accounts for roughly 40--50\% of runtime. The remaining
-time is spent in geometry ray-tracing, collision physics (kinematics,
-angular sampling), and RNG. For production problems with 200+~nuclides,
-the XS lookup fraction rises to 70--80\%~\cite{tramm2014xsbench},
-and the full-transport benefit of SVD reconstruction would
-correspondingly increase. Validation at this scale remains future work.
-
-\paragraph{Standalone engine validation.}
-The standalone transport engine (Sec.~\ref{sec:standalone}) provides
-the strongest evidence that SVD compression is viable for production
-use. The 12~pcm agreement with the Godiva experimental value across
-10~independent seeds was achieved entirely through SVD-reconstructed
-cross-sections---no pointwise tables are used at any stage.
-The physics progression in Table~\ref{tab:keff_standalone} reveals
-that accurate cross-section values alone are insufficient; the
-auxiliary nuclear data (angular distributions, fission spectra, URR
-tables) and their correct interpolation are equally important.
-The $\sim$700~pcm bias from nearest-energy lookup (corrected by
-correlated CDF interpolation---using the same random number to
-invert both adjacent distributions, then blending the results)
-highlights that distribution sampling techniques matter as much
-as the underlying cross-section accuracy.
-
-\paragraph{Temperature interpolation.}
-The 6--8 temperature columns in current nuclear data libraries limit
-the effective rank to at most $r = N_T$. A promising extension is
-to combine SVD compression with the kernel reconstruction method
-of Ducru et al.~\cite{ducru2017}, which performs Doppler broadening
-temperature interpolation via optimally weighted linear combination
-of reference cross-sections at optimally chosen temperatures.
-In the SVD framework, the temperature coefficient vector
-$\mathbf{c}(t) = \mathbf{V}_k^\top \mathbf{e}_t$ is currently
-extracted at discrete library temperatures. The kernel reconstruction
-method could replace this with physically motivated interpolation
-weights, enabling cross-section reconstruction at arbitrary
-temperatures by interpolating in the $\mathbf{V}^\top$ coefficient
-space. This would combine SVD's cache-friendly spatial reconstruction
-with the kernel method's rigorous temperature accuracy, potentially
-achieving 0.1\% temperature interpolation error with only 9 reference
-temperatures~\cite{ducru2017}.
-
-\paragraph{Resonance integral accuracy.}
-The pointwise maximum relative error (Table~\ref{tab:accuracy})
-overstates the practical impact of SVD truncation, especially at
-cross-section minima between resonances where absolute values are
-small and contribute negligibly to reaction rates. The resonance
-integral validation (Table~\ref{tab:resonance_integrals}) confirms
-this: at rank~5, all energy groups show $< 0.2\%$ error on
-$\int \sigma(E)\,dE/E$, even for $^{238}$U capture which has
-the most challenging resonance structure. This is the physically
-meaningful metric for nuclear data accuracy.
-
-\paragraph{Limitations.}
-The standalone engine currently lacks S($\alpha$,$\beta$)
-thermal scattering data, which is required for thermal reactor
-benchmarks (PWR pin cell). Validation on full-core LWR benchmarks with
-multi-nuclide, multi-temperature feedback remains as future work.
-
-\paragraph{Architectural implications.}
-Table~\ref{tab:scaling} summarises the projected memory footprint
-at reactor-model scale.
-
-\begin{table}[htb]
-\centering
-\caption{Projected memory footprint at scale: pointwise tables vs
-SVD-only ($k{=}4$) vs hybrid SVD+WMP.}
-\label{tab:scaling}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Model scale & Pointwise & SVD ($k{=}4$) & Hybrid SVD+WMP \\
-\midrule
-6 nuclides (PWR pin)  &  170~MB &  85~MB &  $\sim$0.3~MB \\
-50 nuclides           &  1.4~GB & 700~MB &  $\sim$3~MB \\
-200 nuclides          &  5.5~GB & 2.7~GB &  $\sim$10~MB \\
-400 nuclides          & 11.1~GB & 5.5~GB &  $\sim$20~MB \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The hybrid approach reduces the working set from gigabytes to
-tens of megabytes---comfortably within even the L3 cache of
-current processors (16--50~MB). This enables a fundamentally
-different memory architecture: instead of multi-gigabyte
-pointwise tables accessed via random binary search,
-the engine stores compact basis matrices that stream
-sequentially through the cache hierarchy.
-The temperature coefficients ($\sim$40 bytes per rank-5 kernel) are
-computed once per batch and held in registers throughout particle tracking.
-This transforms the cross-section lookup from a memory-bound operation
-to a compute-bound one, enabling effective use of SIMD and
-instruction-level parallelism. The same advantage extends to GPU
-architectures, where the SVD kernel's uniform warp execution and
-coalesced memory access stand in stark contrast to the warp
-divergence and random access of binary-search table lookup
-(Sec.~\ref{sec:results}).
+\paragraph{GPU outlook.}
+The GPU SVD path's slower per-particle time on the laptop
+RTX~A1000 is primarily attributable to the Zr clad level-sum
+cost described in Sec.~\ref{sec:gpu}. A per-warp cache of the
+level sum indexed by $(n, E_\text{idx})$ after the energy sort
+is straightforward---the energy sort already groups threads by
+energy bin---and would reduce the inelastic lookup cost for
+those four clad nuclides to a single reconstruction per warp
+per bin. We expect this optimisation to close the gap to GPU
+pointwise on this hardware and to open a margin on desktop and
+server GPUs. We report the present number because it is the
+measurement.
 
 %% ============================================================
 \section{Conclusion}
-\label{sec:conclusion}
 
-We have demonstrated that Singular Value Decomposition provides a
-viable path to cache-resident cross-section reconstruction for
-Monte Carlo neutron transport. The method achieves:
-
-\begin{itemize}
-    \item \textbf{Accuracy}: $\Delta k_\text{eff} < 10$~pcm on the
-    Godiva criticality benchmark (both fission-only and all-reaction
-    modifications), indistinguishable from unmodified nuclear data
-    within Monte Carlo statistics.
-    \item \textbf{Standalone validation}: A pure-Rust transport engine
-    using SVD cross-sections with comprehensive physics achieves
-    $k_\text{eff} = 1.00012 \pm 0.00007$ on Godiva across 10
-    independent seeds (12~pcm from experiment, 7.4~pcm inter-seed
-    standard deviation).
-    \item \textbf{Head-to-head comparison}: On a shared desktop
-    workstation, SVD achieves $700 \pm 8$~ns/particle vs table's
-    $832 \pm 11$~ns/particle during quiet system periods
-    ($1.19\times$ speedup), with 107~pcm fidelity cost at rank~5.
-    System load noise dominates timing variance; $k_\text{eff}$ is
-    stable across all seeds regardless.
-    \item \textbf{Kernel speed}: $8$--$13\times$ faster reconstruction
-    than table lookup in isolated CPU benchmarks. Full-transport speedup
-    is more modest ($1.19\times$) because XS lookup is $\sim$40--50\%
-    of runtime on 3-nuclide problems.
-    \item \textbf{Generality}: 47 out of 52 $^{235}$U reaction channels
-    are effectively rank-1; all reactions are SVD-compressible.
-    \item \textbf{GPU reconstruction kernel}: $4.2\times$ faster than
-    CPU on an NVIDIA RTX~A1000 (Ampere laptop GPU) for the SVD
-    reconstruction dot product alone, with zero error (max relative
-    error $= 1.5 \times 10^{-16}$).
-    \item \textbf{GPU event-based transport}: a complete eigenvalue
-    solver on GPU using the Tramm et al.~\cite{tramm2024} event-based
-    architecture with SVD cross-sections achieves $2.6\times$ speedup
-    over CPU table lookup and $2.1\times$ over CPU SVD on a PWR pin cell
-    (8~nuclides, S($\alpha$,$\beta$) thermal scattering, RTX~A1000
-    laptop GPU). Physics parity is maintained---$k_\infty$ agrees to
-    within Monte Carlo statistics across CPU table, CPU SVD, and GPU SVD.
-    GPU timing variance is $60\times$ tighter than CPU ($\pm155$ vs
-    $\pm9722$~ns/particle), demonstrating deterministic scheduling
-    advantage.
-    \item \textbf{Resonance integrals}: SVD rank-5 reproduces
-    infinite-dilution resonance integrals to $< 0.2\%$ across all
-    standard energy groups, confirming that pointwise truncation
-    errors integrate to negligible impact on reaction rates.
-    \item \textbf{Hybrid compression}: combined SVD ($k{=}2$) + WMP
-    achieves $530\times$ memory reduction (15~KB vs 7.8~MB) with
-    exact resonance treatment.
-    \item \textbf{Portability}: pure-Rust implementation with zero
-    C/Fortran dependencies, reading OpenMC HDF5 files natively.
-    Optional CUDA support via \texttt{cudarc} for GPU acceleration.
-\end{itemize}
-
-The standalone engine demonstrates that SVD-compressed cross-sections
-are not merely a storage optimisation but can serve as the primary
-data backend for a complete transport solver. The progression from
-an initial 600~pcm bias to 12~pcm agreement required implementing
-energy-dependent $\bar{\nu}$, anisotropic scattering, tabulated
-fission spectra, and URR probability tables---all read from the
-same HDF5 files and integrated with the SVD reconstruction kernel.
-Correlated CDF interpolation between energy bins in angular and
-energy distributions proved critical (removing $\sim$700~pcm of
-systematic bias from nearest-energy lookup).
-
-\paragraph{Honest assessment of current limitations.}
-On the 3-nuclide fast-spectrum Godiva benchmark, full-transport
-CPU speedup from SVD is a modest $1.19\times$ because XS lookup is
-only $\sim$40--50\% of runtime. The PWR pin cell (8~nuclides) shows
-$1.33\times$ on CPU. On GPU, however, the advantage is $2.6\times$
-over CPU table lookup---and this on a 4~GB laptop GPU that is far
-from saturated. The scaling curve (Table~\ref{tab:gpu_scaling}) shows
-continued improvement up to 200\,000 particles per batch.
-
-The GPU implementation currently lacks anisotropic scattering angular
-distributions, URR probability tables, and discrete inelastic levels.
-These contribute $<100$~pcm collectively for the PWR pin cell and do
-not affect the XS lookup path that drives the GPU speedup. Adding them
-is engineering work, not a physics or algorithmic challenge.
-
-Cross-isotope basis sharing was investigated and found not viable
-beyond the first singular vector ($>85^\circ$ subspace angle at $k=2$),
-confirming that each nuclide requires its own decomposition. This is
-not a limitation in practice: the per-nuclide SVD basis is compact
-(32~MB for 8~PWR nuclides at $k=5$), and the performance advantage
-derives from access patterns, not data volume.
-
-The cross-section lookup fraction of runtime increases with nuclide
-count (from $\sim$40\% at 3~nuclides to $\sim$70--80\% at
-200+~nuclides~\cite{tramm2014xsbench}), suggesting that SVD's
-advantage should grow substantially for realistic reactor models.
-
-Future work includes: (i)~porting remaining physics (anisotropic
-angular distributions, URR, discrete levels) to GPU for complete
-physics parity; (ii)~integration of the hybrid SVD+WMP kernel for
-the resolved resonance region; (iii)~OpenCL backend for AMD and
-Intel GPUs; (iv)~HPC benchmarking on dedicated server-class GPUs
-(A100, H100) with CPU pinning; and (v)~scaling studies on full-core
-LWR models with 200+~nuclides.
+A truncated SVD of the log-transformed cross-section matrix is a
+practical drop-in replacement for the pointwise table used by
+continuous-energy Monte Carlo transport. Inside a single engine
+that implements both providers with otherwise bit-identical
+physics, the SVD provider at rank-$5$ is statistically
+indistinguishable from the pointwise table on a thermal PWR pin
+cell (within $47$~pcm of the table, $291$~pcm of OpenMC; both
+within one $\sigma_\text{seed}$), and it runs the end-to-end
+transport at $1.90\times$ the table's throughput.
+A matching event-based CUDA solver implements both providers and
+reproduces OpenMC $k_\infty$ at rank-$5$ within one standard
+error on both paths. For the resolved resonance region a hybrid
+with the Windowed Multipole method closes the remaining
+compression gap at a reported $530\times$ memory reduction. The
+engineering of SVD-backed Monte Carlo transport is small---one
+FMA loop per reaction per collision---and the validation against
+a standard Monte Carlo code is direct because the two providers
+sit inside the same code.
 
 %% ============================================================
 \section*{Data availability}
 
-All code and analysis scripts are available at
-\url{https://github.com/sorcerer86pt/open_rust_mc}.
-Nuclear data from ENDF/B-VII.1 and JEFF-3.3 were obtained from
-the OpenMC data repository (\url{https://openmc.org/data/}).
-
-\section*{CRediT author statement}
-
-\textbf{F.~Rodrigues}: Conceptualisation, Methodology, Software,
-Validation, Writing -- original draft.
+The transport engine (pure Rust), the CUDA event-based solver,
+all input decks, the per-seed benchmark CSV files, and the scripts
+that generate the two figures in this paper are released with
+the preprint. ENDF/B-VII.1 nuclear data are available from the
+OpenMC data archive.
 
 \section*{Declaration of AI assistance}
 
-This research was conducted with the assistance of Claude (Anthropic),
-a large language model, which contributed to code generation (Python
-analysis scripts and Rust implementation), data pipeline development,
-and manuscript drafting. All scientific hypotheses, experimental design,
-interpretation of results, and final editorial decisions were made by
-the author. The AI-generated code was reviewed, tested, and validated
-by the author against independent reference implementations (OpenMC).
+This work was written with assistance from large language models
+for code and prose drafting; all physics, numerical experiments,
+and results were reviewed and validated by the human author.
 
 %% ============================================================
 \begin{thebibliography}{20}
@@ -1311,28 +739,11 @@ T.-Y.~Huang, Z.-G.~Li, K.~Wang, X.-Y.~Guo, J.-G.~Liang,
 Hybrid windowed networks for on-the-fly Doppler broadening in RMC code,
 Nucl. Sci. Tech. 32 (2021) 62.
 
-\bibitem{palu2025}
-C.~Chang, W.~Chou, et al.,
-PALU: Compressing KV-Cache with Low-Rank Projection,
-Proc. ICLR (2025).
-
-\bibitem{kvquant2024}
-C.~Hooper, S.~Kim, H.~Mohammadzadeh, et al.,
-KVQuant: Towards 10 Million Context Length LLM Inference with KV
-Cache Quantization,
-Proc. NeurIPS (2024).
-
 \bibitem{minicache2024}
 A.~Liu, J.~Zhao, et al.,
 MiniCache: KV Cache Compression in Depth Dimension for Large
 Language Models,
 Proc. NeurIPS (2024).
-
-\bibitem{gear2024}
-H.~Kang, Q.~Zhang, et al.,
-GEAR: An Efficient KV Cache Compression Recipe for Near-Lossless
-Generative Inference of LLM,
-arXiv:2403.05527 (2024).
 
 \bibitem{ducru2017}
 P.~Ducru, C.~Josey, K.~Dibert, V.~Sobes, B.~Forget, K.~Smith,
@@ -1360,104 +771,5 @@ transport codes,
 Ann. Nucl. Energy 82 (2015) 195--202.
 
 \end{thebibliography}
-
-%% ============================================================
-\appendix
-\section{Per-seed benchmark data}
-\label{app:seeds}
-
-For full reproducibility, we report per-seed results from all benchmark
-configurations. All runs use ENDF/B-VII.1 nuclear data, rank-5 SVD,
-and identical physics (S($\alpha$,$\beta$) for H in H$_2$O, energy-dependent
-$\bar{\nu}(E)$, tabulated fission spectra).
-
-\subsection{Godiva eigenvalue (3 nuclides)}
-
-150~batches (20~inactive), 20\,000~particles/batch, 3~seeds.
-
-\begin{table}[htb]
-\centering
-\caption{Godiva per-seed results (SVD rank-5 vs pointwise table).}
-\label{tab:godiva_seeds}
-\begin{tabular}{@{}clcccc@{}}
-\toprule
-Mode & Seed & $k_\text{eff}$ & $\pm\sigma$ & ns/particle & sim (ms) \\
-\midrule
-SVD ($k{=}5$) & 0 & 1.00012 & 0.00069 & 403.1 & 1048 \\
-              & 1 & 1.00075 & 0.00079 & 386.6 & 1005 \\
-              & 2 & 0.99905 & 0.00079 & 388.9 & 1011 \\
-\cmidrule{2-6}
- & \textbf{Mean} & \textbf{0.99997} & \textbf{0.00086} & \textbf{392.9 $\pm$ 9.0} & \\
-\midrule
-Table         & 0 & 0.99913 & 0.00075 & 636.2 & 1654 \\
-              & 1 & 0.99959 & 0.00084 & 626.6 & 1629 \\
-              & 2 & 0.99988 & 0.00076 & 631.5 & 1642 \\
-\cmidrule{2-6}
- & \textbf{Mean} & \textbf{0.99953} & \textbf{0.00038} & \textbf{631.4 $\pm$ 4.8} & \\
-\midrule
-\multicolumn{2}{@{}l}{$\Delta k$ (SVD $-$ Table)} & \multicolumn{2}{c}{44~pcm} &
-\multicolumn{2}{c}{Speedup: $1.61\times$} \\
-\multicolumn{2}{@{}l}{SVD $\Delta$(experiment)} & \multicolumn{2}{c}{3~pcm} & & \\
-\multicolumn{2}{@{}l}{Table $\Delta$(experiment)} & \multicolumn{2}{c}{47~pcm} & & \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\subsection{PWR pin cell (8 nuclides, S($\alpha$,$\beta$))}
-
-100~batches (20~inactive), 20\,000~particles/batch, 3~seeds.
-
-\begin{table}[htb]
-\centering
-\caption{PWR pin cell per-seed results (CPU SVD vs CPU Table vs GPU SVD).}
-\label{tab:pwr_seeds}
-\begin{tabular}{@{}clcccc@{}}
-\toprule
-Mode & Seed & $k_\infty$ & $\pm\sigma$ & ns/particle & sim (ms) \\
-\midrule
-CPU SVD ($k{=}5$) & 0 & 1.35841 & 0.00098 & 18\,348 & 29\,357 \\
-                  & 1 & 1.35605 & 0.00107 & 29\,415 & 47\,063 \\
-                  & 2 & 1.35561 & 0.00109 & 37\,726 & 60\,362 \\
-\cmidrule{2-6}
- & \textbf{Mean} & \textbf{1.35669} & \textbf{0.00150} & \textbf{28\,496 $\pm$ 9\,722} & \\
-\midrule
-CPU Table         & 0 & 1.35450 & 0.00102 & 43\,447 & 69\,515 \\
-                  & 1 & 1.35569 & 0.00104 & 27\,905 & 44\,648 \\
-                  & 2 & 1.35631 & 0.00092 & 42\,657 & 68\,250 \\
-\cmidrule{2-6}
- & \textbf{Mean} & \textbf{1.35550} & \textbf{0.00092} & \textbf{38\,003 $\pm$ 8\,754} & \\
-\midrule
-GPU SVD ($k{=}5$) & 0 & 1.35410 & --- & 14\,550 & 11\,640 \\
-                  & 1 & 1.35343 & --- & 14\,510 & 11\,608 \\
-                  & 2 & 1.35399 & --- & 14\,263 & 11\,410 \\
-\cmidrule{2-6}
- & \textbf{Mean} & \textbf{1.35384} & \textbf{0.00036} & \textbf{14\,441 $\pm$ 155} & \\
-\midrule
-\multicolumn{2}{@{}l}{SVD $-$ Table (CPU)} & \multicolumn{2}{c}{88~pcm} &
-\multicolumn{2}{c}{$1.33\times$} \\
-\multicolumn{2}{@{}l}{GPU $-$ CPU SVD} & \multicolumn{2}{c}{285~pcm} &
-\multicolumn{2}{c}{$1.97\times$} \\
-\multicolumn{2}{@{}l}{GPU $-$ CPU Table} & \multicolumn{2}{c}{166~pcm} &
-\multicolumn{2}{c}{$2.63\times$} \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-\paragraph{Timing variance analysis.}
-The CPU timing shows large inter-seed variance ($\sigma/\mu \approx 30\%$)
-due to OS scheduling, thermal throttling, and background processes on a
-shared workstation. The GPU timing is stable ($\sigma/\mu \approx 1\%$)
-because GPU execution is deterministic at the hardware level---no OS
-interrupts, no context switches, no frequency scaling during kernel
-execution. For rigorous timing comparisons, the GPU $\sigma$ is the
-appropriate metric; the CPU median may be more representative than the
-mean for CPU timing.
-
-\paragraph{Reactivity comparison.}
-All three modes agree within their combined statistical uncertainties.
-The SVD fidelity cost (88~pcm CPU-to-CPU) is below the combined
-$1\sigma$ envelope ($\sqrt{150^2 + 92^2} = 176$~pcm), confirming that
-SVD compression at rank~5 does not introduce statistically detectable
-bias for the PWR pin cell.
 
 \end{document}

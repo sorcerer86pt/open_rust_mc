@@ -50,6 +50,11 @@ mod cuda_main {
         /// Geometry: "pwr" (8 nuclides, pin cell) or "godiva" (3 nuclides, bare sphere)
         #[arg(short, long, default_value = "pwr")]
         geometry: String,
+        /// Force SVD XS path on GPU by clearing uploaded pointwise tables.
+        /// Without this flag, nuclides with pointwise data use exact-table lookups
+        /// and `--rank` only affects discrete inelastic levels.
+        #[arg(long, default_value_t = false)]
+        force_svd: bool,
     }
 
     const PWR_NUCLIDES: &[(&str, f64, f64, usize)] = &[
@@ -284,7 +289,15 @@ mod cuda_main {
         for &(filename, awr, nu_bar, nuc_temp_idx) in nuclide_specs {
             let path = args.data_dir.join(filename);
             println!("  Loading {}...", filename);
-            kernels.push(xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar));
+            let mut k = xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar);
+            if args.force_svd {
+                // Null out pointwise XS so GPU uses SVD path for main channels.
+                k.pointwise_xs = None;
+            }
+            kernels.push(k);
+        }
+        if args.force_svd {
+            println!("  force_svd: cleared pointwise XS -> GPU uses SVD rank={} for main channels", args.rank);
         }
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
         println!("  Loaded in {load_ms:.0} ms");
