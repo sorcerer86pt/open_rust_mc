@@ -25,6 +25,8 @@ pub struct NuclideKernels {
     pub total_xs_raw: Option<Vec<f64>>,
     /// Missing channel XS = total_hdf5 - (el + inel + n2n + n3n + fis + cap) from pointwise data.
     pub missing_xs: Option<Vec<f64>>,
+    /// Pointwise XS [n_energy * 7]: el, inel, n2n, n3n, fis, cap, total — for GPU upload.
+    pub pointwise_xs: Option<Vec<f64>>,
     /// SVD kernel for inelastic scattering (MT=4, total inelastic).
     pub inelastic: Option<ReactionKernel>,
     /// SVD kernel for (n,2n) reaction (MT=16).
@@ -427,7 +429,7 @@ pub fn load_nuclide(
         Err(e) => {
             eprintln!("    WARNING: failed to open {}: {e}", h5_path.display());
             return NuclideKernels {
-                elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, inelastic: None, n2n: None, n3n: None,
+                elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, pointwise_xs: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback, nu_bar_table: None,
                 discrete_levels: vec![], has_continuum_inelastic: false,
@@ -537,8 +539,10 @@ pub fn load_nuclide(
         missing
     });
 
+    let pointwise_xs = reader.compute_pointwise_xs(temp_idx);
+
     NuclideKernels {
-        elastic, total_table, total_xs_raw: total_xs_vec, missing_xs, inelastic, n2n, n3n, fission, capture,
+        elastic, total_table, total_xs_raw: total_xs_vec, missing_xs, pointwise_xs, inelastic, n2n, n3n, fission, capture,
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,

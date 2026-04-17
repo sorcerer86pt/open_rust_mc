@@ -325,6 +325,53 @@ impl NuclideFileReader {
         })
     }
 
+    /// Compute pointwise XS for all 7 channels (el, inel, n2n, n3n, fis, cap, total)
+    /// at one temperature on the unionized grid. Returns [n_energy * 7] flat array.
+    /// Channel order: 0=elastic, 1=inelastic, 2=n2n, 3=n3n, 4=fission, 5=capture, 6=total.
+    pub fn compute_pointwise_xs(&self, temp_idx: usize) -> Option<Vec<f64>> {
+        let n = self.union_grid.len();
+        if n == 0 { return None; }
+
+        let read = |mt: u32| -> Vec<f64> {
+            self.read_reaction(mt).ok()
+                .and_then(|d| d.xs_per_temp.get(temp_idx).cloned())
+                .unwrap_or_else(|| vec![0.0; n])
+        };
+
+        let elastic = read(2);
+        let mut inelastic = read(4);
+        if inelastic.iter().all(|&v| v == 0.0) {
+            for mt in 51..=91 {
+                if let Ok(data) = self.read_reaction(mt) {
+                    if let Some(xs) = data.xs_per_temp.get(temp_idx) {
+                        for i in 0..n.min(xs.len()) { inelastic[i] += xs[i].max(0.0); }
+                    }
+                }
+            }
+        }
+        let n2n = read(16);
+        let n3n = read(17);
+        let fission = read(18);
+        let capture = read(102);
+        let total = self.compute_total_xs(temp_idx).unwrap_or_else(|| {
+            (0..n).map(|i| elastic[i] + inelastic[i] + n2n[i] + n3n[i] + fission[i] + capture[i]).collect()
+        });
+
+        let mut out = vec![0.0_f64; n * 7];
+        for i in 0..n {
+            out[i * 7 + 0] = elastic[i].max(0.0);
+            out[i * 7 + 1] = inelastic[i].max(0.0);
+            out[i * 7 + 2] = n2n[i].max(0.0);
+            out[i * 7 + 3] = n3n[i].max(0.0);
+            out[i * 7 + 4] = fission[i].max(0.0);
+            out[i * 7 + 5] = capture[i].max(0.0);
+            out[i * 7 + 6] = total[i].max(0.0);
+        }
+        println!("    Pointwise XS: {} energy pts × 7 channels = {:.1} KB",
+                 n, out.len() as f64 * 8.0 / 1024.0);
+        Some(out)
+    }
+
     /// List all physics reaction MT numbers in the HDF5 file (MT < 200).
     pub fn list_reaction_mts(&self) -> Vec<u32> {
         let root = self.file.root();

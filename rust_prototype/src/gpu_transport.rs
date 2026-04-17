@@ -12,7 +12,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 70;
+const N_PARAMS: usize = 73;
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -52,6 +52,9 @@ pub struct GpuNuclideData {
     pub total_xs: CudaSlice<f64>,
     pub total_xs_offsets: CudaSlice<i32>,
     pub has_total_xs: CudaSlice<i32>,
+    pub pointwise_xs: CudaSlice<f64>,
+    pub pw_offsets: CudaSlice<i32>,
+    pub has_pw: CudaSlice<i32>,
     // Energy-dependent nu-bar tables
     pub nu_bar_energies: CudaSlice<f64>,
     pub nu_bar_values: CudaSlice<f64>,
@@ -235,6 +238,9 @@ impl GpuTransportContext {
             dptr!(&nuc_data.total_xs),
             dptr!(&nuc_data.total_xs_offsets),
             dptr!(&nuc_data.has_total_xs),
+            dptr!(&nuc_data.pointwise_xs),
+            dptr!(&nuc_data.pw_offsets),
+            dptr!(&nuc_data.has_pw),
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -324,6 +330,9 @@ impl GpuTransportContext {
             dptr!(&nuc_data.total_xs),
             dptr!(&nuc_data.total_xs_offsets),
             dptr!(&nuc_data.has_total_xs),
+            dptr!(&nuc_data.pointwise_xs),
+            dptr!(&nuc_data.pw_offsets),
+            dptr!(&nuc_data.has_pw),
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -425,13 +434,27 @@ impl GpuTransportContext {
         let mut total_xs_off_vec = vec![0_i32; n_nuc];
         let mut has_total_xs_vec = vec![0_i32; n_nuc];
         for (nuc_idx, nuc) in nuclides.iter().enumerate() {
-            if let Some(ref xs) = nuc.missing_xs {
+            if let Some(ref xs) = nuc.total_xs_raw {
                 total_xs_off_vec[nuc_idx] = total_xs_vec.len() as i32;
                 has_total_xs_vec[nuc_idx] = 1;
                 total_xs_vec.extend_from_slice(xs);
             }
         }
         if total_xs_vec.is_empty() { total_xs_vec.push(0.0); }
+
+        // ── Pack pointwise XS tables (7 channels per energy point) ──
+        let mut pw_xs_vec: Vec<f64> = Vec::new();
+        let mut pw_off_vec = vec![0_i32; n_nuc];
+        let mut has_pw_vec = vec![0_i32; n_nuc];
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref pw) = nuc.pointwise_xs {
+                pw_off_vec[nuc_idx] = pw_xs_vec.len() as i32;
+                has_pw_vec[nuc_idx] = 1;
+                pw_xs_vec.extend_from_slice(pw);
+            }
+        }
+        if pw_xs_vec.is_empty() { pw_xs_vec.push(0.0); }
+        println!("  GPU: pointwise XS = {:.1} MB", pw_xs_vec.len() as f64 * 8.0 / 1e6);
 
         // ── Pack discrete inelastic levels (Q-values + SVD basis) ──
         let mut lev_q_vec: Vec<f64> = Vec::new();
@@ -603,6 +626,9 @@ impl GpuTransportContext {
             total_xs: self.stream.clone_htod(&total_xs_vec)?,
             total_xs_offsets: self.stream.clone_htod(&total_xs_off_vec)?,
             has_total_xs: self.stream.clone_htod(&has_total_xs_vec)?,
+            pointwise_xs: self.stream.clone_htod(&pw_xs_vec)?,
+            pw_offsets: self.stream.clone_htod(&pw_off_vec)?,
+            has_pw: self.stream.clone_htod(&has_pw_vec)?,
             level_q_values: self.stream.clone_htod(&lev_q_vec)?,
             level_thresholds: self.stream.clone_htod(&lev_thr_vec)?,
             level_offsets: self.stream.clone_htod(&lev_off_vec)?,
@@ -936,6 +962,9 @@ impl GpuTransportContext {
             dptr!(&nuc_data.total_xs),                // 67 P_TOTAL_XS
             dptr!(&nuc_data.total_xs_offsets),         // 68 P_TOTAL_XS_OFF
             dptr!(&nuc_data.has_total_xs),             // 69 P_HAS_TOTAL_XS
+            dptr!(&nuc_data.pointwise_xs),             // 70 P_PW_XS
+            dptr!(&nuc_data.pw_offsets),               // 71 P_PW_OFF
+            dptr!(&nuc_data.has_pw),                   // 72 P_HAS_PW
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -1176,6 +1205,9 @@ impl GpuTransportContext {
             dptr!(&nuc_data.total_xs),
             dptr!(&nuc_data.total_xs_offsets),
             dptr!(&nuc_data.has_total_xs),
+            dptr!(&nuc_data.pointwise_xs),
+            dptr!(&nuc_data.pw_offsets),
+            dptr!(&nuc_data.has_pw),
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
