@@ -325,6 +325,77 @@ impl NuclideFileReader {
         })
     }
 
+    /// List all physics reaction MT numbers in the HDF5 file (MT < 200).
+    pub fn list_reaction_mts(&self) -> Vec<u32> {
+        let root = self.file.root();
+        let nuc = match root.group(&self.nuclide_name) {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        let reactions = match nuc.group("reactions") {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        let groups = match reactions.groups() {
+            Ok(g) => g,
+            Err(_) => return vec![],
+        };
+        groups.iter()
+            .filter_map(|name| {
+                let mt: u32 = name.strip_prefix("reaction_")?.parse().ok()?;
+                if mt < 200 { Some(mt) } else { None }
+            })
+            .collect()
+    }
+
+    /// Compute total XS from HDF5 at one temperature on the unionized grid.
+    ///
+    /// Uses MT=2 (elastic) + MT=3 (nonelastic) when available (exact match to OpenMC).
+    /// Otherwise sums individual leaf reactions, excluding sum-MTs (1, 3, 4).
+    pub fn compute_total_xs(&self, temp_idx: usize) -> Option<Vec<f64>> {
+        let mts = self.list_reaction_mts();
+        if mts.is_empty() { return None; }
+
+        let n = self.union_grid.len();
+        let has_mt3 = mts.contains(&3);
+
+        if has_mt3 {
+            let el = self.read_reaction(2).ok()?;
+            let nel = self.read_reaction(3).ok()?;
+            let xs_el = el.xs_per_temp.get(temp_idx)?;
+            let xs_nel = nel.xs_per_temp.get(temp_idx)?;
+            let mut total = vec![0.0_f64; n];
+            for i in 0..n {
+                total[i] = xs_el.get(i).copied().unwrap_or(0.0).max(0.0)
+                         + xs_nel.get(i).copied().unwrap_or(0.0).max(0.0);
+            }
+            println!("    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)");
+            return Some(total);
+        }
+
+        // No MT=3: sum leaf reactions (exclude MT=1,3,4 which are sums of others)
+        let mut total = vec![0.0_f64; n];
+        let mut count = 0_u32;
+        for mt in &mts {
+            if matches!(*mt, 1 | 3 | 4) { continue; }
+            if let Ok(data) = self.read_reaction(*mt) {
+                if let Some(xs) = data.xs_per_temp.get(temp_idx) {
+                    for i in 0..n.min(xs.len()) {
+                        total[i] += xs[i].max(0.0);
+                    }
+                    count += 1;
+                }
+            }
+        }
+
+        if count > 0 {
+            println!("    Total XS: summed {count} leaf reactions (no MT=3 available)");
+            Some(total)
+        } else {
+            None
+        }
+    }
+
     /// Read the AWR attribute.
     pub fn awr(&self) -> Result<f64> {
         let root = self.file.root();

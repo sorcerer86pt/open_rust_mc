@@ -52,21 +52,21 @@ mod cuda_main {
         geometry: String,
     }
 
-    const PWR_NUCLIDES: &[(&str, f64, f64)] = &[
-        ("U235.h5", 233.025, 2.43),
-        ("U238.h5", 236.006, 2.49),
-        ("O16.h5",  15.858,  0.0),
-        ("H1.h5",    0.999,  0.0),
-        ("Zr90.h5", 89.132,  0.0),
-        ("Zr91.h5", 90.130,  0.0),
-        ("Zr92.h5", 91.126,  0.0),
-        ("Zr94.h5", 93.120,  0.0),
+    const PWR_NUCLIDES: &[(&str, f64, f64, usize)] = &[
+        ("U235.h5", 233.025, 2.43, 3),  // fuel: 900K
+        ("U238.h5", 236.006, 2.49, 3),  // fuel: 900K
+        ("O16.h5",  15.858,  0.0,  2),  // shared: 600K
+        ("H1.h5",    0.999,  0.0,  2),  // water: 600K
+        ("Zr90.h5", 89.132,  0.0,  2),  // clad: 600K
+        ("Zr91.h5", 90.130,  0.0,  2),  // clad: 600K
+        ("Zr92.h5", 91.126,  0.0,  2),  // clad: 600K
+        ("Zr94.h5", 93.120,  0.0,  2),  // clad: 600K
     ];
 
-    const GODIVA_NUCLIDES: &[(&str, f64, f64)] = &[
-        ("U234.h5", 232.029, 2.49),
-        ("U235.h5", 233.025, 2.43),
-        ("U238.h5", 236.006, 2.49),
+    const GODIVA_NUCLIDES: &[(&str, f64, f64, usize)] = &[
+        ("U234.h5", 232.029, 2.49, 1),  // 294K
+        ("U235.h5", 233.025, 2.43, 1),  // 294K
+        ("U238.h5", 236.006, 2.49, 1),  // 294K
     ];
 
     /// Per-seed result.
@@ -263,7 +263,7 @@ mod cuda_main {
 
         let is_godiva = args.geometry == "godiva";
         let geom_type: i32 = if is_godiva { 1 } else { 0 };
-        let nuclide_specs: &[(&str, f64, f64)] = if is_godiva { GODIVA_NUCLIDES } else { PWR_NUCLIDES };
+        let nuclide_specs: &[(&str, f64, f64, usize)] = if is_godiva { GODIVA_NUCLIDES } else { PWR_NUCLIDES };
         let geom_label = if is_godiva { "Godiva (bare HEU sphere)" } else { "PWR pin cell" };
 
         println!("=== GPU {} — Paper Benchmark ===\n", geom_label);
@@ -280,10 +280,10 @@ mod cuda_main {
         println!("\n── Loading nuclear data (SVD, rank={}) ──", args.rank);
         let t_load = Instant::now();
         let mut kernels = Vec::new();
-        for &(filename, awr, nu_bar) in nuclide_specs {
+        for &(filename, awr, nu_bar, nuc_temp_idx) in nuclide_specs {
             let path = args.data_dir.join(filename);
             println!("  Loading {}...", filename);
-            kernels.push(xs_provider::load_nuclide(&path, args.rank, args.temp_idx, awr, nu_bar));
+            kernels.push(xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar));
         }
         let load_ms = t_load.elapsed().as_secs_f64() * 1000.0;
         println!("  Loaded in {load_ms:.0} ms");
@@ -352,17 +352,17 @@ mod cuda_main {
     fn setup_materials() -> Vec<open_rust_mc::transport::material::Material> {
         use open_rust_mc::transport::material::Material;
         let mut fuel = Material::new("UO2", 900.0);
-        fuel.add_nuclide(0.00072, 0);
-        fuel.add_nuclide(0.02219, 1);
-        fuel.add_nuclide(0.04582, 2);
+        fuel.add_nuclide(0.000719, 0);
+        fuel.add_nuclide(0.022482, 1);
+        fuel.add_nuclide(0.046402, 2);
         let mut clad = Material::new("Zircaloy", 600.0);
-        clad.add_nuclide(0.02189, 4);
-        clad.add_nuclide(0.00477, 5);
-        clad.add_nuclide(0.00729, 6);
-        clad.add_nuclide(0.00739, 7);
+        clad.add_nuclide(0.022932, 4);
+        clad.add_nuclide(0.004996, 5);
+        clad.add_nuclide(0.007636, 6);
+        clad.add_nuclide(0.007740, 7);
         let mut water = Material::new("H2O", 600.0);
-        water.add_nuclide(0.04937, 3);
-        water.add_nuclide(0.02469, 2);
+        water.add_nuclide(0.049486, 3);
+        water.add_nuclide(0.024743, 2);
         vec![fuel, clad, water]
     }
 }

@@ -326,6 +326,7 @@ fn transport_particle<XS: XsProvider>(
             break;
         }
 
+        void_crossings = 0;
         let material = &materials[mat_idx];
 
         // Look up microscopic cross-sections with URR sampling.

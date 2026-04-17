@@ -58,17 +58,20 @@ struct Args {
     seeds: u32,
 }
 
-/// Nuclide specs: (filename, AWR, fallback nu-bar).
+/// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
 /// Index in this array = xs_kernel_idx used by materials.
-const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
-    ("U235.h5", 233.025, 2.43),  // 0
-    ("U238.h5", 236.006, 2.49),  // 1
-    ("O16.h5",  15.858,  0.0),   // 2
-    ("H1.h5",    0.999,  0.0),   // 3
-    ("Zr90.h5", 89.132,  0.0),   // 4
-    ("Zr91.h5", 90.130,  0.0),   // 5
-    ("Zr92.h5", 91.126,  0.0),   // 6
-    ("Zr94.h5", 93.120,  0.0),   // 7
+/// temp_idx after numeric sort: 0=250K, 1=294K, 2=600K, 3=900K, 4=1200K, 5=2500K
+/// O16 is duplicated: idx 2 at 900K for fuel, idx 8 at 600K for water.
+const NUCLIDE_SPECS: &[(&str, f64, f64, usize)] = &[
+    ("U235.h5", 233.025, 2.43, 3),  // 0  fuel: 900K
+    ("U238.h5", 236.006, 2.49, 3),  // 1  fuel: 900K
+    ("O16.h5",  15.858,  0.0,  3),  // 2  fuel O16: 900K
+    ("H1.h5",    0.999,  0.0,  2),  // 3  water: 600K
+    ("Zr90.h5", 89.132,  0.0,  2),  // 4  clad: 600K
+    ("Zr91.h5", 90.130,  0.0,  2),  // 5  clad: 600K
+    ("Zr92.h5", 91.126,  0.0,  2),  // 6  clad: 600K
+    ("Zr94.h5", 93.120,  0.0,  2),  // 7  clad: 600K
+    ("O16.h5",  15.858,  0.0,  2),  // 8  water O16: 600K
 ];
 
 /// Results from one seeded run.
@@ -294,23 +297,23 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
 
 fn setup_materials() -> Vec<Material> {
     // Material 0: UO2 fuel (3.1% enriched, 10.4 g/cm³)
-    // Atom densities from OpenMC model (atoms/barn-cm)
+    // Atom densities from OpenMC (atoms/barn-cm)
     let mut fuel = Material::new("UO2", 900.0);
-    fuel.add_nuclide(0.00072, 0);   // U-235  (xs_kernel_idx=0)
-    fuel.add_nuclide(0.02219, 1);   // U-238  (xs_kernel_idx=1)
-    fuel.add_nuclide(0.04582, 2);   // O-16   (xs_kernel_idx=2)
+    fuel.add_nuclide(0.000719, 0);  // U-235  (xs_kernel_idx=0)
+    fuel.add_nuclide(0.022482, 1);  // U-238  (xs_kernel_idx=1)
+    fuel.add_nuclide(0.046402, 2);  // O-16   (xs_kernel_idx=2)
 
-    // Material 1: Zircaloy-4 cladding (6.55 g/cm³, simplified)
+    // Material 1: Zircaloy-4 cladding (6.55 g/cm³)
     let mut clad = Material::new("Zircaloy", 600.0);
-    clad.add_nuclide(0.02189, 4);   // Zr-90  (xs_kernel_idx=4)
-    clad.add_nuclide(0.00477, 5);   // Zr-91  (xs_kernel_idx=5)
-    clad.add_nuclide(0.00729, 6);   // Zr-92  (xs_kernel_idx=6)
-    clad.add_nuclide(0.00739, 7);   // Zr-94  (xs_kernel_idx=7)
+    clad.add_nuclide(0.022932, 4);  // Zr-90  (xs_kernel_idx=4)
+    clad.add_nuclide(0.004996, 5);  // Zr-91  (xs_kernel_idx=5)
+    clad.add_nuclide(0.007636, 6);  // Zr-92  (xs_kernel_idx=6)
+    clad.add_nuclide(0.007740, 7);  // Zr-94  (xs_kernel_idx=7)
 
     // Material 2: Light water (0.74 g/cm³, 600K)
     let mut water = Material::new("H2O", 600.0);
-    water.add_nuclide(0.04937, 3);  // H-1    (xs_kernel_idx=3)
-    water.add_nuclide(0.02469, 2);  // O-16   (xs_kernel_idx=2, shared with fuel)
+    water.add_nuclide(0.049486, 3); // H-1    (xs_kernel_idx=3)
+    water.add_nuclide(0.024743, 8); // O-16   (xs_kernel_idx=8, at 600K)
 
     vec![fuel, clad, water]
 }
@@ -350,19 +353,19 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     let t0 = Instant::now();
 
     let mut kernels = Vec::new();
-    for &(filename, awr, nu_bar) in NUCLIDE_SPECS {
+    for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
             kernels.push(xs_provider::NuclideKernels {
-                elastic: None, inelastic: None, n2n: None, n3n: None,
+                elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
                 nu_bar_table: None, discrete_levels: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
                 fission_energy_dist: None, urr_tables: None,
             });
         } else {
-            kernels.push(xs_provider::load_nuclide(&path, args.rank, args.temp_idx, awr, nu_bar));
+            kernels.push(xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar));
         }
     }
 
@@ -380,19 +383,19 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     let t0 = Instant::now();
 
     let mut tables = Vec::new();
-    for &(filename, awr, nu_bar) in NUCLIDE_SPECS {
+    for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
             tables.push(xs_provider::NuclideTableData {
-                elastic: None, inelastic: None, n2n: None, n3n: None,
+                elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
                 nu_bar_table: None, discrete_levels: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
                 fission_energy_dist: None, urr_tables: None,
             });
         } else {
-            tables.push(xs_provider::load_nuclide_table(&path, args.temp_idx, awr, nu_bar));
+            tables.push(xs_provider::load_nuclide_table(&path, nuc_temp_idx, awr, nu_bar));
         }
     }
 

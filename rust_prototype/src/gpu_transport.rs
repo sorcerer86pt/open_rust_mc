@@ -12,7 +12,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 66;
+const N_PARAMS: usize = 70;
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -49,6 +49,9 @@ pub struct GpuNuclideData {
     pub has_reaction: CudaSlice<i32>,
     pub coeffs_offsets: CudaSlice<i32>,
     pub rank: i32,
+    pub total_xs: CudaSlice<f64>,
+    pub total_xs_offsets: CudaSlice<i32>,
+    pub has_total_xs: CudaSlice<i32>,
     // Energy-dependent nu-bar tables
     pub nu_bar_energies: CudaSlice<f64>,
     pub nu_bar_values: CudaSlice<f64>,
@@ -103,6 +106,7 @@ pub struct GpuSabData {
     pub eout_sizes: CudaSlice<i32>,
     pub e_out: CudaSlice<f64>,
     pub cdf_e: CudaSlice<f64>,
+    pub pdf_e: CudaSlice<f64>,
     pub mu_offsets: CudaSlice<i32>,
     pub mu_sizes: CudaSlice<i32>,
     pub mu: CudaSlice<f64>,
@@ -215,12 +219,16 @@ impl GpuTransportContext {
             dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
             dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
             dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&sab_data.pdf_e),
             dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
             dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
             dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
             dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
             dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
             geom_type as u64,
+            dptr!(&nuc_data.total_xs),
+            dptr!(&nuc_data.total_xs_offsets),
+            dptr!(&nuc_data.has_total_xs),
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -300,12 +308,16 @@ impl GpuTransportContext {
             dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
             dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
             dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&sab_data.pdf_e),
             dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
             dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
             dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
             dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
             dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
             geom_type as u64,
+            dptr!(&nuc_data.total_xs),
+            dptr!(&nuc_data.total_xs_offsets),
+            dptr!(&nuc_data.has_total_xs),
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -341,7 +353,7 @@ impl GpuTransportContext {
         rank: usize,
     ) -> Result<GpuNuclideData, Box<dyn std::error::Error>> {
         let n_nuc = nuclides.len();
-        let n_rxn = 6; // elastic, inelastic, n2n, n3n, fission, capture
+        let n_rxn = 7; // elastic, inelastic, n2n, n3n, fission, capture, total
 
         // Concatenate all basis, coefficients, and energy grids
         let mut all_basis_vec: Vec<f32> = Vec::new();
@@ -372,13 +384,14 @@ impl GpuTransportContext {
             }
 
             // Each reaction
-            let reactions: [Option<&crate::transport::xs_provider::ReactionKernel>; 6] = [
+            let reactions: [Option<&crate::transport::xs_provider::ReactionKernel>; 7] = [
                 nuc.elastic.as_ref(),
                 nuc.inelastic.as_ref(),
                 nuc.n2n.as_ref(),
                 nuc.n3n.as_ref(),
                 nuc.fission.as_ref(),
                 nuc.capture.as_ref(),
+                None, // RXN_TOTAL: not an SVD kernel, handled via pointwise total_xs
             ];
 
             for (rxn_idx, rxn_opt) in reactions.iter().enumerate() {
@@ -400,6 +413,19 @@ impl GpuTransportContext {
         if all_basis_vec.is_empty() { all_basis_vec.push(0.0); }
         if all_coeffs_vec.is_empty() { all_coeffs_vec.push(0.0); }
         if all_grids_vec.is_empty() { all_grids_vec.push(0.0); }
+
+        // ── Pack pointwise total XS (sum of all HDF5 reactions) ──
+        let mut total_xs_vec: Vec<f64> = Vec::new();
+        let mut total_xs_off_vec = vec![0_i32; n_nuc];
+        let mut has_total_xs_vec = vec![0_i32; n_nuc];
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref xs) = nuc.missing_xs {
+                total_xs_off_vec[nuc_idx] = total_xs_vec.len() as i32;
+                has_total_xs_vec[nuc_idx] = 1;
+                total_xs_vec.extend_from_slice(xs);
+            }
+        }
+        if total_xs_vec.is_empty() { total_xs_vec.push(0.0); }
 
         // ── Pack discrete inelastic levels (Q-values + SVD basis) ──
         let mut lev_q_vec: Vec<f64> = Vec::new();
@@ -568,6 +594,9 @@ impl GpuTransportContext {
             has_reaction: self.stream.clone_htod(&has_reaction_vec)?,
             coeffs_offsets: self.stream.clone_htod(&coeffs_offsets_vec)?,
             rank: rank as i32,
+            total_xs: self.stream.clone_htod(&total_xs_vec)?,
+            total_xs_offsets: self.stream.clone_htod(&total_xs_off_vec)?,
+            has_total_xs: self.stream.clone_htod(&has_total_xs_vec)?,
             level_q_values: self.stream.clone_htod(&lev_q_vec)?,
             level_thresholds: self.stream.clone_htod(&lev_thr_vec)?,
             level_offsets: self.stream.clone_htod(&lev_off_vec)?,
@@ -689,6 +718,7 @@ impl GpuTransportContext {
                     eout_sizes: self.stream.clone_htod(&eout_sizes)?,
                     e_out: self.stream.clone_htod(&c.e_out)?,
                     cdf_e: self.stream.clone_htod(&c.cdf_e)?,
+                    pdf_e: self.stream.clone_htod(&c.pdf_e)?,
                     mu_offsets: self.stream.clone_htod(&mu_offs)?,
                     mu_sizes: self.stream.clone_htod(&mu_szs)?,
                     mu: self.stream.clone_htod(&c.mu)?,
@@ -707,6 +737,7 @@ impl GpuTransportContext {
                     eout_sizes: self.stream.clone_htod(&[0_i32])?,
                     e_out: self.stream.clone_htod(&[0.0_f64])?,
                     cdf_e: self.stream.clone_htod(&[0.0_f64])?,
+                    pdf_e: self.stream.clone_htod(&[0.0_f64])?,
                     mu_offsets: self.stream.clone_htod(&[0_i32])?,
                     mu_sizes: self.stream.clone_htod(&[0_i32])?,
                     mu: self.stream.clone_htod(&[0.0_f64])?,
@@ -727,6 +758,7 @@ impl GpuTransportContext {
             eout_sizes: self.stream.clone_htod(&[0_i32])?,
             e_out: self.stream.clone_htod(&[0.0_f64])?,
             cdf_e: self.stream.clone_htod(&[0.0_f64])?,
+            pdf_e: self.stream.clone_htod(&[0.0_f64])?,
             mu_offsets: self.stream.clone_htod(&[0_i32])?,
             mu_sizes: self.stream.clone_htod(&[0_i32])?,
             mu: self.stream.clone_htod(&[0.0_f64])?,
@@ -883,17 +915,21 @@ impl GpuTransportContext {
             dptr!(&sab_data.cdf_mu),                  // 52 P_SAB_CDF_MU
             dptr!(&sab_data.xs),                      // 53 P_SAB_XS
             sab_data.energy_max.to_bits(),            // 54 P_SAB_EMAX (f64 as bits)
-            dptr!(&nuc_data.urr_energies),            // 55 P_URR_ENERGIES
-            dptr!(&nuc_data.urr_cum_prob),            // 56 P_URR_CUM_PROB
-            dptr!(&nuc_data.urr_total_f),             // 57 P_URR_TOTAL_F
-            dptr!(&nuc_data.urr_elastic_f),           // 58 P_URR_ELASTIC_F
-            dptr!(&nuc_data.urr_fission_f),           // 59 P_URR_FISSION_F
-            dptr!(&nuc_data.urr_capture_f),           // 60 P_URR_CAPTURE_F
-            dptr!(&nuc_data.urr_offsets),              // 61 P_URR_OFFSETS
-            dptr!(&nuc_data.urr_n_energies),           // 62 P_URR_N_ENERGIES
-            dptr!(&nuc_data.urr_n_bands),              // 63 P_URR_N_BANDS
-            dptr!(&nuc_data.urr_multiply_smooth),      // 64 P_URR_MULT_SM
-            geom_type as u64,                         // 65 P_GEOM_TYPE
+            dptr!(&sab_data.pdf_e),                   // 55 P_SAB_PDF_E
+            dptr!(&nuc_data.urr_energies),            // 56 P_URR_ENERGIES
+            dptr!(&nuc_data.urr_cum_prob),            // 57 P_URR_CUM_PROB
+            dptr!(&nuc_data.urr_total_f),             // 58 P_URR_TOTAL_F
+            dptr!(&nuc_data.urr_elastic_f),           // 59 P_URR_ELASTIC_F
+            dptr!(&nuc_data.urr_fission_f),           // 60 P_URR_FISSION_F
+            dptr!(&nuc_data.urr_capture_f),           // 61 P_URR_CAPTURE_F
+            dptr!(&nuc_data.urr_offsets),              // 62 P_URR_OFFSETS
+            dptr!(&nuc_data.urr_n_energies),           // 63 P_URR_N_ENERGIES
+            dptr!(&nuc_data.urr_n_bands),              // 64 P_URR_N_BANDS
+            dptr!(&nuc_data.urr_multiply_smooth),      // 65 P_URR_MULT_SM
+            geom_type as u64,                         // 66 P_GEOM_TYPE
+            dptr!(&nuc_data.total_xs),                // 67 P_TOTAL_XS
+            dptr!(&nuc_data.total_xs_offsets),         // 68 P_TOTAL_XS_OFF
+            dptr!(&nuc_data.has_total_xs),             // 69 P_HAS_TOTAL_XS
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;

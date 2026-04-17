@@ -195,7 +195,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
             kernels.push(xs_provider::NuclideKernels {
-                elastic: None, inelastic: None, n2n: None, n3n: None,
+                elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
                 nu_bar_table: None, discrete_levels: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
@@ -220,7 +220,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
             tables.push(xs_provider::NuclideTableData {
-                elastic: None, inelastic: None, n2n: None, n3n: None,
+                elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
                 nu_bar_table: None, discrete_levels: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,

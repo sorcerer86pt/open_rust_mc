@@ -153,18 +153,33 @@ scripts/paper_openmc_benchmark.py         Multi-seed OpenMC runner
 run_paper_full.ps1                        Full benchmark script (CPU + GPU + scaling)
 ```
 
+### Bugs Found and Fixed (PWR GPU session)
+
+10. **GPU S(α,β) missing kinematic energy scaling** (transport.cu sab_sample):
+    GPU sampled outgoing energy directly from one bounding table without
+    OpenMC Eq 31/35 scaling to the actual incident energy's kinematic bounds.
+    CPU's `sample_continuous_inelastic()` in thermal.rs:346-361 does:
+    `e_out = e_min + (e_hat - e_ell_min)/(e_ell_max - e_ell_min) * (e_max - e_min)`
+    This affected ALL ~164,000 thermal scatters/batch (28% of collisions).
+    Also added PDF-based CDF inversion (Eq 33/34) replacing simple linear interp.
+    Also switched angular sampling from CDF to equiprobable bins + smearing
+    (matching CPU algorithm). Expected impact: ~1000-2000 pcm.
+
+11. **GPU cell-finding nudge too tight** (transport.cu trace_surface):
+    `best_t + 1e-10` for determining next cell — CPU uses `1e-8` everywhere.
+    At fuel/gap boundary (r ≈ 0.41 cm), 1e-10 may not clear double-precision
+    ambiguity, causing occasional cell misassignment → surface stuckness.
+    Changed to `best_t + 1e-8`. Expected impact: ~100-500 pcm.
+
 ## Next Steps
 
-1. Investigate remaining 145 pcm GPU-CPU gap (transport loop structure)
+1. Run PWR GPU benchmark with fixes, compare to CPU k=1.355
 2. Rank sweep (k=1..6) for paper accuracy/speed tradeoff curve
-3. Rerun PWR pin cell benchmarks with all fixes
-4. Run OpenMC 10-seed reference via WSL (verify Table mode matches)
-5. Update paper tables + appendix with corrected numbers
-6. OpenCL port (gpu/opencl/)
+3. Run OpenMC 10-seed reference via WSL (verify Table mode matches)
+4. Update paper tables + appendix with corrected numbers
+5. OpenCL port (gpu/opencl/)
 
-
-
-### NEW - Things to check
+### Investigation notes (resolved)
 1. Thermal Scattering Replacement (S(α,β))This is a high-risk area for bias. In your Rust code:Rustif let Some(tsl) = xs_provider.thermal_scattering(nuc_idx) {
     if particle.energy < tsl.energy_max {
         // ... replaces free-atom elastic with thermal total ...

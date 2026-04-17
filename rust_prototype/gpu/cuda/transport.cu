@@ -8,8 +8,9 @@
 
 #define COINCIDENCE_TOL 1e-12
 #define PI 3.14159265358979323846
-#define N_REACTIONS 6
+#define N_REACTIONS 7
 #define RXN_ELASTIC 0
+#define RXN_TOTAL   6
 #define RXN_INELASTIC 1
 #define RXN_N2N 2
 #define RXN_N3N 3
@@ -104,18 +105,22 @@
 #define P_SAB_CDF_MU     52
 #define P_SAB_XS         53
 #define P_SAB_EMAX       54
-#define P_URR_ENERGIES   55
-#define P_URR_CUM_PROB   56
-#define P_URR_TOTAL_F    57
-#define P_URR_ELASTIC_F  58
-#define P_URR_FISSION_F  59
-#define P_URR_CAPTURE_F  60
-#define P_URR_OFFSETS    61
-#define P_URR_N_ENERGIES 62
-#define P_URR_N_BANDS    63
-#define P_URR_MULT_SM    64
-#define P_GEOM_TYPE      65
-#define N_PARAMS          66
+#define P_SAB_PDF_E      55
+#define P_URR_ENERGIES   56
+#define P_URR_CUM_PROB   57
+#define P_URR_TOTAL_F    58
+#define P_URR_ELASTIC_F  59
+#define P_URR_FISSION_F  60
+#define P_URR_CAPTURE_F  61
+#define P_URR_OFFSETS    62
+#define P_URR_N_ENERGIES 63
+#define P_URR_N_BANDS    64
+#define P_URR_MULT_SM    65
+#define P_GEOM_TYPE      66
+#define P_TOTAL_XS       67
+#define P_TOTAL_XS_OFF   68
+#define P_HAS_TOTAL_XS   69
+#define N_PARAMS          70
 
 // Access helpers — read from the flat u64 params buffer
 #define PTR_F(p, idx)   ((const float*)  (p)[(idx)])
@@ -251,7 +256,7 @@ __device__ void trace_surface(
     #undef TEST_SURF
 
     if (best_bc == BC_TRANSMISSION && best_t < 1e19) {
-        double nx=px+dx*(best_t+1e-10), ny=py+dy*(best_t+1e-10), nz=pz+dz*(best_t+1e-10);
+        double nx=px+dx*(best_t+1e-8), ny=py+dy*(best_t+1e-8), nz=pz+dz*(best_t+1e-8);
         best_next = find_cell(nx, ny, nz, geom_type);
     }
     *out_dist=best_t; *out_bc=best_bc; *out_next_cell=best_next;
@@ -440,35 +445,86 @@ __device__ void sab_sample(
 {
     int n = SCALAR_I(p, P_SAB_N_INC);
     if (n <= 0) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
-    int ie=0;
-    if (E_in<=PTR_D(p, P_SAB_INC_E)[0]) ie=0;
-    else if (E_in>=PTR_D(p, P_SAB_INC_E)[n-1]) ie=n-1;
+
+    const double* inc_e = PTR_D(p, P_SAB_INC_E);
+
+    // Step 1: Find bounding incident energies i_lo, i_hi
+    int i_hi = 1;
+    if (E_in <= inc_e[0]) { i_hi = 1; }
+    else if (E_in >= inc_e[n-1]) { i_hi = n-1; }
     else {
-        int lo=0,hi=n-1;
-        while(hi-lo>1){int mid=(lo+hi)/2;if(PTR_D(p, P_SAB_INC_E)[mid]<=E_in)lo=mid;else hi=mid;}
-        double f=(E_in-PTR_D(p, P_SAB_INC_E)[lo])/fmax(PTR_D(p, P_SAB_INC_E)[hi]-PTR_D(p, P_SAB_INC_E)[lo],1e-30);
-        ie = (pcg_uniform(rng)<f) ? hi : lo;
+        int lo=0, hi=n-1;
+        while(hi-lo>1){int mid=(lo+hi)/2; if(inc_e[mid]<=E_in) lo=mid; else hi=mid;}
+        i_hi = hi;
     }
-    int eo_off=PTR_I(p, P_SAB_EOUT_OFF)[ie], eo_sz=PTR_I(p, P_SAB_EOUT_SZ)[ie];
-    if (eo_sz<=1) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
-    double xi_e=pcg_uniform(rng);
-    const double* eo=&PTR_D(p, P_SAB_E_OUT)[eo_off];
-    const double* cdf_e=&PTR_D(p, P_SAB_CDF_E)[eo_off];
-    int lo=0,hi=eo_sz-1;
-    while(hi-lo>1){int mid=(lo+hi)/2;if(cdf_e[mid]<=xi_e)lo=mid;else hi=mid;}
-    double f_e=(xi_e-cdf_e[lo])/fmax(cdf_e[hi]-cdf_e[lo],1e-30);
-    *E_out=fmax(eo[lo]+f_e*(eo[hi]-eo[lo]),1e-11);
-    int eout_bin=lo;
-    int mu_key=eo_off+eout_bin;
-    int mu_off=PTR_I(p, P_SAB_MU_OFF)[mu_key], mu_sz=PTR_I(p, P_SAB_MU_SZ)[mu_key];
-    if (mu_sz<=1) { *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
-    double xi_mu=pcg_uniform(rng);
-    const double* mu_arr=&PTR_D(p, P_SAB_MU)[mu_off];
-    const double* cdf_mu=&PTR_D(p, P_SAB_CDF_MU)[mu_off];
-    lo=0; hi=mu_sz-1;
-    while(hi-lo>1){int mid=(lo+hi)/2;if(cdf_mu[mid]<=xi_mu)lo=mid;else hi=mid;}
-    double f_mu=(xi_mu-cdf_mu[lo])/fmax(cdf_mu[hi]-cdf_mu[lo],1e-30);
-    *mu_out=fmax(-1.0,fmin(1.0,mu_arr[lo]+f_mu*(mu_arr[hi]-mu_arr[lo])));
+    int i_lo = i_hi - 1;
+    double denom = inc_e[i_hi] - inc_e[i_lo];
+    double f = (denom > 1e-30) ? (E_in - inc_e[i_lo]) / denom : 0.0;
+
+    // Step 2: Stochastic table selection
+    int ell = (pcg_uniform(rng) > f) ? i_lo : i_hi;
+
+    int eo_off = PTR_I(p, P_SAB_EOUT_OFF)[ell];
+    int eo_sz  = PTR_I(p, P_SAB_EOUT_SZ)[ell];
+    if (eo_sz <= 1) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
+
+    const double* eo    = &PTR_D(p, P_SAB_E_OUT)[eo_off];
+    const double* cdf_e = &PTR_D(p, P_SAB_CDF_E)[eo_off];
+    const double* pdf_e = &PTR_D(p, P_SAB_PDF_E)[eo_off];
+
+    // Step 3: Sample outgoing energy bin from CDF
+    double xi_e = pcg_uniform(rng);
+    int j = 1;
+    { int lo=0, hi=eo_sz-1;
+      while(hi-lo>1){int mid=(lo+hi)/2; if(cdf_e[mid]<xi_e) lo=mid; else hi=mid;}
+      j = (lo == 0 && cdf_e[0] >= xi_e) ? 0 : lo;
+    }
+    if (j >= eo_sz-1) j = eo_sz-2;
+
+    // Step 4: PDF-based within-bin interpolation (OpenMC Eq 33/34)
+    double e_hat;
+    double dp = pdf_e[j+1] - pdf_e[j];
+    if (fabs(dp) < 1e-30) {
+        // Histogram bin
+        e_hat = (fabs(pdf_e[j]) < 1e-30) ? eo[j]
+              : eo[j] + (xi_e - cdf_e[j]) / pdf_e[j];
+    } else {
+        // Linear-linear interpolation (Eq 34)
+        double m = dp / fmax(eo[j+1] - eo[j], 1e-30);
+        double disc = pdf_e[j]*pdf_e[j] + 2.0*m*(xi_e - cdf_e[j]);
+        e_hat = (disc < 0.0) ? eo[j] : eo[j] + (sqrt(fmax(disc,0.0)) - pdf_e[j]) / m;
+    }
+
+    // Step 5: Kinematic energy scaling (OpenMC Eq 31/35)
+    int off_lo = PTR_I(p, P_SAB_EOUT_OFF)[i_lo];
+    int sz_lo  = PTR_I(p, P_SAB_EOUT_SZ)[i_lo];
+    int off_hi = PTR_I(p, P_SAB_EOUT_OFF)[i_hi];
+    int sz_hi  = PTR_I(p, P_SAB_EOUT_SZ)[i_hi];
+    const double* eo_all = PTR_D(p, P_SAB_E_OUT);
+    double e_min = eo_all[off_lo] + f * (eo_all[off_hi] - eo_all[off_lo]);
+    double e_max = eo_all[off_lo + sz_lo - 1] + f * (eo_all[off_hi + sz_hi - 1] - eo_all[off_lo + sz_lo - 1]);
+    double e_ell_min = eo[0];
+    double e_ell_max = eo[eo_sz - 1];
+    double e_range = e_ell_max - e_ell_min;
+    double e_out_final = (e_range > 1e-30)
+        ? e_min + (e_hat - e_ell_min) / e_range * (e_max - e_min)
+        : e_hat;
+    *E_out = fmax(e_out_final, 1e-11);
+
+    // Step 6: Angular distribution — equiprobable discrete bins with smearing
+    int mu_key = eo_off + j;
+    int mu_off = PTR_I(p, P_SAB_MU_OFF)[mu_key];
+    int mu_sz  = PTR_I(p, P_SAB_MU_SZ)[mu_key];
+    if (mu_sz <= 1) { *mu_out = 2.0*pcg_uniform(rng) - 1.0; return; }
+
+    const double* mu_arr = &PTR_D(p, P_SAB_MU)[mu_off];
+    int k = (int)(pcg_uniform(rng) * mu_sz);
+    if (k >= mu_sz) k = mu_sz - 1;
+    double mu_k = mu_arr[k];
+    double left  = (k > 0)        ? (mu_k - mu_arr[k-1]) : (mu_k + 1.0);
+    double right = (k+1 < mu_sz)  ? (mu_arr[k+1] - mu_k) : (1.0 - mu_k);
+    double hw = fmin(left, right);
+    *mu_out = fmax(-1.0, fmin(1.0, mu_k + hw * (pcg_uniform(rng) - 0.5)));
 }
 
 __device__ void apply_urr(
@@ -634,7 +690,7 @@ __device__ double sample_angular_dist_interp(
 extern "C" __global__ void debug_xs_reconstruct(
     Params p,
     const double* energies, int n_samples, int nuc_idx,
-    double* out_xs) // [n_samples * 6]
+    double* out_xs) // [n_samples * N_REACTIONS]
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_samples) return;
@@ -643,8 +699,8 @@ extern "C" __global__ void debug_xs_reconstruct(
     int g_off = PTR_I(p, P_GRID_OFFSETS)[nuc_idx];
     int n_e = PTR_I(p, P_N_ENERGIES)[nuc_idx];
     int e_idx = energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off], n_e, E);
-    for (int r = 0; r < 6; r++) {
-        int key = nuc_idx * 6 + r;
+    for (int r = 0; r < N_REACTIONS; r++) {
+        int key = nuc_idx * N_REACTIONS + r;
         double xs = 0.0;
         if (PTR_I(p, P_HAS_REACTION)[key]) {
             xs = svd_reconstruct(
@@ -652,7 +708,7 @@ extern "C" __global__ void debug_xs_reconstruct(
                 &PTR_D(p, P_COEFFS)[PTR_I(p, P_COEFFS_OFFSETS)[key]],
                 e_idx, rank);
         }
-        out_xs[tid * 6 + r] = xs;
+        out_xs[tid * N_REACTIONS + r] = xs;
     }
 }
 
@@ -777,7 +833,7 @@ transport_persistent(
             }
 
             double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0;
-            for (int r=0; r<N_REACTIONS; r++) {
+            for (int r=0; r<6; r++) {
                 int key = ni*N_REACTIONS+r;
                 if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
                     double s = svd_reconstruct_interp(
@@ -803,6 +859,14 @@ transport_persistent(
             }
 
             double micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+            if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
+                int m_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
+                double missing = PTR_D(p, P_TOTAL_XS)[m_off + e_idx];
+                if (missing > 0.0) {
+                    s_cap += missing;
+                    micro_t += missing;
+                }
+            }
             nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
             nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
             nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
