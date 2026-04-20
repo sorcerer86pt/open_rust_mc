@@ -12,11 +12,11 @@
 
 use std::sync::Arc;
 
-use crate::transport::simulate::XsProvider;
-use crate::physics::collision::MicroXs;
-use crate::transport::xs_provider::SvdXsProvider;
 use crate::hdf5_reader::{AngularDistribution, DiscreteLevelInfo, EnergyDistribution};
+use crate::physics::collision::MicroXs;
 use crate::thermal::ThermalScatteringData;
+use crate::transport::simulate::XsProvider;
+use crate::transport::xs_provider::SvdXsProvider;
 use crate::wmp::WindowedMultipole;
 
 /// Hybrid provider: SVD everywhere, overridden by WMP inside the resolved
@@ -31,8 +31,11 @@ impl HybridSvdWmpXsProvider {
     /// Wrap an `SvdXsProvider`. `wmps` length must equal the number of
     /// nuclides in the inner provider; `None` entries keep the SVD path.
     pub fn new(inner: SvdXsProvider, wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>>) -> Self {
-        assert_eq!(inner.nuclides.len(), wmps.len(),
-                   "wmps length must match nuclide count");
+        assert_eq!(
+            inner.nuclides.len(),
+            wmps.len(),
+            "wmps length must match nuclide count"
+        );
         Self { inner, wmps }
     }
 
@@ -62,14 +65,19 @@ impl HybridSvdWmpXsProvider {
 
         for (i, nuc) in self.inner.nuclides.iter().enumerate() {
             // Full-grid bytes for every reaction
-            let k_el  = nuc.elastic.as_ref().map_or(0, |r| r.kernel.memory_bytes());
+            let k_el = nuc.elastic.as_ref().map_or(0, |r| r.kernel.memory_bytes());
             let k_fis = nuc.fission.as_ref().map_or(0, |r| r.kernel.memory_bytes());
             let k_cap = nuc.capture.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_in  = nuc.inelastic.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_2n  = nuc.n2n.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_3n  = nuc.n3n.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_tt  = nuc.total_table.as_ref().map_or(0, |t| t.memory_bytes());
-            let k_dl: usize = nuc.discrete_levels.iter()
+            let k_in = nuc
+                .inelastic
+                .as_ref()
+                .map_or(0, |r| r.kernel.memory_bytes());
+            let k_2n = nuc.n2n.as_ref().map_or(0, |r| r.kernel.memory_bytes());
+            let k_3n = nuc.n3n.as_ref().map_or(0, |r| r.kernel.memory_bytes());
+            let k_tt = nuc.total_table.as_ref().map_or(0, |t| t.memory_bytes());
+            let k_dl: usize = nuc
+                .discrete_levels
+                .iter()
                 .map(|l| l.kernel.as_ref().map_or(0, |r| r.kernel.memory_bytes()))
                 .sum();
 
@@ -131,7 +139,9 @@ fn kernel_smooth_fraction(
     e_lo: f64,
     e_hi: f64,
 ) -> f64 {
-    let grid = nuc.elastic.as_ref()
+    let grid = nuc
+        .elastic
+        .as_ref()
         .or(nuc.fission.as_ref())
         .or(nuc.capture.as_ref())
         .map(|r| r.kernel.energies());
@@ -139,7 +149,11 @@ fn kernel_smooth_fraction(
         None => 1.0,
         Some(g) => {
             let outside = g.iter().filter(|&&e| e < e_lo || e > e_hi).count();
-            if g.is_empty() { 1.0 } else { outside as f64 / g.len() as f64 }
+            if g.is_empty() {
+                1.0
+            } else {
+                outside as f64 / g.len() as f64
+            }
         }
     }
 }
@@ -156,22 +170,22 @@ impl XsProvider for HybridSvdWmpXsProvider {
     fn lookup(&self, nuclide_idx: usize, energy: f64) -> MicroXs {
         let mut xs = self.inner.lookup(nuclide_idx, energy);
 
-        if let Some((wmp, t_kelvin)) = self.wmps[nuclide_idx].as_ref() {
-            if energy >= wmp.e_min && energy <= wmp.e_max {
-                let (sig_s, sig_a, sig_f) = wmp.evaluate(energy, *t_kelvin);
-                // Floor negative values at zero — WMP with truncated pole sets
-                // can produce tiny negative tails between resonances.
-                let elastic = sig_s.max(0.0);
-                let fission = sig_f.max(0.0);
-                let capture = (sig_a - fission).max(0.0);
-                // Recompute total from partials.
-                let total = elastic + xs.inelastic + xs.n2n + xs.n3n
-                          + fission + capture;
-                xs.elastic = elastic;
-                xs.fission = fission;
-                xs.capture = capture;
-                xs.total = total;
-            }
+        if let Some((wmp, t_kelvin)) = self.wmps[nuclide_idx].as_ref()
+            && energy >= wmp.e_min
+            && energy <= wmp.e_max
+        {
+            let (sig_s, sig_a, sig_f) = wmp.evaluate(energy, *t_kelvin);
+            // Floor negative values at zero — WMP with truncated pole sets
+            // can produce tiny negative tails between resonances.
+            let elastic = sig_s.max(0.0);
+            let fission = sig_f.max(0.0);
+            let capture = (sig_a - fission).max(0.0);
+            // Recompute total from partials.
+            let total = elastic + xs.inelastic + xs.n2n + xs.n3n + fission + capture;
+            xs.elastic = elastic;
+            xs.fission = fission;
+            xs.capture = capture;
+            xs.total = total;
         }
         xs
     }
@@ -203,10 +217,11 @@ impl XsProvider for HybridSvdWmpXsProvider {
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         // If we're inside WMP range, URR is not physically applicable
         // (the resonances are already explicit via poles). Skip it.
-        if let Some((wmp, _)) = self.wmps[nuclide_idx].as_ref() {
-            if energy >= wmp.e_min && energy <= wmp.e_max {
-                return;
-            }
+        if let Some((wmp, _)) = self.wmps[nuclide_idx].as_ref()
+            && energy >= wmp.e_min
+            && energy <= wmp.e_max
+        {
+            return;
         }
         self.inner.apply_urr(nuclide_idx, xs, energy, xi);
     }

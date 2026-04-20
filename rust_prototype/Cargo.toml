@@ -22,8 +22,14 @@ cuda = ["cudarc"]
 criterion = { version = "0.8", features = ["html_reports"] }
 
 [lints.clippy]
-pedantic = { level = "warn", priority = -1 }
+# Correctness / safety lints kept on. Style-oriented pedantic lints
+# are too noisy for a numerical codebase (single-char physics
+# identifiers like E/A/Q, long literals for constants, similar names
+# like e_cm/e_cm_out are intentional and documented).
 unwrap_used = "deny"
+undocumented_unsafe_blocks = "warn"
+# Keep the cast lints that catch real bugs off — every XS lookup does
+# idx-from-usize casts that are safe by construction.
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"

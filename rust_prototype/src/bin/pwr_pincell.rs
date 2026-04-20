@@ -22,33 +22,41 @@ use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
 use open_rust_mc::hdf5_reader;
 use open_rust_mc::thermal::ThermalScatteringData;
+use open_rust_mc::transport::hybrid_xs::HybridSvdWmpXsProvider;
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
 use open_rust_mc::transport::xs_provider;
-use open_rust_mc::transport::hybrid_xs::HybridSvdWmpXsProvider;
 use open_rust_mc::wmp::WindowedMultipole;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
-enum XsMode { Svd, Table, Both, Hybrid }
+enum XsMode {
+    Svd,
+    Table,
+    Both,
+    Hybrid,
+}
 
 /// WMP filename (ZZAAA.h5) and target temperature (K) per nuclide,
 /// parallel to NUCLIDE_SPECS. None = no WMP coverage for this nuclide.
 /// Temperatures match the `temp_idx` in NUCLIDE_SPECS:
 ///   0=250K, 1=294K, 2=600K, 3=900K, 4=1200K, 5=2500K.
 const WMP_SPECS: &[(&str, f64)] = &[
-    ("092235.h5", 900.0),  // 0  U235 fuel
-    ("092238.h5", 900.0),  // 1  U238 fuel
-    ("008016.h5", 900.0),  // 2  O16 fuel
-    ("001001.h5", 600.0),  // 3  H1 water
-    ("040090.h5", 600.0),  // 4  Zr90 clad
-    ("040091.h5", 600.0),  // 5  Zr91 clad
-    ("040092.h5", 600.0),  // 6  Zr92 clad
-    ("040094.h5", 600.0),  // 7  Zr94 clad
-    ("008016.h5", 600.0),  // 8  O16 water
+    ("092235.h5", 900.0), // 0  U235 fuel
+    ("092238.h5", 900.0), // 1  U238 fuel
+    ("008016.h5", 900.0), // 2  O16 fuel
+    ("001001.h5", 600.0), // 3  H1 water
+    ("040090.h5", 600.0), // 4  Zr90 clad
+    ("040091.h5", 600.0), // 5  Zr91 clad
+    ("040092.h5", 600.0), // 6  Zr92 clad
+    ("040094.h5", 600.0), // 7  Zr94 clad
+    ("008016.h5", 600.0), // 8  O16 water
 ];
 
 #[derive(Parser)]
-#[command(name = "pwr_pincell", about = "PWR pin cell benchmark (multi-material, multi-nuclide)")]
+#[command(
+    name = "pwr_pincell",
+    about = "PWR pin cell benchmark (multi-material, multi-nuclide)"
+)]
 struct Args {
     /// Directory containing nuclide HDF5 files.
     data_dir: PathBuf,
@@ -86,15 +94,15 @@ struct Args {
 /// temp_idx after numeric sort: 0=250K, 1=294K, 2=600K, 3=900K, 4=1200K, 5=2500K
 /// O16 is duplicated: idx 2 at 900K for fuel, idx 8 at 600K for water.
 const NUCLIDE_SPECS: &[(&str, f64, f64, usize)] = &[
-    ("U235.h5", 233.025, 2.43, 3),  // 0  fuel: 900K
-    ("U238.h5", 236.006, 2.49, 3),  // 1  fuel: 900K
-    ("O16.h5",  15.858,  0.0,  3),  // 2  fuel O16: 900K
-    ("H1.h5",    0.999,  0.0,  2),  // 3  water: 600K
-    ("Zr90.h5", 89.132,  0.0,  2),  // 4  clad: 600K
-    ("Zr91.h5", 90.130,  0.0,  2),  // 5  clad: 600K
-    ("Zr92.h5", 91.126,  0.0,  2),  // 6  clad: 600K
-    ("Zr94.h5", 93.120,  0.0,  2),  // 7  clad: 600K
-    ("O16.h5",  15.858,  0.0,  2),  // 8  water O16: 600K
+    ("U235.h5", 233.025, 2.43, 3), // 0  fuel: 900K
+    ("U238.h5", 236.006, 2.49, 3), // 1  fuel: 900K
+    ("O16.h5", 15.858, 0.0, 3),    // 2  fuel O16: 900K
+    ("H1.h5", 0.999, 0.0, 2),      // 3  water: 600K
+    ("Zr90.h5", 89.132, 0.0, 2),   // 4  clad: 600K
+    ("Zr91.h5", 90.130, 0.0, 2),   // 5  clad: 600K
+    ("Zr92.h5", 91.126, 0.0, 2),   // 6  clad: 600K
+    ("Zr94.h5", 93.120, 0.0, 2),   // 7  clad: 600K
+    ("O16.h5", 15.858, 0.0, 2),    // 8  water O16: 600K
 ];
 
 /// Results from one seeded run.
@@ -128,27 +136,41 @@ impl BenchmarkResult {
     }
 
     fn k_eff_std(&self) -> f64 {
-        if self.seed_results.len() < 2 { return self.seed_results[0].k_std; }
+        if self.seed_results.len() < 2 {
+            return self.seed_results[0].k_std;
+        }
         let mean = self.k_eff_mean();
         let n = self.seed_results.len() as f64;
-        let var = self.seed_results.iter()
+        let var = self
+            .seed_results
+            .iter()
             .map(|r| (r.k_mean - mean).powi(2))
-            .sum::<f64>() / (n - 1.0);
+            .sum::<f64>()
+            / (n - 1.0);
         var.sqrt()
     }
 
     fn ns_per_particle_mean(&self) -> f64 {
         let n = self.seed_results.len() as f64;
-        self.seed_results.iter().map(|r| r.ns_per_particle()).sum::<f64>() / n
+        self.seed_results
+            .iter()
+            .map(|r| r.ns_per_particle())
+            .sum::<f64>()
+            / n
     }
 
     fn ns_per_particle_std(&self) -> f64 {
-        if self.seed_results.len() < 2 { return 0.0; }
+        if self.seed_results.len() < 2 {
+            return 0.0;
+        }
         let mean = self.ns_per_particle_mean();
         let n = self.seed_results.len() as f64;
-        let var = self.seed_results.iter()
+        let var = self
+            .seed_results
+            .iter()
             .map(|r| (r.ns_per_particle() - mean).powi(2))
-            .sum::<f64>() / (n - 1.0);
+            .sum::<f64>()
+            / (n - 1.0);
         var.sqrt()
     }
 
@@ -158,6 +180,7 @@ impl BenchmarkResult {
 }
 
 /// Run multiple seeds with a given XS provider, return aggregate results.
+#[allow(clippy::too_many_arguments)]
 fn run_multi_seed<XS: XsProvider>(
     label: &str,
     args: &Args,
@@ -180,7 +203,9 @@ fn run_multi_seed<XS: XsProvider>(
             seed: seed as u64,
             auto_inactive: if args.auto_inactive {
                 Some(open_rust_mc::transport::simulate::EntropyConvergence::default())
-            } else { None },
+            } else {
+                None
+            },
         };
 
         if args.seeds > 1 {
@@ -191,10 +216,12 @@ fn run_multi_seed<XS: XsProvider>(
         }
 
         let t1 = Instant::now();
-        let (results, _) = simulate::run_eigenvalue(&config, surfaces, cells, materials, xs_provider);
+        let (results, _) =
+            simulate::run_eigenvalue(&config, surfaces, cells, materials, xs_provider);
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-        let active: Vec<f64> = results.iter()
+        let active: Vec<f64> = results
+            .iter()
             .filter(|r| r.active)
             .map(|r| r.k_eff)
             .collect();
@@ -203,25 +230,38 @@ fn run_multi_seed<XS: XsProvider>(
         let k_var = active.iter().map(|&k| (k - k_mean).powi(2)).sum::<f64>() / (n * (n - 1.0));
         let k_std = k_var.sqrt();
 
-        let sr = SeedResult { seed, k_mean, k_std, sim_ms, total_histories };
+        let sr = SeedResult {
+            seed,
+            k_mean,
+            k_std,
+            sim_ms,
+            total_histories,
+        };
 
         if args.seeds > 1 {
-            println!("k={k_mean:.5} +/- {k_std:.5}  {sim_ms:.0}ms  ({:.1} ns/particle)",
-                     sr.ns_per_particle());
+            println!(
+                "k={k_mean:.5} +/- {k_std:.5}  {sim_ms:.0}ms  ({:.1} ns/particle)",
+                sr.ns_per_particle()
+            );
         }
 
         seed_results.push(sr);
     }
 
-    BenchmarkResult { label: label.to_string(), load_ms, xs_memory_bytes, seed_results }
+    BenchmarkResult {
+        label: label.to_string(),
+        load_ms,
+        xs_memory_bytes,
+        seed_results,
+    }
 }
 
 fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
     // Standard PWR pin cell dimensions
-    let fuel_or = 0.4096;  // cm, fuel outer radius
-    let clad_ir = 0.4180;  // cm, clad inner radius
-    let clad_or = 0.4750;  // cm, clad outer radius
-    let pitch = 1.2600;    // cm, pin pitch
+    let fuel_or = 0.4096; // cm, fuel outer radius
+    let clad_ir = 0.4180; // cm, clad inner radius
+    let clad_or = 0.4750; // cm, clad outer radius
+    let pitch = 1.2600; // cm, pin pitch
     let half = pitch / 2.0;
 
     let z_half = half; // Use same extent in Z for reflective bounding
@@ -229,43 +269,67 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
     let surfaces = vec![
         // 0: fuel outer cylinder
         Surface::CylinderZ {
-            center_x: 0.0, center_y: 0.0, radius: fuel_or,
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: fuel_or,
             bc: BoundaryCondition::Transmission,
         },
         // 1: clad inner cylinder
         Surface::CylinderZ {
-            center_x: 0.0, center_y: 0.0, radius: clad_ir,
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: clad_ir,
             bc: BoundaryCondition::Transmission,
         },
         // 2: clad outer cylinder
         Surface::CylinderZ {
-            center_x: 0.0, center_y: 0.0, radius: clad_or,
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: clad_or,
             bc: BoundaryCondition::Transmission,
         },
         // 3: -X plane
-        Surface::PlaneX { x0: -half, bc: BoundaryCondition::Reflective },
+        Surface::PlaneX {
+            x0: -half,
+            bc: BoundaryCondition::Reflective,
+        },
         // 4: +X plane
-        Surface::PlaneX { x0: half, bc: BoundaryCondition::Reflective },
+        Surface::PlaneX {
+            x0: half,
+            bc: BoundaryCondition::Reflective,
+        },
         // 5: -Y plane
-        Surface::PlaneY { y0: -half, bc: BoundaryCondition::Reflective },
+        Surface::PlaneY {
+            y0: -half,
+            bc: BoundaryCondition::Reflective,
+        },
         // 6: +Y plane
-        Surface::PlaneY { y0: half, bc: BoundaryCondition::Reflective },
+        Surface::PlaneY {
+            y0: half,
+            bc: BoundaryCondition::Reflective,
+        },
         // 7: -Z plane (reflective — infinite lattice in Z)
-        Surface::PlaneZ { z0: -z_half, bc: BoundaryCondition::Reflective },
+        Surface::PlaneZ {
+            z0: -z_half,
+            bc: BoundaryCondition::Reflective,
+        },
         // 8: +Z plane
-        Surface::PlaneZ { z0: z_half, bc: BoundaryCondition::Reflective },
+        Surface::PlaneZ {
+            z0: z_half,
+            bc: BoundaryCondition::Reflective,
+        },
     ];
 
-    let box_aabb = Aabb::new(Vec3::new(-half, -half, -z_half), Vec3::new(half, half, z_half));
+    let box_aabb = Aabb::new(
+        Vec3::new(-half, -half, -z_half),
+        Vec3::new(half, half, z_half),
+    );
 
     let cells = vec![
         // 0: Fuel (inside fuel cylinder, inside Z box)
         Cell::new(
             CellId(0),
-            cell::intersect_all(vec![
-                cell::inside(0),
-                cell::outside(7), cell::inside(8),
-            ]),
+            cell::intersect_all(vec![cell::inside(0), cell::outside(7), cell::inside(8)]),
             CellFill::Material(0),
         )
         .with_aabb(Aabb::new(
@@ -277,8 +341,10 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
         Cell::new(
             CellId(1),
             cell::intersect_all(vec![
-                cell::outside(0), cell::inside(1),
-                cell::outside(7), cell::inside(8),
+                cell::outside(0),
+                cell::inside(1),
+                cell::outside(7),
+                cell::inside(8),
             ]),
             CellFill::Void,
         )
@@ -290,8 +356,10 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
         Cell::new(
             CellId(2),
             cell::intersect_all(vec![
-                cell::outside(1), cell::inside(2),
-                cell::outside(7), cell::inside(8),
+                cell::outside(1),
+                cell::inside(2),
+                cell::outside(7),
+                cell::inside(8),
             ]),
             CellFill::Material(1),
         )
@@ -304,13 +372,13 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
         Cell::new(
             CellId(3),
             cell::intersect_all(vec![
-                cell::outside(2),  // outside clad
-                cell::outside(3),  // x > -half
-                cell::inside(4),   // x < +half
-                cell::outside(5),  // y > -half
-                cell::inside(6),   // y < +half
-                cell::outside(7),  // z > -z_half
-                cell::inside(8),   // z < +z_half
+                cell::outside(2), // outside clad
+                cell::outside(3), // x > -half
+                cell::inside(4),  // x < +half
+                cell::outside(5), // y > -half
+                cell::inside(6),  // y < +half
+                cell::outside(7), // z > -z_half
+                cell::inside(8),  // z < +z_half
             ]),
             CellFill::Material(2),
         )
@@ -325,16 +393,16 @@ fn setup_materials() -> Vec<Material> {
     // Material 0: UO2 fuel (3.1% enriched, 10.4 g/cm³)
     // Atom densities from OpenMC (atoms/barn-cm)
     let mut fuel = Material::new("UO2", 900.0);
-    fuel.add_nuclide(0.000719, 0);  // U-235  (xs_kernel_idx=0)
-    fuel.add_nuclide(0.022482, 1);  // U-238  (xs_kernel_idx=1)
-    fuel.add_nuclide(0.046402, 2);  // O-16   (xs_kernel_idx=2)
+    fuel.add_nuclide(0.000719, 0); // U-235  (xs_kernel_idx=0)
+    fuel.add_nuclide(0.022482, 1); // U-238  (xs_kernel_idx=1)
+    fuel.add_nuclide(0.046402, 2); // O-16   (xs_kernel_idx=2)
 
     // Material 1: Zircaloy-4 cladding (6.55 g/cm³)
     let mut clad = Material::new("Zircaloy", 600.0);
-    clad.add_nuclide(0.022932, 4);  // Zr-90  (xs_kernel_idx=4)
-    clad.add_nuclide(0.004996, 5);  // Zr-91  (xs_kernel_idx=5)
-    clad.add_nuclide(0.007636, 6);  // Zr-92  (xs_kernel_idx=6)
-    clad.add_nuclide(0.007740, 7);  // Zr-94  (xs_kernel_idx=7)
+    clad.add_nuclide(0.022932, 4); // Zr-90  (xs_kernel_idx=4)
+    clad.add_nuclide(0.004996, 5); // Zr-91  (xs_kernel_idx=5)
+    clad.add_nuclide(0.007636, 6); // Zr-92  (xs_kernel_idx=6)
+    clad.add_nuclide(0.007740, 7); // Zr-94  (xs_kernel_idx=7)
 
     // Material 2: Light water (0.74 g/cm³, 600K)
     let mut water = Material::new("H2O", 600.0);
@@ -347,16 +415,23 @@ fn setup_materials() -> Vec<Material> {
 /// Load thermal scattering data and build the per-nuclide thermal vector.
 ///
 /// H1 (xs_kernel_idx=3) gets c_H_in_H2O thermal data if available.
-fn load_thermal(data_dir: &PathBuf) -> Vec<Option<Arc<ThermalScatteringData>>> {
+fn load_thermal(data_dir: &std::path::Path) -> Vec<Option<Arc<ThermalScatteringData>>> {
     let h2o_path = data_dir.join("c_H_in_H2O.h5");
     let h2o_thermal: Option<Arc<ThermalScatteringData>> = if h2o_path.exists() {
         match hdf5_reader::load_thermal_scattering(&h2o_path) {
             Ok(tsl) => {
-                println!("  S(a,b): loaded {} ({} temperatures)", tsl.name, tsl.temp_labels.len());
+                println!(
+                    "  S(a,b): loaded {} ({} temperatures)",
+                    tsl.name,
+                    tsl.temp_labels.len()
+                );
                 Some(Arc::new(tsl))
             }
             Err(e) => {
-                eprintln!("  WARNING: failed to load S(a,b) from {}: {e}", h2o_path.display());
+                eprintln!(
+                    "  WARNING: failed to load S(a,b) from {}: {e}",
+                    h2o_path.display()
+                );
                 None
             }
         }
@@ -384,37 +459,66 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
             kernels.push(xs_provider::NuclideKernels {
-                elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, pointwise_xs: None, inelastic: None, n2n: None, n3n: None,
-                fission: None, capture: None, awr, nu_bar_const: nu_bar,
-                nu_bar_table: None, discrete_levels: vec![], discrete_level_angles: vec![],
-                has_continuum_inelastic: false, elastic_angle: None,
-                fission_energy_dist: None, urr_tables: None,
+                elastic: None,
+                total_table: None,
+                total_xs_raw: None,
+                missing_xs: None,
+                pointwise_xs: None,
+                inelastic: None,
+                n2n: None,
+                n3n: None,
+                fission: None,
+                capture: None,
+                awr,
+                nu_bar_const: nu_bar,
+                nu_bar_table: None,
+                discrete_levels: vec![],
+                discrete_level_angles: vec![],
+                has_continuum_inelastic: false,
+                elastic_angle: None,
+                fission_energy_dist: None,
+                urr_tables: None,
             });
         } else {
-            kernels.push(xs_provider::load_nuclide(&path, args.rank, nuc_temp_idx, awr, nu_bar));
+            kernels.push(xs_provider::load_nuclide(
+                &path,
+                args.rank,
+                nuc_temp_idx,
+                awr,
+                nu_bar,
+            ));
         }
     }
 
     let thermal = load_thermal(&args.data_dir);
     let xs_mem: usize = kernels.iter().map(|k| k.svd_memory_bytes()).sum();
-    let provider = xs_provider::SvdXsProvider { nuclides: kernels, thermal };
+    let provider = xs_provider::SvdXsProvider {
+        nuclides: kernels,
+        thermal,
+    };
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB ({} nuclides)", xs_mem as f64 / 1024.0, NUCLIDE_SPECS.len());
+    println!(
+        "  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB ({} nuclides)",
+        xs_mem as f64 / 1024.0,
+        NUCLIDE_SPECS.len()
+    );
 
     (provider, xs_mem, load_ms)
 }
 
 fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
-    println!("\n── Loading nuclear data (Hybrid SVD rank={} + WMP) ──", args.rank);
+    println!(
+        "\n── Loading nuclear data (Hybrid SVD rank={} + WMP) ──",
+        args.rank
+    );
     let t0 = Instant::now();
 
     // First build the SVD provider exactly as `load_svd` does.
-    let (svd_provider, svd_mem, _) = load_svd(args);
+    let (svd_provider, _svd_mem, _) = load_svd(args);
 
     // Now load per-nuclide WMP data.
     let wmp_dir = args.data_dir.join("..").join("wmp");
     let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> = Vec::with_capacity(WMP_SPECS.len());
-    let mut wmp_bytes: usize = 0;
     let mut covered = 0usize;
     for &(wmp_file, t_kelvin) in WMP_SPECS {
         let path = wmp_dir.join(wmp_file);
@@ -425,10 +529,11 @@ fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
         }
         match WindowedMultipole::from_hdf5(&path) {
             Ok(wmp) => {
-                wmp_bytes += wmp_payload_bytes(&wmp);
-                println!("  Loaded WMP {wmp_file} at T={t_kelvin} K   \
+                println!(
+                    "  Loaded WMP {wmp_file} at T={t_kelvin} K   \
                     (E {:.2e}..{:.2e} eV, {} poles, {} windows)",
-                    wmp.e_min, wmp.e_max, wmp.n_poles, wmp.n_windows);
+                    wmp.e_min, wmp.e_max, wmp.n_poles, wmp.n_windows
+                );
                 covered += 1;
                 wmps.push(Some((Arc::new(wmp), t_kelvin)));
             }
@@ -443,34 +548,43 @@ fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
     let report = provider.memory_report();
     let total_mem = report.current_total();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("  Hybrid ready in {load_ms:.0} ms  ({} / {} nuclides with WMP)",
-        covered, WMP_SPECS.len());
+    println!(
+        "  Hybrid ready in {load_ms:.0} ms  ({} / {} nuclides with WMP)",
+        covered,
+        WMP_SPECS.len()
+    );
     println!("  Memory (current scaffolding):");
-    println!("    full SVD basis     = {:.1} KB", report.current_svd_bytes as f64 / 1024.0);
-    println!("    WMP payload        = {:.1} KB", report.wmp_payload_bytes as f64 / 1024.0);
-    println!("    TOTAL (current)    = {:.1} KB", report.current_total() as f64 / 1024.0);
+    println!(
+        "    full SVD basis     = {:.1} KB",
+        report.current_svd_bytes as f64 / 1024.0
+    );
+    println!(
+        "    WMP payload        = {:.1} KB",
+        report.wmp_payload_bytes as f64 / 1024.0
+    );
+    println!(
+        "    TOTAL (current)    = {:.1} KB",
+        report.current_total() as f64 / 1024.0
+    );
     println!("  Memory (smooth-only projection, measured from loaded data):");
-    println!("    smooth-only SVD    = {:.1} KB", report.smooth_only_svd_bytes as f64 / 1024.0);
-    println!("    WMP payload        = {:.1} KB", report.wmp_payload_bytes as f64 / 1024.0);
-    println!("    TOTAL (projected)  = {:.1} KB", report.smooth_only_total() as f64 / 1024.0);
-    println!("    reduction vs full  = {:.1}x",
-        report.current_total() as f64 / report.smooth_only_total() as f64);
+    println!(
+        "    smooth-only SVD    = {:.1} KB",
+        report.smooth_only_svd_bytes as f64 / 1024.0
+    );
+    println!(
+        "    WMP payload        = {:.1} KB",
+        report.wmp_payload_bytes as f64 / 1024.0
+    );
+    println!(
+        "    TOTAL (projected)  = {:.1} KB",
+        report.smooth_only_total() as f64 / 1024.0
+    );
+    println!(
+        "    reduction vs full  = {:.1}x",
+        report.current_total() as f64 / report.smooth_only_total() as f64
+    );
 
     (provider, total_mem, load_ms)
-}
-
-/// Count bytes of the WMP raw payload (poles + windows + curvefit +
-/// broaden_poly) — mirrors the Python experiment for apples-to-apples.
-fn wmp_payload_bytes(wmp: &WindowedMultipole) -> usize {
-    // poles: n_poles * 4 * 16 bytes (complex128)
-    let poles = wmp.n_poles * 4 * 16;
-    // windows: n_windows * 2 * 4 bytes (int32)
-    let windows = wmp.n_windows * 2 * 4;
-    // curvefit: n_windows * (fit_order+1) * 3 * 8 bytes
-    let curvefit = wmp.n_windows * (wmp.fit_order + 1) * 3 * 8;
-    // broaden_poly: n_windows * 1 byte
-    let broaden = wmp.n_windows;
-    poles + windows + curvefit + broaden
 }
 
 fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
@@ -483,22 +597,45 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
             tables.push(xs_provider::NuclideTableData {
-                elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
-                fission: None, capture: None, awr, nu_bar_const: nu_bar,
-                nu_bar_table: None, discrete_levels: vec![], discrete_level_angles: vec![],
-                has_continuum_inelastic: false, elastic_angle: None,
-                fission_energy_dist: None, urr_tables: None,
+                elastic: None,
+                total_table: None,
+                inelastic: None,
+                n2n: None,
+                n3n: None,
+                fission: None,
+                capture: None,
+                awr,
+                nu_bar_const: nu_bar,
+                nu_bar_table: None,
+                discrete_levels: vec![],
+                discrete_level_angles: vec![],
+                has_continuum_inelastic: false,
+                elastic_angle: None,
+                fission_energy_dist: None,
+                urr_tables: None,
             });
         } else {
-            tables.push(xs_provider::load_nuclide_table(&path, nuc_temp_idx, awr, nu_bar));
+            tables.push(xs_provider::load_nuclide_table(
+                &path,
+                nuc_temp_idx,
+                awr,
+                nu_bar,
+            ));
         }
     }
 
     let thermal = load_thermal(&args.data_dir);
     let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
-    let provider = xs_provider::TableXsProvider { nuclides: tables, thermal };
+    let provider = xs_provider::TableXsProvider {
+        nuclides: tables,
+        thermal,
+    };
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB ({} nuclides)", xs_mem as f64 / 1024.0, NUCLIDE_SPECS.len());
+    println!(
+        "  Loaded in {load_ms:.0} ms  |  XS memory: {:.1} KB ({} nuclides)",
+        xs_mem as f64 / 1024.0,
+        NUCLIDE_SPECS.len()
+    );
 
     (provider, xs_mem, load_ms)
 }
@@ -507,24 +644,42 @@ fn print_benchmark(r: &BenchmarkResult) {
     let n_seeds = r.seed_results.len();
 
     println!("  {}:", r.label);
-    println!("    k_inf            = {:.5} +/- {:.5}", r.k_eff_mean(), r.k_eff_std());
+    println!(
+        "    k_inf            = {:.5} +/- {:.5}",
+        r.k_eff_mean(),
+        r.k_eff_std()
+    );
     if n_seeds > 1 {
-        println!("    ns/particle      = {:.2} +/- {:.2} ({n_seeds} seeds)",
-                 r.ns_per_particle_mean(), r.ns_per_particle_std());
+        println!(
+            "    ns/particle      = {:.2} +/- {:.2} ({n_seeds} seeds)",
+            r.ns_per_particle_mean(),
+            r.ns_per_particle_std()
+        );
     } else {
         println!("    ns/particle      = {:.2}", r.ns_per_particle_mean());
     }
-    println!("    Total sim time   = {:.0} ms ({n_seeds} run{})", r.total_sim_ms(), if n_seeds > 1 { "s" } else { "" });
+    println!(
+        "    Total sim time   = {:.0} ms ({n_seeds} run{})",
+        r.total_sim_ms(),
+        if n_seeds > 1 { "s" } else { "" }
+    );
     println!("    Load time        = {:.0} ms", r.load_ms);
-    println!("    XS memory        = {:.1} KB", r.xs_memory_bytes as f64 / 1024.0);
+    println!(
+        "    XS memory        = {:.1} KB",
+        r.xs_memory_bytes as f64 / 1024.0
+    );
 }
 
 fn main() {
     let args = Args::parse();
 
     let inactive = if args.inactive >= args.batches {
-        println!("  [Warning] Inactive batches ({}) >= total batches ({}). Capping inactive to {}.",
-                 args.inactive, args.batches, args.batches - 1);
+        println!(
+            "  [Warning] Inactive batches ({}) >= total batches ({}). Capping inactive to {}.",
+            args.inactive,
+            args.batches,
+            args.batches - 1
+        );
         args.batches - 1
     } else {
         args.inactive
@@ -538,15 +693,25 @@ fn main() {
     if matches!(args.mode, XsMode::Svd | XsMode::Both) {
         println!("SVD rank:     {}", args.rank);
     }
-    println!("Batches:      {} ({} inactive + {} active)",
-             args.batches, inactive, active_batches);
+    println!(
+        "Batches:      {} ({} inactive + {} active)",
+        args.batches, inactive, active_batches
+    );
     println!("Particles:    {}/batch", args.particles);
-    println!("Histories:    {} per run ({} active batches x {} particles)",
-             histories_per_run, active_batches, args.particles);
-    println!("Nuclides:     {} (U235, U238, O16, H1, Zr90-94)", NUCLIDE_SPECS.len());
+    println!(
+        "Histories:    {} per run ({} active batches x {} particles)",
+        histories_per_run, active_batches, args.particles
+    );
+    println!(
+        "Nuclides:     {} (U235, U238, O16, H1, Zr90-94)",
+        NUCLIDE_SPECS.len()
+    );
     println!("Materials:    3 (UO2 fuel, Zircaloy clad, H2O moderator)");
     if args.seeds > 1 {
-        println!("Seeds:        {} (independent runs for statistical confidence)", args.seeds);
+        println!(
+            "Seeds:        {} (independent runs for statistical confidence)",
+            args.seeds
+        );
     }
     println!("S(a,b):       c_H_in_H2O (if available in data_dir)");
 
@@ -558,7 +723,13 @@ fn main() {
             let (provider, xs_mem, load_ms) = load_svd(&args);
             let r = run_multi_seed(
                 &format!("SVD (rank={})", args.rank),
-                &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &provider,
+                xs_mem,
+                load_ms,
             );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell");
@@ -569,7 +740,13 @@ fn main() {
             let (provider, xs_mem, load_ms) = load_table(&args);
             let r = run_multi_seed(
                 "Pointwise Table",
-                &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &provider,
+                xs_mem,
+                load_ms,
             );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell");
@@ -580,7 +757,13 @@ fn main() {
             let (provider, xs_mem, load_ms) = load_hybrid(&args);
             let r = run_multi_seed(
                 &format!("Hybrid SVD(rank={})+WMP", args.rank),
-                &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &provider,
+                xs_mem,
+                load_ms,
             );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell (Hybrid SVD + WMP)");
@@ -591,14 +774,26 @@ fn main() {
             let (svd_prov, svd_mem, svd_load) = load_svd(&args);
             let svd = run_multi_seed(
                 &format!("SVD (rank={})", args.rank),
-                &args, &surfaces, &cells, &materials, &svd_prov, svd_mem, svd_load,
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &svd_prov,
+                svd_mem,
+                svd_load,
             );
             drop(svd_prov); // free before loading table
 
             let (tbl_prov, tbl_mem, tbl_load) = load_table(&args);
             let tbl = run_multi_seed(
                 "Pointwise Table",
-                &args, &surfaces, &cells, &materials, &tbl_prov, tbl_mem, tbl_load,
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &tbl_prov,
+                tbl_mem,
+                tbl_load,
             );
 
             println!("\n{}", "=".repeat(60));
@@ -615,19 +810,28 @@ fn main() {
             println!("\n  {}", "-".repeat(50));
             println!("  COMPARISON:");
             println!("    k_inf gap (SVD - table)  = {dk:.0} pcm");
-            println!("    SVD speedup              = {speedup:.2}x ({:.2} vs {:.2} ns/particle)",
-                     svd.ns_per_particle_mean(), tbl.ns_per_particle_mean());
+            println!(
+                "    SVD speedup              = {speedup:.2}x ({:.2} vs {:.2} ns/particle)",
+                svd.ns_per_particle_mean(),
+                tbl.ns_per_particle_mean()
+            );
             if args.seeds > 1 {
                 let s1 = svd.ns_per_particle_std();
                 let s2 = tbl.ns_per_particle_std();
                 let m1 = svd.ns_per_particle_mean();
                 let m2 = tbl.ns_per_particle_mean();
-                let ratio_std = speedup * ((s1/m1).powi(2) + (s2/m2).powi(2)).sqrt();
-                println!("    Speedup uncertainty      = +/- {ratio_std:.2}x ({} seeds)", args.seeds);
+                let ratio_std = speedup * ((s1 / m1).powi(2) + (s2 / m2).powi(2)).sqrt();
+                println!(
+                    "    Speedup uncertainty      = +/- {ratio_std:.2}x ({} seeds)",
+                    args.seeds
+                );
             }
-            println!("    Memory ratio (tbl/svd)   = {:.2}x ({:.1} KB vs {:.1} KB)",
-                     tbl.xs_memory_bytes as f64 / svd.xs_memory_bytes as f64,
-                     svd.xs_memory_bytes as f64 / 1024.0, tbl.xs_memory_bytes as f64 / 1024.0);
+            println!(
+                "    Memory ratio (tbl/svd)   = {:.2}x ({:.1} KB vs {:.1} KB)",
+                tbl.xs_memory_bytes as f64 / svd.xs_memory_bytes as f64,
+                svd.xs_memory_bytes as f64 / 1024.0,
+                tbl.xs_memory_bytes as f64 / 1024.0
+            );
         }
     }
 }

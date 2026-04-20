@@ -49,12 +49,7 @@ impl Bvh {
     }
 
     /// Find which cell contains a point, using BVH acceleration.
-    pub fn find_cell(
-        &self,
-        pos: Vec3,
-        surfaces: &[Surface],
-        cells: &[Cell],
-    ) -> Option<usize> {
+    pub fn find_cell(&self, pos: Vec3, surfaces: &[Surface], cells: &[Cell]) -> Option<usize> {
         let root = self.root.as_ref()?;
         let evals: Vec<f64> = surfaces.iter().map(|s| s.evaluate(pos)).collect();
         find_cell_recursive(root, pos, &evals, cells)
@@ -104,8 +99,14 @@ fn build_recursive(entries: &mut [(usize, Aabb, Vec3)]) -> BvhNode {
     if entries.len() == 2 {
         return BvhNode::Internal {
             aabb: overall_aabb,
-            left: Box::new(BvhNode::Leaf { cell_idx: entries[0].0, aabb: entries[0].1 }),
-            right: Box::new(BvhNode::Leaf { cell_idx: entries[1].0, aabb: entries[1].1 }),
+            left: Box::new(BvhNode::Leaf {
+                cell_idx: entries[0].0,
+                aabb: entries[0].1,
+            }),
+            right: Box::new(BvhNode::Leaf {
+                cell_idx: entries[1].0,
+                aabb: entries[1].1,
+            }),
         };
     }
 

@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use std::hint::black_box;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use open_rust_mc::kernel;
 use open_rust_mc::loader::SvdFactors;
 use open_rust_mc::table::PointwiseTable;
+use std::hint::black_box;
 
 fn output_dir() -> PathBuf {
     let home = std::env::var("HOME")
@@ -40,7 +40,11 @@ fn bench_reconstruct(c: &mut Criterion) {
 
         group.bench_with_input(BenchmarkId::new("faer_simd", k), &k, |b, _| {
             b.iter(|| {
-                kernel::reconstruct_log_faer(black_box(&kern), black_box(&coeffs), black_box(&mut buf));
+                kernel::reconstruct_log_faer(
+                    black_box(&kern),
+                    black_box(&coeffs),
+                    black_box(&mut buf),
+                );
             });
         });
     }

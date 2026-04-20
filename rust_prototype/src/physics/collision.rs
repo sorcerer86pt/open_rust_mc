@@ -97,15 +97,15 @@ pub fn process_collision(
     // Inelastic scattering
     cum += xs.inelastic;
     if xi < cum {
-        let (q_value, level_idx) = sample_inelastic_level(
-            particle.energy, xs.awr, inelastic_data, rng,
-        );
+        let (q_value, level_idx) =
+            sample_inelastic_level(particle.energy, xs.awr, inelastic_data, rng);
         // Discrete level (not continuum / fallback) may carry its own
         // CM-frame angular distribution; else scatter isotropically.
-        let angle = level_idx
-            .and_then(|i| inelastic_data
+        let angle = level_idx.and_then(|i| {
+            inelastic_data
                 .and_then(|d| d.level_angles.get(i))
-                .and_then(|o| o.as_ref()));
+                .and_then(|o| o.as_ref())
+        });
         let (new_energy, new_dir) = super::scatter::inelastic_scatter(
             particle.energy,
             particle.dir,
@@ -148,8 +148,16 @@ pub fn process_collision(
         let e2 = sample_evaporation_energy(particle.energy, rng);
         let e3 = sample_evaporation_energy(particle.energy, rng);
         let sites = vec![
-            FissionSite { pos: particle.pos, energy: e2, weight: particle.weight },
-            FissionSite { pos: particle.pos, energy: e3, weight: particle.weight },
+            FissionSite {
+                pos: particle.pos,
+                energy: e2,
+                weight: particle.weight,
+            },
+            FissionSite {
+                pos: particle.pos,
+                energy: e3,
+                weight: particle.weight,
+            },
         ];
         // Primary neutron continues with reduced energy
         let (new_energy, new_dir) = super::scatter::inelastic_scatter(
@@ -280,7 +288,7 @@ fn sample_evaporation_energy(incident_energy: f64, rng: &mut Rng) -> f64 {
 ///   a = 0.988 MeV, b = 2.249 /MeV
 fn sample_fission_energy(_incident_energy: f64, rng: &mut Rng) -> f64 {
     let a = 988_000.0; // 0.988 MeV in eV
-    let b = 2.249e-6;  // 2.249 /MeV in /eV
+    let b = 2.249e-6; // 2.249 /MeV in /eV
 
     loop {
         let e_prime = -a * rng.uniform().ln();
@@ -333,12 +341,7 @@ mod tests {
             nu_bar: 0.0,
             awr: 235.0,
         };
-        let mut p = Particle::new(
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            1.0e6,
-            0,
-        );
+        let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
@@ -358,12 +361,7 @@ mod tests {
             nu_bar: 0.0,
             awr: 235.0,
         };
-        let mut p = Particle::new(
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            1.0e6,
-            0,
-        );
+        let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
@@ -383,12 +381,7 @@ mod tests {
             nu_bar: 2.43,
             awr: 235.0,
         };
-        let mut p = Particle::new(
-            Vec3::new(1.0, 2.0, 3.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            1.0e6,
-            0,
-        );
+        let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
         match outcome {
             CollisionOutcome::Fission { sites } => {
@@ -419,9 +412,21 @@ mod tests {
             awr: 235.0,
         };
         let levels = vec![
-            DiscreteLevelInfo { mt: 51, q_value: -76.8, threshold: 77.1 },
-            DiscreteLevelInfo { mt: 52, q_value: -13040.0, threshold: 13095.5 },
-            DiscreteLevelInfo { mt: 53, q_value: -46200.0, threshold: 46396.6 },
+            DiscreteLevelInfo {
+                mt: 51,
+                q_value: -76.8,
+                threshold: 77.1,
+            },
+            DiscreteLevelInfo {
+                mt: 52,
+                q_value: -13040.0,
+                threshold: 13095.5,
+            },
+            DiscreteLevelInfo {
+                mt: 53,
+                q_value: -46200.0,
+                threshold: 46396.6,
+            },
         ];
         let level_xs = vec![0.5, 0.3, 0.2];
         let data = InelasticData {
@@ -431,12 +436,7 @@ mod tests {
             level_angles: &[],
         };
 
-        let mut p = Particle::new(
-            Vec3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-            1.0e6,
-            0,
-        );
+        let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
@@ -456,13 +456,16 @@ mod tests {
         // Single-energy tab: essentially a delta at mu_cm = +1 (linear CDF
         // from 0.9 .. 1.0 over [0.9, 1.0], zero below).
         let d = TabularMuDist {
-            mu:  vec![-1.0, 0.9, 1.0],
-            cdf: vec![ 0.0, 0.0, 1.0],
+            mu: vec![-1.0, 0.9, 1.0],
+            cdf: vec![0.0, 0.0, 1.0],
         };
         AngularDistribution {
             energies: vec![1.0, 2.0e7],
             distributions: vec![
-                TabularMuDist { mu: d.mu.clone(), cdf: d.cdf.clone() },
+                TabularMuDist {
+                    mu: d.mu.clone(),
+                    cdf: d.cdf.clone(),
+                },
                 d,
             ],
             center_of_mass: true,
@@ -473,13 +476,21 @@ mod tests {
     fn per_level_angular_dist_is_used_when_provided() {
         let mut rng = Rng::new(2026, 1);
         let xs = MicroXs {
-            total: 1.0, elastic: 0.0, inelastic: 1.0,
-            n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0,
-            nu_bar: 0.0, awr: 235.0,
+            total: 1.0,
+            elastic: 0.0,
+            inelastic: 1.0,
+            n2n: 0.0,
+            n3n: 0.0,
+            fission: 0.0,
+            capture: 0.0,
+            nu_bar: 0.0,
+            awr: 235.0,
         };
-        let levels = vec![
-            DiscreteLevelInfo { mt: 51, q_value: -50_000.0, threshold: 50_213.0 },
-        ];
+        let levels = vec![DiscreteLevelInfo {
+            mt: 51,
+            q_value: -50_000.0,
+            threshold: 50_213.0,
+        }];
         let level_xs = vec![1.0];
         let angle = build_forward_peaked_angle();
         let angles = vec![Some(angle)];
@@ -496,7 +507,8 @@ mod tests {
             let mut p = Particle::new(
                 crate::geometry::Vec3::new(0.0, 0.0, 0.0),
                 crate::geometry::Vec3::new(1.0, 0.0, 0.0),
-                1.0e6, 0,
+                1.0e6,
+                0,
             );
             let outcome = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
             assert!(matches!(outcome, CollisionOutcome::Scatter));
@@ -505,20 +517,31 @@ mod tests {
         // Forward-peaked CM distribution → lab direction biased forward:
         // ⟨dir.x⟩ must be well above 0.5; isotropic gave ~0.0.
         let mean_x = sum_x / trials as f64;
-        assert!(mean_x > 0.5, "expected forward bias, got mean dir.x = {mean_x}");
+        assert!(
+            mean_x > 0.5,
+            "expected forward bias, got mean dir.x = {mean_x}"
+        );
     }
 
     #[test]
     fn per_level_fallback_to_isotropic_when_angles_empty() {
         let mut rng = Rng::new(2027, 1);
         let xs = MicroXs {
-            total: 1.0, elastic: 0.0, inelastic: 1.0,
-            n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0,
-            nu_bar: 0.0, awr: 235.0,
+            total: 1.0,
+            elastic: 0.0,
+            inelastic: 1.0,
+            n2n: 0.0,
+            n3n: 0.0,
+            fission: 0.0,
+            capture: 0.0,
+            nu_bar: 0.0,
+            awr: 235.0,
         };
-        let levels = vec![
-            DiscreteLevelInfo { mt: 51, q_value: -50_000.0, threshold: 50_213.0 },
-        ];
+        let levels = vec![DiscreteLevelInfo {
+            mt: 51,
+            q_value: -50_000.0,
+            threshold: 50_213.0,
+        }];
         let level_xs = vec![1.0];
         let data = InelasticData {
             levels: &levels,
@@ -532,7 +555,8 @@ mod tests {
             let mut p = Particle::new(
                 crate::geometry::Vec3::new(0.0, 0.0, 0.0),
                 crate::geometry::Vec3::new(1.0, 0.0, 0.0),
-                1.0e6, 0,
+                1.0e6,
+                0,
             );
             let _ = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
             sum_x += p.dir.x;
@@ -541,6 +565,9 @@ mod tests {
         // Isotropic in CM plus two-body kinematics on a heavy nucleus (A=235)
         // leaves a weak forward bias around 0.5. Must stay well below the
         // forward-peaked case (> 0.5 there, well over 0.8 in practice).
-        assert!(mean_x < 0.6, "isotropic should not be strongly forward: {mean_x}");
+        assert!(
+            mean_x < 0.6,
+            "isotropic should not be strongly forward: {mean_x}"
+        );
     }
 }

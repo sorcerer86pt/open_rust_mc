@@ -18,7 +18,11 @@ pub struct Ray {
 impl Ray {
     pub fn new(origin: Vec3, dir: Vec3) -> Self {
         let inv_dir = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
-        Self { origin, dir, inv_dir }
+        Self {
+            origin,
+            dir,
+            inv_dir,
+        }
     }
 }
 
@@ -66,11 +70,7 @@ pub fn find_nearest_surface(
 /// Evaluates all surfaces once, then tests each cell's boolean region.
 /// The BVH accelerates this by skipping cells whose AABB doesn't
 /// contain the point.
-pub fn find_cell(
-    pos: Vec3,
-    surfaces: &[Surface],
-    cells: &[Cell],
-) -> Option<usize> {
+pub fn find_cell(pos: Vec3, surfaces: &[Surface], cells: &[Cell]) -> Option<usize> {
     // Pre-evaluate all surfaces at this point
     let evals: Vec<f64> = surfaces.iter().map(|s| s.evaluate(pos)).collect();
 
@@ -129,13 +129,11 @@ mod tests {
     #[test]
     fn trace_godiva() {
         // Godiva: single sphere, R=8.7407
-        let surfaces = vec![
-            Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0),
-                radius: 8.7407,
-                bc: BoundaryCondition::Vacuum,
-            },
-        ];
+        let surfaces = vec![Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 8.7407,
+            bc: BoundaryCondition::Vacuum,
+        }];
 
         let cells = vec![
             // Fuel: inside the sphere
@@ -167,14 +165,28 @@ mod tests {
         let surfaces = vec![
             // 0: fuel cylinder R=0.4096
             Surface::CylinderZ {
-                center_x: 0.0, center_y: 0.0, radius: 0.4096,
+                center_x: 0.0,
+                center_y: 0.0,
+                radius: 0.4096,
                 bc: BoundaryCondition::Transmission,
             },
             // 1-4: reflective box (pitch=1.26)
-            Surface::PlaneX { x0: -0.63, bc: BoundaryCondition::Reflective },
-            Surface::PlaneX { x0: 0.63, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: -0.63, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: 0.63, bc: BoundaryCondition::Reflective },
+            Surface::PlaneX {
+                x0: -0.63,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneX {
+                x0: 0.63,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: -0.63,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: 0.63,
+                bc: BoundaryCondition::Reflective,
+            },
         ];
 
         let cells = vec![
@@ -184,11 +196,11 @@ mod tests {
             Cell::new(
                 CellId(1),
                 cell::intersect_all(vec![
-                    cell::outside(0),  // outside fuel
-                    cell::outside(1),  // x > -0.63
-                    cell::inside(2),   // x < 0.63
-                    cell::outside(3),  // y > -0.63
-                    cell::inside(4),   // y < 0.63
+                    cell::outside(0), // outside fuel
+                    cell::outside(1), // x > -0.63
+                    cell::inside(2),  // x < 0.63
+                    cell::outside(3), // y > -0.63
+                    cell::inside(4),  // y < 0.63
                 ]),
                 CellFill::Material(1),
             ),
@@ -203,8 +215,8 @@ mod tests {
         assert_eq!(find_cell(pos_water, &surfaces, &cells), Some(1));
 
         // Trace from fuel center heading +x: should hit fuel cylinder at R=0.4096
-        let hit = trace_step(pos, Vec3::new(1.0, 0.0, 0.0), 0, &surfaces, &cells)
-            .expect("should hit");
+        let hit =
+            trace_step(pos, Vec3::new(1.0, 0.0, 0.0), 0, &surfaces, &cells).expect("should hit");
         assert!((hit.distance - 0.4096).abs() < 1e-8);
         assert_eq!(hit.next_cell_idx, Some(1)); // enters water
     }

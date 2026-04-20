@@ -29,8 +29,8 @@ pub enum BoundaryCondition {
 pub enum Surface {
     /// Plane: Ax + By + Cz = D
     Plane {
-        normal: Vec3,   // (A, B, C), unit normal
-        offset: f64,    // D
+        normal: Vec3, // (A, B, C), unit normal
+        offset: f64,  // D
         bc: BoundaryCondition,
     },
     /// Axis-aligned plane: x = x0
@@ -85,17 +85,32 @@ impl Surface {
                 let d = p - *center;
                 d.dot(d) - radius * radius
             }
-            Self::CylinderZ { center_x, center_y, radius, .. } => {
+            Self::CylinderZ {
+                center_x,
+                center_y,
+                radius,
+                ..
+            } => {
                 let dx = p.x - center_x;
                 let dy = p.y - center_y;
                 dx.mul_add(dx, dy * dy) - radius * radius
             }
-            Self::CylinderX { center_y, center_z, radius, .. } => {
+            Self::CylinderX {
+                center_y,
+                center_z,
+                radius,
+                ..
+            } => {
                 let dy = p.y - center_y;
                 let dz = p.z - center_z;
                 dy.mul_add(dy, dz * dz) - radius * radius
             }
-            Self::CylinderY { center_x, center_z, radius, .. } => {
+            Self::CylinderY {
+                center_x,
+                center_z,
+                radius,
+                ..
+            } => {
                 let dx = p.x - center_x;
                 let dz = p.z - center_z;
                 dx.mul_add(dx, dz * dz) - radius * radius
@@ -117,33 +132,50 @@ impl Surface {
                 if t > COINCIDENCE_TOL { Some(t) } else { None }
             }
             Self::PlaneX { x0, .. } => {
-                if dir.x.abs() < COINCIDENCE_TOL { return None; }
+                if dir.x.abs() < COINCIDENCE_TOL {
+                    return None;
+                }
                 let t = (x0 - p.x) / dir.x;
                 if t > COINCIDENCE_TOL { Some(t) } else { None }
             }
             Self::PlaneY { y0, .. } => {
-                if dir.y.abs() < COINCIDENCE_TOL { return None; }
+                if dir.y.abs() < COINCIDENCE_TOL {
+                    return None;
+                }
                 let t = (y0 - p.y) / dir.y;
                 if t > COINCIDENCE_TOL { Some(t) } else { None }
             }
             Self::PlaneZ { z0, .. } => {
-                if dir.z.abs() < COINCIDENCE_TOL { return None; }
+                if dir.z.abs() < COINCIDENCE_TOL {
+                    return None;
+                }
                 let t = (z0 - p.z) / dir.z;
                 if t > COINCIDENCE_TOL { Some(t) } else { None }
             }
-            Self::Sphere { center, radius, .. } => {
-                sphere_intersect(p, dir, *center, *radius)
-            }
-            Self::CylinderZ { center_x, center_y, radius, .. } => {
-                cylinder_z_intersect(p, dir, *center_x, *center_y, *radius)
-            }
-            Self::CylinderX { center_y, center_z, radius, .. } => {
+            Self::Sphere { center, radius, .. } => sphere_intersect(p, dir, *center, *radius),
+            Self::CylinderZ {
+                center_x,
+                center_y,
+                radius,
+                ..
+            } => cylinder_z_intersect(p, dir, *center_x, *center_y, *radius),
+            Self::CylinderX {
+                center_y,
+                center_z,
+                radius,
+                ..
+            } => {
                 // Rotate coordinates: X-cylinder is Z-cylinder in rotated frame
                 let p_rot = Vec3::new(p.y, p.z, p.x);
                 let d_rot = Vec3::new(dir.y, dir.z, dir.x);
                 cylinder_z_intersect(p_rot, d_rot, *center_y, *center_z, *radius)
             }
-            Self::CylinderY { center_x, center_z, radius, .. } => {
+            Self::CylinderY {
+                center_x,
+                center_z,
+                radius,
+                ..
+            } => {
                 let p_rot = Vec3::new(p.x, p.z, p.y);
                 let d_rot = Vec3::new(dir.x, dir.z, dir.y);
                 cylinder_z_intersect(p_rot, d_rot, *center_x, *center_z, *radius)
@@ -175,15 +207,15 @@ impl Surface {
             Self::PlaneY { .. } => Vec3::new(0.0, 1.0, 0.0),
             Self::PlaneZ { .. } => Vec3::new(0.0, 0.0, 1.0),
             Self::Sphere { center, .. } => (p - *center).normalized(),
-            Self::CylinderZ { center_x, center_y, .. } => {
-                Vec3::new(p.x - center_x, p.y - center_y, 0.0).normalized()
-            }
-            Self::CylinderX { center_y, center_z, .. } => {
-                Vec3::new(0.0, p.y - center_y, p.z - center_z).normalized()
-            }
-            Self::CylinderY { center_x, center_z, .. } => {
-                Vec3::new(p.x - center_x, 0.0, p.z - center_z).normalized()
-            }
+            Self::CylinderZ {
+                center_x, center_y, ..
+            } => Vec3::new(p.x - center_x, p.y - center_y, 0.0).normalized(),
+            Self::CylinderX {
+                center_y, center_z, ..
+            } => Vec3::new(0.0, p.y - center_y, p.z - center_z).normalized(),
+            Self::CylinderY {
+                center_x, center_z, ..
+            } => Vec3::new(p.x - center_x, 0.0, p.z - center_z).normalized(),
         }
     }
 
@@ -192,14 +224,20 @@ impl Surface {
         match self {
             Self::Sphere { center, radius, .. } => {
                 let r = Vec3::new(*radius, *radius, *radius);
-                Aabb { min: *center - r, max: *center + r }
-            }
-            Self::CylinderZ { center_x, center_y, radius, .. } => {
                 Aabb {
-                    min: Vec3::new(center_x - radius, center_y - radius, f64::NEG_INFINITY),
-                    max: Vec3::new(center_x + radius, center_y + radius, f64::INFINITY),
+                    min: *center - r,
+                    max: *center + r,
                 }
             }
+            Self::CylinderZ {
+                center_x,
+                center_y,
+                radius,
+                ..
+            } => Aabb {
+                min: Vec3::new(center_x - radius, center_y - radius, f64::NEG_INFINITY),
+                max: Vec3::new(center_x + radius, center_y + radius, f64::INFINITY),
+            },
             // Planes and other infinite surfaces get infinite AABBs
             _ => Aabb::INFINITE,
         }
@@ -322,7 +360,10 @@ mod tests {
 
     #[test]
     fn plane_x_distance() {
-        let s = Surface::PlaneX { x0: 3.0, bc: BoundaryCondition::Vacuum };
+        let s = Surface::PlaneX {
+            x0: 3.0,
+            bc: BoundaryCondition::Vacuum,
+        };
         let p = Vec3::new(0.0, 0.0, 0.0);
         let d = Vec3::new(1.0, 0.0, 0.0);
         let t = s.distance(p, d).expect("should intersect");
@@ -332,7 +373,9 @@ mod tests {
     #[test]
     fn cylinder_z_distance() {
         let s = Surface::CylinderZ {
-            center_x: 0.0, center_y: 0.0, radius: 1.0,
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: 1.0,
             bc: BoundaryCondition::Vacuum,
         };
         let p = Vec3::new(-5.0, 0.0, 0.0);
@@ -350,7 +393,8 @@ mod tests {
             bc: BoundaryCondition::Vacuum,
         };
         // Particle at origin heading outward
-        let t = s.distance(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+        let t = s
+            .distance(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
             .expect("should hit");
         assert!((t - 8.7407).abs() < 1e-10);
     }

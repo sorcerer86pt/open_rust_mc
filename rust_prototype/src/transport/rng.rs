@@ -29,7 +29,8 @@ impl Rng {
     /// Seed for a specific particle in a specific batch.
     /// Deterministic: same (batch, particle_id) always gives same sequence.
     pub fn for_particle(batch: u64, particle_id: u64) -> Self {
-        let seed = batch.wrapping_mul(6_364_136_223_846_793_005)
+        let seed = batch
+            .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(particle_id);
         Self::new(seed, particle_id)
     }
@@ -74,15 +75,22 @@ impl Rng {
 
     /// Get the internal state (for saving/restoring in event-based transport).
     #[inline]
-    pub fn state(&self) -> u64 { self.state }
+    pub fn state(&self) -> u64 {
+        self.state
+    }
 
     /// Get the stream/increment (for saving/restoring).
     #[inline]
-    pub fn stream(&self) -> u64 { self.inc >> 1 }
+    pub fn stream(&self) -> u64 {
+        self.inc >> 1
+    }
 
     /// Restore from saved state and stream.
     pub fn from_state(state: u64, stream: u64) -> Self {
-        Self { state, inc: (stream << 1) | 1 }
+        Self {
+            state,
+            inc: (stream << 1) | 1,
+        }
     }
 
     /// Discrete sampling: pick an index 0..n with probability proportional to weights.

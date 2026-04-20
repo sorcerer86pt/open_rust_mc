@@ -46,19 +46,18 @@ impl Region {
     #[inline]
     pub fn contains(&self, surface_evals: &[f64]) -> bool {
         match self {
-            Self::HalfSpace { surface_idx, positive } => {
+            Self::HalfSpace {
+                surface_idx,
+                positive,
+            } => {
                 if *positive {
                     surface_evals[*surface_idx] > 0.0
                 } else {
                     surface_evals[*surface_idx] < 0.0
                 }
             }
-            Self::Intersection(a, b) => {
-                a.contains(surface_evals) && b.contains(surface_evals)
-            }
-            Self::Union(a, b) => {
-                a.contains(surface_evals) || b.contains(surface_evals)
-            }
+            Self::Intersection(a, b) => a.contains(surface_evals) && b.contains(surface_evals),
+            Self::Union(a, b) => a.contains(surface_evals) || b.contains(surface_evals),
             Self::Complement(a) => !a.contains(surface_evals),
         }
     }
@@ -95,7 +94,7 @@ impl Cell {
             id,
             region,
             fill,
-            temperature: 293.6, // default room temperature
+            temperature: 293.6,   // default room temperature
             aabb: Aabb::INFINITE, // will be computed later
         }
     }
@@ -124,27 +123,45 @@ impl Cell {
 /// Intersection of two half-spaces: -S1 ∩ -S2 (inside both surfaces).
 pub fn inside_both(s1: usize, s2: usize) -> Region {
     Region::Intersection(
-        Box::new(Region::HalfSpace { surface_idx: s1, positive: false }),
-        Box::new(Region::HalfSpace { surface_idx: s2, positive: false }),
+        Box::new(Region::HalfSpace {
+            surface_idx: s1,
+            positive: false,
+        }),
+        Box::new(Region::HalfSpace {
+            surface_idx: s2,
+            positive: false,
+        }),
     )
 }
 
 /// Inside s1 but outside s2: -S1 ∩ +S2.
 pub fn between(inner: usize, outer: usize) -> Region {
     Region::Intersection(
-        Box::new(Region::HalfSpace { surface_idx: inner, positive: true }),
-        Box::new(Region::HalfSpace { surface_idx: outer, positive: false }),
+        Box::new(Region::HalfSpace {
+            surface_idx: inner,
+            positive: true,
+        }),
+        Box::new(Region::HalfSpace {
+            surface_idx: outer,
+            positive: false,
+        }),
     )
 }
 
 /// Inside a single surface (negative half-space).
 pub fn inside(s: usize) -> Region {
-    Region::HalfSpace { surface_idx: s, positive: false }
+    Region::HalfSpace {
+        surface_idx: s,
+        positive: false,
+    }
 }
 
 /// Outside a single surface (positive half-space).
 pub fn outside(s: usize) -> Region {
-    Region::HalfSpace { surface_idx: s, positive: true }
+    Region::HalfSpace {
+        surface_idx: s,
+        positive: true,
+    }
 }
 
 /// Intersection of multiple half-spaces.

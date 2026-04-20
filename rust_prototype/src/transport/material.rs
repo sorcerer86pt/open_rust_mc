@@ -28,7 +28,10 @@ impl Material {
     }
 
     pub fn add_nuclide(&mut self, atom_density: f64, xs_kernel_idx: usize) {
-        self.nuclides.push(NuclideEntry { atom_density, xs_kernel_idx });
+        self.nuclides.push(NuclideEntry {
+            atom_density,
+            xs_kernel_idx,
+        });
     }
 
     /// Compute macroscopic total cross-section at a given energy.
@@ -51,12 +54,7 @@ impl Material {
     /// Returns the index into `self.nuclides`.
     /// Probability proportional to N_i · σ_t,i(E).
     #[inline]
-    pub fn sample_nuclide(
-        &self,
-        micro_totals: &[f64],
-        macro_total: f64,
-        xi: f64,
-    ) -> usize {
+    pub fn sample_nuclide(&self, micro_totals: &[f64], macro_total: f64, xi: f64) -> usize {
         let threshold = xi * macro_total;
         let mut cumulative = 0.0;
         for (i, (nuc, &sigma)) in self.nuclides.iter().zip(micro_totals.iter()).enumerate() {

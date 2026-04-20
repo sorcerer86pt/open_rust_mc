@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use ndarray_npy::ReadNpyExt;
 
-use crate::error::{SvdError, Result};
+use crate::error::{Result, SvdError};
 use crate::kernel::EnergyHashTable;
 
 /// Pointwise cross-section table for one nuclide, one reaction, one temperature.
@@ -44,20 +44,32 @@ impl PointwiseTable {
         let e: Arc<[f64]> = energies.into();
         // Hash table disabled for PointwiseTable — the log-log interpolation
         // is sensitive to bracket accuracy. SVD uses hash (index-only, no interp).
-        Ok(Self { energies: e, xs, hash_table: None })
+        Ok(Self {
+            energies: e,
+            xs,
+            hash_table: None,
+        })
     }
 
     /// Build from raw vectors (for benchmarking without file I/O).
     pub fn from_vecs(energies: Vec<f64>, xs: Vec<f64>) -> Self {
         debug_assert_eq!(energies.len(), xs.len());
         let e: Arc<[f64]> = energies.into();
-        Self { energies: e, xs, hash_table: None }
+        Self {
+            energies: e,
+            xs,
+            hash_table: None,
+        }
     }
 
     /// Build from a shared energy grid and owned XS values.
     pub fn from_shared_grid(energies: Arc<[f64]>, xs: Vec<f64>) -> Self {
         debug_assert_eq!(energies.len(), xs.len());
-        Self { energies, xs, hash_table: None }
+        Self {
+            energies,
+            xs,
+            hash_table: None,
+        }
     }
 
     /// Memory footprint of XS data only (bytes), excluding shared energy grid.
@@ -77,14 +89,19 @@ impl PointwiseTable {
         // Both return the lower bracket index for interpolation.
         let idx = if let Some(ref ht) = self.hash_table {
             let i = ht.lookup(energy, &self.energies);
-            if energy <= self.energies[0] { return self.xs[0]; }
-            if i >= n { return self.xs[n - 1]; }
+            if energy <= self.energies[0] {
+                return self.xs[0];
+            }
+            if i >= n {
+                return self.xs[n - 1];
+            }
             // Hash returns upper bracket; we need lower for interpolation
             if i > 0 { i - 1 } else { 0 }
         } else {
-            match self.energies.binary_search_by(|e| {
-                e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
-            }) {
+            match self
+                .energies
+                .binary_search_by(|e| e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less))
+            {
                 Ok(i) => return self.xs[i],
                 Err(0) => return self.xs[0],
                 Err(i) if i >= n => return self.xs[n - 1],

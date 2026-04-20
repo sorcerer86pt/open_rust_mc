@@ -13,8 +13,9 @@
 //!   - Humlicek, J., "Optimised computation of the Voigt and complex
 //!     probability functions", JQSRT 27 (1982) 437-444.
 
-use std::path::Path;
 use crate::error::{Result, SvdError};
+use std::ops::{Add, Div, Mul, Sub};
+use std::path::Path;
 
 /// Boltzmann constant in eV/K (OpenMC value).
 const K_BOLTZMANN: f64 = 8.617_328_5e-5;
@@ -31,25 +32,56 @@ pub struct C64 {
 }
 
 impl C64 {
-    #[inline] pub const fn new(re: f64, im: f64) -> Self { Self { re, im } }
-    #[inline] pub fn abs2(self) -> f64 { self.re * self.re + self.im * self.im }
-    #[inline] pub fn mul(self, o: Self) -> Self {
-        Self::new(self.re * o.re - self.im * o.im,
-                  self.re * o.im + self.im * o.re)
+    #[inline]
+    pub const fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
     }
-    #[inline] pub fn add(self, o: Self) -> Self {
-        Self::new(self.re + o.re, self.im + o.im)
+    #[inline]
+    pub fn abs2(self) -> f64 {
+        self.re * self.re + self.im * self.im
     }
-    #[inline] pub fn sub(self, o: Self) -> Self {
-        Self::new(self.re - o.re, self.im - o.im)
-    }
-    #[inline] pub fn scale(self, s: f64) -> Self {
+    #[inline]
+    pub fn scale(self, s: f64) -> Self {
         Self::new(self.re * s, self.im * s)
     }
-    #[inline] pub fn div(self, o: Self) -> Self {
+}
+
+impl std::ops::Mul for C64 {
+    type Output = Self;
+    #[inline]
+    fn mul(self, o: Self) -> Self {
+        Self::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
+    }
+}
+
+impl std::ops::Add for C64 {
+    type Output = Self;
+    #[inline]
+    fn add(self, o: Self) -> Self {
+        Self::new(self.re + o.re, self.im + o.im)
+    }
+}
+
+impl std::ops::Sub for C64 {
+    type Output = Self;
+    #[inline]
+    fn sub(self, o: Self) -> Self {
+        Self::new(self.re - o.re, self.im - o.im)
+    }
+}
+
+impl std::ops::Div for C64 {
+    type Output = Self;
+    #[inline]
+    fn div(self, o: Self) -> Self {
         let d = o.abs2();
-        Self::new((self.re * o.re + self.im * o.im) / d,
-                  (self.im * o.re - self.re * o.im) / d)
+        Self::new(
+            (self.re * o.re + self.im * o.im) / d,
+            (self.im * o.re - self.re * o.im) / d,
+        )
     }
 }
 
@@ -94,10 +126,11 @@ pub fn faddeeva(z: C64) -> C64 {
         // Region II
         let t = C64::new(y, -x);
         let u = t.mul(t);
-        let num = t.mul(C64::new(1.410474 + u.re * INV_SQRT_PI,
-                                 u.im * INV_SQRT_PI));
-        let den = C64::new(0.75 + u.re * 3.0 + (u.mul(u)).re,
-                           u.im * 3.0 + (u.mul(u)).im);
+        let num = t.mul(C64::new(1.410474 + u.re * INV_SQRT_PI, u.im * INV_SQRT_PI));
+        let den = C64::new(
+            0.75 + u.re * 3.0 + (u.mul(u)).re,
+            u.im * 3.0 + (u.mul(u)).im,
+        );
         return num.div(den);
     }
 
@@ -106,14 +139,8 @@ pub fn faddeeva(z: C64) -> C64 {
         // flipped by sign convention).
         let t = C64::new(y, -x);
         // Horner's method, coefficients from Humlicek 1982 W4.
-        let num = poly_horner(
-            t,
-            &[16.4955, 20.20933, 11.96482, 3.778987, 0.5642236],
-        );
-        let den = poly_horner(
-            t,
-            &[16.4955, 38.82363, 39.27121, 21.69274, 6.699398, 1.0],
-        );
+        let num = poly_horner(t, &[16.4955, 20.20933, 11.96482, 3.778987, 0.5642236]);
+        let den = poly_horner(t, &[16.4955, 38.82363, 39.27121, 21.69274, 6.699398, 1.0]);
         return num.div(den);
     }
 
@@ -125,8 +152,25 @@ pub fn faddeeva(z: C64) -> C64 {
     // P(u) = 36183.31 - u(3321.9905 - u(1540.787 - u(219.0313 - u(35.76683 - u(1.320522 - 0.56419*u)))))
     // Q(u) = 32066.6 - u(24322.84 - u(9022.228 - u(2186.181 - u(364.2191 - u(61.57037 - u(1.841439 - u))))))
     // Evaluated via nested Horner on u, with sign alternation.
-    let p_coefs = [36183.31_f64, -3321.9905, 1540.787, -219.0313, 35.76683, -1.320522, 0.56419];
-    let q_coefs = [32066.6_f64, -24322.84, 9022.228, -2186.181, 364.2191, -61.57037, 1.841439, -1.0];
+    let p_coefs = [
+        36183.31_f64,
+        -3321.9905,
+        1540.787,
+        -219.0313,
+        35.76683,
+        -1.320522,
+        0.56419,
+    ];
+    let q_coefs = [
+        32066.6_f64,
+        -24322.84,
+        9022.228,
+        -2186.181,
+        364.2191,
+        -61.57037,
+        1.841439,
+        -1.0,
+    ];
 
     let p = poly_horner_real(u, &p_coefs);
     let q = poly_horner_real(u, &q_coefs);
@@ -162,7 +206,11 @@ fn poly_horner_real(u: C64, coefs: &[f64]) -> C64 {
 // ── WMP data ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy)]
-pub enum WmpReaction { Scattering = 0, Absorption = 1, Fission = 2 }
+pub enum WmpReaction {
+    Scattering = 0,
+    Absorption = 1,
+    Fission = 2,
+}
 
 /// Parsed Windowed Multipole data for one nuclide.
 pub struct WindowedMultipole {
@@ -250,15 +298,30 @@ impl WindowedMultipole {
         if n_cols != 4 || data_raw.len() != n_poles * 4 * 16 {
             return Err(SvdError::Hdf5 {
                 path: path.display().to_string(),
-                detail: format!("data layout unexpected: shape={shape:?} bytes={}", data_raw.len()),
+                detail: format!(
+                    "data layout unexpected: shape={shape:?} bytes={}",
+                    data_raw.len()
+                ),
             });
         }
         let mut poles = Vec::with_capacity(n_poles * 4);
         for i in 0..n_poles {
             for j in 0..4 {
                 let off = (i * 4 + j) * 16;
-                let re = f64::from_le_bytes(data_raw[off..off + 8].try_into().unwrap());
-                let im = f64::from_le_bytes(data_raw[off + 8..off + 16].try_into().unwrap());
+                // Complex128 in the WMP HDF5 layout is exactly 16 bytes
+                // (re + im); the slice length is known-correct by
+                // construction so an explicit expect() documents the
+                // invariant without triggering clippy::unwrap_used.
+                let re = f64::from_le_bytes(
+                    data_raw[off..off + 8]
+                        .try_into()
+                        .expect("WMP complex128 re slice must be 8 bytes"),
+                );
+                let im = f64::from_le_bytes(
+                    data_raw[off + 8..off + 16]
+                        .try_into()
+                        .expect("WMP complex128 im slice must be 8 bytes"),
+                );
                 poles.push(C64::new(re, im));
             }
         }
@@ -361,18 +424,18 @@ impl WindowedMultipole {
             // Doppler-broadened curvefit.
             let dopp = self.sqrt_awr / sqrt_kt;
             let factors = broaden_wmp_polynomials(e, dopp, order1);
-            for i_poly in 0..order1 {
-                sig_s += self.curvefit[cf_base + i_poly * 3 + 0] * factors[i_poly];
-                sig_a += self.curvefit[cf_base + i_poly * 3 + 1] * factors[i_poly];
+            for (i_poly, &factor) in factors.iter().enumerate().take(order1) {
+                sig_s += self.curvefit[cf_base + i_poly * 3] * factor;
+                sig_a += self.curvefit[cf_base + i_poly * 3 + 1] * factor;
                 if self.fissionable {
-                    sig_f += self.curvefit[cf_base + i_poly * 3 + 2] * factors[i_poly];
+                    sig_f += self.curvefit[cf_base + i_poly * 3 + 2] * factor;
                 }
             }
         } else {
             // Unbroadened: temp = 1/E, then 1/sqrt(E), then 1, then sqrt(E), ...
             let mut temp = inv_e;
             for i_poly in 0..order1 {
-                sig_s += self.curvefit[cf_base + i_poly * 3 + 0] * temp;
+                sig_s += self.curvefit[cf_base + i_poly * 3] * temp;
                 sig_a += self.curvefit[cf_base + i_poly * 3 + 1] * temp;
                 if self.fissionable {
                     sig_f += self.curvefit[cf_base + i_poly * 3 + 2] * temp;
@@ -388,7 +451,7 @@ impl WindowedMultipole {
             if sqrt_kt == 0.0 {
                 // 0 K asymptotic
                 for i_pole in (startw as usize)..(endw as usize) {
-                    let ea = self.poles[i_pole * 4 + 0];
+                    let ea = self.poles[i_pole * 4];
                     let rs = self.poles[i_pole * 4 + 1];
                     let ra = self.poles[i_pole * 4 + 2];
                     let rf = self.poles[i_pole * 4 + 3];
@@ -407,7 +470,7 @@ impl WindowedMultipole {
                 // Doppler-broadened via Faddeeva.
                 let dopp = self.sqrt_awr / sqrt_kt;
                 for i_pole in (startw as usize)..(endw as usize) {
-                    let ea = self.poles[i_pole * 4 + 0];
+                    let ea = self.poles[i_pole * 4];
                     let rs = self.poles[i_pole * 4 + 1];
                     let ra = self.poles[i_pole * 4 + 2];
                     let rf = self.poles[i_pole * 4 + 3];
@@ -454,8 +517,7 @@ fn broaden_wmp_polynomials(e: f64, dopp: f64, n: usize) -> Vec<f64> {
         factors[1] = 1.0 / sqrt_e;
     }
     if n > 2 {
-        factors[2] = factors[0] * (half_inv_dopp2 + e)
-                     + exp_m_beta2 / (beta * PI.sqrt());
+        factors[2] = factors[0] * (half_inv_dopp2 + e) + exp_m_beta2 / (beta * PI.sqrt());
     }
     // Higher-order recurrence (matches OpenMC)
     for i in 1..(n.saturating_sub(2)) {
@@ -474,8 +536,11 @@ fn erf_f64(x: f64) -> f64 {
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
     let ax = x.abs();
     let t = 1.0 / (1.0 + 0.3275911 * ax);
-    let y = 1.0 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t
-                   - 0.284496736) * t + 0.254829592) * t * (-ax * ax).exp();
+    let y = 1.0
+        - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t
+            + 0.254829592)
+            * t
+            * (-ax * ax).exp();
     sign * y
 }
 
@@ -519,8 +584,11 @@ mod tests {
             let w = faddeeva(C64::new(x, 0.0));
             let expected = (-x * x).exp();
             // Humlicek W4 has ~1e-4 accuracy; allow generous tolerance.
-            assert!((w.re - expected).abs() < 1e-3,
-                "Re(w({x} + 0i)) = {} vs exp(-x²) = {expected}", w.re);
+            assert!(
+                (w.re - expected).abs() < 1e-3,
+                "Re(w({x} + 0i)) = {} vs exp(-x²) = {expected}",
+                w.re
+            );
         }
     }
 
@@ -532,12 +600,15 @@ mod tests {
         // confirm the function is still well-behaved and near 1.0 at z=0.
         // w(0) = 1 exactly.
         let w = faddeeva(C64::new(0.0, 0.0));
-        assert!((w.re - 1.0).abs() < 1e-6 && w.im.abs() < 1e-6,
-                "w(0) = {:?}, expected (1, 0)", w);
+        assert!(
+            (w.re - 1.0).abs() < 1e-6 && w.im.abs() < 1e-6,
+            "w(0) = {:?}, expected (1, 0)",
+            w
+        );
         // w is continuous across region boundaries — no discontinuity at
         // s = 5.5 or s = 15.
         let eps = 1e-6;
-        let w_below = faddeeva(C64::new(4.0, 1.5 + eps));   // s just above 5.5
+        let w_below = faddeeva(C64::new(4.0, 1.5 + eps)); // s just above 5.5
         let w_below_other = faddeeva(C64::new(4.0, 1.5 - eps));
         assert!((w_below.re - w_below_other.re).abs() < 1e-3);
     }
@@ -548,8 +619,18 @@ mod tests {
         // So w(x - iy).re = -w(x + iy).re and w(x - iy).im = +w(x + iy).im.
         let up = faddeeva(C64::new(1.0, 0.5));
         let down = faddeeva(C64::new(1.0, -0.5));
-        assert!((down.re + up.re).abs() < 1e-10, "re sign flip broken: up={}, down={}", up.re, down.re);
-        assert!((down.im - up.im).abs() < 1e-10, "im sign stability broken: up={}, down={}", up.im, down.im);
+        assert!(
+            (down.re + up.re).abs() < 1e-10,
+            "re sign flip broken: up={}, down={}",
+            up.re,
+            down.re
+        );
+        assert!(
+            (down.im - up.im).abs() < 1e-10,
+            "im sign stability broken: up={}, down={}",
+            up.im,
+            down.im
+        );
     }
 
     #[test]
@@ -559,8 +640,10 @@ mod tests {
         let w = faddeeva(z);
         let expected_mag = 1.0 / (z.abs2().sqrt() * std::f64::consts::PI.sqrt());
         let w_mag = w.abs2().sqrt();
-        assert!((w_mag - expected_mag).abs() < 1e-3 * expected_mag,
-                "asymptotic magnitude off: {w_mag} vs {expected_mag}");
+        assert!(
+            (w_mag - expected_mag).abs() < 1e-3 * expected_mag,
+            "asymptotic magnitude off: {w_mag} vs {expected_mag}"
+        );
     }
 
     #[test]
@@ -573,7 +656,15 @@ mod tests {
         let factors = broaden_wmp_polynomials(e, dopp, n);
         let beta = e.sqrt() * dopp;
         let expected_0 = erf_f64(beta) / e;
-        assert!((factors[0] - expected_0).abs() < 1e-10, "factors[0] = {}", factors[0]);
-        assert!((factors[1] - 1.0 / e.sqrt()).abs() < 1e-10, "factors[1] = {}", factors[1]);
+        assert!(
+            (factors[0] - expected_0).abs() < 1e-10,
+            "factors[0] = {}",
+            factors[0]
+        );
+        assert!(
+            (factors[1] - 1.0 / e.sqrt()).abs() < 1e-10,
+            "factors[1] = {}",
+            factors[1]
+        );
     }
 }

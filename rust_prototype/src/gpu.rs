@@ -12,7 +12,9 @@
 pub mod cuda {
     use std::sync::Arc;
 
-    use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg};
+    use cudarc::driver::{
+        CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
+    };
     use cudarc::nvrtc;
 
     /// CUDA kernel source for SVD reconstruction.
@@ -66,7 +68,11 @@ extern "C" __global__ void svd_reconstruct(
 
             println!("  GPU initialized (CUDA)");
 
-            Ok(Self { _ctx: ctx, stream, func })
+            Ok(Self {
+                _ctx: ctx,
+                stream,
+                func,
+            })
         }
 
         /// Batch SVD reconstruction on GPU.
@@ -104,7 +110,8 @@ extern "C" __global__ void svd_reconstruct(
 
             // Launch kernel
             unsafe {
-                self.stream.launch_builder(&self.func)
+                self.stream
+                    .launch_builder(&self.func)
                     .arg(&d_basis)
                     .arg(&d_coeffs)
                     .arg(&mut d_output)

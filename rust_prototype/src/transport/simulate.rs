@@ -12,9 +12,9 @@ use std::io::Write;
 
 use rayon::prelude::*;
 
-use crate::geometry::{self, Vec3};
 use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
+use crate::geometry::{self, Vec3};
 use crate::hdf5_reader::{AngularDistribution, DiscreteLevelInfo, EnergyDistribution};
 use crate::physics::collision::{self, CollisionOutcome, InelasticData, MicroXs};
 use crate::thermal::ThermalScatteringData;
@@ -67,7 +67,12 @@ impl Default for EntropyConvergence {
         // typical 10k-50k particles/batch used in paper benchmarks
         // (measured CV ≈ 2e-3 once settled) while still tight enough
         // that transient bias is well below the k_eff standard error.
-        Self { min_inactive: 20, max_inactive: 200, window: 10, cv_tol: 5e-3 }
+        Self {
+            min_inactive: 20,
+            max_inactive: 200,
+            window: 10,
+            cv_tol: 5e-3,
+        }
     }
 }
 
@@ -77,13 +82,16 @@ impl EntropyConvergence {
     /// `window` samples and `history.len() >= min_inactive`.
     pub fn has_converged(&self, history: &[f64]) -> bool {
         let n = history.len() as u32;
-        if n < self.min_inactive || n < self.window { return false; }
+        if n < self.min_inactive || n < self.window {
+            return false;
+        }
         let start = history.len() - self.window as usize;
         let window = &history[start..];
         let mean: f64 = window.iter().sum::<f64>() / window.len() as f64;
-        if mean.abs() < 1e-12 { return false; }
-        let var: f64 = window.iter().map(|h| (h - mean).powi(2)).sum::<f64>()
-            / window.len() as f64;
+        if mean.abs() < 1e-12 {
+            return false;
+        }
+        let var: f64 = window.iter().map(|h| (h - mean).powi(2)).sum::<f64>() / window.len() as f64;
         let cv = var.sqrt() / mean.abs();
         cv < self.cv_tol
     }
@@ -130,7 +138,8 @@ fn detect_tracking_mode<XS: XsProvider>(
     xs_provider: &XS,
 ) -> TrackingMode {
     // Count unique material indices
-    let mut mat_indices: Vec<usize> = cells.iter()
+    let mut mat_indices: Vec<usize> = cells
+        .iter()
         .filter_map(|c| match c.fill {
             CellFill::Material(m) => Some(m as usize),
             _ => None,
@@ -160,7 +169,9 @@ fn detect_tracking_mode<XS: XsProvider>(
 
         let mut mat_totals = Vec::with_capacity(mat_indices.len());
         for &mi in &mat_indices {
-            if mi >= materials.len() { continue; }
+            if mi >= materials.len() {
+                continue;
+            }
             let mat = &materials[mi];
             let mut macro_t = 0.0;
             for nuc in &mat.nuclides {
@@ -171,7 +182,9 @@ fn detect_tracking_mode<XS: XsProvider>(
         }
 
         let sigma_max = mat_totals.iter().copied().fold(0.0_f64, f64::max);
-        let sigma_min = mat_totals.iter().copied()
+        let sigma_min = mat_totals
+            .iter()
+            .copied()
             .filter(|&s| s > 1e-10)
             .fold(f64::INFINITY, f64::min);
 
@@ -185,14 +198,24 @@ fn detect_tracking_mode<XS: XsProvider>(
 
     // High contrast (>20x) means >95% virtual collisions — delta tracking is worse
     if max_contrast > 20.0 {
-        println!("  Tracking: SURFACE (heterogeneous but contrast={:.1}x too high for delta tracking)",
-                 max_contrast);
+        println!(
+            "  Tracking: SURFACE (heterogeneous but contrast={:.1}x too high for delta tracking)",
+            max_contrast
+        );
         return TrackingMode::Surface;
     }
 
-    let avg_rejection = if max_contrast > 1.0 { 1.0 - 1.0 / max_contrast } else { 0.0 };
-    println!("  Tracking: DELTA (heterogeneous — {} materials, contrast={:.1}x, ~{:.0}% virtual collisions)",
-             mat_indices.len(), max_contrast, avg_rejection * 100.0);
+    let avg_rejection = if max_contrast > 1.0 {
+        1.0 - 1.0 / max_contrast
+    } else {
+        0.0
+    };
+    println!(
+        "  Tracking: DELTA (heterogeneous — {} materials, contrast={:.1}x, ~{:.0}% virtual collisions)",
+        mat_indices.len(),
+        max_contrast,
+        avg_rejection * 100.0
+    );
 
     TrackingMode::Delta(MajorantTable {
         log_e_min: log_min,
@@ -328,12 +351,12 @@ impl EntropyMesh {
         let inv_dz = if dz > 0.0 { 1.0 / dz } else { 0.0 };
 
         for s in sites {
-            let ix = (((s.pos.x - self.lo[0]) * inv_dx) as isize)
-                .clamp(0, self.n as isize - 1) as usize;
-            let iy = (((s.pos.y - self.lo[1]) * inv_dy) as isize)
-                .clamp(0, self.n as isize - 1) as usize;
-            let iz = (((s.pos.z - self.lo[2]) * inv_dz) as isize)
-                .clamp(0, self.n as isize - 1) as usize;
+            let ix =
+                (((s.pos.x - self.lo[0]) * inv_dx) as isize).clamp(0, self.n as isize - 1) as usize;
+            let iy =
+                (((s.pos.y - self.lo[1]) * inv_dy) as isize).clamp(0, self.n as isize - 1) as usize;
+            let iz =
+                (((s.pos.z - self.lo[2]) * inv_dz) as isize).clamp(0, self.n as isize - 1) as usize;
             counts[ix * self.n * self.n + iy * self.n + iz] += 1;
         }
 
@@ -409,7 +432,11 @@ fn transport_particle<XS: XsProvider>(
                     break;
                 }
                 let trace = geometry::ray::trace_step(
-                    particle.pos, particle.dir, particle.cell_idx, surfaces, cells,
+                    particle.pos,
+                    particle.dir,
+                    particle.cell_idx,
+                    surfaces,
+                    cells,
                 );
                 match trace {
                     Some(hit) => {
@@ -479,16 +506,17 @@ fn transport_particle<XS: XsProvider>(
 
             // S(α,β) thermal scattering: replace free-atom elastic XS
             // with thermal scattering XS below energy_max
-            if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx) {
-                if particle.energy < tsl.energy_max && particle.energy > 0.0 {
-                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                    let thermal_total = tsl.total_xs(particle.energy, t_idx).max(0.0);
-                    if thermal_total > 0.0 {
-                        let delta = thermal_total - xs.elastic;
-                        xs.total += delta;
-                        thermal_xs_add[i] = thermal_total;
-                        xs.elastic = 0.0;
-                    }
+            if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
+                && particle.energy < tsl.energy_max
+                && particle.energy > 0.0
+            {
+                let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                let thermal_total = tsl.total_xs(particle.energy, t_idx).max(0.0);
+                if thermal_total > 0.0 {
+                    let delta = thermal_total - xs.elastic;
+                    xs.total += delta;
+                    thermal_xs_add[i] = thermal_total;
+                    xs.elastic = 0.0;
                 }
             }
 
@@ -560,7 +588,9 @@ fn transport_particle<XS: XsProvider>(
                 let use_thermal = thermal_xs_add[nuc_idx] > 0.0;
                 if use_thermal {
                     // Thermal scattering: sample from S(α,β)
-                    let tsl = xs_provider.thermal_scattering(xs_kernel_idx).expect("thermal data");
+                    let tsl = xs_provider
+                        .thermal_scattering(xs_kernel_idx)
+                        .expect("thermal data");
                     let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
                     let xi_reaction = rng.uniform() * micro_xs[nuc_idx].total;
 
@@ -577,29 +607,34 @@ fn transport_particle<XS: XsProvider>(
                         if w2 < 0.999 {
                             let inv_sq = 1.0 / (1.0 - w2).sqrt();
                             particle.dir = Vec3::new(
-                                mu * d.x + sin_mu * (d.x * d.z * phi.cos() - d.y * phi.sin()) * inv_sq,
-                                mu * d.y + sin_mu * (d.y * d.z * phi.cos() + d.x * phi.sin()) * inv_sq,
+                                mu * d.x
+                                    + sin_mu * (d.x * d.z * phi.cos() - d.y * phi.sin()) * inv_sq,
+                                mu * d.y
+                                    + sin_mu * (d.y * d.z * phi.cos() + d.x * phi.sin()) * inv_sq,
                                 mu * d.z - sin_mu * (1.0 - w2).sqrt() * phi.cos(),
                             );
                         } else {
                             let sign = if d.z > 0.0 { 1.0 } else { -1.0 };
-                            particle.dir = Vec3::new(
-                                sin_mu * phi.cos(),
-                                sin_mu * phi.sin() * sign,
-                                mu * sign,
-                            );
+                            particle.dir =
+                                Vec3::new(sin_mu * phi.cos(), sin_mu * phi.sin() * sign, mu * sign);
                         }
                         // Continue — this was a scatter
                     } else {
                         // Non-thermal reaction (fission, capture, inelastic, etc.)
                         // Process normally but with elastic = 0
                         let outcome = process_non_thermal_collision(
-                            &mut particle, &micro_xs[nuc_idx], xs_kernel_idx,
-                            xs_provider, cell.temperature, &mut rng,
+                            &mut particle,
+                            &micro_xs[nuc_idx],
+                            xs_kernel_idx,
+                            xs_provider,
+                            cell.temperature,
+                            &mut rng,
                         );
                         match outcome {
                             CollisionOutcome::Scatter => {}
-                            CollisionOutcome::Absorption => { result.absorptions += 1; }
+                            CollisionOutcome::Absorption => {
+                                result.absorptions += 1;
+                            }
                             CollisionOutcome::Fission { sites } => {
                                 result.fissions += 1;
                                 result.fission_sites.extend(sites);
@@ -685,8 +720,13 @@ fn process_non_thermal_collision<XS: XsProvider>(
     let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
 
     collision::process_collision(
-        particle, xs, inelastic_data.as_ref(),
-        elastic_angle, fission_edist, temperature, rng,
+        particle,
+        xs,
+        inelastic_data.as_ref(),
+        elastic_angle,
+        fission_edist,
+        temperature,
+        rng,
     )
 }
 
@@ -696,6 +736,7 @@ fn process_non_thermal_collision<XS: XsProvider>(
 /// pre-computed majorant XS for the entire geometry. At each potential
 /// collision, accepts or rejects based on real/majorant XS ratio.
 /// This avoids surface intersection at transmission boundaries.
+#[allow(clippy::too_many_arguments)]
 fn transport_particle_delta<XS: XsProvider>(
     site: &FissionSite,
     batch: u64,
@@ -739,7 +780,11 @@ fn transport_particle_delta<XS: XsProvider>(
 
         // Check for vacuum/reflective boundaries before advancing
         let trace = geometry::ray::trace_step(
-            particle.pos, particle.dir, particle.cell_idx, surfaces, cells,
+            particle.pos,
+            particle.dir,
+            particle.cell_idx,
+            surfaces,
+            cells,
         );
 
         match trace {
@@ -794,7 +839,11 @@ fn transport_particle_delta<XS: XsProvider>(
             CellFill::Void => {
                 // Void region — free-stream to next surface
                 let trace = geometry::ray::trace_step(
-                    particle.pos, particle.dir, particle.cell_idx, surfaces, cells,
+                    particle.pos,
+                    particle.dir,
+                    particle.cell_idx,
+                    surfaces,
+                    cells,
                 );
                 match trace {
                     Some(hit) => {
@@ -874,9 +923,8 @@ fn transport_particle_delta<XS: XsProvider>(
             break;
         }
 
-        let nuc_idx = material.sample_nuclide(
-            &micro_totals[..n_nuclides], macro_total, rng.uniform(),
-        );
+        let nuc_idx =
+            material.sample_nuclide(&micro_totals[..n_nuclides], macro_total, rng.uniform());
 
         let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
         let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
@@ -946,14 +994,15 @@ pub fn run_eigenvalue<XS: XsProvider>(
     let mut source_bank = initial_source(n, surfaces, cells, seed);
 
     // Build the Shannon-entropy mesh from the AABB of the first fissile cell.
-    let aabb = cells.iter()
+    let aabb = cells
+        .iter()
         .find_map(|c| match c.fill {
             CellFill::Material(_) => Some(c.aabb),
             _ => None,
         })
         .unwrap_or(crate::geometry::Aabb::new(
             crate::geometry::Vec3::new(-1.0, -1.0, -1.0),
-            crate::geometry::Vec3::new( 1.0,  1.0,  1.0),
+            crate::geometry::Vec3::new(1.0, 1.0, 1.0),
         ));
     let entropy_mesh = EntropyMesh::from_aabb(&aabb, 8);
 
@@ -980,17 +1029,26 @@ pub fn run_eigenvalue<XS: XsProvider>(
         let particle_results: Vec<ParticleResult> = source_bank
             .par_iter()
             .enumerate()
-            .map(|(i, site)| {
-                match &tracking {
-                    TrackingMode::Surface => transport_particle(
-                        site, batch_seed, i as u64,
-                        surfaces, cells, materials, xs_provider,
-                    ),
-                    TrackingMode::Delta(majorant) => transport_particle_delta(
-                        site, batch_seed, i as u64,
-                        surfaces, cells, materials, xs_provider, majorant,
-                    ),
-                }
+            .map(|(i, site)| match &tracking {
+                TrackingMode::Surface => transport_particle(
+                    site,
+                    batch_seed,
+                    i as u64,
+                    surfaces,
+                    cells,
+                    materials,
+                    xs_provider,
+                ),
+                TrackingMode::Delta(majorant) => transport_particle_delta(
+                    site,
+                    batch_seed,
+                    i as u64,
+                    surfaces,
+                    cells,
+                    materials,
+                    xs_provider,
+                    majorant,
+                ),
             })
             .collect();
 
@@ -1033,22 +1091,22 @@ pub fn run_eigenvalue<XS: XsProvider>(
         // Still honors the user's fixed `inactive` as a minimum unless auto
         // explicitly decides earlier.
         entropy_history.push(entropy);
-        if let Some(policy) = config.auto_inactive {
-            if auto_converged_at.is_none()
-                && batch >= policy.min_inactive
-                && (policy.has_converged(&entropy_history) || batch >= policy.max_inactive)
+        if let Some(policy) = config.auto_inactive
+            && auto_converged_at.is_none()
+            && batch >= policy.min_inactive
+            && (policy.has_converged(&entropy_history) || batch >= policy.max_inactive)
+        {
+            // Convergence fires at end of `batch`; first active is batch+1.
+            effective_inactive = batch;
+            auto_converged_at = Some(batch);
+            let reason = if batch >= policy.max_inactive && !policy.has_converged(&entropy_history)
             {
-                // Convergence fires at end of `batch`; first active is batch+1.
-                effective_inactive = batch;
-                auto_converged_at = Some(batch);
-                let reason = if batch >= policy.max_inactive && !policy.has_converged(&entropy_history) {
-                    "max_inactive"
-                } else {
-                    "plateau"
-                };
-                println!("  [auto-inactive] entropy converged at batch {batch} ({reason})");
-                let _ = std::io::stdout().flush();
-            }
+                "max_inactive"
+            } else {
+                "plateau"
+            };
+            println!("  [auto-inactive] entropy converged at batch {batch} ({reason})");
+            let _ = std::io::stdout().flush();
         }
 
         let is_active = batch > effective_inactive;
@@ -1071,7 +1129,11 @@ pub fn run_eigenvalue<XS: XsProvider>(
         source_bank = normalize_fission_bank(&fission_bank, n, batch + seed as u32 * 100_000);
     }
 
-    let k_final = if k_count > 0 { k_sum / k_count as f64 } else { 0.0 };
+    let k_final = if k_count > 0 {
+        k_sum / k_count as f64
+    } else {
+        0.0
+    };
     (results, k_final)
 }
 
@@ -1086,7 +1148,9 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> 
     let mut sites = Vec::with_capacity(n);
 
     // Find the first material cell (assumed fissile for eigenvalue problems)
-    let target_idx = cells.iter().position(|c| matches!(c.fill, CellFill::Material(_)));
+    let target_idx = cells
+        .iter()
+        .position(|c| matches!(c.fill, CellFill::Material(_)));
     let aabb = target_idx
         .map(|i| cells[i].aabb)
         .unwrap_or(crate::geometry::Aabb::new(
@@ -1102,14 +1166,14 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> 
 
         // Only accept if the point is actually in the target cell
         // (rejects points in the AABB corners that are outside the cylinder)
-        if let Some(idx) = geometry::ray::find_cell(pos, surfaces, cells) {
-            if Some(idx) == target_idx {
-                sites.push(FissionSite {
-                    pos,
-                    energy: 1.0e6,
-                    weight: 1.0,
-                });
-            }
+        if let Some(idx) = geometry::ray::find_cell(pos, surfaces, cells)
+            && Some(idx) == target_idx
+        {
+            sites.push(FissionSite {
+                pos,
+                energy: 1.0e6,
+                weight: 1.0,
+            });
         }
     }
 
@@ -1153,7 +1217,12 @@ mod tests {
 
     #[test]
     fn entropy_convergence_respects_min_inactive() {
-        let p = EntropyConvergence { min_inactive: 10, max_inactive: 100, window: 5, cv_tol: 1e-2 };
+        let p = EntropyConvergence {
+            min_inactive: 10,
+            max_inactive: 100,
+            window: 5,
+            cv_tol: 1e-2,
+        };
         // First 9 entries are extremely flat but should NOT trigger because
         // we have not reached min_inactive.
         let history: Vec<f64> = (0..9).map(|_| 7.5).collect();
@@ -1162,7 +1231,12 @@ mod tests {
 
     #[test]
     fn entropy_convergence_fires_on_flat_window() {
-        let p = EntropyConvergence { min_inactive: 5, max_inactive: 100, window: 10, cv_tol: 1e-3 };
+        let p = EntropyConvergence {
+            min_inactive: 5,
+            max_inactive: 100,
+            window: 10,
+            cv_tol: 1e-3,
+        };
         // Flat 12 samples at 8.0 → CV = 0 < tol.
         let history: Vec<f64> = vec![8.0; 12];
         assert!(p.has_converged(&history));
@@ -1170,24 +1244,43 @@ mod tests {
 
     #[test]
     fn entropy_convergence_does_not_fire_on_noisy_window() {
-        let p = EntropyConvergence { min_inactive: 5, max_inactive: 100, window: 10, cv_tol: 1e-3 };
+        let p = EntropyConvergence {
+            min_inactive: 5,
+            max_inactive: 100,
+            window: 10,
+            cv_tol: 1e-3,
+        };
         // 10% oscillation on top of 8.0 → CV ≈ 5e-2 ≫ tol.
-        let history: Vec<f64> = (0..20).map(|i| 8.0 + if i % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let history: Vec<f64> = (0..20)
+            .map(|i| 8.0 + if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
         assert!(!p.has_converged(&history));
     }
 
     #[test]
     fn entropy_convergence_window_only_looks_at_tail() {
-        let p = EntropyConvergence { min_inactive: 5, max_inactive: 100, window: 5, cv_tol: 1e-3 };
+        let p = EntropyConvergence {
+            min_inactive: 5,
+            max_inactive: 100,
+            window: 5,
+            cv_tol: 1e-3,
+        };
         // Early noise, recent flat tail → should fire (only tail matters).
-        let mut history: Vec<f64> = (0..10).map(|i| if i < 5 { 5.0 + i as f64 } else { 8.0 }).collect();
+        let mut history: Vec<f64> = (0..10)
+            .map(|i| if i < 5 { 5.0 + i as f64 } else { 8.0 })
+            .collect();
         history.push(8.0);
         assert!(p.has_converged(&history));
     }
 
     #[test]
     fn entropy_convergence_handles_near_zero_mean() {
-        let p = EntropyConvergence { min_inactive: 5, max_inactive: 100, window: 5, cv_tol: 1e-3 };
+        let p = EntropyConvergence {
+            min_inactive: 5,
+            max_inactive: 100,
+            window: 5,
+            cv_tol: 1e-3,
+        };
         // Mean near zero — guard against divide-by-near-zero in CV.
         // Must not falsely trigger.
         let history: Vec<f64> = vec![1e-15, -1e-15, 1e-15, -1e-15, 1e-15, -1e-15, 1e-15];
@@ -1198,14 +1291,29 @@ mod tests {
     fn entropy_convergence_cv_threshold_is_honoured() {
         // With cv_tol = 1e-2, a 0.5% coefficient of variation should fire
         // but a 2% coefficient should not.
-        let p = EntropyConvergence { min_inactive: 5, max_inactive: 100, window: 10, cv_tol: 1e-2 };
-        let flat: Vec<f64> = (0..20).map(|i| 8.0 + if i % 2 == 0 { 0.04 } else { -0.04 }).collect();
+        let p = EntropyConvergence {
+            min_inactive: 5,
+            max_inactive: 100,
+            window: 10,
+            cv_tol: 1e-2,
+        };
+        let flat: Vec<f64> = (0..20)
+            .map(|i| 8.0 + if i % 2 == 0 { 0.04 } else { -0.04 })
+            .collect();
         // CV ≈ 0.04/8.0 = 5e-3 < 1e-2 → should fire
-        assert!(p.has_converged(&flat), "0.5% CV should be below 1e-2 threshold");
+        assert!(
+            p.has_converged(&flat),
+            "0.5% CV should be below 1e-2 threshold"
+        );
 
-        let noisy: Vec<f64> = (0..20).map(|i| 8.0 + if i % 2 == 0 { 0.16 } else { -0.16 }).collect();
+        let noisy: Vec<f64> = (0..20)
+            .map(|i| 8.0 + if i % 2 == 0 { 0.16 } else { -0.16 })
+            .collect();
         // CV = 0.16/8.0 = 2e-2 > 1e-2 → should not fire
-        assert!(!p.has_converged(&noisy), "2% CV should exceed 1e-2 threshold");
+        assert!(
+            !p.has_converged(&noisy),
+            "2% CV should exceed 1e-2 threshold"
+        );
     }
 
     // ── EntropyMesh ───────────────────────────────────────────────────
@@ -1213,56 +1321,78 @@ mod tests {
     #[test]
     fn entropy_mesh_empty_bank_is_zero() {
         use crate::geometry::{Aabb, Vec3};
-        let mesh = EntropyMesh::from_aabb(&Aabb::new(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)), 4);
+        let mesh = EntropyMesh::from_aabb(
+            &Aabb::new(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+            4,
+        );
         assert_eq!(mesh.entropy(&[]), 0.0);
     }
 
     #[test]
     fn entropy_mesh_single_bin_is_zero() {
         use crate::geometry::{Aabb, Vec3};
-        let mesh = EntropyMesh::from_aabb(&Aabb::new(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)), 4);
+        let mesh = EntropyMesh::from_aabb(
+            &Aabb::new(Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)),
+            4,
+        );
         // All sites in the same bin: p = 1 → H = 0.
-        let sites: Vec<FissionSite> = (0..100).map(|_| FissionSite {
-            pos: Vec3::new(0.1, 0.1, 0.1), energy: 1e6, weight: 1.0,
-        }).collect();
-        assert!(mesh.entropy(&sites).abs() < 1e-12, "concentrated bank should have H ≈ 0");
+        let sites: Vec<FissionSite> = (0..100)
+            .map(|_| FissionSite {
+                pos: Vec3::new(0.1, 0.1, 0.1),
+                energy: 1e6,
+                weight: 1.0,
+            })
+            .collect();
+        assert!(
+            mesh.entropy(&sites).abs() < 1e-12,
+            "concentrated bank should have H ≈ 0"
+        );
     }
 
     #[test]
     fn entropy_mesh_uniform_bank_saturates() {
         use crate::geometry::{Aabb, Vec3};
         let n = 4;
-        let mesh = EntropyMesh::from_aabb(&Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(4.0, 4.0, 4.0)), n);
+        let mesh = EntropyMesh::from_aabb(
+            &Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(4.0, 4.0, 4.0)),
+            n,
+        );
         // One site per bin = perfectly uniform → H = log2(n^3) = log2(64) = 6.
         let mut sites = Vec::new();
-        for i in 0..n { for j in 0..n { for k in 0..n {
-            sites.push(FissionSite {
-                pos: Vec3::new(i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5),
-                energy: 1e6,
-                weight: 1.0,
-            });
-        }}}
+        for i in 0..n {
+            for j in 0..n {
+                for k in 0..n {
+                    sites.push(FissionSite {
+                        pos: Vec3::new(i as f64 + 0.5, j as f64 + 0.5, k as f64 + 0.5),
+                        energy: 1e6,
+                        weight: 1.0,
+                    });
+                }
+            }
+        }
         let h = mesh.entropy(&sites);
-        let upper = ((n*n*n) as f64).log2();
-        assert!((h - upper).abs() < 1e-10, "uniform bank should saturate at log2(64): got {h}");
+        let upper = ((n * n * n) as f64).log2();
+        assert!(
+            (h - upper).abs() < 1e-10,
+            "uniform bank should saturate at log2(64): got {h}"
+        );
     }
 
     #[test]
     fn godiva_eigenvalue_smoke_test() {
-        let surfaces = vec![
-            Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0),
-                radius: 8.7407,
-                bc: BoundaryCondition::Vacuum,
-            },
-        ];
+        let surfaces = vec![Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 8.7407,
+            bc: BoundaryCondition::Vacuum,
+        }];
 
         let cells = vec![
-            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0))
-                .with_aabb(crate::geometry::Aabb::new(
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_aabb(
+                crate::geometry::Aabb::new(
                     Vec3::new(-8.7407, -8.7407, -8.7407),
                     Vec3::new(8.7407, 8.7407, 8.7407),
-                )),
+                ),
+            ),
             Cell::new(CellId(1), cell::outside(0), CellFill::Void),
         ];
 
@@ -1293,13 +1423,14 @@ mod tests {
             auto_inactive: None,
         };
 
-        let (results, k_final) = run_eigenvalue(
-            &config, &surfaces, &cells, &materials, &xs_provider,
-        );
+        let (results, k_final) =
+            run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
         assert_eq!(results.len(), 10);
-        assert!(k_final > 0.3 && k_final < 3.0,
-                "k_final = {k_final} — out of reasonable range");
+        assert!(
+            k_final > 0.3 && k_final < 3.0,
+            "k_final = {k_final} — out of reasonable range"
+        );
         println!("\n  Godiva smoke test: k_final = {k_final:.4}");
     }
 
@@ -1315,25 +1446,29 @@ mod tests {
 
         let surfaces = vec![
             Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: fuel_r,
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: fuel_r,
                 bc: BoundaryCondition::Transmission,
             },
             Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: clad_ir,
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: clad_ir,
                 bc: BoundaryCondition::Transmission,
             },
             Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: clad_or,
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: clad_or,
                 bc: BoundaryCondition::Vacuum,
             },
         ];
 
         let cells = vec![
-            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0))
-                .with_aabb(crate::geometry::Aabb::new(
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_aabb(
+                crate::geometry::Aabb::new(
                     Vec3::new(-fuel_r, -fuel_r, -fuel_r),
                     Vec3::new(fuel_r, fuel_r, fuel_r),
-                )),
+                ),
+            ),
             Cell::new(
                 CellId(1),
                 cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
@@ -1367,36 +1502,60 @@ mod tests {
         let xs_provider = ConstantXs {
             xs: vec![
                 MicroXs {
-                    total: 7.0, elastic: 4.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
-                    fission: 2.0, capture: 0.1, nu_bar: 2.43, awr: 235.0,
+                    total: 7.0,
+                    elastic: 4.0,
+                    inelastic: 0.0,
+                    n2n: 0.0,
+                    n3n: 0.0,
+                    fission: 2.0,
+                    capture: 0.1,
+                    nu_bar: 2.43,
+                    awr: 235.0,
                 },
                 MicroXs {
-                    total: 5.0, elastic: 1.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
-                    fission: 0.0, capture: 4.0, nu_bar: 0.0, awr: 91.0,
+                    total: 5.0,
+                    elastic: 1.0,
+                    inelastic: 0.0,
+                    n2n: 0.0,
+                    n3n: 0.0,
+                    fission: 0.0,
+                    capture: 4.0,
+                    nu_bar: 0.0,
+                    awr: 91.0,
                 },
             ],
         };
 
-        let config = SimConfig { batches: 5, inactive: 1, particles_per_batch: 200, seed: 0, auto_inactive: None };
+        let config = SimConfig {
+            batches: 5,
+            inactive: 1,
+            particles_per_batch: 200,
+            seed: 0,
+            auto_inactive: None,
+        };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
         // Key check: simulation runs to completion. If void streaming is broken,
         // particles die in the gap and we get k=0 and no collisions.
         let total_collisions: u32 = results.iter().map(|r| r.collisions).sum();
-        assert!(total_collisions > 100,
-                "Too few collisions ({total_collisions}) — void streaming may be broken");
-        println!("\n  Void streaming test: {total_collisions} collisions across {} batches", results.len());
+        assert!(
+            total_collisions > 100,
+            "Too few collisions ({total_collisions}) — void streaming may be broken"
+        );
+        println!(
+            "\n  Void streaming test: {total_collisions} collisions across {} batches",
+            results.len()
+        );
     }
 
     #[test]
     fn tracking_mode_single_material_is_surface() {
         // Single material → surface tracking
-        let _surfaces = vec![
-            Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: 5.0,
-                bc: BoundaryCondition::Vacuum,
-            },
-        ];
+        let _surfaces = [Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 5.0,
+            bc: BoundaryCondition::Vacuum,
+        }];
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
             Cell::new(CellId(1), cell::outside(0), CellFill::Void),
@@ -1407,26 +1566,37 @@ mod tests {
 
         let xs = ConstantXs {
             xs: vec![MicroXs {
-                total: 5.0, elastic: 3.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
-                fission: 1.0, capture: 1.0, nu_bar: 2.43, awr: 235.0,
+                total: 5.0,
+                elastic: 3.0,
+                inelastic: 0.0,
+                n2n: 0.0,
+                n3n: 0.0,
+                fission: 1.0,
+                capture: 1.0,
+                nu_bar: 2.43,
+                awr: 235.0,
             }],
         };
 
         let mode = detect_tracking_mode(&cells, &materials, &xs);
-        assert!(matches!(mode, TrackingMode::Surface),
-                "Single material should use surface tracking");
+        assert!(
+            matches!(mode, TrackingMode::Surface),
+            "Single material should use surface tracking"
+        );
     }
 
     #[test]
     fn tracking_mode_high_contrast_falls_back() {
         // Two materials with high XS contrast → should fall back to surface
-        let _surfaces = vec![
+        let _surfaces = [
             Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: 5.0,
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 5.0,
                 bc: BoundaryCondition::Transmission,
             },
             Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: 10.0,
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 10.0,
                 bc: BoundaryCondition::Vacuum,
             },
         ];
@@ -1447,33 +1617,53 @@ mod tests {
 
         let xs = ConstantXs {
             xs: vec![
-                MicroXs { total: 100.0, elastic: 90.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
-                          fission: 5.0, capture: 5.0, nu_bar: 2.43, awr: 235.0 },
-                MicroXs { total: 1.0, elastic: 0.9, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
-                          fission: 0.0, capture: 0.1, nu_bar: 0.0, awr: 56.0 },
+                MicroXs {
+                    total: 100.0,
+                    elastic: 90.0,
+                    inelastic: 0.0,
+                    n2n: 0.0,
+                    n3n: 0.0,
+                    fission: 5.0,
+                    capture: 5.0,
+                    nu_bar: 2.43,
+                    awr: 235.0,
+                },
+                MicroXs {
+                    total: 1.0,
+                    elastic: 0.9,
+                    inelastic: 0.0,
+                    n2n: 0.0,
+                    n3n: 0.0,
+                    fission: 0.0,
+                    capture: 0.1,
+                    nu_bar: 0.0,
+                    awr: 56.0,
+                },
             ],
         };
 
         let mode = detect_tracking_mode(&cells, &materials, &xs);
-        assert!(matches!(mode, TrackingMode::Surface),
-                "High contrast should fall back to surface tracking");
+        assert!(
+            matches!(mode, TrackingMode::Surface),
+            "High contrast should fall back to surface tracking"
+        );
     }
 
     #[test]
     fn different_seeds_produce_different_results() {
         // Two runs with different seeds should give different per-batch k values
-        let surfaces = vec![
-            Surface::Sphere {
-                center: Vec3::new(0.0, 0.0, 0.0), radius: 8.7407,
-                bc: BoundaryCondition::Vacuum,
-            },
-        ];
+        let surfaces = vec![Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 8.7407,
+            bc: BoundaryCondition::Vacuum,
+        }];
         let cells = vec![
-            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0))
-                .with_aabb(crate::geometry::Aabb::new(
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_aabb(
+                crate::geometry::Aabb::new(
                     Vec3::new(-8.7407, -8.7407, -8.7407),
                     Vec3::new(8.7407, 8.7407, 8.7407),
-                )),
+                ),
+            ),
             Cell::new(CellId(1), cell::outside(0), CellFill::Void),
         ];
         let mut mat = Material::new("HEU", 294.0);
@@ -1481,13 +1671,32 @@ mod tests {
         let materials = vec![mat];
         let xs = ConstantXs {
             xs: vec![MicroXs {
-                total: 7.0, elastic: 4.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0,
-                fission: 1.2, capture: 0.1, nu_bar: 2.43, awr: 235.0,
+                total: 7.0,
+                elastic: 4.0,
+                inelastic: 0.0,
+                n2n: 0.0,
+                n3n: 0.0,
+                fission: 1.2,
+                capture: 0.1,
+                nu_bar: 2.43,
+                awr: 235.0,
             }],
         };
 
-        let config0 = SimConfig { batches: 5, inactive: 1, particles_per_batch: 500, seed: 0, auto_inactive: None };
-        let config1 = SimConfig { batches: 5, inactive: 1, particles_per_batch: 500, seed: 1, auto_inactive: None };
+        let config0 = SimConfig {
+            batches: 5,
+            inactive: 1,
+            particles_per_batch: 500,
+            seed: 0,
+            auto_inactive: None,
+        };
+        let config1 = SimConfig {
+            batches: 5,
+            inactive: 1,
+            particles_per_batch: 500,
+            seed: 1,
+            auto_inactive: None,
+        };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);
         let (r1, _) = run_eigenvalue(&config1, &surfaces, &cells, &materials, &xs);
@@ -1495,6 +1704,9 @@ mod tests {
         // Per-batch k_eff values should differ (stochastic independence)
         let k0: Vec<f64> = r0.iter().map(|r| r.k_eff).collect();
         let k1: Vec<f64> = r1.iter().map(|r| r.k_eff).collect();
-        assert_ne!(k0, k1, "Different seeds must produce different batch sequences");
+        assert_ne!(
+            k0, k1,
+            "Different seeds must produce different batch sequences"
+        );
     }
 }

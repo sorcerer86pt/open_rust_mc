@@ -12,7 +12,7 @@ pub struct ErrorStats {
 
 /// Per-region error breakdown.
 pub struct RegionalErrors {
-    pub thermal: ErrorStats,  // E < 1 eV
+    pub thermal: ErrorStats,   // E < 1 eV
     pub resonance: ErrorStats, // 1 eV – 25 keV
     pub fast: ErrorStats,      // > 25 keV
     pub overall: ErrorStats,
@@ -117,14 +117,22 @@ pub fn print_report(comparisons: &[(String, RegionalErrors)], k: usize) {
 
     for (label, regional) in comparisons {
         println!("\n  --- {label} ---");
-        for stats in [&regional.thermal, &regional.resonance, &regional.fast, &regional.overall] {
+        for stats in [
+            &regional.thermal,
+            &regional.resonance,
+            &regional.fast,
+            &regional.overall,
+        ] {
             if stats.n_points == 0 {
                 continue;
             }
             println!(
                 "    {:<25} max={:.2e}  mean={:.2e}  P99={:.2e}  (n={})",
-                stats.label, stats.max_rel_err, stats.mean_rel_err,
-                stats.p99_rel_err, stats.n_points
+                stats.label,
+                stats.max_rel_err,
+                stats.mean_rel_err,
+                stats.p99_rel_err,
+                stats.n_points
             );
         }
     }

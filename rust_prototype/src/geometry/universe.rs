@@ -4,7 +4,6 @@
 //! geometry. Cells can be filled with another universe for nested geometry
 //! (e.g., a fuel pin universe repeated inside a lattice).
 
-
 /// Unique identifier for a universe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct UniverseId(pub u32);

@@ -38,9 +38,12 @@ impl Aabb {
     /// Test if a point is inside the AABB.
     #[inline]
     pub fn contains(&self, p: Vec3) -> bool {
-        p.x >= self.min.x && p.x <= self.max.x
-            && p.y >= self.min.y && p.y <= self.max.y
-            && p.z >= self.min.z && p.z <= self.max.z
+        p.x >= self.min.x
+            && p.x <= self.max.x
+            && p.y >= self.min.y
+            && p.y <= self.max.y
+            && p.z >= self.min.z
+            && p.z <= self.max.z
     }
 
     /// Surface area (used for SAH cost in BVH construction).

@@ -36,7 +36,8 @@ impl Vec3 {
 
     #[inline]
     pub fn dot(self, other: Self) -> f64 {
-        self.x.mul_add(other.x, self.y.mul_add(other.y, self.z * other.z))
+        self.x
+            .mul_add(other.x, self.y.mul_add(other.y, self.z * other.z))
     }
 
     #[inline]
@@ -86,7 +87,11 @@ impl std::ops::Add for Vec3 {
     type Output = Self;
     #[inline]
     fn add(self, rhs: Self) -> Self {
-        Self { x: self.x + rhs.x, y: self.y + rhs.y, z: self.z + rhs.z }
+        Self {
+            x: self.x + rhs.x,
+            y: self.y + rhs.y,
+            z: self.z + rhs.z,
+        }
     }
 }
 
@@ -94,7 +99,11 @@ impl std::ops::Sub for Vec3 {
     type Output = Self;
     #[inline]
     fn sub(self, rhs: Self) -> Self {
-        Self { x: self.x - rhs.x, y: self.y - rhs.y, z: self.z - rhs.z }
+        Self {
+            x: self.x - rhs.x,
+            y: self.y - rhs.y,
+            z: self.z - rhs.z,
+        }
     }
 }
 
@@ -102,7 +111,11 @@ impl std::ops::Mul<f64> for Vec3 {
     type Output = Self;
     #[inline]
     fn mul(self, s: f64) -> Self {
-        Self { x: self.x * s, y: self.y * s, z: self.z * s }
+        Self {
+            x: self.x * s,
+            y: self.y * s,
+            z: self.z * s,
+        }
     }
 }
 
@@ -110,6 +123,10 @@ impl std::ops::Neg for Vec3 {
     type Output = Self;
     #[inline]
     fn neg(self) -> Self {
-        Self { x: -self.x, y: -self.y, z: -self.z }
+        Self {
+            x: -self.x,
+            y: -self.y,
+            z: -self.z,
+        }
     }
 }

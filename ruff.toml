@@ -1,0 +1,27 @@
+# Ruff configuration for research/analysis scripts in scripts/.
+# These are one-shot experiments and plot generators, not production
+# code; several pedantic lints are tolerated on purpose.
+
+line-length = 120
+target-version = "py312"
+
+[lint]
+# Lints that catch real bugs stay on by default. The extend-ignore list
+# only silences lints that are noise on numerical scripts.
+extend-ignore = [
+    # Local variables assigned but unused: intermediate calculations
+    # kept for debugging / comparison reruns.
+    "F841",
+    # Ambiguous one-letter names: physics uses l (level), E (energy),
+    # A (mass number), T (temperature) by convention.
+    "E741",
+    # Module-level import not at top: scripts `sys.exit` on missing
+    # deps before `scipy` is imported, which is intentional.
+    "E402",
+    # Multiple statements on one line (colon-separated): occasional
+    # dense analysis code.
+    "E701",
+]
+
+[lint.per-file-ignores]
+# `__init__.py`-style imports elsewhere are fine; not applicable here.

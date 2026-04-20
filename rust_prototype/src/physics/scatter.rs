@@ -13,12 +13,7 @@ use crate::transport::rng::Rng;
 ///
 /// `awr` is the atomic weight ratio (A / neutron mass).
 /// Scattering is isotropic in the center-of-mass frame.
-pub fn elastic_scatter(
-    energy: f64,
-    dir: Vec3,
-    awr: f64,
-    rng: &mut Rng,
-) -> (f64, Vec3) {
+pub fn elastic_scatter(energy: f64, dir: Vec3, awr: f64, rng: &mut Rng) -> (f64, Vec3) {
     // Sample cosine of scattering angle in center-of-mass frame
     let mu_cm = 2.0 * rng.uniform() - 1.0;
 
@@ -104,9 +99,15 @@ fn free_gas_scatter(
     // Simplified: v_t = sqrt(-2*kT/A * ln(xi1)) for the magnitude (Maxwellian speed)
     let sigma = (kt / awr).sqrt(); // thermal speed parameter
     // Sample speed from Maxwell distribution using Box-Muller for 3 components
-    let vx = sigma * (-2.0 * rng.uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
-    let vy = sigma * (-2.0 * rng.uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
-    let vz = sigma * (-2.0 * rng.uniform().ln()).sqrt() * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
+    let vx = sigma
+        * (-2.0 * rng.uniform().ln()).sqrt()
+        * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
+    let vy = sigma
+        * (-2.0 * rng.uniform().ln()).sqrt()
+        * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
+    let vz = sigma
+        * (-2.0 * rng.uniform().ln()).sqrt()
+        * (2.0 * std::f64::consts::PI * rng.uniform()).cos();
 
     // Target velocity vector (in the same units as neutron speed)
     let v_target = Vec3::new(vx, vy, vz);
@@ -235,7 +236,8 @@ pub fn inelastic_scatter(
 
     // Lab scattering cosine
     let mu_lab = if v_n + v_cm_sys > 1e-20 {
-        (v_cm_sys + v_n * mu_cm) / (v_n * v_n + v_cm_sys * v_cm_sys + 2.0 * v_n * v_cm_sys * mu_cm).sqrt()
+        (v_cm_sys + v_n * mu_cm)
+            / (v_n * v_n + v_cm_sys * v_cm_sys + 2.0 * v_n * v_cm_sys * mu_cm).sqrt()
     } else {
         2.0 * rng.uniform() - 1.0
     };
@@ -258,11 +260,7 @@ fn rotate_direction(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
     // Check if the direction is nearly along the z-axis
     if w.abs() > 0.999_999 {
         let sign = w.signum();
-        return Vec3::new(
-            sin_theta * cos_phi,
-            sign * sin_theta * sin_phi,
-            sign * mu,
-        );
+        return Vec3::new(sin_theta * cos_phi, sign * sin_theta * sin_phi, sign * mu);
     }
 
     // General rotation formula
@@ -329,15 +327,18 @@ mod tests {
         let mut inelastic_sum = 0.0;
         let n = 10_000;
         for _ in 0..n {
-            let (e_el, _) = elastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, &mut Rng::new(42, 1));
+            let (e_el, _) =
+                elastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, &mut Rng::new(42, 1));
             let (e_in, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, None, &mut rng);
             elastic_sum += e_el;
             inelastic_sum += e_in;
         }
         let avg_inelastic = inelastic_sum / n as f64;
         let avg_elastic = elastic_sum / n as f64;
-        assert!(avg_inelastic < avg_elastic,
-                "inelastic avg = {avg_inelastic}, elastic avg = {avg_elastic}");
+        assert!(
+            avg_inelastic < avg_elastic,
+            "inelastic avg = {avg_inelastic}, elastic avg = {avg_elastic}"
+        );
     }
 
     #[test]
@@ -363,7 +364,8 @@ mod tests {
             let mut sum = 0.0;
             let n = 1000;
             for _ in 0..n {
-                let (e_out, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, None, &mut rng);
+                let (e_out, _) =
+                    inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, None, &mut rng);
                 sum += e_out;
             }
             let avg = sum / n as f64;

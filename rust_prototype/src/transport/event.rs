@@ -14,9 +14,9 @@
 //!   - Ridley 2024 (MIT PhD): GPU-oriented algorithms for CE MC transport
 //!   - Hamilton & Evans 2019: event-based outperforms history-based on GPU
 
-use crate::geometry::{self, Vec3};
 use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
+use crate::geometry::{self, Vec3};
 use crate::physics::collision::{self, CollisionOutcome, InelasticData, MicroXs};
 use crate::transport::material::Material;
 use crate::transport::particle::FissionSite;
@@ -81,7 +81,13 @@ impl ParticleBank {
         bank
     }
 
-    pub fn len(&self) -> usize { self.pos.len() }
+    pub fn len(&self) -> usize {
+        self.pos.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pos.is_empty()
+    }
 
     pub fn alive_count(&self) -> usize {
         self.alive.iter().filter(|&&a| a).count()
@@ -92,7 +98,9 @@ impl ParticleBank {
     pub fn sort_by_energy(&mut self) {
         let energies = &self.energy;
         self.sorted_idx.sort_unstable_by(|&a, &b| {
-            energies[a].partial_cmp(&energies[b]).unwrap_or(std::cmp::Ordering::Equal)
+            energies[a]
+                .partial_cmp(&energies[b])
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 }
@@ -141,7 +149,9 @@ pub fn transport_batch_event<XS: XsProvider>(
         // GPU acceleration: move XS lookup to GPU kernel.
         let n = bank.len();
         for pi in 0..n {
-            if !bank.alive[pi] { continue; }
+            if !bank.alive[pi] {
+                continue;
+            }
             if bank.n_collisions[pi] >= 1000 {
                 bank.alive[pi] = false;
                 result.leakage += 1;
@@ -157,7 +167,11 @@ pub fn transport_batch_event<XS: XsProvider>(
                 CellFill::Void => {
                     // Free-stream through void
                     let trace = geometry::ray::trace_step(
-                        bank.pos[pi], bank.dir[pi], bank.cell_idx[pi], surfaces, cells,
+                        bank.pos[pi],
+                        bank.dir[pi],
+                        bank.cell_idx[pi],
+                        surfaces,
+                        cells,
                     );
                     match trace {
                         Some(hit) => {
@@ -218,14 +232,14 @@ pub fn transport_batch_event<XS: XsProvider>(
                 xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, bank.energy[pi], urr_xi);
 
                 // S(α,β) thermal scattering adjustment
-                if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx) {
-                    if bank.energy[pi] < tsl.energy_max {
-                        let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                        let thermal_total = tsl.total_xs(bank.energy[pi], t_idx);
-                        let delta = thermal_total - xs.elastic;
-                        xs.total += delta;
-                        xs.elastic = 0.0;
-                    }
+                if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
+                    && bank.energy[pi] < tsl.energy_max
+                {
+                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                    let thermal_total = tsl.total_xs(bank.energy[pi], t_idx);
+                    let delta = thermal_total - xs.elastic;
+                    xs.total += delta;
+                    xs.elastic = 0.0;
                 }
 
                 micro_totals[i] = xs.total;
@@ -246,7 +260,11 @@ pub fn transport_batch_event<XS: XsProvider>(
 
             // ── Trace to nearest surface ──
             let trace = geometry::ray::trace_step(
-                bank.pos[pi], bank.dir[pi], bank.cell_idx[pi], surfaces, cells,
+                bank.pos[pi],
+                bank.dir[pi],
+                bank.cell_idx[pi],
+                surfaces,
+                cells,
             );
 
             match trace {
@@ -282,16 +300,21 @@ pub fn transport_batch_event<XS: XsProvider>(
                     bank.n_collisions[pi] += 1;
 
                     let nuc_idx = material.sample_nuclide(
-                        &micro_totals[..n_nuclides], macro_total, rng.uniform(),
+                        &micro_totals[..n_nuclides],
+                        macro_total,
+                        rng.uniform(),
                     );
                     let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
 
                     // Check for thermal scattering
-                    let thermal_active = xs_provider.thermal_scattering(xs_kernel_idx)
+                    let thermal_active = xs_provider
+                        .thermal_scattering(xs_kernel_idx)
                         .is_some_and(|tsl| bank.energy[pi] < tsl.energy_max);
 
                     if thermal_active {
-                        let tsl = xs_provider.thermal_scattering(xs_kernel_idx).expect("thermal");
+                        let tsl = xs_provider
+                            .thermal_scattering(xs_kernel_idx)
+                            .expect("thermal");
                         let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
                         let thermal_xs = tsl.total_xs(bank.energy[pi], t_idx);
                         let xi = rng.uniform() * micro_xs[nuc_idx].total;
@@ -304,11 +327,18 @@ pub fn transport_batch_event<XS: XsProvider>(
                         } else {
                             // Non-thermal collision
                             let mut particle = make_temp_particle(
-                                bank.pos[pi], bank.dir[pi], bank.energy[pi], bank.cell_idx[pi],
+                                bank.pos[pi],
+                                bank.dir[pi],
+                                bank.energy[pi],
+                                bank.cell_idx[pi],
                             );
                             let outcome = process_standard_collision(
-                                &mut particle, &micro_xs[nuc_idx], xs_kernel_idx,
-                                xs_provider, cell.temperature, &mut rng,
+                                &mut particle,
+                                &micro_xs[nuc_idx],
+                                xs_kernel_idx,
+                                xs_provider,
+                                cell.temperature,
+                                &mut rng,
                             );
                             bank.energy[pi] = particle.energy;
                             bank.dir[pi] = particle.dir;
@@ -317,11 +347,18 @@ pub fn transport_batch_event<XS: XsProvider>(
                     } else {
                         // Standard collision
                         let mut particle = make_temp_particle(
-                            bank.pos[pi], bank.dir[pi], bank.energy[pi], bank.cell_idx[pi],
+                            bank.pos[pi],
+                            bank.dir[pi],
+                            bank.energy[pi],
+                            bank.cell_idx[pi],
                         );
                         let outcome = process_standard_collision(
-                            &mut particle, &micro_xs[nuc_idx], xs_kernel_idx,
-                            xs_provider, cell.temperature, &mut rng,
+                            &mut particle,
+                            &micro_xs[nuc_idx],
+                            xs_kernel_idx,
+                            xs_provider,
+                            cell.temperature,
+                            &mut rng,
                         );
                         bank.energy[pi] = particle.energy;
                         bank.dir[pi] = particle.dir;
@@ -359,7 +396,10 @@ fn rotate_direction(dir: &mut Vec3, mu: f64, rng: &mut Rng) {
 }
 
 fn make_temp_particle(
-    pos: Vec3, dir: Vec3, energy: f64, cell_idx: usize,
+    pos: Vec3,
+    dir: Vec3,
+    energy: f64,
+    cell_idx: usize,
 ) -> crate::transport::particle::Particle {
     crate::transport::particle::Particle::new(pos, dir, energy, cell_idx)
 }
@@ -392,8 +432,13 @@ fn process_standard_collision<XS: XsProvider>(
     let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
 
     collision::process_collision(
-        particle, xs, inelastic_data.as_ref(),
-        elastic_angle, fission_edist, temperature, rng,
+        particle,
+        xs,
+        inelastic_data.as_ref(),
+        elastic_angle,
+        fission_edist,
+        temperature,
+        rng,
     )
 }
 

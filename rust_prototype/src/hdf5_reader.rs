@@ -41,16 +41,18 @@ impl NuclideData {
 
         // Discover the nuclide name (top-level group, e.g. "U235")
         let root = file.root();
-        let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-            path: path.display().to_string(),
-            detail: format!("cannot list root groups: {e}"),
-        })?
-        .into_iter()
-        .next()
-        .ok_or_else(|| SvdError::Hdf5 {
-            path: path.display().to_string(),
-            detail: "no nuclide group found at root".into(),
-        })?;
+        let nuclide_name = root
+            .groups()
+            .map_err(|e| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: format!("cannot list root groups: {e}"),
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: "no nuclide group found at root".into(),
+            })?;
 
         println!("  Nuclide: {nuclide_name}");
 
@@ -78,7 +80,10 @@ impl NuclideData {
             va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let temperatures: Vec<f64> = temp_labels.iter().filter_map(|l| parse_temp_kelvin(l)).collect();
+        let temperatures: Vec<f64> = temp_labels
+            .iter()
+            .filter_map(|l| parse_temp_kelvin(l))
+            .collect();
 
         println!("  Temperatures: {temp_labels:?}");
 
@@ -104,14 +109,18 @@ impl NuclideData {
 
         // Read cross-sections per temperature
         let rxn_name = format!("reaction_{mt:03}");
-        let reactions_group = nuclide_group.group("reactions").map_err(|e| SvdError::Hdf5 {
-            path: path.display().to_string(),
-            detail: format!("cannot open /{nuclide_name}/reactions: {e}"),
-        })?;
-        let rxn_group = reactions_group.group(&rxn_name).map_err(|e| SvdError::Hdf5 {
-            path: path.display().to_string(),
-            detail: format!("cannot open /{nuclide_name}/reactions/{rxn_name}: {e}"),
-        })?;
+        let reactions_group = nuclide_group
+            .group("reactions")
+            .map_err(|e| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: format!("cannot open /{nuclide_name}/reactions: {e}"),
+            })?;
+        let rxn_group = reactions_group
+            .group(&rxn_name)
+            .map_err(|e| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: format!("cannot open /{nuclide_name}/reactions/{rxn_name}: {e}"),
+            })?;
 
         let mut xs_per_temp = Vec::with_capacity(temp_labels.len());
         for (t_idx, label) in temp_labels.iter().enumerate() {
@@ -157,8 +166,12 @@ impl NuclideData {
         })
     }
 
-    pub fn n_energy(&self) -> usize { self.energies.len() }
-    pub fn n_temp(&self) -> usize { self.temperatures.len() }
+    pub fn n_energy(&self) -> usize {
+        self.energies.len()
+    }
+    pub fn n_temp(&self) -> usize {
+        self.temperatures.len()
+    }
 
     /// Build N_E × N_T matrix in log₁₀ scale, row-major.
     pub fn to_log_matrix(&self) -> Vec<f64> {
@@ -214,16 +227,18 @@ impl NuclideFileReader {
         })?;
 
         let root = file.root();
-        let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-            path: path.display().to_string(),
-            detail: format!("cannot list root groups: {e}"),
-        })?
-        .into_iter()
-        .next()
-        .ok_or_else(|| SvdError::Hdf5 {
-            path: path.display().to_string(),
-            detail: "no nuclide group found".into(),
-        })?;
+        let nuclide_name = root
+            .groups()
+            .map_err(|e| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: format!("cannot list root groups: {e}"),
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| SvdError::Hdf5 {
+                path: path.display().to_string(),
+                detail: "no nuclide group found".into(),
+            })?;
 
         let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
             path: path.display().to_string(),
@@ -243,7 +258,8 @@ impl NuclideFileReader {
             va.partial_cmp(&vb).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let temperatures: Vec<f64> = temp_labels.iter()
+        let temperatures: Vec<f64> = temp_labels
+            .iter()
             .filter_map(|l| parse_temp_kelvin(l))
             .collect();
 
@@ -263,7 +279,14 @@ impl NuclideFileReader {
         union_grid.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         union_grid.dedup();
 
-        Ok(Self { file, nuclide_name, temp_labels, temperatures, energy_grids, union_grid })
+        Ok(Self {
+            file,
+            nuclide_name,
+            temp_labels,
+            temperatures,
+            energy_grids,
+            union_grid,
+        })
     }
 
     /// Read a single reaction's cross-section data using the cached grids.
@@ -330,10 +353,13 @@ impl NuclideFileReader {
     /// Channel order: 0=elastic, 1=inelastic, 2=n2n, 3=n3n, 4=fission, 5=capture, 6=total.
     pub fn compute_pointwise_xs(&self, temp_idx: usize) -> Option<Vec<f64>> {
         let n = self.union_grid.len();
-        if n == 0 { return None; }
+        if n == 0 {
+            return None;
+        }
 
         let read = |mt: u32| -> Vec<f64> {
-            self.read_reaction(mt).ok()
+            self.read_reaction(mt)
+                .ok()
                 .and_then(|d| d.xs_per_temp.get(temp_idx).cloned())
                 .unwrap_or_else(|| vec![0.0; n])
         };
@@ -342,9 +368,11 @@ impl NuclideFileReader {
         let mut inelastic = read(4);
         if inelastic.iter().all(|&v| v == 0.0) {
             for mt in 51..=91 {
-                if let Ok(data) = self.read_reaction(mt) {
-                    if let Some(xs) = data.xs_per_temp.get(temp_idx) {
-                        for i in 0..n.min(xs.len()) { inelastic[i] += xs[i].max(0.0); }
+                if let Ok(data) = self.read_reaction(mt)
+                    && let Some(xs) = data.xs_per_temp.get(temp_idx)
+                {
+                    for i in 0..n.min(xs.len()) {
+                        inelastic[i] += xs[i].max(0.0);
                     }
                 }
             }
@@ -354,12 +382,14 @@ impl NuclideFileReader {
         let fission = read(18);
         let capture = read(102);
         let total = self.compute_total_xs(temp_idx).unwrap_or_else(|| {
-            (0..n).map(|i| elastic[i] + inelastic[i] + n2n[i] + n3n[i] + fission[i] + capture[i]).collect()
+            (0..n)
+                .map(|i| elastic[i] + inelastic[i] + n2n[i] + n3n[i] + fission[i] + capture[i])
+                .collect()
         });
 
         let mut out = vec![0.0_f64; n * 7];
         for i in 0..n {
-            out[i * 7 + 0] = elastic[i].max(0.0);
+            out[i * 7] = elastic[i].max(0.0);
             out[i * 7 + 1] = inelastic[i].max(0.0);
             out[i * 7 + 2] = n2n[i].max(0.0);
             out[i * 7 + 3] = n3n[i].max(0.0);
@@ -367,8 +397,11 @@ impl NuclideFileReader {
             out[i * 7 + 5] = capture[i].max(0.0);
             out[i * 7 + 6] = total[i].max(0.0);
         }
-        println!("    Pointwise XS: {} energy pts × 7 channels = {:.1} KB",
-                 n, out.len() as f64 * 8.0 / 1024.0);
+        println!(
+            "    Pointwise XS: {} energy pts × 7 channels = {:.1} KB",
+            n,
+            out.len() as f64 * 8.0 / 1024.0
+        );
         Some(out)
     }
 
@@ -387,7 +420,8 @@ impl NuclideFileReader {
             Ok(g) => g,
             Err(_) => return vec![],
         };
-        groups.iter()
+        groups
+            .iter()
             .filter_map(|name| {
                 let mt: u32 = name.strip_prefix("reaction_")?.parse().ok()?;
                 if mt < 200 { Some(mt) } else { None }
@@ -401,7 +435,9 @@ impl NuclideFileReader {
     /// Otherwise sums individual leaf reactions, excluding sum-MTs (1, 3, 4).
     pub fn compute_total_xs(&self, temp_idx: usize) -> Option<Vec<f64>> {
         let mts = self.list_reaction_mts();
-        if mts.is_empty() { return None; }
+        if mts.is_empty() {
+            return None;
+        }
 
         let n = self.union_grid.len();
         let has_mt3 = mts.contains(&3);
@@ -411,11 +447,12 @@ impl NuclideFileReader {
             let nel = self.read_reaction(3).ok()?;
             let xs_el = el.xs_per_temp.get(temp_idx)?;
             let xs_nel = nel.xs_per_temp.get(temp_idx)?;
-            let mut total = vec![0.0_f64; n];
-            for i in 0..n {
-                total[i] = xs_el.get(i).copied().unwrap_or(0.0).max(0.0)
-                         + xs_nel.get(i).copied().unwrap_or(0.0).max(0.0);
-            }
+            let total: Vec<f64> = (0..n)
+                .map(|i| {
+                    xs_el.get(i).copied().unwrap_or(0.0).max(0.0)
+                        + xs_nel.get(i).copied().unwrap_or(0.0).max(0.0)
+                })
+                .collect();
             println!("    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)");
             return Some(total);
         }
@@ -424,14 +461,16 @@ impl NuclideFileReader {
         let mut total = vec![0.0_f64; n];
         let mut count = 0_u32;
         for mt in &mts {
-            if matches!(*mt, 1 | 3 | 4) { continue; }
-            if let Ok(data) = self.read_reaction(*mt) {
-                if let Some(xs) = data.xs_per_temp.get(temp_idx) {
-                    for i in 0..n.min(xs.len()) {
-                        total[i] += xs[i].max(0.0);
-                    }
-                    count += 1;
+            if matches!(*mt, 1 | 3 | 4) {
+                continue;
+            }
+            if let Ok(data) = self.read_reaction(*mt)
+                && let Some(xs) = data.xs_per_temp.get(temp_idx)
+            {
+                for i in 0..n.min(xs.len()) {
+                    total[i] += xs[i].max(0.0);
                 }
+                count += 1;
             }
         }
 
@@ -473,7 +512,12 @@ impl NuclideFileReader {
         })?;
         let rxn = match nuc.group("reactions").and_then(|r| r.group("reaction_018")) {
             Ok(g) => g,
-            Err(_) => return Ok(NuBarTable { energies: vec![], values: vec![] }),
+            Err(_) => {
+                return Ok(NuBarTable {
+                    energies: vec![],
+                    values: vec![],
+                });
+            }
         };
         read_nu_bar_from_group(&rxn)
     }
@@ -504,9 +548,19 @@ impl NuclideFileReader {
             let attrs = rxn.attrs().unwrap_or_default();
             let q_value = if let Some(hdf5_pure::AttrValue::F64(q)) = attrs.get("Q_value") {
                 *q
-            } else { continue };
-            let threshold = if q_value < 0.0 { (-q_value) * (awr + 1.0) / awr } else { 0.0 };
-            levels.push(DiscreteLevelInfo { mt, q_value, threshold });
+            } else {
+                continue;
+            };
+            let threshold = if q_value < 0.0 {
+                (-q_value) * (awr + 1.0) / awr
+            } else {
+                0.0
+            };
+            levels.push(DiscreteLevelInfo {
+                mt,
+                q_value,
+                threshold,
+            });
         }
         levels.sort_by_key(|l| l.mt);
         levels
@@ -540,15 +594,24 @@ impl NuBarTable {
     /// Interpolate nu-bar at a given energy (linear interpolation).
     pub fn lookup(&self, energy: f64) -> f64 {
         let n = self.energies.len();
-        if n == 0 { return 2.43; } // fallback
-        if n == 1 { return self.values[0]; }
-        if energy <= self.energies[0] { return self.values[0]; }
-        if energy >= self.energies[n - 1] { return self.values[n - 1]; }
+        if n == 0 {
+            return 2.43;
+        } // fallback
+        if n == 1 {
+            return self.values[0];
+        }
+        if energy <= self.energies[0] {
+            return self.values[0];
+        }
+        if energy >= self.energies[n - 1] {
+            return self.values[n - 1];
+        }
 
         // Binary search
-        let idx = match self.energies.binary_search_by(|e| {
-            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        let idx = match self
+            .energies
+            .binary_search_by(|e| e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => return self.values[i],
             Err(i) => i,
         };
@@ -613,11 +676,18 @@ impl AngularDistribution {
             return self.distributions[n - 1].sample(rng);
         }
 
-        let idx = match self.energies.binary_search_by(|e| {
-            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        let idx = match self
+            .energies
+            .binary_search_by(|e| e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => return self.distributions[i].sample(rng),
-            Err(i) => if i > 0 { i - 1 } else { 0 },
+            Err(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
         };
 
         if idx + 1 >= n {
@@ -632,7 +702,11 @@ impl AngularDistribution {
         //   if r > ξ_bin: take high bin; else take low bin.
         //   Then sample mu from the chosen bin with a fresh ξ_mu.
         let pick_hi = rng.uniform() < r;
-        let dist = if pick_hi { &self.distributions[idx + 1] } else { &self.distributions[idx] };
+        let dist = if pick_hi {
+            &self.distributions[idx + 1]
+        } else {
+            &self.distributions[idx]
+        };
         dist.sample(rng).clamp(-1.0, 1.0)
     }
 }
@@ -651,11 +725,18 @@ impl TabularMuDist {
         }
 
         // Binary search on CDF
-        let idx = match self.cdf.binary_search_by(|c| {
-            c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        let idx = match self
+            .cdf
+            .binary_search_by(|c| c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => i,
-            Err(i) => if i > 0 { i - 1 } else { 0 },
+            Err(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
         };
 
         let idx = idx.min(n - 2);
@@ -688,16 +769,18 @@ pub fn read_nu_bar(path: &Path) -> Result<NuBarTable> {
     })?;
 
     let root = file.root();
-    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root groups: {e}"),
-    })?
-    .into_iter()
-    .next()
-    .ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no nuclide group found".into(),
-    })?;
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
 
     let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -707,7 +790,12 @@ pub fn read_nu_bar(path: &Path) -> Result<NuBarTable> {
     let rxn_group = nuc.group("reactions").and_then(|r| r.group("reaction_018"));
     let rxn_group = match rxn_group {
         Ok(g) => g,
-        Err(_) => return Ok(NuBarTable { energies: vec![], values: vec![] }),
+        Err(_) => {
+            return Ok(NuBarTable {
+                energies: vec![],
+                values: vec![],
+            });
+        }
     };
 
     // Collect all neutron product yield tables (prompt + delayed)
@@ -716,7 +804,9 @@ pub fn read_nu_bar(path: &Path) -> Result<NuBarTable> {
     let mut delayed_constants: Vec<f64> = Vec::new();
 
     for product_name in &subgroups {
-        if !product_name.starts_with("product_") { continue; }
+        if !product_name.starts_with("product_") {
+            continue;
+        }
 
         let product = match rxn_group.group(product_name) {
             Ok(g) => g,
@@ -729,7 +819,9 @@ pub fn read_nu_bar(path: &Path) -> Result<NuBarTable> {
             attrs.get("particle"),
             Some(hdf5_pure::AttrValue::String(s)) if s == "neutron"
         );
-        if !is_neutron { continue; }
+        if !is_neutron {
+            continue;
+        }
 
         let is_prompt = matches!(
             attrs.get("emission_mode"),
@@ -789,7 +881,10 @@ pub fn read_nu_bar(path: &Path) -> Result<NuBarTable> {
             }
             Ok(table)
         }
-        None => Ok(NuBarTable { energies: vec![], values: vec![] }),
+        None => Ok(NuBarTable {
+            energies: vec![],
+            values: vec![],
+        }),
     }
 }
 
@@ -801,16 +896,18 @@ pub fn read_awr(path: &Path) -> Result<f64> {
     })?;
 
     let root = file.root();
-    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root groups: {e}"),
-    })?
-    .into_iter()
-    .next()
-    .ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no nuclide group found".into(),
-    })?;
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
 
     let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -842,16 +939,18 @@ pub fn read_discrete_levels(path: &Path, awr: f64) -> Result<Vec<DiscreteLevelIn
     })?;
 
     let root = file.root();
-    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root groups: {e}"),
-    })?
-    .into_iter()
-    .next()
-    .ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no nuclide group found".into(),
-    })?;
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
 
     let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -892,7 +991,11 @@ pub fn read_discrete_levels(path: &Path, awr: f64) -> Result<Vec<DiscreteLevelIn
             0.0
         };
 
-        levels.push(DiscreteLevelInfo { mt, q_value, threshold });
+        levels.push(DiscreteLevelInfo {
+            mt,
+            q_value,
+            threshold,
+        });
     }
 
     // Sort by MT number (which corresponds to ascending excitation energy)
@@ -945,10 +1048,17 @@ impl EnergyDistribution {
         }
 
         let idx = match self.energies.binary_search_by(|e| {
-            e.partial_cmp(&incident_energy).unwrap_or(std::cmp::Ordering::Less)
+            e.partial_cmp(&incident_energy)
+                .unwrap_or(std::cmp::Ordering::Less)
         }) {
             Ok(i) => return self.distributions[i].sample(rng).max(1e-5),
-            Err(i) => if i > 0 { i - 1 } else { 0 },
+            Err(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
         };
 
         if idx + 1 >= n {
@@ -996,10 +1106,9 @@ impl TabularEnergyDist {
     /// by EnergyDistribution::sample for the OpenMC scaled kinematic
     /// adjustment.
     fn bounds(&self) -> (f64, f64) {
-        if self.e_out.is_empty() {
-            (0.0, 0.0)
-        } else {
-            (self.e_out[0], *self.e_out.last().unwrap())
+        match self.e_out.last() {
+            None => (0.0, 0.0),
+            Some(&last) => (self.e_out[0], last),
         }
     }
 
@@ -1016,11 +1125,18 @@ impl TabularEnergyDist {
             return self.e_out.first().copied().unwrap_or(1.0e6);
         }
 
-        let idx = match self.cdf.binary_search_by(|c| {
-            c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        let idx = match self
+            .cdf
+            .binary_search_by(|c| c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => i,
-            Err(i) => if i > 0 { i - 1 } else { 0 },
+            Err(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
         };
 
         let idx = idx.min(n - 2);
@@ -1071,16 +1187,18 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
     })?;
 
     let root = file.root();
-    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root groups: {e}"),
-    })?
-    .into_iter()
-    .next()
-    .ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no nuclide group found".into(),
-    })?;
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
 
     let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -1095,7 +1213,9 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
     // Find the prompt neutron product
     let subgroups = rxn.groups().unwrap_or_default();
     for product_name in &subgroups {
-        if !product_name.starts_with("product_") { continue; }
+        if !product_name.starts_with("product_") {
+            continue;
+        }
 
         let product = match rxn.group(product_name) {
             Ok(g) => g,
@@ -1105,7 +1225,9 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
         let attrs = product.attrs().unwrap_or_default();
         let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
         let is_prompt = matches!(attrs.get("emission_mode"), Some(hdf5_pure::AttrValue::String(s)) if s == "prompt");
-        if !is_neutron || !is_prompt { continue; }
+        if !is_neutron || !is_prompt {
+            continue;
+        }
 
         // Navigate to distribution_0/energy/
         let dist = match product.group("distribution_0") {
@@ -1123,7 +1245,9 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
             Err(_) => continue,
         };
         let energies = energy_ds.read_f64().unwrap_or_default();
-        if energies.is_empty() { continue; }
+        if energies.is_empty() {
+            continue;
+        }
 
         // Read distribution dataset [3, N_total]
         let dist_ds = match edist.dataset("distribution") {
@@ -1133,24 +1257,27 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
         let dist_shape = dist_ds.shape().unwrap_or_default();
         let dist_raw = dist_ds.read_f64().unwrap_or_default();
 
-        if dist_shape.len() != 2 || dist_shape[0] != 3 { continue; }
+        if dist_shape.len() != 2 || dist_shape[0] != 3 {
+            continue;
+        }
         let n_total = dist_shape[1] as usize;
 
         // Read offsets attribute
         let dist_attrs = dist_ds.attrs().unwrap_or_default();
-        let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
-            arr.iter().map(|&v| v as usize).collect()
-        } else {
-            let per_e = n_total / energies.len();
-            (0..energies.len()).map(|i| i * per_e).collect()
-        };
+        let offsets: Vec<usize> =
+            if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+                arr.iter().map(|&v| v as usize).collect()
+            } else {
+                let per_e = n_total / energies.len();
+                (0..energies.len()).map(|i| i * per_e).collect()
+            };
 
         // Parse per-energy distributions. Layout is [3, n_total] =
         // (e_out, pdf, cdf). PDF is needed for the quadratic lin-lin
         // CDF inversion (OpenMC Tabular::sample).
         let e_out_values = &dist_raw[..n_total];
-        let pdf_values   = &dist_raw[n_total..2 * n_total];
-        let cdf_values   = &dist_raw[2 * n_total..3 * n_total];
+        let pdf_values = &dist_raw[n_total..2 * n_total];
+        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
 
         let n_energies = energies.len();
         let mut distributions = Vec::with_capacity(n_energies);
@@ -1161,20 +1288,23 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
             if start >= end || start >= n_total {
                 distributions.push(TabularEnergyDist {
                     e_out: vec![1e5, 2e6],
-                    pdf:   vec![1.0, 1.0],
-                    cdf:   vec![0.0, 1.0],
+                    pdf: vec![1.0, 1.0],
+                    cdf: vec![0.0, 1.0],
                 });
                 continue;
             }
 
             distributions.push(TabularEnergyDist {
                 e_out: e_out_values[start..end].to_vec(),
-                pdf:   pdf_values[start..end].to_vec(),
-                cdf:   cdf_values[start..end].to_vec(),
+                pdf: pdf_values[start..end].to_vec(),
+                cdf: cdf_values[start..end].to_vec(),
             });
         }
 
-        return Ok(Some(EnergyDistribution { energies, distributions }));
+        return Ok(Some(EnergyDistribution {
+            energies,
+            distributions,
+        }));
     }
 
     Ok(None)
@@ -1221,7 +1351,9 @@ impl UrrProbabilityTables {
     /// Check if the given energy is within the URR range.
     #[inline]
     pub fn in_range(&self, energy: f64) -> bool {
-        if self.energies.is_empty() { return false; }
+        if self.energies.is_empty() {
+            return false;
+        }
         energy >= self.energies[0] && energy <= *self.energies.last().unwrap_or(&0.0)
     }
 
@@ -1238,15 +1370,27 @@ impl UrrProbabilityTables {
     pub fn sample(&self, energy: f64, xi: f64) -> UrrFactors {
         let n_e = self.energies.len();
         if n_e == 0 {
-            return UrrFactors { total: 1.0, elastic: 1.0, fission: 1.0, capture: 1.0 };
+            return UrrFactors {
+                total: 1.0,
+                elastic: 1.0,
+                fission: 1.0,
+                capture: 1.0,
+            };
         }
 
         // Bracket [i_lo, i_lo+1] with E_i <= energy < E_{i+1}; clamp at edges.
-        let i_lo = match self.energies.binary_search_by(|e| {
-            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        let i_lo = match self
+            .energies
+            .binary_search_by(|e| e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => i,
-            Err(i) => if i > 0 { i - 1 } else { 0 },
+            Err(i) => {
+                if i > 0 {
+                    i - 1
+                } else {
+                    0
+                }
+            }
         };
 
         // Single-energy sampling helper (used at edges or when n_e == 1).
@@ -1256,17 +1400,27 @@ impl UrrProbabilityTables {
             // is strictly greater than ξ. Matches OpenMC's upper_bound_index.
             let mut band = cum.len() - 1;
             for (j, &cp) in cum.iter().enumerate() {
-                if xi < cp { band = j; break; }
+                if xi < cp {
+                    band = j;
+                    break;
+                }
             }
-            (self.total_factor[idx][band],
-             self.elastic_factor[idx][band],
-             self.fission_factor[idx][band],
-             self.capture_factor[idx][band])
+            (
+                self.total_factor[idx][band],
+                self.elastic_factor[idx][band],
+                self.fission_factor[idx][band],
+                self.capture_factor[idx][band],
+            )
         };
 
         if n_e == 1 || i_lo + 1 >= n_e || energy <= self.energies[0] {
             let (total, elastic, fission, capture) = pick(i_lo.min(n_e - 1));
-            return UrrFactors { total, elastic, fission, capture };
+            return UrrFactors {
+                total,
+                elastic,
+                fission,
+                capture,
+            };
         }
 
         // Interpolate between E_i and E_{i+1}.
@@ -1279,10 +1433,10 @@ impl UrrProbabilityTables {
         let (t_lo, el_lo, fi_lo, c_lo) = pick(i_lo);
         let (t_hi, el_hi, fi_hi, c_hi) = pick(i_lo + 1);
         UrrFactors {
-            total:   (1.0 - f) * t_lo  + f * t_hi,
+            total: (1.0 - f) * t_lo + f * t_hi,
             elastic: (1.0 - f) * el_lo + f * el_hi,
             fission: (1.0 - f) * fi_lo + f * fi_hi,
-            capture: (1.0 - f) * c_lo  + f * c_hi,
+            capture: (1.0 - f) * c_lo + f * c_hi,
         }
     }
 }
@@ -1305,16 +1459,18 @@ pub fn read_urr_tables(path: &Path, temp_label: &str) -> Result<Option<UrrProbab
     })?;
 
     let root = file.root();
-    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root groups: {e}"),
-    })?
-    .into_iter()
-    .next()
-    .ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no nuclide group found".into(),
-    })?;
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
 
     let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -1381,11 +1537,19 @@ pub fn read_urr_tables(path: &Path, temp_label: &str) -> Result<Option<UrrProbab
 
     for e in 0..n_e {
         let base = e * n_channels * n_bands;
-        let prob: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 0 * n_bands + b]).collect();
-        let total: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 1 * n_bands + b]).collect();
-        let elastic: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 2 * n_bands + b]).collect();
-        let fission: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 3 * n_bands + b]).collect();
-        let capture: Vec<f64> = (0..n_bands).map(|b| table_raw[base + 4 * n_bands + b]).collect();
+        let prob: Vec<f64> = (0..n_bands).map(|b| table_raw[base + b]).collect();
+        let total: Vec<f64> = (0..n_bands)
+            .map(|b| table_raw[base + n_bands + b])
+            .collect();
+        let elastic: Vec<f64> = (0..n_bands)
+            .map(|b| table_raw[base + 2 * n_bands + b])
+            .collect();
+        let fission: Vec<f64> = (0..n_bands)
+            .map(|b| table_raw[base + 3 * n_bands + b])
+            .collect();
+        let capture: Vec<f64> = (0..n_bands)
+            .map(|b| table_raw[base + 4 * n_bands + b])
+            .collect();
 
         cum_prob.push(prob);
         total_factor.push(total);
@@ -1422,16 +1586,18 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
     })?;
 
     let root = file.root();
-    let nuclide_name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root groups: {e}"),
-    })?
-    .into_iter()
-    .next()
-    .ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no nuclide group found".into(),
-    })?;
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
 
     let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -1500,15 +1666,16 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
 
     // Try to read offsets attribute from mu dataset
     let mu_attrs = mu_ds.attrs().unwrap_or_default();
-    let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("offsets") {
-        arr.iter().map(|&v| v as usize).collect()
-    } else if let Some(hdf5_pure::AttrValue::I64(v)) = mu_attrs.get("offsets") {
-        vec![*v as usize]
-    } else {
-        // No offsets attribute — try uniform distribution
-        let per_e = n_total / n_energies;
-        (0..n_energies).map(|i| i * per_e).collect()
-    };
+    let offsets: Vec<usize> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else if let Some(hdf5_pure::AttrValue::I64(v)) = mu_attrs.get("offsets") {
+            vec![*v as usize]
+        } else {
+            // No offsets attribute — try uniform distribution
+            let per_e = n_total / n_energies;
+            (0..n_energies).map(|i| i * per_e).collect()
+        };
 
     // Parse per-energy distributions
     // mu_raw is stored as [3, N_total] in row-major: first N_total values are row 0 (mu),
@@ -1534,7 +1701,10 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
 
         let mu_slice = mu_values[start..end].to_vec();
         let cdf_slice = cdf_values[start..end].to_vec();
-        distributions.push(TabularMuDist { mu: mu_slice, cdf: cdf_slice });
+        distributions.push(TabularMuDist {
+            mu: mu_slice,
+            cdf: cdf_slice,
+        });
     }
 
     Ok(Some(AngularDistribution {
@@ -1563,26 +1733,48 @@ fn read_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Result<NuBarTable
     let mut delayed_constants: Vec<f64> = Vec::new();
 
     for product_name in &subgroups {
-        if !product_name.starts_with("product_") { continue; }
-        let product = match rxn_group.group(product_name) { Ok(g) => g, Err(_) => continue };
+        if !product_name.starts_with("product_") {
+            continue;
+        }
+        let product = match rxn_group.group(product_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
         let attrs = product.attrs().unwrap_or_default();
         let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
-        if !is_neutron { continue; }
+        if !is_neutron {
+            continue;
+        }
         let is_prompt = matches!(attrs.get("emission_mode"), Some(hdf5_pure::AttrValue::String(s)) if s == "prompt");
-        let yield_ds = match product.dataset("yield") { Ok(ds) => ds, Err(_) => continue };
+        let yield_ds = match product.dataset("yield") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
         let shape = yield_ds.shape().unwrap_or_default();
-        let raw = match yield_ds.read_f64() { Ok(r) => r, Err(_) => continue };
+        let raw = match yield_ds.read_f64() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
 
         if shape.len() == 2 && shape[0] == 2 {
             let n = shape[1] as usize;
             if raw.len() >= 2 * n {
-                let t = NuBarTable { energies: raw[..n].to_vec(), values: raw[n..2*n].to_vec() };
-                if is_prompt { prompt_table = Some(t); }
-                else { delayed_tables.push(t); }
+                let t = NuBarTable {
+                    energies: raw[..n].to_vec(),
+                    values: raw[n..2 * n].to_vec(),
+                };
+                if is_prompt {
+                    prompt_table = Some(t);
+                } else {
+                    delayed_tables.push(t);
+                }
             }
         } else if shape.len() == 1 && shape[0] == 1 {
             if is_prompt {
-                prompt_table = Some(NuBarTable { energies: vec![1e-5, 20.0e6], values: vec![raw[0], raw[0]] });
+                prompt_table = Some(NuBarTable {
+                    energies: vec![1e-5, 20.0e6],
+                    values: vec![raw[0], raw[0]],
+                });
             } else {
                 delayed_constants.push(raw[0]);
             }
@@ -1591,11 +1783,18 @@ fn read_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Result<NuBarTable
 
     let mut prompt = match prompt_table {
         Some(t) => t,
-        None => return Ok(NuBarTable { energies: vec![], values: vec![] }),
+        None => {
+            return Ok(NuBarTable {
+                energies: vec![],
+                values: vec![],
+            });
+        }
     };
 
     let d_const: f64 = delayed_constants.iter().sum();
-    for v in &mut prompt.values { *v += d_const; }
+    for v in &mut prompt.values {
+        *v += d_const;
+    }
 
     for d in &delayed_tables {
         for (i, &e) in prompt.energies.iter().enumerate() {
@@ -1607,26 +1806,47 @@ fn read_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Result<NuBarTable
 }
 
 /// Read angular distribution from an already-open file.
-fn read_angular_dist_from_file(file: &hdf5_pure::File, nuclide_name: &str, mt: u32) -> Option<AngularDistribution> {
+fn read_angular_dist_from_file(
+    file: &hdf5_pure::File,
+    nuclide_name: &str,
+    mt: u32,
+) -> Option<AngularDistribution> {
     let root = file.root();
     let nuc = root.group(nuclide_name).ok()?;
     let rxn_name = format!("reaction_{mt:03}");
     let rxn = nuc.group("reactions").ok()?.group(&rxn_name).ok()?;
     let rxn_attrs = rxn.attrs().unwrap_or_default();
-    let center_of_mass = matches!(rxn_attrs.get("center_of_mass"), Some(hdf5_pure::AttrValue::I64(1)));
-    let angle = rxn.group("product_0").ok()?.group("distribution_0").ok()?.group("angle").ok()?;
+    let center_of_mass = matches!(
+        rxn_attrs.get("center_of_mass"),
+        Some(hdf5_pure::AttrValue::I64(1))
+    );
+    let angle = rxn
+        .group("product_0")
+        .ok()?
+        .group("distribution_0")
+        .ok()?
+        .group("angle")
+        .ok()?;
     let energies = angle.dataset("energy").ok()?.read_f64().ok()?;
-    if energies.is_empty() { return None; }
+    if energies.is_empty() {
+        return None;
+    }
     let n_energies = energies.len();
     let mu_ds = angle.dataset("mu").ok()?;
     let mu_shape = mu_ds.shape().ok()?;
     let mu_raw = mu_ds.read_f64().ok()?;
-    if mu_shape.len() != 2 || mu_shape[0] != 3 { return None; }
+    if mu_shape.len() != 2 || mu_shape[0] != 3 {
+        return None;
+    }
     let n_total = mu_shape[1] as usize;
     let mu_attrs = mu_ds.attrs().unwrap_or_default();
-    let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("offsets") {
-        arr.iter().map(|&v| v as usize).collect()
-    } else { let per_e = n_total / n_energies; (0..n_energies).map(|i| i * per_e).collect() };
+    let offsets: Vec<usize> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else {
+            let per_e = n_total / n_energies;
+            (0..n_energies).map(|i| i * per_e).collect()
+        };
     let mu_values = &mu_raw[..n_total];
     let cdf_values = &mu_raw[2 * n_total..3 * n_total];
     let mut distributions = Vec::with_capacity(n_energies);
@@ -1634,70 +1854,112 @@ fn read_angular_dist_from_file(file: &hdf5_pure::File, nuclide_name: &str, mt: u
         let start = offsets.get(i).copied().unwrap_or(0);
         let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
         if start >= end || start >= n_total {
-            distributions.push(TabularMuDist { mu: vec![-1.0, 1.0], cdf: vec![0.0, 1.0] });
+            distributions.push(TabularMuDist {
+                mu: vec![-1.0, 1.0],
+                cdf: vec![0.0, 1.0],
+            });
         } else {
-            distributions.push(TabularMuDist { mu: mu_values[start..end].to_vec(), cdf: cdf_values[start..end].to_vec() });
+            distributions.push(TabularMuDist {
+                mu: mu_values[start..end].to_vec(),
+                cdf: cdf_values[start..end].to_vec(),
+            });
         }
     }
-    Some(AngularDistribution { energies, distributions, center_of_mass })
+    Some(AngularDistribution {
+        energies,
+        distributions,
+        center_of_mass,
+    })
 }
 
 /// Read fission energy distribution from an already-open file.
-fn read_fission_edist_from_file(file: &hdf5_pure::File, nuclide_name: &str) -> Option<EnergyDistribution> {
+fn read_fission_edist_from_file(
+    file: &hdf5_pure::File,
+    nuclide_name: &str,
+) -> Option<EnergyDistribution> {
     let root = file.root();
     let nuc = root.group(nuclide_name).ok()?;
     let rxn = nuc.group("reactions").ok()?.group("reaction_018").ok()?;
     let subgroups = rxn.groups().unwrap_or_default();
     for product_name in &subgroups {
-        if !product_name.starts_with("product_") { continue; }
-        let product = match rxn.group(product_name) { Ok(g) => g, Err(_) => continue };
+        if !product_name.starts_with("product_") {
+            continue;
+        }
+        let product = match rxn.group(product_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
         let attrs = product.attrs().unwrap_or_default();
         let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
         let is_prompt = matches!(attrs.get("emission_mode"), Some(hdf5_pure::AttrValue::String(s)) if s == "prompt");
-        if !is_neutron || !is_prompt { continue; }
+        if !is_neutron || !is_prompt {
+            continue;
+        }
         let edist = product.group("distribution_0").ok()?.group("energy").ok()?;
         let energies = edist.dataset("energy").ok()?.read_f64().ok()?;
-        if energies.is_empty() { continue; }
+        if energies.is_empty() {
+            continue;
+        }
         let dist_ds = edist.dataset("distribution").ok()?;
         let dist_shape = dist_ds.shape().ok()?;
         let dist_raw = dist_ds.read_f64().ok()?;
-        if dist_shape.len() != 2 || dist_shape[0] != 3 { continue; }
+        if dist_shape.len() != 2 || dist_shape[0] != 3 {
+            continue;
+        }
         let n_total = dist_shape[1] as usize;
         let dist_attrs = dist_ds.attrs().unwrap_or_default();
-        let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
-            arr.iter().map(|&v| v as usize).collect()
-        } else { let per_e = n_total / energies.len(); (0..energies.len()).map(|i| i * per_e).collect() };
+        let offsets: Vec<usize> =
+            if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+                arr.iter().map(|&v| v as usize).collect()
+            } else {
+                let per_e = n_total / energies.len();
+                (0..energies.len()).map(|i| i * per_e).collect()
+            };
         let e_out_values = &dist_raw[..n_total];
-        let pdf_values   = &dist_raw[n_total..2 * n_total];
-        let cdf_values   = &dist_raw[2 * n_total..3 * n_total];
+        let pdf_values = &dist_raw[n_total..2 * n_total];
+        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
         let n_energies = energies.len();
         let mut distributions = Vec::with_capacity(n_energies);
         for i in 0..n_energies {
             let start = offsets.get(i).copied().unwrap_or(0);
             let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
             if start >= end || start >= n_total {
-                distributions.push(TabularEnergyDist { e_out: vec![1e5, 2e6], pdf: vec![1.0, 1.0], cdf: vec![0.0, 1.0] });
+                distributions.push(TabularEnergyDist {
+                    e_out: vec![1e5, 2e6],
+                    pdf: vec![1.0, 1.0],
+                    cdf: vec![0.0, 1.0],
+                });
             } else {
                 distributions.push(TabularEnergyDist {
                     e_out: e_out_values[start..end].to_vec(),
-                    pdf:   pdf_values[start..end].to_vec(),
-                    cdf:   cdf_values[start..end].to_vec(),
+                    pdf: pdf_values[start..end].to_vec(),
+                    cdf: cdf_values[start..end].to_vec(),
                 });
             }
         }
-        return Some(EnergyDistribution { energies, distributions });
+        return Some(EnergyDistribution {
+            energies,
+            distributions,
+        });
     }
     None
 }
 
 /// Read URR probability tables from an already-open file.
-fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &str) -> Option<UrrProbabilityTables> {
+fn read_urr_from_file(
+    file: &hdf5_pure::File,
+    nuclide_name: &str,
+    temp_label: &str,
+) -> Option<UrrProbabilityTables> {
     let root = file.root();
     let nuc = root.group(nuclide_name).ok()?;
     let urr = nuc.group("urr").ok()?;
     let temp_group = urr.group(temp_label).ok()?;
     let attrs = temp_group.attrs().unwrap_or_default();
-    let multiply_smooth = matches!(attrs.get("multiply_smooth"), Some(hdf5_pure::AttrValue::I64(1)));
+    let multiply_smooth = matches!(
+        attrs.get("multiply_smooth"),
+        Some(hdf5_pure::AttrValue::I64(1))
+    );
     let interpolation = match attrs.get("interpolation") {
         Some(hdf5_pure::AttrValue::I64(v)) => *v as u8,
         _ => 2,
@@ -1707,7 +1969,9 @@ fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &s
     let table_ds = temp_group.dataset("table").ok()?;
     let table_shape = table_ds.shape().ok()?;
     let table_raw = table_ds.read_f64().ok()?;
-    if table_shape.len() != 3 || table_shape[0] as usize != n_e || table_shape[1] != 6 { return None; }
+    if table_shape.len() != 3 || table_shape[0] as usize != n_e || table_shape[1] != 6 {
+        return None;
+    }
     let n_bands = table_shape[2] as usize;
     let n_ch = 6_usize;
     let mut cum_prob = Vec::with_capacity(n_e);
@@ -1718,19 +1982,45 @@ fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &s
     for e in 0..n_e {
         let base = e * n_ch * n_bands;
         cum_prob.push((0..n_bands).map(|b| table_raw[base + b]).collect());
-        total_factor.push((0..n_bands).map(|b| table_raw[base + n_bands + b]).collect());
-        elastic_factor.push((0..n_bands).map(|b| table_raw[base + 2 * n_bands + b]).collect());
-        fission_factor.push((0..n_bands).map(|b| table_raw[base + 3 * n_bands + b]).collect());
-        capture_factor.push((0..n_bands).map(|b| table_raw[base + 4 * n_bands + b]).collect());
+        total_factor.push(
+            (0..n_bands)
+                .map(|b| table_raw[base + n_bands + b])
+                .collect(),
+        );
+        elastic_factor.push(
+            (0..n_bands)
+                .map(|b| table_raw[base + 2 * n_bands + b])
+                .collect(),
+        );
+        fission_factor.push(
+            (0..n_bands)
+                .map(|b| table_raw[base + 3 * n_bands + b])
+                .collect(),
+        );
+        capture_factor.push(
+            (0..n_bands)
+                .map(|b| table_raw[base + 4 * n_bands + b])
+                .collect(),
+        );
     }
-    Some(UrrProbabilityTables { energies, n_bands, cum_prob, total_factor, elastic_factor, fission_factor, capture_factor, multiply_smooth, interpolation })
+    Some(UrrProbabilityTables {
+        energies,
+        n_bands,
+        cum_prob,
+        total_factor,
+        elastic_factor,
+        fission_factor,
+        capture_factor,
+        multiply_smooth,
+        interpolation,
+    })
 }
 
 // ── Thermal Scattering HDF5 Reader ─────────────────────────────────────
 
 use crate::thermal::{
-    ThermalScatteringData, InelasticThermal, InelasticDist,
-    ContinuousInelastic, DiscreteInelastic, ElasticThermal,
+    ContinuousInelastic, DiscreteInelastic, ElasticThermal, InelasticDist, InelasticThermal,
+    ThermalScatteringData,
 };
 
 /// Load thermal scattering data from an OpenMC HDF5 file (e.g., `c_H_in_H2O.h5`).
@@ -1755,13 +2045,18 @@ pub fn load_thermal_scattering(path: &Path) -> Result<ThermalScatteringData> {
     let root = file.root();
 
     // Find the thermal material group (first group under root)
-    let name = root.groups().map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot list root: {e}"),
-    })?.into_iter().next().ok_or_else(|| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: "no group at root".into(),
-    })?;
+    let name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no group at root".into(),
+        })?;
 
     let g = root.group(&name).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -1783,7 +2078,9 @@ pub fn load_thermal_scattering(path: &Path) -> Result<ThermalScatteringData> {
         _ => vec![],
     };
 
-    println!("  Thermal: {name}  nuclides={nuclides:?}  energy_max={energy_max:.2} eV  AWR={awr:.3}");
+    println!(
+        "  Thermal: {name}  nuclides={nuclides:?}  energy_max={energy_max:.2} eV  AWR={awr:.3}"
+    );
 
     // Read temperatures from kTs group
     let kts_group = g.group("kTs").map_err(|e| SvdError::Hdf5 {
@@ -1870,15 +2167,21 @@ fn read_thermal_inelastic(
         detail: format!("xs read error: {e}"),
     })?;
 
-    let n_e = if xs_shape.len() == 2 { xs_shape[1] as usize } else { xs_raw.len() / 2 };
+    let n_e = if xs_shape.len() == 2 {
+        xs_shape[1] as usize
+    } else {
+        xs_raw.len() / 2
+    };
     let energy: Vec<f64> = xs_raw[..n_e].to_vec();
     let xs: Vec<f64> = xs_raw[n_e..2 * n_e].to_vec();
 
     // Read distribution
-    let dist_group = inel_group.group("distribution").map_err(|e| SvdError::Hdf5 {
-        path: path.display().to_string(),
-        detail: format!("cannot open distribution: {e}"),
-    })?;
+    let dist_group = inel_group
+        .group("distribution")
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot open distribution: {e}"),
+        })?;
 
     let dist_attrs = dist_group.attrs().unwrap_or_default();
     let dist_type = match dist_attrs.get("type") {
@@ -1899,10 +2202,7 @@ fn read_thermal_inelastic(
 }
 
 /// Read continuous inelastic distribution (type="incoherent_inelastic" / "correlated").
-fn read_continuous_inelastic_dist(
-    group: &hdf5_pure::Group,
-    path: &Path,
-) -> Result<InelasticDist> {
+fn read_continuous_inelastic_dist(group: &hdf5_pure::Group, path: &Path) -> Result<InelasticDist> {
     // energy: double[n_inc]
     let energy_ds = group.dataset("energy").map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -1925,7 +2225,11 @@ fn read_continuous_inelastic_dist(
         detail: format!("energy_out read error: {e}"),
     })?;
 
-    let n_total = if eout_shape.len() == 2 { eout_shape[1] as usize } else { eout_raw.len() / 5 };
+    let n_total = if eout_shape.len() == 2 {
+        eout_shape[1] as usize
+    } else {
+        eout_raw.len() / 5
+    };
 
     // Unpack 5 rows
     let e_out = eout_raw[..n_total].to_vec();
@@ -1940,21 +2244,23 @@ fn read_continuous_inelastic_dist(
 
     // Read offsets attribute for energy_out distributions
     let eout_attrs = eout_ds.attrs().unwrap_or_default();
-    let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = eout_attrs.get("offsets") {
-        arr.iter().map(|&v| v as usize).collect()
-    } else if let Some(hdf5_pure::AttrValue::F64Array(arr)) = eout_attrs.get("offsets") {
-        arr.iter().map(|&v| v as usize).collect()
-    } else {
-        // Fallback: evenly split
-        let per_e = n_total / n_inc.max(1);
-        (0..n_inc).map(|i| i * per_e).collect()
-    };
+    let offsets: Vec<usize> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = eout_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else if let Some(hdf5_pure::AttrValue::F64Array(arr)) = eout_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else {
+            // Fallback: evenly split
+            let per_e = n_total / n_inc.max(1);
+            (0..n_inc).map(|i| i * per_e).collect()
+        };
 
-    let interp: Vec<u32> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) = eout_attrs.get("interpolation") {
-        arr.iter().map(|&v| v as u32).collect()
-    } else {
-        vec![2; n_inc] // default: linear-linear
-    };
+    let interp: Vec<u32> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = eout_attrs.get("interpolation") {
+            arr.iter().map(|&v| v as u32).collect()
+        } else {
+            vec![2; n_inc] // default: linear-linear
+        };
 
     // mu: double[3][M_total]
     let mu_ds = group.dataset("mu").map_err(|e| SvdError::Hdf5 {
@@ -1967,7 +2273,11 @@ fn read_continuous_inelastic_dist(
         detail: format!("mu read error: {e}"),
     })?;
 
-    let n_mu_total = if mu_shape.len() == 2 { mu_shape[1] as usize } else { mu_raw.len() / 3 };
+    let n_mu_total = if mu_shape.len() == 2 {
+        mu_shape[1] as usize
+    } else {
+        mu_raw.len() / 3
+    };
 
     let mu = mu_raw[..n_mu_total].to_vec();
     let pdf_mu = mu_raw[n_mu_total..2 * n_mu_total].to_vec();
@@ -1991,10 +2301,7 @@ fn read_continuous_inelastic_dist(
 }
 
 /// Read discrete inelastic distribution (type="incoherent_inelastic_discrete").
-fn read_discrete_inelastic_dist(
-    group: &hdf5_pure::Group,
-    path: &Path,
-) -> Result<InelasticDist> {
+fn read_discrete_inelastic_dist(group: &hdf5_pure::Group, path: &Path) -> Result<InelasticDist> {
     // energy_out: double[n_inc][n_out]
     let eout_ds = group.dataset("energy_out").map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
@@ -2005,7 +2312,11 @@ fn read_discrete_inelastic_dist(
         path: path.display().to_string(),
         detail: format!("energy_out read error: {e}"),
     })?;
-    let n_out = if eout_shape.len() >= 2 { eout_shape[1] as usize } else { 1 };
+    let n_out = if eout_shape.len() >= 2 {
+        eout_shape[1] as usize
+    } else {
+        1
+    };
 
     // mu_out: double[n_inc][n_out][n_mu]
     let mu_ds = group.dataset("mu_out").map_err(|e| SvdError::Hdf5 {
@@ -2017,7 +2328,11 @@ fn read_discrete_inelastic_dist(
         path: path.display().to_string(),
         detail: format!("mu_out read error: {e}"),
     })?;
-    let n_mu = if mu_shape.len() >= 3 { mu_shape[2] as usize } else { 1 };
+    let n_mu = if mu_shape.len() >= 3 {
+        mu_shape[2] as usize
+    } else {
+        1
+    };
 
     // skewed: int8 (0 = equi-probable, 1 = skewed)
     let dist_attrs = group.attrs().unwrap_or_default();
@@ -2026,7 +2341,11 @@ fn read_discrete_inelastic_dist(
         _ => {
             // Check for the dataset version
             if let Ok(ds) = group.dataset("skewed") {
-                ds.read_f64().ok().and_then(|v| v.first().copied()).unwrap_or(0.0) != 0.0
+                ds.read_f64()
+                    .ok()
+                    .and_then(|v| v.first().copied())
+                    .unwrap_or(0.0)
+                    != 0.0
             } else {
                 false
             }
@@ -2072,12 +2391,24 @@ fn read_thermal_elastic_one(
     _path: &Path,
 ) -> ElasticThermal {
     let root = file.root();
-    let base = match root.group(thermal_name) { Ok(g) => g, Err(_) => return default_elastic() };
-    let temp = match base.group(temp_label) { Ok(g) => g, Err(_) => return default_elastic() };
-    let el = match temp.group("elastic") { Ok(g) => g, Err(_) => return default_elastic() };
+    let base = match root.group(thermal_name) {
+        Ok(g) => g,
+        Err(_) => return default_elastic(),
+    };
+    let temp = match base.group(temp_label) {
+        Ok(g) => g,
+        Err(_) => return default_elastic(),
+    };
+    let el = match temp.group("elastic") {
+        Ok(g) => g,
+        Err(_) => return default_elastic(),
+    };
 
     // Read xs dataset and check type attribute
-    let xs_ds = match el.dataset("xs") { Ok(d) => d, Err(_) => return default_elastic() };
+    let xs_ds = match el.dataset("xs") {
+        Ok(d) => d,
+        Err(_) => return default_elastic(),
+    };
     let xs_attrs = xs_ds.attrs().unwrap_or_default();
     let xs_type = match xs_attrs.get("type") {
         Some(hdf5_pure::AttrValue::String(s)) => s.clone(),
@@ -2089,19 +2420,31 @@ fn read_thermal_elastic_one(
             // [2, n_bragg]: row 0 = bragg edges, row 1 = cumulative factors
             let raw = xs_ds.read_f64().unwrap_or_default();
             let shape = xs_ds.shape().unwrap_or_default();
-            let n = if shape.len() == 2 { shape[1] as usize } else { raw.len() / 2 };
+            let n = if shape.len() == 2 {
+                shape[1] as usize
+            } else {
+                raw.len() / 2
+            };
             let bragg_edges = raw[..n].to_vec();
             let factors = raw[n..2 * n].to_vec();
             println!("    {temp_label} elastic: coherent, {n} Bragg edges");
-            ElasticThermal::Coherent { bragg_edges, factors }
+            ElasticThermal::Coherent {
+                bragg_edges,
+                factors,
+            }
         }
         "IncoherentElastic" => {
             // [2]: bound_xs, debye_waller
             let raw = xs_ds.read_f64().unwrap_or_default();
             let bound_xs = raw.first().copied().unwrap_or(0.0);
             let debye_waller = raw.get(1).copied().unwrap_or(0.0);
-            println!("    {temp_label} elastic: incoherent, σ_b={bound_xs:.1} b, W'={debye_waller:.4} eV⁻¹");
-            ElasticThermal::Incoherent { bound_xs, debye_waller }
+            println!(
+                "    {temp_label} elastic: incoherent, σ_b={bound_xs:.1} b, W'={debye_waller:.4} eV⁻¹"
+            );
+            ElasticThermal::Incoherent {
+                bound_xs,
+                debye_waller,
+            }
         }
         _ => {
             // Unknown or Tabulated1D — try to read as tabulated cross section
@@ -2112,7 +2455,10 @@ fn read_thermal_elastic_one(
 }
 
 fn default_elastic() -> ElasticThermal {
-    ElasticThermal::Incoherent { bound_xs: 0.0, debye_waller: 0.0 }
+    ElasticThermal::Incoherent {
+        bound_xs: 0.0,
+        debye_waller: 0.0,
+    }
 }
 
 /// Linear interpolation of (x_src, y_src) onto x_dst.
@@ -2174,7 +2520,7 @@ mod sampling_tests {
         // Two bins: low bin isotropic, high bin forward-peaked.
         let dist = build_two_bin_angular(
             &[1e4, 1e6],
-            &[(-1.0, 0.0), (1.0, 1.0)],          // uniform [-1, 1]
+            &[(-1.0, 0.0), (1.0, 1.0)],             // uniform [-1, 1]
             &[(-1.0, 0.0), (0.0, 0.1), (1.0, 1.0)], // more weight near +1
         );
         let mut rng = Rng::new(42, 0);
@@ -2222,14 +2568,16 @@ mod sampling_tests {
         let dist = build_two_bin_angular(
             &[0.0, 1.0],
             &[(-1.0, 0.0), (-0.999, 1.0)], // nearly δ at -1
-            &[(0.999, 0.0), (1.0, 1.0)],    // nearly δ at +1
+            &[(0.999, 0.0), (1.0, 1.0)],   // nearly δ at +1
         );
         let mut rng = Rng::new(3, 0);
         let e = 0.25; // r = 0.25
         let n = 100_000;
         let mean: f64 = (0..n).map(|_| dist.sample_mu(e, &mut rng)).sum::<f64>() / n as f64;
-        assert!((mean - (-0.5)).abs() < 2e-2,
-                "stochastic-bin mean {mean} does not match r=0.25 prediction -0.5");
+        assert!(
+            (mean - (-0.5)).abs() < 2e-2,
+            "stochastic-bin mean {mean} does not match r=0.25 prediction -0.5"
+        );
     }
 
     #[test]
@@ -2274,7 +2622,9 @@ mod sampling_tests {
             let mut pdf = vec![0.0_f64; e_out.len()];
             for k in 0..e_out.len().saturating_sub(1) {
                 let de = e_out[k + 1] - e_out[k];
-                if de > 0.0 { pdf[k] = (cdf[k + 1] - cdf[k]) / de; }
+                if de > 0.0 {
+                    pdf[k] = (cdf[k + 1] - cdf[k]) / de;
+                }
             }
             let n = e_out.len();
             if n >= 2 {
@@ -2323,15 +2673,23 @@ mod sampling_tests {
         let mut max_e = 0.0_f64;
         for _ in 0..n {
             let e = dist.sample(0.5, &mut rng);
-            if e < min_e { min_e = e; }
-            if e > max_e { max_e = e; }
+            if e < min_e {
+                min_e = e;
+            }
+            if e > max_e {
+                max_e = e;
+            }
         }
         // Allow generous margin; the essential claim is that the scaled
         // remap keeps samples in the interpolated [E_1, E_K] envelope.
-        assert!(min_e >= 1.9e6 && min_e <= 2.1e6,
-                "min E_out = {min_e} should be near 2.0e6");
-        assert!(max_e >= 3.8e6 && max_e <= 4.2e6,
-                "max E_out = {max_e} should be near 4.0e6");
+        assert!(
+            (1.9e6..=2.1e6).contains(&min_e),
+            "min E_out = {min_e} should be near 2.0e6"
+        );
+        assert!(
+            (3.8e6..=4.2e6).contains(&max_e),
+            "max E_out = {max_e} should be near 4.0e6"
+        );
     }
 
     #[test]
@@ -2344,8 +2702,10 @@ mod sampling_tests {
         let mut rng = Rng::new(44, 0);
         for _ in 0..500 {
             let e = dist.sample(1.0, &mut rng);
-            assert!(e >= 1.0e6 && e <= 2.0e6,
-                    "below-grid sample {e} not in first bin [1e6, 2e6]");
+            assert!(
+                (1.0e6..=2.0e6).contains(&e),
+                "below-grid sample {e} not in first bin [1e6, 2e6]"
+            );
         }
     }
 
@@ -2360,21 +2720,27 @@ mod sampling_tests {
     #[test]
     fn energy_tabular_quadratic_triangular_pdf_inverse() {
         let e_out = vec![0.0_f64, 1.0e6];
-        let pdf   = vec![0.0_f64, 2.0e-6]; // triangular, ∫ = 1
-        let cdf   = vec![0.0_f64, 1.0];
+        let pdf = vec![0.0_f64, 2.0e-6]; // triangular, ∫ = 1
+        let cdf = vec![0.0_f64, 1.0];
         let t = TabularEnergyDist { e_out, pdf, cdf };
         let sample = t.sample_with_xi(0.5);
         // Analytical inverse: E = sqrt(0.5) * 1e6 ≈ 707_107 eV.
         let expected = (0.5_f64).sqrt() * 1.0e6;
-        assert!((sample - expected).abs() / expected < 1e-5,
-                "quadratic sample {sample} vs expected {expected}");
+        assert!(
+            (sample - expected).abs() / expected < 1e-5,
+            "quadratic sample {sample} vs expected {expected}"
+        );
     }
 
     #[test]
     fn energy_tabular_quadratic_falls_back_to_linear_when_pdf_missing() {
         let e_out = vec![0.0_f64, 1.0e6];
-        let cdf   = vec![0.0_f64, 1.0];
-        let t = TabularEnergyDist { e_out, pdf: vec![], cdf };
+        let cdf = vec![0.0_f64, 1.0];
+        let t = TabularEnergyDist {
+            e_out,
+            pdf: vec![],
+            cdf,
+        };
         let sample = t.sample_with_xi(0.5);
         // Linear fallback: E = 0.5 * 1e6 = 5e5 eV.
         assert!((sample - 5.0e5).abs() < 1e-3, "fallback {sample}");
@@ -2390,7 +2756,7 @@ mod sampling_tests {
             energies: vec![100.0, 1000.0],
             n_bands: 1,
             cum_prob: vec![vec![1.0], vec![1.0]],
-            total_factor:   vec![vec![1.0], vec![2.0]],
+            total_factor: vec![vec![1.0], vec![2.0]],
             elastic_factor: vec![vec![1.0], vec![2.0]],
             fission_factor: vec![vec![1.0], vec![2.0]],
             capture_factor: vec![vec![1.0], vec![2.0]],
@@ -2403,8 +2769,12 @@ mod sampling_tests {
     fn urr_lin_lin_interpolation_midpoint() {
         let urr = build_two_point_urr(2);
         let f = urr.sample(550.0, 0.5); // (550-100)/(1000-100) = 0.5
-        assert!((f.elastic - 1.5).abs() < 1e-12, "lin-lin elastic {}", f.elastic);
-        assert!((f.total   - 1.5).abs() < 1e-12);
+        assert!(
+            (f.elastic - 1.5).abs() < 1e-12,
+            "lin-lin elastic {}",
+            f.elastic
+        );
+        assert!((f.total - 1.5).abs() < 1e-12);
     }
 
     #[test]
@@ -2414,7 +2784,11 @@ mod sampling_tests {
         let urr = build_two_point_urr(5);
         let e = 100.0 * 10_f64.sqrt();
         let f = urr.sample(e, 0.5);
-        assert!((f.elastic - 1.5).abs() < 1e-10, "log-log elastic {}", f.elastic);
+        assert!(
+            (f.elastic - 1.5).abs() < 1e-10,
+            "log-log elastic {}",
+            f.elastic
+        );
     }
 
     #[test]
@@ -2428,16 +2802,20 @@ mod sampling_tests {
                 vec![0.9, 1.0], // at E_lo: ξ=0.5 < 0.9 → band 0
                 vec![0.1, 1.0], // at E_hi: ξ=0.5 > 0.1 → band 1
             ],
-            total_factor:   vec![vec![10.0, 99.0], vec![88.0, 20.0]],
+            total_factor: vec![vec![10.0, 99.0], vec![88.0, 20.0]],
             elastic_factor: vec![vec![10.0, 99.0], vec![88.0, 20.0]],
-            fission_factor: vec![vec![ 0.0,  0.0], vec![ 0.0,  0.0]],
-            capture_factor: vec![vec![ 0.0,  0.0], vec![ 0.0,  0.0]],
+            fission_factor: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
+            capture_factor: vec![vec![0.0, 0.0], vec![0.0, 0.0]],
             multiply_smooth: false,
             interpolation: 2,
         };
         // At E=150, f=0.5. Expected elastic = 0.5*10 + 0.5*20 = 15.
         let f = urr.sample(150.0, 0.5);
-        assert!((f.elastic - 15.0).abs() < 1e-12, "indep band elastic {}", f.elastic);
+        assert!(
+            (f.elastic - 15.0).abs() < 1e-12,
+            "indep band elastic {}",
+            f.elastic
+        );
     }
 
     #[test]

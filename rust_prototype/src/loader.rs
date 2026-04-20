@@ -6,7 +6,7 @@ use std::path::Path;
 use ndarray::Array2;
 use ndarray_npy::ReadNpyExt;
 
-use crate::error::{SvdError, Result};
+use crate::error::{Result, SvdError};
 use crate::kernel::SvdKernel;
 
 /// Raw SVD factors loaded from disk.
@@ -65,7 +65,9 @@ impl SvdFactors {
 
         if rank_u != rank_s || rank_s != rank_vt {
             return Err(SvdError::DimensionMismatch {
-                expected: format!("consistent rank (U cols={rank_u}, S len={rank_s}, Vt rows={rank_vt})"),
+                expected: format!(
+                    "consistent rank (U cols={rank_u}, S len={rank_s}, Vt rows={rank_vt})"
+                ),
                 got: "mismatched ranks".into(),
             });
         }

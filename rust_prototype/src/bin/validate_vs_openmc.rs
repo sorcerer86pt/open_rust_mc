@@ -68,11 +68,14 @@ fn main() {
     }
 
     // Check energy grids match
-    let mut energy_diff = 0.0_f64;
     let min_ne = n_e.min(ref_ne);
-    for i in 0..min_ne {
-        energy_diff = energy_diff.max((data.energies[i] - ref_energies[i]).abs());
-    }
+    let energy_diff: f64 = data
+        .energies
+        .iter()
+        .zip(ref_energies.iter())
+        .take(min_ne)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
     println!("\n  Energy grid max difference: {energy_diff:.2e}");
 
     // Compare values
@@ -87,12 +90,15 @@ fn main() {
     compare::print_report(&fidelity, 0);
 
     // Overall fidelity stats
-    let worst_fidelity = fidelity.iter()
+    let worst_fidelity = fidelity
+        .iter()
         .map(|(_, r)| r.overall.max_rel_err)
         .fold(0.0_f64, f64::max);
-    let mean_fidelity = fidelity.iter()
+    let mean_fidelity = fidelity
+        .iter()
         .map(|(_, r)| r.overall.mean_rel_err)
-        .sum::<f64>() / fidelity.len() as f64;
+        .sum::<f64>()
+        / fidelity.len() as f64;
 
     println!("\n  FIDELITY VERDICT:");
     if worst_fidelity < 1e-12 {
@@ -129,29 +135,36 @@ fn main() {
         );
 
         println!("\n  --- k={k} vs OpenMC ---");
-        let worst = results.iter()
+        let worst = results
+            .iter()
             .map(|(_, r)| r.overall.max_rel_err)
             .fold(0.0_f64, f64::max);
-        let worst_res = results.iter()
+        let worst_res = results
+            .iter()
             .map(|(_, r)| r.resonance.max_rel_err)
             .fold(0.0_f64, f64::max);
-        let worst_p99 = results.iter()
+        let worst_p99 = results
+            .iter()
             .map(|(_, r)| r.resonance.p99_rel_err)
             .fold(0.0_f64, f64::max);
-        let mean = results.iter()
+        let mean = results
+            .iter()
             .map(|(_, r)| r.overall.mean_rel_err)
-            .sum::<f64>() / results.len() as f64;
+            .sum::<f64>()
+            / results.len() as f64;
 
         println!("    Overall:   max={worst:.2e}  mean={mean:.2e}");
         println!("    Resonance: max={worst_res:.2e}  P99={worst_p99:.2e}");
 
         // Per-temp breakdown for resonance
         for (label, regional) in &results {
-            println!("      {label}: resonance max={:.2e} P99={:.2e}  thermal max={:.2e}  fast max={:.2e}",
-                     regional.resonance.max_rel_err,
-                     regional.resonance.p99_rel_err,
-                     regional.thermal.max_rel_err,
-                     regional.fast.max_rel_err);
+            println!(
+                "      {label}: resonance max={:.2e} P99={:.2e}  thermal max={:.2e}  fast max={:.2e}",
+                regional.resonance.max_rel_err,
+                regional.resonance.p99_rel_err,
+                regional.thermal.max_rel_err,
+                regional.fast.max_rel_err
+            );
         }
     }
 
@@ -160,8 +173,10 @@ fn main() {
     println!("SUMMARY");
     println!("{}", "=".repeat(80));
     println!("  Data fidelity (Rust reader vs OpenMC): max_err = {worst_fidelity:.2e}");
-    println!("  SVD singular spectrum confirms Scenario B (σ_2/σ_1 = {:.4e})",
-             svd.s[1] / svd.s[0]);
+    println!(
+        "  SVD singular spectrum confirms Scenario B (σ_2/σ_1 = {:.4e})",
+        svd.s[1] / svd.s[0]
+    );
     println!("  At k=5: resonance P99 error vs OpenMC ~ 10⁻³ level");
     println!("  At k=6 (full rank): reconstruction is machine-epsilon exact");
 }

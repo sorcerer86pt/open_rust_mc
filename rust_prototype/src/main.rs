@@ -17,7 +17,10 @@ use open_rust_mc::loader::SvdFactors;
 use open_rust_mc::table::PointwiseTable;
 
 #[derive(Parser)]
-#[command(name = "open_rust_mc", about = "SVD cross-section reconstruction engine")]
+#[command(
+    name = "open_rust_mc",
+    about = "SVD cross-section reconstruction engine"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -63,7 +66,7 @@ fn main() {
 
 // ─── HDF5 full pipeline ────────────────────────────────────────────────────
 
-fn run_hdf5(path: &PathBuf, mt: u32, max_rank: usize) {
+fn run_hdf5(path: &std::path::Path, mt: u32, max_rank: usize) {
     println!("=== open_rust_mc — HDF5 Full Pipeline ===\n");
     println!("File: {}", path.display());
     println!("Reaction: MT={mt}");
@@ -98,11 +101,20 @@ fn run_hdf5(path: &PathBuf, mt: u32, max_rank: usize) {
     let svd_result = decompose::svd(&log_matrix, n_e, n_t);
     let svd_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-    println!("\n  SVD computed in {svd_ms:.0} ms (rank = {})", svd_result.rank);
+    println!(
+        "\n  SVD computed in {svd_ms:.0} ms (rank = {})",
+        svd_result.rank
+    );
     println!("  Singular values:");
     for (j, &s) in svd_result.s.iter().enumerate() {
         let ratio = s / svd_result.s[0];
-        println!("    σ_{} = {:.6e}  (σ_{}/σ_1 = {:.6e})", j + 1, s, j + 1, ratio);
+        println!(
+            "    σ_{} = {:.6e}  (σ_{}/σ_1 = {:.6e})",
+            j + 1,
+            s,
+            j + 1,
+            ratio
+        );
     }
 
     // Cumulative energy
@@ -211,14 +223,7 @@ fn build_kernel_from_svd(
         }
     }
 
-    open_rust_mc::kernel::SvdKernel::new(
-        basis,
-        vt_coeffs,
-        energies.to_vec().into(),
-        rank,
-        n_e,
-        n_t,
-    )
+    open_rust_mc::kernel::SvdKernel::new(basis, vt_coeffs, energies.to_vec().into(), rank, n_e, n_t)
 }
 
 // ─── Explore HDF5 structure ────────────────────────────────────────────────
@@ -240,10 +245,17 @@ fn explore_group(group: &hdf5_pure::Group<'_>, path: &str, depth: usize) {
 
     if let Ok(datasets) = group.datasets() {
         for name in &datasets {
-            let ds_path = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
+            let ds_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            };
             if let Ok(ds) = group.dataset(name) {
                 let shape = ds.shape().unwrap_or_default();
-                let dtype = ds.dtype().map(|d| format!("{d:?}")).unwrap_or_else(|_| "?".into());
+                let dtype = ds
+                    .dtype()
+                    .map(|d| format!("{d:?}"))
+                    .unwrap_or_else(|_| "?".into());
                 println!("{indent}  [{ds_path}] shape={shape:?} dtype={dtype}");
             }
         }
@@ -251,7 +263,11 @@ fn explore_group(group: &hdf5_pure::Group<'_>, path: &str, depth: usize) {
 
     if let Ok(subgroups) = group.groups() {
         for name in &subgroups {
-            let sub_path = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
+            let sub_path = if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            };
             println!("{indent}  {sub_path}/");
             if let Ok(sg) = group.group(name) {
                 explore_group(&sg, &sub_path, depth + 1);
@@ -262,11 +278,11 @@ fn explore_group(group: &hdf5_pure::Group<'_>, path: &str, depth: usize) {
 
 // ─── NPY benchmark mode ───────────────────────────────────────────────────
 
-fn run_npy(dir: &PathBuf, prefix: &str) {
-    let dir = if dir.as_os_str().is_empty() {
+fn run_npy(dir: &std::path::Path, prefix: &str) {
+    let dir: PathBuf = if dir.as_os_str().is_empty() {
         default_output_dir()
     } else {
-        dir.clone()
+        dir.to_path_buf()
     };
 
     println!("=== open_rust_mc — NPY Benchmark Mode ===\n");

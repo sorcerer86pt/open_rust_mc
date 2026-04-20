@@ -53,7 +53,13 @@ impl NuclideData {
         let a_raw: Vec<f64> = a_raw_nd.into_raw_vec_and_offset().0;
         let a_log: Vec<f64> = a_log_nd.into_raw_vec_and_offset().0;
 
-        Ok(Self { a_raw, a_log, energies, n_e, n_t })
+        Ok(Self {
+            a_raw,
+            a_log,
+            energies,
+            n_e,
+            n_t,
+        })
     }
 }
 

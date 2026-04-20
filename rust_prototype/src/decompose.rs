@@ -78,5 +78,12 @@ pub fn svd(matrix: &[f64], n_e: usize, n_t: usize) -> SvdResult {
         }
     }
 
-    SvdResult { u, s, vt, n_e, n_t, rank }
+    SvdResult {
+        u,
+        s,
+        vt,
+        n_e,
+        n_t,
+        rank,
+    }
 }

@@ -7,9 +7,9 @@
 //!
 //! Reconstruction at temperature index `t`:
 //!   1. Build `coeffs[j] = vt_coeffs[j * n_t + t]` for j in 0..rank  (one cache line)
-//!   2. For each energy point i:
-//!        σ_log(E_i) = Σ_{j=0}^{rank-1} basis[i*rank + j] * coeffs[j]
-//!   3. σ(E_i) = 10^{σ_log(E_i)}
+//!   2. For each energy point i,
+//!      `σ_log(E_i) = Σ_{j=0}^{rank-1} basis[i*rank + j] * coeffs[j]`
+//!   3. `σ(E_i) = 10^{σ_log(E_i)}`
 //!
 //! Step 2 is a dot product of length `rank` — pure ALU, no memory stalls,
 //! because `basis` is streamed sequentially and `coeffs` fits in registers.
@@ -36,13 +36,22 @@ impl EnergyHashTable {
     pub fn new(energies: &[f64], n_bins: usize) -> Self {
         let n = energies.len();
         if n < 2 {
-            return Self { bins: vec![0; n_bins], log_e_min: 0.0, inv_bin_width: 0.0, n_bins };
+            return Self {
+                bins: vec![0; n_bins],
+                log_e_min: 0.0,
+                inv_bin_width: 0.0,
+                n_bins,
+            };
         }
 
         let log_e_min = energies[0].max(1e-11).ln();
         let log_e_max = energies[n - 1].max(1e-11).ln();
         let bin_width = (log_e_max - log_e_min) / n_bins as f64;
-        let inv_bin_width = if bin_width > 0.0 { 1.0 / bin_width } else { 0.0 };
+        let inv_bin_width = if bin_width > 0.0 {
+            1.0 / bin_width
+        } else {
+            0.0
+        };
 
         // For each bin, find the first grid index whose energy falls in that bin
         let mut bins = Vec::with_capacity(n_bins);
@@ -57,7 +66,12 @@ impl EnergyHashTable {
             bins.push(if grid_idx > 0 { grid_idx - 1 } else { 0 });
         }
 
-        Self { bins, log_e_min, inv_bin_width, n_bins }
+        Self {
+            bins,
+            log_e_min,
+            inv_bin_width,
+            n_bins,
+        }
     }
 
     /// O(1) energy lookup: hash to bin, then linear scan ≤ a few entries.
@@ -72,9 +86,15 @@ impl EnergyHashTable {
     #[inline]
     pub fn lookup(&self, energy: f64, energies: &[f64]) -> usize {
         let n = energies.len();
-        if n < 2 { return 0; }
-        if energy <= energies[0] { return 0; }
-        if energy >= energies[n - 1] { return n - 1; }
+        if n < 2 {
+            return 0;
+        }
+        if energy <= energies[0] {
+            return 0;
+        }
+        if energy >= energies[n - 1] {
+            return n - 1;
+        }
 
         let log_e = energy.ln();
         let bin = ((log_e - self.log_e_min) * self.inv_bin_width) as usize;
@@ -83,7 +103,11 @@ impl EnergyHashTable {
         // Start from the PREVIOUS bin's index (guaranteed <= energy's bracket).
         // bins[bin] is near the current bin's upper edge — too high for forward scan.
         // bins[bin-1] is near the current bin's lower edge — correct starting point.
-        let start = if bin > 0 { self.bins[bin - 1] as usize } else { 0 };
+        let start = if bin > 0 {
+            self.bins[bin - 1] as usize
+        } else {
+            0
+        };
         let mut idx = start.min(n - 1);
 
         // Linear scan forward past all grid points below energy
@@ -130,7 +154,15 @@ impl SvdKernel {
         } else {
             None
         };
-        Self { basis, vt_coeffs, energies, hash_table, rank, n_e, n_t }
+        Self {
+            basis,
+            vt_coeffs,
+            energies,
+            hash_table,
+            rank,
+            n_e,
+            n_t,
+        }
     }
 
     /// Number of energy points.
@@ -195,10 +227,8 @@ impl SvdKernel {
         // Weighted sum of V^T columns: c_k = Σ_j w_j * vt[k, j]
         let mut coeffs = Vec::with_capacity(self.rank);
         for k in 0..self.rank {
-            let mut acc = 0.0;
-            for j in 0..n_t {
-                acc += weights[j] * self.vt_coeffs[k * n_t + j];
-            }
+            let row = &self.vt_coeffs[k * n_t..k * n_t + n_t];
+            let acc: f64 = weights.iter().zip(row.iter()).map(|(w, c)| w * c).sum();
             coeffs.push(acc);
         }
         coeffs
@@ -281,14 +311,19 @@ impl SvdKernel {
     #[inline]
     fn energy_index_binary(&self, energy: f64) -> usize {
         let n = self.energies.len();
-        match self.energies.binary_search_by(|e| {
-            e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        match self
+            .energies
+            .binary_search_by(|e| e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => i,
             Err(i) => {
-                if i == 0 { 0 }
-                else if i >= n { n - 1 }
-                else { i }
+                if i == 0 {
+                    0
+                } else if i >= n {
+                    n - 1
+                } else {
+                    i
+                }
             }
         }
     }
@@ -327,16 +362,19 @@ pub fn ducru_weights(temperatures: &[f64], target_temp: f64) -> Vec<f64> {
 
         // Product term: Π_{i≠j} [(T - T_i)/(T + T_i)] * [(T_j + T_i)/(T_j - T_i)]
         let mut product = 1.0_f64;
-        for i in 0..n {
-            if i == j { continue; }
-            let t_i = temperatures[i];
+        for (i, &t_i) in temperatures.iter().enumerate().take(n) {
+            if i == j {
+                continue;
+            }
             let num1 = t - t_i;
             let den1 = t + t_i;
             let num2 = t_j + t_i;
             let den2 = t_j - t_i;
 
             // Guard against division by zero (identical reference temps)
-            if den2.abs() < 1e-10 { continue; }
+            if den2.abs() < 1e-10 {
+                continue;
+            }
 
             product *= (num1 / den1) * (num2 / den2);
         }

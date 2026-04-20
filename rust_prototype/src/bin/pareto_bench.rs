@@ -33,13 +33,13 @@ const RANKS: &[usize] = &[2, 3, 4, 5, 6];
 
 /// (filename, mt, label)
 const TARGETS: &[(&str, u32, &str)] = &[
-    ("U235.h5", 2,   "U235_elastic"),
-    ("U235.h5", 18,  "U235_fission"),
+    ("U235.h5", 2, "U235_elastic"),
+    ("U235.h5", 18, "U235_fission"),
     ("U235.h5", 102, "U235_capture"),
-    ("U238.h5", 2,   "U238_elastic"),
-    ("U238.h5", 18,  "U238_fission"),
+    ("U238.h5", 2, "U238_elastic"),
+    ("U238.h5", 18, "U238_fission"),
     ("U238.h5", 102, "U238_capture"),
-    ("U234.h5", 2,   "U234_elastic"),
+    ("U234.h5", 2, "U234_elastic"),
     ("U234.h5", 102, "U234_capture"),
 ];
 
@@ -58,7 +58,14 @@ fn build_kernel(svd: &decompose::SvdResult, energies: &[f64], k: usize) -> SvdKe
             vt_coeffs[j * svd.n_t + t] = svd.vt[j * svd.n_t + t];
         }
     }
-    SvdKernel::new(basis, vt_coeffs, energies.to_vec().into(), rank, svd.n_e, svd.n_t)
+    SvdKernel::new(
+        basis,
+        vt_coeffs,
+        energies.to_vec().into(),
+        rank,
+        svd.n_e,
+        svd.n_t,
+    )
 }
 
 /// Compute accuracy metrics over all (E, T) points.
@@ -73,19 +80,25 @@ fn accuracy(kernel: &SvdKernel, data: &NuclideData) -> (f64, f64, f64) {
     for t in 0..data.n_temp() {
         let coeffs = kernel.temp_coeffs(t);
         kernel.reconstruct_linear(&coeffs, &mut buf);
-        for i in 0..n_e {
+        for (i, &recon_raw) in buf.iter().enumerate().take(n_e) {
             let truth = data.xs_per_temp[t][i];
-            if truth <= 0.0 { continue; }
-            let recon = buf[i].max(1e-30);
+            if truth <= 0.0 {
+                continue;
+            }
+            let recon = recon_raw.max(1e-30);
             let d = recon.log10() - truth.log10();
             sum_sq += d * d;
-            if d.abs() > max_abs { max_abs = d.abs(); }
+            if d.abs() > max_abs {
+                max_abs = d.abs();
+            }
             sum_rel += ((recon - truth) / truth).abs();
             n_points += 1;
         }
     }
 
-    if n_points == 0 { return (0.0, 0.0, 0.0); }
+    if n_points == 0 {
+        return (0.0, 0.0, 0.0);
+    }
     let rmse = (sum_sq / n_points as f64).sqrt();
     let mean_rel = sum_rel / n_points as f64;
     (rmse, max_abs, mean_rel)
@@ -98,10 +111,12 @@ fn random_log_energies(grid: &[f64], n: usize) -> Vec<f64> {
     let log_min = e_min.ln();
     let log_max = e_max.ln();
     let mut rng = Rng::new(0xDEAD_BEEF_0000_0001, 0);
-    (0..n).map(|_| {
-        let u = rng.uniform();
-        (log_min + u * (log_max - log_min)).exp()
-    }).collect()
+    (0..n)
+        .map(|_| {
+            let u = rng.uniform();
+            (log_min + u * (log_max - log_min)).exp()
+        })
+        .collect()
 }
 
 /// Time SVD lookup (hash index + reconstruct_single, linear scale).
@@ -153,7 +168,9 @@ fn main() {
     let data_dir = PathBuf::from(&args[0]);
 
     // CSV header to stdout so shell redirection captures only data.
-    println!("kind,rank,nuclide,mt,n_e,n_t,rmse_log10,max_abs_log10,mean_rel_err,ns_per_lookup,mem_bytes");
+    println!(
+        "kind,rank,nuclide,mt,n_e,n_t,rmse_log10,max_abs_log10,mean_rel_err,ns_per_lookup,mem_bytes"
+    );
 
     for (filename, mt, label) in TARGETS {
         let path = data_dir.join(filename);
@@ -161,7 +178,10 @@ fn main() {
 
         let data = match NuclideData::from_hdf5(&path, *mt) {
             Ok(d) => d,
-            Err(e) => { eprintln!("  SKIP: {e}"); continue; }
+            Err(e) => {
+                eprintln!("  SKIP: {e}");
+                continue;
+            }
         };
         let n_e = data.n_energy();
         let n_t = data.n_temp();
@@ -178,20 +198,28 @@ fn main() {
         let table = PointwiseTable::from_vecs(data.energies.clone(), xs_col);
         let table_ns = bench_table_lookup(&table, &queries);
         let table_mem = n_e * 8; // xs values; energy grid shared per nuclide
-        println!("table,0,{label},{mt},{n_e},{n_t},0,0,0,{:.3},{}",
-                 table_ns, table_mem);
+        println!(
+            "table,0,{label},{mt},{n_e},{n_t},0,0,0,{:.3},{}",
+            table_ns, table_mem
+        );
         eprintln!("  table:   ns/lookup = {:.2}", table_ns);
 
         for &k in RANKS {
-            if k > svd.rank { continue; }
+            if k > svd.rank {
+                continue;
+            }
             let kernel = build_kernel(&svd, &data.energies, k);
             let (rmse, max_abs, mean_rel) = accuracy(&kernel, &data);
             let ns = bench_svd_lookup(&kernel, &queries);
             let mem = kernel.memory_bytes();
-            println!("svd,{k},{label},{mt},{n_e},{n_t},{:.3e},{:.3e},{:.3e},{:.3},{}",
-                     rmse, max_abs, mean_rel, ns, mem);
-            eprintln!("  k={k}: rmse_log10 = {:.2e}  ns/lookup = {:.2}  mean_rel = {:.2e}",
-                      rmse, ns, mean_rel);
+            println!(
+                "svd,{k},{label},{mt},{n_e},{n_t},{:.3e},{:.3e},{:.3e},{:.3},{}",
+                rmse, max_abs, mean_rel, ns, mem
+            );
+            eprintln!(
+                "  k={k}: rmse_log10 = {:.2e}  ns/lookup = {:.2}  mean_rel = {:.2e}",
+                rmse, ns, mean_rel
+            );
         }
     }
 }

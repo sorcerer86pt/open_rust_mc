@@ -7,7 +7,9 @@
 
 use std::sync::Arc;
 
-use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
@@ -21,7 +23,6 @@ const N_PARAMS: usize = 97;
 /// PWR pin cell geometry is hardcoded (9 surfaces, 4 cells, 3 materials).
 /// SVD basis data is passed via global memory, coefficients via shared memory.
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
-
 
 // ── Rust-side GPU transport context ──────────────────────────────
 
@@ -61,34 +62,34 @@ pub struct GpuNuclideData {
     pub nu_bar_offsets: CudaSlice<i32>,
     pub nu_bar_sizes: CudaSlice<i32>,
     // Discrete inelastic levels (Q-values + SVD basis for XS-proportional sampling)
-    pub level_q_values: CudaSlice<f64>,      // flat: all Q-values concatenated
-    pub level_thresholds: CudaSlice<f64>,    // flat: all thresholds concatenated
-    pub level_offsets: CudaSlice<i32>,        // per-nuclide offset into level arrays
-    pub level_counts: CudaSlice<i32>,         // per-nuclide number of levels
-    pub level_basis: CudaSlice<f64>,          // flat: SVD basis for each level's XS
-    pub level_coeffs: CudaSlice<f64>,         // flat: SVD coefficients for each level
-    pub level_basis_offsets: CudaSlice<i32>,  // per-level offset into level_basis
+    pub level_q_values: CudaSlice<f64>, // flat: all Q-values concatenated
+    pub level_thresholds: CudaSlice<f64>, // flat: all thresholds concatenated
+    pub level_offsets: CudaSlice<i32>,  // per-nuclide offset into level arrays
+    pub level_counts: CudaSlice<i32>,   // per-nuclide number of levels
+    pub level_basis: CudaSlice<f64>,    // flat: SVD basis for each level's XS
+    pub level_coeffs: CudaSlice<f64>,   // flat: SVD coefficients for each level
+    pub level_basis_offsets: CudaSlice<i32>, // per-level offset into level_basis
     pub level_coeffs_offsets: CudaSlice<i32>, // per-level offset into level_coeffs
-    pub level_has_kernel: CudaSlice<i32>,     // per-level: 1 if kernel exists, 0 if not
-    pub level_mt: CudaSlice<i32>,             // per-level: MT number (51-91)
+    pub level_has_kernel: CudaSlice<i32>, // per-level: 1 if kernel exists, 0 if not
+    pub level_mt: CudaSlice<i32>,       // per-level: MT number (51-91)
     // Per-discrete-level CM-frame angular distributions (ENDF MT=51-91).
     // Indexed by global level index (same space as level_q_values).
-    pub lev_ang_energies: CudaSlice<f64>,     // flat: incident-energy grid per level
-    pub lev_ang_mu: CudaSlice<f64>,           // flat: cosine values
-    pub lev_ang_cdf: CudaSlice<f64>,          // flat: CDF values
-    pub lev_ang_dist_off: CudaSlice<i32>,     // per (global_level, energy_idx) → offset
-    pub lev_ang_dist_sz: CudaSlice<i32>,      // per (global_level, energy_idx) → size
-    pub lev_ang_lev_off: CudaSlice<i32>,      // per global level → offset into lev_ang_energies
-    pub lev_ang_lev_ne: CudaSlice<i32>,       // per global level → number of incident energies
+    pub lev_ang_energies: CudaSlice<f64>, // flat: incident-energy grid per level
+    pub lev_ang_mu: CudaSlice<f64>,       // flat: cosine values
+    pub lev_ang_cdf: CudaSlice<f64>,      // flat: CDF values
+    pub lev_ang_dist_off: CudaSlice<i32>, // per (global_level, energy_idx) → offset
+    pub lev_ang_dist_sz: CudaSlice<i32>,  // per (global_level, energy_idx) → size
+    pub lev_ang_lev_off: CudaSlice<i32>,  // per global level → offset into lev_ang_energies
+    pub lev_ang_lev_ne: CudaSlice<i32>,   // per global level → number of incident energies
     // Anisotropic elastic scattering angular distributions
-    pub ang_energies: CudaSlice<f64>,         // flat: energy grids for angular dist
-    pub ang_mu: CudaSlice<f64>,               // flat: cosine values
-    pub ang_cdf: CudaSlice<f64>,              // flat: CDF values
-    pub ang_dist_offsets: CudaSlice<i32>,      // per (nuc, energy) → offset into mu/cdf
-    pub ang_dist_sizes: CudaSlice<i32>,        // per (nuc, energy) → n_mu
-    pub ang_nuc_offsets: CudaSlice<i32>,       // per-nuclide → offset into ang_energies
-    pub ang_nuc_n_energies: CudaSlice<i32>,    // per-nuclide → number of angular energies
-    pub ang_is_cm: CudaSlice<i32>,             // per-nuclide → 1 if CM frame
+    pub ang_energies: CudaSlice<f64>, // flat: energy grids for angular dist
+    pub ang_mu: CudaSlice<f64>,       // flat: cosine values
+    pub ang_cdf: CudaSlice<f64>,      // flat: CDF values
+    pub ang_dist_offsets: CudaSlice<i32>, // per (nuc, energy) → offset into mu/cdf
+    pub ang_dist_sizes: CudaSlice<i32>, // per (nuc, energy) → n_mu
+    pub ang_nuc_offsets: CudaSlice<i32>, // per-nuclide → offset into ang_energies
+    pub ang_nuc_n_energies: CudaSlice<i32>, // per-nuclide → number of angular energies
+    pub ang_is_cm: CudaSlice<i32>,    // per-nuclide → 1 if CM frame
     // Fission energy distributions (tabulated CDF)
     pub fis_inc_energies: CudaSlice<f64>,
     pub fis_dist_offsets: CudaSlice<i32>,
@@ -162,7 +163,7 @@ pub struct GpuWmpData {
 
 /// Result of debug trace on GPU.
 pub struct GpuTraceResult {
-    pub data: Vec<f64>,       // [n_particles * max_steps * TRACE_COLS]
+    pub data: Vec<f64>,        // [n_particles * max_steps * TRACE_COLS]
     pub step_counts: Vec<i32>, // [n_particles]
 }
 
@@ -194,7 +195,8 @@ impl GpuTransportContext {
             arch: Some("sm_86"),
             options: vec![
                 "--ptxas-options=-v".to_string(),
-                "-Xptxas".to_string(), "-warn-spills".to_string(),
+                "-Xptxas".to_string(),
+                "-warn-spills".to_string(),
             ],
             ..Default::default()
         };
@@ -212,9 +214,13 @@ impl GpuTransportContext {
         println!("  GPU transport kernels compiled (8 kernels)");
 
         Ok(Self {
-            _ctx: ctx, stream,
-            k_init_source, k_count_alive, k_compact_alive,
-            k_energy_bin_count, k_energy_bin_scatter,
+            _ctx: ctx,
+            stream,
+            k_init_source,
+            k_count_alive,
+            k_compact_alive,
+            k_energy_bin_count,
+            k_energy_bin_scatter,
             k_transport_persistent,
         })
     }
@@ -247,41 +253,72 @@ impl GpuTransportContext {
             }};
         }
         let mut params_vec: Vec<u64> = vec![
-            dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
-            dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
-            dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
-            dptr!(&nuc_data.has_reaction), dptr!(&nuc_data.coeffs_offsets),
+            dptr!(&nuc_data.all_basis),
+            dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids),
+            dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets),
+            dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction),
+            dptr!(&nuc_data.coeffs_offsets),
             nuc_data.rank as u64,
-            dptr!(&mat_data.mat_n_nuclides), dptr!(&mat_data.mat_nuclide_idx),
-            dptr!(&mat_data.mat_atom_density), dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.mat_n_nuclides),
+            dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density),
+            dptr!(&mat_data.awr_table),
             dptr!(&mat_data.nu_bar_const),
-            dptr!(&nuc_data.nu_bar_energies), dptr!(&nuc_data.nu_bar_values),
-            dptr!(&nuc_data.nu_bar_offsets), dptr!(&nuc_data.nu_bar_sizes),
-            dptr!(&nuc_data.fis_inc_energies), dptr!(&nuc_data.fis_dist_offsets),
-            dptr!(&nuc_data.fis_dist_sizes), dptr!(&nuc_data.fis_e_out),
-            dptr!(&nuc_data.fis_cdf), dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.nu_bar_energies),
+            dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets),
+            dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies),
+            dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes),
+            dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf),
+            dptr!(&nuc_data.fis_nuc_offsets),
             dptr!(&nuc_data.fis_nuc_n_inc),
-            dptr!(&nuc_data.level_q_values), dptr!(&nuc_data.level_thresholds),
-            dptr!(&nuc_data.level_offsets), dptr!(&nuc_data.level_counts),
-            dptr!(&nuc_data.level_basis), dptr!(&nuc_data.level_coeffs),
-            dptr!(&nuc_data.level_basis_offsets), dptr!(&nuc_data.level_coeffs_offsets),
-            dptr!(&nuc_data.level_has_kernel), dptr!(&nuc_data.level_mt),
-            dptr!(&nuc_data.ang_energies), dptr!(&nuc_data.ang_mu),
-            dptr!(&nuc_data.ang_cdf), dptr!(&nuc_data.ang_dist_offsets),
-            dptr!(&nuc_data.ang_dist_sizes), dptr!(&nuc_data.ang_nuc_offsets),
-            dptr!(&nuc_data.ang_nuc_n_energies), dptr!(&nuc_data.ang_is_cm),
-            dptr!(&sab_data.inc_energies), sab_data.n_inc as u64,
-            dptr!(&sab_data.eout_offsets), dptr!(&sab_data.eout_sizes),
-            dptr!(&sab_data.e_out), dptr!(&sab_data.cdf_e),
-            dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
-            dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
-            dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&nuc_data.level_q_values),
+            dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets),
+            dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis),
+            dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets),
+            dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel),
+            dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies),
+            dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf),
+            dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes),
+            dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies),
+            dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies),
+            sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets),
+            dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out),
+            dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets),
+            dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu),
+            dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs),
+            sab_data.energy_max.to_bits(),
             dptr!(&sab_data.pdf_e),
-            dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
-            dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
-            dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
-            dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
-            dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
+            dptr!(&nuc_data.urr_energies),
+            dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f),
+            dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f),
+            dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets),
+            dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands),
+            dptr!(&nuc_data.urr_multiply_smooth),
             geom_type as u64,
             dptr!(&nuc_data.total_xs),
             dptr!(&nuc_data.total_xs_offsets),
@@ -294,7 +331,9 @@ impl GpuTransportContext {
         // remaining slots (WMP + per-level angular) with nulls so the
         // runtime TransportParams layout check passes. These arrays are
         // not referenced from the `debug_angular_sample` kernel.
-        while params_vec.len() < N_PARAMS { params_vec.push(0_u64); }
+        while params_vec.len() < N_PARAMS {
+            params_vec.push(0_u64);
+        }
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
 
@@ -306,10 +345,15 @@ impl GpuTransportContext {
         let n_i32 = n as i32;
         let grid = ((n as u32 + 255) / 256, 1, 1);
         let block = (256u32, 1, 1);
-        let cfg = cudarc::driver::LaunchConfig { grid_dim: grid, block_dim: block, shared_mem_bytes: 0 };
+        let cfg = cudarc::driver::LaunchConfig {
+            grid_dim: grid,
+            block_dim: block,
+            shared_mem_bytes: 0,
+        };
 
         unsafe {
-            self.stream.launch_builder(&k_debug)
+            self.stream
+                .launch_builder(&k_debug)
                 .arg(&d_params)
                 .arg(&d_energies)
                 .arg(&d_xis)
@@ -341,44 +385,78 @@ impl GpuTransportContext {
         let mut d_out: CudaSlice<f64> = self.stream.alloc_zeros(n * 6)?;
 
         macro_rules! dptr {
-            ($slice:expr) => {{ let (ptr, _guard) = $slice.device_ptr(&self.stream); ptr }};
+            ($slice:expr) => {{
+                let (ptr, _guard) = $slice.device_ptr(&self.stream);
+                ptr
+            }};
         }
         let mut params_vec: Vec<u64> = vec![
-            dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
-            dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
-            dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
-            dptr!(&nuc_data.has_reaction), dptr!(&nuc_data.coeffs_offsets),
+            dptr!(&nuc_data.all_basis),
+            dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids),
+            dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets),
+            dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction),
+            dptr!(&nuc_data.coeffs_offsets),
             nuc_data.rank as u64,
-            dptr!(&mat_data.mat_n_nuclides), dptr!(&mat_data.mat_nuclide_idx),
-            dptr!(&mat_data.mat_atom_density), dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.mat_n_nuclides),
+            dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density),
+            dptr!(&mat_data.awr_table),
             dptr!(&mat_data.nu_bar_const),
-            dptr!(&nuc_data.nu_bar_energies), dptr!(&nuc_data.nu_bar_values),
-            dptr!(&nuc_data.nu_bar_offsets), dptr!(&nuc_data.nu_bar_sizes),
-            dptr!(&nuc_data.fis_inc_energies), dptr!(&nuc_data.fis_dist_offsets),
-            dptr!(&nuc_data.fis_dist_sizes), dptr!(&nuc_data.fis_e_out),
-            dptr!(&nuc_data.fis_cdf), dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.nu_bar_energies),
+            dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets),
+            dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies),
+            dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes),
+            dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf),
+            dptr!(&nuc_data.fis_nuc_offsets),
             dptr!(&nuc_data.fis_nuc_n_inc),
-            dptr!(&nuc_data.level_q_values), dptr!(&nuc_data.level_thresholds),
-            dptr!(&nuc_data.level_offsets), dptr!(&nuc_data.level_counts),
-            dptr!(&nuc_data.level_basis), dptr!(&nuc_data.level_coeffs),
-            dptr!(&nuc_data.level_basis_offsets), dptr!(&nuc_data.level_coeffs_offsets),
-            dptr!(&nuc_data.level_has_kernel), dptr!(&nuc_data.level_mt),
-            dptr!(&nuc_data.ang_energies), dptr!(&nuc_data.ang_mu),
-            dptr!(&nuc_data.ang_cdf), dptr!(&nuc_data.ang_dist_offsets),
-            dptr!(&nuc_data.ang_dist_sizes), dptr!(&nuc_data.ang_nuc_offsets),
-            dptr!(&nuc_data.ang_nuc_n_energies), dptr!(&nuc_data.ang_is_cm),
-            dptr!(&sab_data.inc_energies), sab_data.n_inc as u64,
-            dptr!(&sab_data.eout_offsets), dptr!(&sab_data.eout_sizes),
-            dptr!(&sab_data.e_out), dptr!(&sab_data.cdf_e),
-            dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
-            dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
-            dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&nuc_data.level_q_values),
+            dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets),
+            dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis),
+            dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets),
+            dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel),
+            dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies),
+            dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf),
+            dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes),
+            dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies),
+            dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies),
+            sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets),
+            dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out),
+            dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets),
+            dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu),
+            dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs),
+            sab_data.energy_max.to_bits(),
             dptr!(&sab_data.pdf_e),
-            dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
-            dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
-            dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
-            dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
-            dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
+            dptr!(&nuc_data.urr_energies),
+            dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f),
+            dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f),
+            dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets),
+            dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands),
+            dptr!(&nuc_data.urr_multiply_smooth),
             geom_type as u64,
             dptr!(&nuc_data.total_xs),
             dptr!(&nuc_data.total_xs_offsets),
@@ -387,7 +465,9 @@ impl GpuTransportContext {
             dptr!(&nuc_data.pw_offsets),
             dptr!(&nuc_data.has_pw),
         ];
-        while params_vec.len() < N_PARAMS { params_vec.push(0_u64); }
+        while params_vec.len() < N_PARAMS {
+            params_vec.push(0_u64);
+        }
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
 
@@ -398,10 +478,12 @@ impl GpuTransportContext {
         let n_i32 = n as i32;
         let cfg = cudarc::driver::LaunchConfig {
             grid_dim: (((n as u32) + 255) / 256, 1, 1),
-            block_dim: (256, 1, 1), shared_mem_bytes: 0,
+            block_dim: (256, 1, 1),
+            shared_mem_bytes: 0,
         };
         unsafe {
-            self.stream.launch_builder(&k_debug)
+            self.stream
+                .launch_builder(&k_debug)
                 .arg(&d_params)
                 .arg(&d_energies)
                 .arg(&n_i32)
@@ -412,9 +494,10 @@ impl GpuTransportContext {
         Ok(self.stream.clone_dtoh(&d_out)?)
     }
 
-
     /// Expose the CUDA stream for diagnostic buffer downloads.
-    pub fn stream(&self) -> &Arc<CudaStream> { &self.stream }
+    pub fn stream(&self) -> &Arc<CudaStream> {
+        &self.stream
+    }
 
     /// Upload SVD nuclide data to GPU.
     pub fn upload_nuclide_data(
@@ -441,7 +524,9 @@ impl GpuTransportContext {
             grid_offsets_vec[nuc_idx] = grid_offset as i32;
 
             // Get energy grid from any available reaction
-            let any_kernel = nuc.elastic.as_ref()
+            let any_kernel = nuc
+                .elastic
+                .as_ref()
                 .or(nuc.fission.as_ref())
                 .or(nuc.capture.as_ref())
                 .or(nuc.inelastic.as_ref())
@@ -480,9 +565,15 @@ impl GpuTransportContext {
         }
 
         // Ensure we have data
-        if all_basis_vec.is_empty() { all_basis_vec.push(0.0); }
-        if all_coeffs_vec.is_empty() { all_coeffs_vec.push(0.0); }
-        if all_grids_vec.is_empty() { all_grids_vec.push(0.0); }
+        if all_basis_vec.is_empty() {
+            all_basis_vec.push(0.0);
+        }
+        if all_coeffs_vec.is_empty() {
+            all_coeffs_vec.push(0.0);
+        }
+        if all_grids_vec.is_empty() {
+            all_grids_vec.push(0.0);
+        }
 
         // ── Pack pointwise total XS (sum of all HDF5 reactions) ──
         let mut total_xs_vec: Vec<f64> = Vec::new();
@@ -495,7 +586,9 @@ impl GpuTransportContext {
                 total_xs_vec.extend_from_slice(xs);
             }
         }
-        if total_xs_vec.is_empty() { total_xs_vec.push(0.0); }
+        if total_xs_vec.is_empty() {
+            total_xs_vec.push(0.0);
+        }
 
         // ── Pack pointwise XS tables (7 channels per energy point) ──
         let mut pw_xs_vec: Vec<f64> = Vec::new();
@@ -508,8 +601,13 @@ impl GpuTransportContext {
                 pw_xs_vec.extend_from_slice(pw);
             }
         }
-        if pw_xs_vec.is_empty() { pw_xs_vec.push(0.0); }
-        println!("  GPU: pointwise XS = {:.1} MB", pw_xs_vec.len() as f64 * 8.0 / 1e6);
+        if pw_xs_vec.is_empty() {
+            pw_xs_vec.push(0.0);
+        }
+        println!(
+            "  GPU: pointwise XS = {:.1} MB",
+            pw_xs_vec.len() as f64 * 8.0 / 1e6
+        );
 
         // ── Pack discrete inelastic levels (Q-values + SVD basis) ──
         let mut lev_q_vec: Vec<f64> = Vec::new();
@@ -576,19 +674,39 @@ impl GpuTransportContext {
             }
         }
         if lev_q_vec.is_empty() {
-            lev_q_vec.push(0.0); lev_thr_vec.push(0.0); lev_mt_vec.push(0);
-            lev_has_kernel_vec.push(0); lev_basis_off_vec.push(0); lev_coeffs_off_vec.push(0);
-            lev_ang_loff_vec.push(0); lev_ang_lne_vec.push(0);
+            lev_q_vec.push(0.0);
+            lev_thr_vec.push(0.0);
+            lev_mt_vec.push(0);
+            lev_has_kernel_vec.push(0);
+            lev_basis_off_vec.push(0);
+            lev_coeffs_off_vec.push(0);
+            lev_ang_loff_vec.push(0);
+            lev_ang_lne_vec.push(0);
         }
-        if lev_basis_vec.is_empty() { lev_basis_vec.push(0.0); }
-        if lev_coeffs_vec.is_empty() { lev_coeffs_vec.push(0.0); }
-        if lev_ang_e_vec.is_empty() { lev_ang_e_vec.push(0.0); }
-        if lev_ang_mu_vec.is_empty() { lev_ang_mu_vec.push(0.0); lev_ang_cdf_vec.push(0.0); }
-        if lev_ang_doff_vec.is_empty() { lev_ang_doff_vec.push(0); lev_ang_dsz_vec.push(0); }
+        if lev_basis_vec.is_empty() {
+            lev_basis_vec.push(0.0);
+        }
+        if lev_coeffs_vec.is_empty() {
+            lev_coeffs_vec.push(0.0);
+        }
+        if lev_ang_e_vec.is_empty() {
+            lev_ang_e_vec.push(0.0);
+        }
+        if lev_ang_mu_vec.is_empty() {
+            lev_ang_mu_vec.push(0.0);
+            lev_ang_cdf_vec.push(0.0);
+        }
+        if lev_ang_doff_vec.is_empty() {
+            lev_ang_doff_vec.push(0);
+            lev_ang_dsz_vec.push(0);
+        }
 
         let n_total_levels: usize = lev_cnt_vec.iter().map(|&c| c as usize).sum();
-        println!("  GPU: {} discrete levels, {:.1} MB level basis",
-                 n_total_levels, lev_basis_vec.len() as f64 * 4.0 / 1e6);
+        println!(
+            "  GPU: {} discrete levels, {:.1} MB level basis",
+            n_total_levels,
+            lev_basis_vec.len() as f64 * 4.0 / 1e6
+        );
 
         // ── Pack angular distributions ──
         let mut ang_e_vec: Vec<f64> = Vec::new();
@@ -615,9 +733,17 @@ impl GpuTransportContext {
                 }
             }
         }
-        if ang_e_vec.is_empty() { ang_e_vec.push(0.0); }
-        if ang_mu_vec.is_empty() { ang_mu_vec.push(0.0); ang_cdf_vec.push(0.0); }
-        if ang_doff_vec.is_empty() { ang_doff_vec.push(0); ang_dsz_vec.push(0); }
+        if ang_e_vec.is_empty() {
+            ang_e_vec.push(0.0);
+        }
+        if ang_mu_vec.is_empty() {
+            ang_mu_vec.push(0.0);
+            ang_cdf_vec.push(0.0);
+        }
+        if ang_doff_vec.is_empty() {
+            ang_doff_vec.push(0);
+            ang_dsz_vec.push(0);
+        }
 
         // ── Pack nu-bar tables (flat with offsets) ──
         let mut nb_energies_vec: Vec<f64> = Vec::new();
@@ -635,7 +761,10 @@ impl GpuTransportContext {
                 }
             }
         }
-        if nb_energies_vec.is_empty() { nb_energies_vec.push(0.0); nb_values_vec.push(0.0); }
+        if nb_energies_vec.is_empty() {
+            nb_energies_vec.push(0.0);
+            nb_values_vec.push(0.0);
+        }
 
         // ── Pack fission energy distributions (flat CDFs with offsets) ──
         let mut fis_inc_e_vec: Vec<f64> = Vec::new();
@@ -660,9 +789,17 @@ impl GpuTransportContext {
                 }
             }
         }
-        if fis_inc_e_vec.is_empty() { fis_inc_e_vec.push(0.0); }
-        if fis_eout_vec.is_empty() { fis_eout_vec.push(0.0); fis_cdf_vec.push(0.0); }
-        if fis_dist_off_vec.is_empty() { fis_dist_off_vec.push(0); fis_dist_sz_vec.push(0); }
+        if fis_inc_e_vec.is_empty() {
+            fis_inc_e_vec.push(0.0);
+        }
+        if fis_eout_vec.is_empty() {
+            fis_eout_vec.push(0.0);
+            fis_cdf_vec.push(0.0);
+        }
+        if fis_dist_off_vec.is_empty() {
+            fis_dist_off_vec.push(0);
+            fis_dist_sz_vec.push(0);
+        }
 
         // ── Pack URR probability tables ──
         let mut urr_e_vec: Vec<f64> = Vec::new();
@@ -683,26 +820,50 @@ impl GpuTransportContext {
                 urr_nb_vec[nuc_idx] = urr.n_bands as i32;
                 urr_ms_vec[nuc_idx] = if urr.multiply_smooth { 1 } else { 0 };
                 urr_e_vec.extend_from_slice(&urr.energies);
-                for row in &urr.cum_prob { urr_cp_vec.extend_from_slice(row); }
-                for row in &urr.total_factor { urr_tf_vec.extend_from_slice(row); }
-                for row in &urr.elastic_factor { urr_ef_vec.extend_from_slice(row); }
-                for row in &urr.fission_factor { urr_ff_vec.extend_from_slice(row); }
-                for row in &urr.capture_factor { urr_cf_vec.extend_from_slice(row); }
+                for row in &urr.cum_prob {
+                    urr_cp_vec.extend_from_slice(row);
+                }
+                for row in &urr.total_factor {
+                    urr_tf_vec.extend_from_slice(row);
+                }
+                for row in &urr.elastic_factor {
+                    urr_ef_vec.extend_from_slice(row);
+                }
+                for row in &urr.fission_factor {
+                    urr_ff_vec.extend_from_slice(row);
+                }
+                for row in &urr.capture_factor {
+                    urr_cf_vec.extend_from_slice(row);
+                }
             }
         }
         // Always have at least one element so device pointers are never null
-        if urr_e_vec.is_empty() { urr_e_vec.push(0.0); }
-        if urr_cp_vec.is_empty() { urr_cp_vec.push(0.0); }
-        if urr_tf_vec.is_empty() { urr_tf_vec.push(0.0); }
-        if urr_ef_vec.is_empty() { urr_ef_vec.push(0.0); }
-        if urr_ff_vec.is_empty() { urr_ff_vec.push(0.0); }
-        if urr_cf_vec.is_empty() { urr_cf_vec.push(0.0); }
+        if urr_e_vec.is_empty() {
+            urr_e_vec.push(0.0);
+        }
+        if urr_cp_vec.is_empty() {
+            urr_cp_vec.push(0.0);
+        }
+        if urr_tf_vec.is_empty() {
+            urr_tf_vec.push(0.0);
+        }
+        if urr_ef_vec.is_empty() {
+            urr_ef_vec.push(0.0);
+        }
+        if urr_ff_vec.is_empty() {
+            urr_ff_vec.push(0.0);
+        }
+        if urr_cf_vec.is_empty() {
+            urr_cf_vec.push(0.0);
+        }
 
-        println!("  GPU: basis={:.1} MB, grids={:.1} MB, nu-bar={} pts, fis_spec={} pts",
-                 all_basis_vec.len() as f64 * 8.0 / 1e6,
-                 all_grids_vec.len() as f64 * 8.0 / 1e6,
-                 nb_energies_vec.len(),
-                 fis_eout_vec.len());
+        println!(
+            "  GPU: basis={:.1} MB, grids={:.1} MB, nu-bar={} pts, fis_spec={} pts",
+            all_basis_vec.len() as f64 * 8.0 / 1e6,
+            all_grids_vec.len() as f64 * 8.0 / 1e6,
+            nb_energies_vec.len(),
+            fis_eout_vec.len()
+        );
 
         Ok(GpuNuclideData {
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
@@ -806,7 +967,6 @@ impl GpuTransportContext {
         tsl: &crate::thermal::ThermalScatteringData,
         temp_idx: usize,
     ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
-
         let inel = &tsl.inelastic[temp_idx];
         match &inel.dist {
             crate::thermal::InelasticDist::Continuous(c) => {
@@ -820,7 +980,11 @@ impl GpuTransportContext {
                 let mut eout_sizes = Vec::with_capacity(c.n_inc);
                 for i in 0..c.n_inc {
                     let start = c.offsets[i];
-                    let end = if i + 1 < c.offsets.len() { c.offsets[i + 1] } else { c.e_out.len() };
+                    let end = if i + 1 < c.offsets.len() {
+                        c.offsets[i + 1]
+                    } else {
+                        c.e_out.len()
+                    };
                     eout_offsets.push(start as i32);
                     eout_sizes.push((end - start) as i32);
                 }
@@ -830,16 +994,27 @@ impl GpuTransportContext {
                 let mut mu_szs = Vec::with_capacity(c.mu_offsets.len());
                 for i in 0..c.mu_offsets.len() {
                     let start = c.mu_offsets[i];
-                    let end = if i + 1 < c.mu_offsets.len() { c.mu_offsets[i + 1] } else { c.mu.len() };
+                    let end = if i + 1 < c.mu_offsets.len() {
+                        c.mu_offsets[i + 1]
+                    } else {
+                        c.mu.len()
+                    };
                     mu_offs.push(start as i32);
                     mu_szs.push((end - start) as i32);
                 }
 
                 // Ensure non-empty
-                if mu_offs.is_empty() { mu_offs.push(0); mu_szs.push(0); }
+                if mu_offs.is_empty() {
+                    mu_offs.push(0);
+                    mu_szs.push(0);
+                }
 
-                println!("  GPU S(a,b): {} inc energies, {} E_out pts, {} mu pts",
-                         n_inc, c.e_out.len(), c.mu.len());
+                println!(
+                    "  GPU S(a,b): {} inc energies, {} E_out pts, {} mu pts",
+                    n_inc,
+                    c.e_out.len(),
+                    c.mu.len()
+                );
 
                 Ok(GpuSabData {
                     inc_energies: self.stream.clone_htod(&inc_e)?,
@@ -960,15 +1135,30 @@ impl GpuTransportContext {
         }
 
         // Keep all device buffers non-empty so device pointers are valid.
-        if poles_vec.is_empty() { poles_vec.extend_from_slice(&[0.0_f64, 0.0_f64]); }
-        if windows_vec.is_empty() { windows_vec.push(0); windows_vec.push(0); }
-        if broaden_vec.is_empty() { broaden_vec.push(0); }
-        if curvefit_vec.is_empty() { curvefit_vec.push(0.0); }
+        if poles_vec.is_empty() {
+            poles_vec.extend_from_slice(&[0.0_f64, 0.0_f64]);
+        }
+        if windows_vec.is_empty() {
+            windows_vec.push(0);
+            windows_vec.push(0);
+        }
+        if broaden_vec.is_empty() {
+            broaden_vec.push(0);
+        }
+        if curvefit_vec.is_empty() {
+            curvefit_vec.push(0.0);
+        }
 
-        println!("  GPU: WMP payload = {:.1} KB ({} / {} nuclides covered)",
-            (poles_vec.len() * 8 + windows_vec.len() * 4
-             + broaden_vec.len() + curvefit_vec.len() * 8) as f64 / 1024.0,
-            covered, wmps.len());
+        println!(
+            "  GPU: WMP payload = {:.1} KB ({} / {} nuclides covered)",
+            (poles_vec.len() * 8
+                + windows_vec.len() * 4
+                + broaden_vec.len()
+                + curvefit_vec.len() * 8) as f64
+                / 1024.0,
+            covered,
+            wmps.len()
+        );
 
         Ok(GpuWmpData {
             has: self.stream.clone_htod(&has_vec)?,
@@ -993,8 +1183,12 @@ impl GpuTransportContext {
 
     /// Create an empty WMP placeholder (no nuclide covered). Used by the
     /// SVD-only and pointwise paths to keep the kernel ABI uniform.
-    pub fn upload_wmp_data_empty(&self, n_nuc: usize) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
-        let wmps: Vec<Option<(Arc<crate::wmp::WindowedMultipole>, f64)>> = (0..n_nuc).map(|_| None).collect();
+    pub fn upload_wmp_data_empty(
+        &self,
+        n_nuc: usize,
+    ) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
+        let wmps: Vec<Option<(Arc<crate::wmp::WindowedMultipole>, f64)>> =
+            (0..n_nuc).map(|_| None).collect();
         self.upload_wmp_data(&wmps)
     }
 
@@ -1027,7 +1221,10 @@ impl GpuTransportContext {
         let mut sz = Vec::with_capacity(n);
         let mut se = Vec::with_capacity(n);
         for &(x, y, z, e) in source_bank {
-            sx.push(x); sy.push(y); sz.push(z); se.push(e);
+            sx.push(x);
+            sy.push(y);
+            sz.push(z);
+            se.push(e);
         }
 
         let d_src_x = self.stream.clone_htod(&sx)?;
@@ -1070,14 +1267,25 @@ impl GpuTransportContext {
         // Initialize source
         let batch_seed = batch as u64 * 1_000_000;
         unsafe {
-            self.stream.launch_builder(&self.k_init_source)
-                .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
-                .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
-                .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
-                .arg(&d_src_x).arg(&d_src_y).arg(&d_src_z).arg(&d_src_e)
+            self.stream
+                .launch_builder(&self.k_init_source)
+                .arg(&mut d_pos_x)
+                .arg(&mut d_pos_y)
+                .arg(&mut d_pos_z)
+                .arg(&mut d_dir_x)
+                .arg(&mut d_dir_y)
+                .arg(&mut d_dir_z)
+                .arg(&mut d_energy)
+                .arg(&mut d_cell)
+                .arg(&mut d_alive)
+                .arg(&d_src_x)
+                .arg(&d_src_y)
+                .arg(&d_src_z)
+                .arg(&d_src_e)
                 .arg(&n_i32)
                 .arg(&batch_seed)
-                .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+                .arg(&mut d_rng_state)
+                .arg(&mut d_rng_inc)
                 .arg(&geom_type)
                 .launch(cfg_full)?;
         }
@@ -1087,107 +1295,107 @@ impl GpuTransportContext {
         macro_rules! dptr {
             ($slice:expr) => {{
                 let (ptr, _guard) = $slice.device_ptr(&self.stream);
-                ptr  // CUdeviceptr = u64
+                ptr // CUdeviceptr = u64
             }};
         }
         let params_vec: Vec<u64> = vec![
             dptr!(&nuc_data.all_basis),            //  0 P_BASIS
             dptr!(&nuc_data.all_coeffs),           //  1 P_COEFFS
             dptr!(&nuc_data.all_energy_grids),     //  2 P_ENERGY_GRIDS
-            dptr!(&nuc_data.basis_offsets),         //  3 P_BASIS_OFFSETS
-            dptr!(&nuc_data.grid_offsets),          //  4 P_GRID_OFFSETS
-            dptr!(&nuc_data.n_energies),            //  5 P_N_ENERGIES
-            dptr!(&nuc_data.has_reaction),          //  6 P_HAS_REACTION
-            dptr!(&nuc_data.coeffs_offsets),        //  7 P_COEFFS_OFFSETS
-            nuc_data.rank as u64,                   //  8 P_RANK
-            dptr!(&mat_data.mat_n_nuclides),        //  9 P_MAT_N_NUC
-            dptr!(&mat_data.mat_nuclide_idx),       // 10 P_MAT_NUC_IDX
-            dptr!(&mat_data.mat_atom_density),      // 11 P_MAT_ATOM_DENS
-            dptr!(&mat_data.awr_table),             // 12 P_AWR_TABLE
-            dptr!(&mat_data.nu_bar_const),          // 13 P_NU_BAR_CONST
-            dptr!(&nuc_data.nu_bar_energies),       // 14 P_NB_ENERGIES
-            dptr!(&nuc_data.nu_bar_values),         // 15 P_NB_VALUES
-            dptr!(&nuc_data.nu_bar_offsets),         // 16 P_NB_OFFSETS
-            dptr!(&nuc_data.nu_bar_sizes),           // 17 P_NB_SIZES
-            dptr!(&nuc_data.fis_inc_energies),       // 18 P_FIS_INC_E
-            dptr!(&nuc_data.fis_dist_offsets),       // 19 P_FIS_DIST_OFF
-            dptr!(&nuc_data.fis_dist_sizes),         // 20 P_FIS_DIST_SZ
-            dptr!(&nuc_data.fis_e_out),              // 21 P_FIS_E_OUT
-            dptr!(&nuc_data.fis_cdf),                // 22 P_FIS_CDF
-            dptr!(&nuc_data.fis_nuc_offsets),        // 23 P_FIS_NUC_OFF
-            dptr!(&nuc_data.fis_nuc_n_inc),          // 24 P_FIS_NUC_NINC
-            dptr!(&nuc_data.level_q_values),         // 25 P_LEVEL_Q
-            dptr!(&nuc_data.level_thresholds),       // 26 P_LEVEL_THR
-            dptr!(&nuc_data.level_offsets),           // 27 P_LEVEL_OFFSETS
-            dptr!(&nuc_data.level_counts),            // 28 P_LEVEL_COUNTS
-            dptr!(&nuc_data.level_basis),             // 29 P_LEVEL_BASIS
-            dptr!(&nuc_data.level_coeffs),            // 30 P_LEVEL_COEFFS
-            dptr!(&nuc_data.level_basis_offsets),     // 31 P_LEVEL_BOFF
-            dptr!(&nuc_data.level_coeffs_offsets),    // 32 P_LEVEL_COFF
-            dptr!(&nuc_data.level_has_kernel),        // 33 P_LEVEL_HAS_K
-            dptr!(&nuc_data.level_mt),                // 34 P_LEVEL_MT
-            dptr!(&nuc_data.ang_energies),            // 35 P_ANG_ENERGIES
-            dptr!(&nuc_data.ang_mu),                  // 36 P_ANG_MU
-            dptr!(&nuc_data.ang_cdf),                 // 37 P_ANG_CDF
-            dptr!(&nuc_data.ang_dist_offsets),        // 38 P_ANG_DIST_OFF
-            dptr!(&nuc_data.ang_dist_sizes),          // 39 P_ANG_DIST_SZ
-            dptr!(&nuc_data.ang_nuc_offsets),         // 40 P_ANG_NUC_OFF
-            dptr!(&nuc_data.ang_nuc_n_energies),      // 41 P_ANG_NUC_NE
-            dptr!(&nuc_data.ang_is_cm),               // 42 P_ANG_IS_CM
-            dptr!(&sab_data.inc_energies),            // 43 P_SAB_INC_E
-            sab_data.n_inc as u64,                    // 44 P_SAB_N_INC
-            dptr!(&sab_data.eout_offsets),            // 45 P_SAB_EOUT_OFF
-            dptr!(&sab_data.eout_sizes),              // 46 P_SAB_EOUT_SZ
-            dptr!(&sab_data.e_out),                   // 47 P_SAB_E_OUT
-            dptr!(&sab_data.cdf_e),                   // 48 P_SAB_CDF_E
-            dptr!(&sab_data.mu_offsets),              // 49 P_SAB_MU_OFF
-            dptr!(&sab_data.mu_sizes),                // 50 P_SAB_MU_SZ
-            dptr!(&sab_data.mu),                      // 51 P_SAB_MU
-            dptr!(&sab_data.cdf_mu),                  // 52 P_SAB_CDF_MU
-            dptr!(&sab_data.xs),                      // 53 P_SAB_XS
-            sab_data.energy_max.to_bits(),            // 54 P_SAB_EMAX (f64 as bits)
-            dptr!(&sab_data.pdf_e),                   // 55 P_SAB_PDF_E
-            dptr!(&nuc_data.urr_energies),            // 56 P_URR_ENERGIES
-            dptr!(&nuc_data.urr_cum_prob),            // 57 P_URR_CUM_PROB
-            dptr!(&nuc_data.urr_total_f),             // 58 P_URR_TOTAL_F
-            dptr!(&nuc_data.urr_elastic_f),           // 59 P_URR_ELASTIC_F
-            dptr!(&nuc_data.urr_fission_f),           // 60 P_URR_FISSION_F
-            dptr!(&nuc_data.urr_capture_f),           // 61 P_URR_CAPTURE_F
-            dptr!(&nuc_data.urr_offsets),              // 62 P_URR_OFFSETS
-            dptr!(&nuc_data.urr_n_energies),           // 63 P_URR_N_ENERGIES
-            dptr!(&nuc_data.urr_n_bands),              // 64 P_URR_N_BANDS
-            dptr!(&nuc_data.urr_multiply_smooth),      // 65 P_URR_MULT_SM
-            geom_type as u64,                         // 66 P_GEOM_TYPE
-            dptr!(&nuc_data.total_xs),                // 67 P_TOTAL_XS
-            dptr!(&nuc_data.total_xs_offsets),         // 68 P_TOTAL_XS_OFF
-            dptr!(&nuc_data.has_total_xs),             // 69 P_HAS_TOTAL_XS
-            dptr!(&nuc_data.pointwise_xs),             // 70 P_PW_XS
-            dptr!(&nuc_data.pw_offsets),               // 71 P_PW_OFF
-            dptr!(&nuc_data.has_pw),                   // 72 P_HAS_PW
-            dptr!(&wmp_data.has),                      // 73 P_WMP_HAS
-            dptr!(&wmp_data.e_min),                    // 74 P_WMP_E_MIN
-            dptr!(&wmp_data.e_max),                    // 75 P_WMP_E_MAX
-            dptr!(&wmp_data.spacing),                  // 76 P_WMP_SPACING
-            dptr!(&wmp_data.sqrt_awr),                 // 77 P_WMP_SQRT_AWR
-            dptr!(&wmp_data.t_kelvin),                 // 78 P_WMP_T_KELVIN
-            dptr!(&wmp_data.fit_order),                // 79 P_WMP_FIT_ORDER
-            dptr!(&wmp_data.n_windows),                // 80 P_WMP_N_WINDOWS
-            dptr!(&wmp_data.fissionable),              // 81 P_WMP_FISSIONABLE
-            dptr!(&wmp_data.poles),                    // 82 P_WMP_POLES
-            dptr!(&wmp_data.pole_offsets),             // 83 P_WMP_POLE_OFF
-            dptr!(&wmp_data.windows),                  // 84 P_WMP_WINDOWS
-            dptr!(&wmp_data.window_offsets),           // 85 P_WMP_WIN_OFF
-            dptr!(&wmp_data.broaden),                  // 86 P_WMP_BROADEN
-            dptr!(&wmp_data.broaden_offsets),          // 87 P_WMP_BROADEN_OFF
-            dptr!(&wmp_data.curvefit),                 // 88 P_WMP_CURVEFIT
-            dptr!(&wmp_data.curvefit_offsets),         // 89 P_WMP_CF_OFF
-            dptr!(&nuc_data.lev_ang_energies),         // 90 P_LEV_ANG_ENERGIES
-            dptr!(&nuc_data.lev_ang_mu),               // 91 P_LEV_ANG_MU
-            dptr!(&nuc_data.lev_ang_cdf),              // 92 P_LEV_ANG_CDF
-            dptr!(&nuc_data.lev_ang_dist_off),         // 93 P_LEV_ANG_DIST_OFF
-            dptr!(&nuc_data.lev_ang_dist_sz),          // 94 P_LEV_ANG_DIST_SZ
-            dptr!(&nuc_data.lev_ang_lev_off),          // 95 P_LEV_ANG_LEV_OFF
-            dptr!(&nuc_data.lev_ang_lev_ne),           // 96 P_LEV_ANG_LEV_NE
+            dptr!(&nuc_data.basis_offsets),        //  3 P_BASIS_OFFSETS
+            dptr!(&nuc_data.grid_offsets),         //  4 P_GRID_OFFSETS
+            dptr!(&nuc_data.n_energies),           //  5 P_N_ENERGIES
+            dptr!(&nuc_data.has_reaction),         //  6 P_HAS_REACTION
+            dptr!(&nuc_data.coeffs_offsets),       //  7 P_COEFFS_OFFSETS
+            nuc_data.rank as u64,                  //  8 P_RANK
+            dptr!(&mat_data.mat_n_nuclides),       //  9 P_MAT_N_NUC
+            dptr!(&mat_data.mat_nuclide_idx),      // 10 P_MAT_NUC_IDX
+            dptr!(&mat_data.mat_atom_density),     // 11 P_MAT_ATOM_DENS
+            dptr!(&mat_data.awr_table),            // 12 P_AWR_TABLE
+            dptr!(&mat_data.nu_bar_const),         // 13 P_NU_BAR_CONST
+            dptr!(&nuc_data.nu_bar_energies),      // 14 P_NB_ENERGIES
+            dptr!(&nuc_data.nu_bar_values),        // 15 P_NB_VALUES
+            dptr!(&nuc_data.nu_bar_offsets),       // 16 P_NB_OFFSETS
+            dptr!(&nuc_data.nu_bar_sizes),         // 17 P_NB_SIZES
+            dptr!(&nuc_data.fis_inc_energies),     // 18 P_FIS_INC_E
+            dptr!(&nuc_data.fis_dist_offsets),     // 19 P_FIS_DIST_OFF
+            dptr!(&nuc_data.fis_dist_sizes),       // 20 P_FIS_DIST_SZ
+            dptr!(&nuc_data.fis_e_out),            // 21 P_FIS_E_OUT
+            dptr!(&nuc_data.fis_cdf),              // 22 P_FIS_CDF
+            dptr!(&nuc_data.fis_nuc_offsets),      // 23 P_FIS_NUC_OFF
+            dptr!(&nuc_data.fis_nuc_n_inc),        // 24 P_FIS_NUC_NINC
+            dptr!(&nuc_data.level_q_values),       // 25 P_LEVEL_Q
+            dptr!(&nuc_data.level_thresholds),     // 26 P_LEVEL_THR
+            dptr!(&nuc_data.level_offsets),        // 27 P_LEVEL_OFFSETS
+            dptr!(&nuc_data.level_counts),         // 28 P_LEVEL_COUNTS
+            dptr!(&nuc_data.level_basis),          // 29 P_LEVEL_BASIS
+            dptr!(&nuc_data.level_coeffs),         // 30 P_LEVEL_COEFFS
+            dptr!(&nuc_data.level_basis_offsets),  // 31 P_LEVEL_BOFF
+            dptr!(&nuc_data.level_coeffs_offsets), // 32 P_LEVEL_COFF
+            dptr!(&nuc_data.level_has_kernel),     // 33 P_LEVEL_HAS_K
+            dptr!(&nuc_data.level_mt),             // 34 P_LEVEL_MT
+            dptr!(&nuc_data.ang_energies),         // 35 P_ANG_ENERGIES
+            dptr!(&nuc_data.ang_mu),               // 36 P_ANG_MU
+            dptr!(&nuc_data.ang_cdf),              // 37 P_ANG_CDF
+            dptr!(&nuc_data.ang_dist_offsets),     // 38 P_ANG_DIST_OFF
+            dptr!(&nuc_data.ang_dist_sizes),       // 39 P_ANG_DIST_SZ
+            dptr!(&nuc_data.ang_nuc_offsets),      // 40 P_ANG_NUC_OFF
+            dptr!(&nuc_data.ang_nuc_n_energies),   // 41 P_ANG_NUC_NE
+            dptr!(&nuc_data.ang_is_cm),            // 42 P_ANG_IS_CM
+            dptr!(&sab_data.inc_energies),         // 43 P_SAB_INC_E
+            sab_data.n_inc as u64,                 // 44 P_SAB_N_INC
+            dptr!(&sab_data.eout_offsets),         // 45 P_SAB_EOUT_OFF
+            dptr!(&sab_data.eout_sizes),           // 46 P_SAB_EOUT_SZ
+            dptr!(&sab_data.e_out),                // 47 P_SAB_E_OUT
+            dptr!(&sab_data.cdf_e),                // 48 P_SAB_CDF_E
+            dptr!(&sab_data.mu_offsets),           // 49 P_SAB_MU_OFF
+            dptr!(&sab_data.mu_sizes),             // 50 P_SAB_MU_SZ
+            dptr!(&sab_data.mu),                   // 51 P_SAB_MU
+            dptr!(&sab_data.cdf_mu),               // 52 P_SAB_CDF_MU
+            dptr!(&sab_data.xs),                   // 53 P_SAB_XS
+            sab_data.energy_max.to_bits(),         // 54 P_SAB_EMAX (f64 as bits)
+            dptr!(&sab_data.pdf_e),                // 55 P_SAB_PDF_E
+            dptr!(&nuc_data.urr_energies),         // 56 P_URR_ENERGIES
+            dptr!(&nuc_data.urr_cum_prob),         // 57 P_URR_CUM_PROB
+            dptr!(&nuc_data.urr_total_f),          // 58 P_URR_TOTAL_F
+            dptr!(&nuc_data.urr_elastic_f),        // 59 P_URR_ELASTIC_F
+            dptr!(&nuc_data.urr_fission_f),        // 60 P_URR_FISSION_F
+            dptr!(&nuc_data.urr_capture_f),        // 61 P_URR_CAPTURE_F
+            dptr!(&nuc_data.urr_offsets),          // 62 P_URR_OFFSETS
+            dptr!(&nuc_data.urr_n_energies),       // 63 P_URR_N_ENERGIES
+            dptr!(&nuc_data.urr_n_bands),          // 64 P_URR_N_BANDS
+            dptr!(&nuc_data.urr_multiply_smooth),  // 65 P_URR_MULT_SM
+            geom_type as u64,                      // 66 P_GEOM_TYPE
+            dptr!(&nuc_data.total_xs),             // 67 P_TOTAL_XS
+            dptr!(&nuc_data.total_xs_offsets),     // 68 P_TOTAL_XS_OFF
+            dptr!(&nuc_data.has_total_xs),         // 69 P_HAS_TOTAL_XS
+            dptr!(&nuc_data.pointwise_xs),         // 70 P_PW_XS
+            dptr!(&nuc_data.pw_offsets),           // 71 P_PW_OFF
+            dptr!(&nuc_data.has_pw),               // 72 P_HAS_PW
+            dptr!(&wmp_data.has),                  // 73 P_WMP_HAS
+            dptr!(&wmp_data.e_min),                // 74 P_WMP_E_MIN
+            dptr!(&wmp_data.e_max),                // 75 P_WMP_E_MAX
+            dptr!(&wmp_data.spacing),              // 76 P_WMP_SPACING
+            dptr!(&wmp_data.sqrt_awr),             // 77 P_WMP_SQRT_AWR
+            dptr!(&wmp_data.t_kelvin),             // 78 P_WMP_T_KELVIN
+            dptr!(&wmp_data.fit_order),            // 79 P_WMP_FIT_ORDER
+            dptr!(&wmp_data.n_windows),            // 80 P_WMP_N_WINDOWS
+            dptr!(&wmp_data.fissionable),          // 81 P_WMP_FISSIONABLE
+            dptr!(&wmp_data.poles),                // 82 P_WMP_POLES
+            dptr!(&wmp_data.pole_offsets),         // 83 P_WMP_POLE_OFF
+            dptr!(&wmp_data.windows),              // 84 P_WMP_WINDOWS
+            dptr!(&wmp_data.window_offsets),       // 85 P_WMP_WIN_OFF
+            dptr!(&wmp_data.broaden),              // 86 P_WMP_BROADEN
+            dptr!(&wmp_data.broaden_offsets),      // 87 P_WMP_BROADEN_OFF
+            dptr!(&wmp_data.curvefit),             // 88 P_WMP_CURVEFIT
+            dptr!(&wmp_data.curvefit_offsets),     // 89 P_WMP_CF_OFF
+            dptr!(&nuc_data.lev_ang_energies),     // 90 P_LEV_ANG_ENERGIES
+            dptr!(&nuc_data.lev_ang_mu),           // 91 P_LEV_ANG_MU
+            dptr!(&nuc_data.lev_ang_cdf),          // 92 P_LEV_ANG_CDF
+            dptr!(&nuc_data.lev_ang_dist_off),     // 93 P_LEV_ANG_DIST_OFF
+            dptr!(&nuc_data.lev_ang_dist_sz),      // 94 P_LEV_ANG_DIST_SZ
+            dptr!(&nuc_data.lev_ang_lev_off),      // 95 P_LEV_ANG_LEV_OFF
+            dptr!(&nuc_data.lev_ang_lev_ne),       // 96 P_LEV_ANG_LEV_NE
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -1197,61 +1405,73 @@ impl GpuTransportContext {
 
         let mut step = 0_u32;
         while step < max_steps && n_alive > 0 {
-                // 1. Compact: build dense list of alive particle indices
-                let mut d_compact_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
-                let compact_grid = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                let compact_cfg = LaunchConfig {
-                    grid_dim: (compact_grid, 1, 1),
-                    block_dim: (BLOCK_SIZE, 1, 1),
-                    shared_mem_bytes: 0,
-                };
-                unsafe {
-                    self.stream.launch_builder(&self.k_compact_alive)
-                        .arg(&d_alive).arg(&n_i32)
-                        .arg(&mut d_compact_idx).arg(&mut d_compact_count)
-                        .launch(compact_cfg)?;
-                }
-                let count = self.stream.clone_dtoh(&d_compact_count)?;
-                n_alive = count[0];
-                if n_alive <= 0 { break; }
+            // 1. Compact: build dense list of alive particle indices
+            let mut d_compact_count: CudaSlice<i32> = self.stream.alloc_zeros(1)?;
+            let compact_grid = (n as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let compact_cfg = LaunchConfig {
+                grid_dim: (compact_grid, 1, 1),
+                block_dim: (BLOCK_SIZE, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            unsafe {
+                self.stream
+                    .launch_builder(&self.k_compact_alive)
+                    .arg(&d_alive)
+                    .arg(&n_i32)
+                    .arg(&mut d_compact_idx)
+                    .arg(&mut d_compact_count)
+                    .launch(compact_cfg)?;
+            }
+            let count = self.stream.clone_dtoh(&d_compact_count)?;
+            n_alive = count[0];
+            if n_alive <= 0 {
+                break;
+            }
 
-                // 2. Energy sort: bin count → prefix sum → scatter
-                let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
-                let alive_cfg = LaunchConfig {
-                    grid_dim: (alive_grid, 1, 1),
-                    block_dim: (BLOCK_SIZE, 1, 1),
-                    shared_mem_bytes: 0,
-                };
+            // 2. Energy sort: bin count → prefix sum → scatter
+            let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            let alive_cfg = LaunchConfig {
+                grid_dim: (alive_grid, 1, 1),
+                block_dim: (BLOCK_SIZE, 1, 1),
+                shared_mem_bytes: 0,
+            };
 
-                // 2a. Count particles per energy bin
-                let mut d_bin_counts: CudaSlice<i32> = self.stream.alloc_zeros(n_bins)?;
-                unsafe {
-                    self.stream.launch_builder(&self.k_energy_bin_count)
-                        .arg(&d_energy).arg(&d_compact_idx).arg(&n_alive)
-                        .arg(&mut d_bin_counts)
-                        .launch(alive_cfg)?;
-                }
+            // 2a. Count particles per energy bin
+            let mut d_bin_counts: CudaSlice<i32> = self.stream.alloc_zeros(n_bins)?;
+            unsafe {
+                self.stream
+                    .launch_builder(&self.k_energy_bin_count)
+                    .arg(&d_energy)
+                    .arg(&d_compact_idx)
+                    .arg(&n_alive)
+                    .arg(&mut d_bin_counts)
+                    .launch(alive_cfg)?;
+            }
 
-                // 2b. Prefix sum on CPU (256 ints — trivial)
-                let counts = self.stream.clone_dtoh(&d_bin_counts)?;
-                let mut offsets = vec![0_i32; n_bins];
-                let mut running = 0_i32;
-                for i in 0..n_bins {
-                    offsets[i] = running;
-                    running += counts[i];
-                }
-                let d_bin_offsets = self.stream.clone_htod(&offsets)?;
+            // 2b. Prefix sum on CPU (256 ints — trivial)
+            let counts = self.stream.clone_dtoh(&d_bin_counts)?;
+            let mut offsets = vec![0_i32; n_bins];
+            let mut running = 0_i32;
+            for i in 0..n_bins {
+                offsets[i] = running;
+                running += counts[i];
+            }
+            let d_bin_offsets = self.stream.clone_htod(&offsets)?;
 
-                // 2c. Scatter compact indices into energy-sorted order
-                unsafe {
-                    self.stream.launch_builder(&self.k_energy_bin_scatter)
-                        .arg(&d_energy).arg(&d_compact_idx).arg(&n_alive)
-                        .arg(&mut d_compact_idx_sorted).arg(&d_bin_offsets)
-                        .launch(alive_cfg)?;
-                }
+            // 2c. Scatter compact indices into energy-sorted order
+            unsafe {
+                self.stream
+                    .launch_builder(&self.k_energy_bin_scatter)
+                    .arg(&d_energy)
+                    .arg(&d_compact_idx)
+                    .arg(&n_alive)
+                    .arg(&mut d_compact_idx_sorted)
+                    .arg(&d_bin_offsets)
+                    .launch(alive_cfg)?;
+            }
 
-                // Swap: sorted becomes the active compact index
-                std::mem::swap(&mut d_compact_idx, &mut d_compact_idx_sorted);
+            // Swap: sorted becomes the active compact index
+            std::mem::swap(&mut d_compact_idx, &mut d_compact_idx_sorted);
 
             // Launch persistent kernel: N steps in one kernel call
             let alive_grid = (n_alive as u32 + BLOCK_SIZE - 1) / BLOCK_SIZE;
@@ -1262,19 +1482,33 @@ impl GpuTransportContext {
             };
             let steps_this_launch = compact_interval as i32;
             unsafe {
-                self.stream.launch_builder(&self.k_transport_persistent)
+                self.stream
+                    .launch_builder(&self.k_transport_persistent)
                     .arg(&d_params)
                     .arg(&d_compact_idx)
                     .arg(&n_alive)
-                    .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
-                    .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
-                    .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
-                    .arg(&mut d_rng_state).arg(&mut d_rng_inc)
-                    .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
-                    .arg(&mut d_fis_e).arg(&mut d_fis_w)
-                    .arg(&mut d_fis_count).arg(&max_fission)
-                    .arg(&mut d_cnt_coll).arg(&mut d_cnt_fis)
-                    .arg(&mut d_cnt_leak).arg(&mut d_cnt_surf)
+                    .arg(&mut d_pos_x)
+                    .arg(&mut d_pos_y)
+                    .arg(&mut d_pos_z)
+                    .arg(&mut d_dir_x)
+                    .arg(&mut d_dir_y)
+                    .arg(&mut d_dir_z)
+                    .arg(&mut d_energy)
+                    .arg(&mut d_cell)
+                    .arg(&mut d_alive)
+                    .arg(&mut d_rng_state)
+                    .arg(&mut d_rng_inc)
+                    .arg(&mut d_fis_x)
+                    .arg(&mut d_fis_y)
+                    .arg(&mut d_fis_z)
+                    .arg(&mut d_fis_e)
+                    .arg(&mut d_fis_w)
+                    .arg(&mut d_fis_count)
+                    .arg(&max_fission)
+                    .arg(&mut d_cnt_coll)
+                    .arg(&mut d_cnt_fis)
+                    .arg(&mut d_cnt_leak)
+                    .arg(&mut d_cnt_surf)
                     .arg(&steps_this_launch)
                     .launch(alive_cfg)?;
             }
@@ -1370,61 +1604,111 @@ impl GpuTransportContext {
 
         let block = 256_u32;
         let grid = ((n as u32 + block - 1) / block, 1, 1);
-        let cfg = LaunchConfig { grid_dim: grid, block_dim: (block, 1, 1), shared_mem_bytes: 0 };
+        let cfg = LaunchConfig {
+            grid_dim: grid,
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
 
         let batch_seed = 42_u64;
         let n_i32 = n as i32;
         unsafe {
-            self.stream.launch_builder(&k_init)
-                .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
-                .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
-                .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
-                .arg(&d_sx).arg(&d_sy).arg(&d_sz).arg(&d_se)
-                .arg(&n_i32).arg(&batch_seed)
-                .arg(&mut d_rng_state).arg(&mut d_rng_inc)
+            self.stream
+                .launch_builder(&k_init)
+                .arg(&mut d_pos_x)
+                .arg(&mut d_pos_y)
+                .arg(&mut d_pos_z)
+                .arg(&mut d_dir_x)
+                .arg(&mut d_dir_y)
+                .arg(&mut d_dir_z)
+                .arg(&mut d_energy)
+                .arg(&mut d_cell)
+                .arg(&mut d_alive)
+                .arg(&d_sx)
+                .arg(&d_sy)
+                .arg(&d_sz)
+                .arg(&d_se)
+                .arg(&n_i32)
+                .arg(&batch_seed)
+                .arg(&mut d_rng_state)
+                .arg(&mut d_rng_inc)
                 .arg(&geom_type)
                 .launch(cfg)?;
         }
 
         macro_rules! dptr {
-            ($slice:expr) => {{ let (ptr, _guard) = $slice.device_ptr(&self.stream); ptr }};
+            ($slice:expr) => {{
+                let (ptr, _guard) = $slice.device_ptr(&self.stream);
+                ptr
+            }};
         }
         let params_vec: Vec<u64> = vec![
-            dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
-            dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
-            dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
-            dptr!(&nuc_data.has_reaction), dptr!(&nuc_data.coeffs_offsets),
+            dptr!(&nuc_data.all_basis),
+            dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids),
+            dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets),
+            dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction),
+            dptr!(&nuc_data.coeffs_offsets),
             nuc_data.rank as u64,
-            dptr!(&mat_data.mat_n_nuclides), dptr!(&mat_data.mat_nuclide_idx),
-            dptr!(&mat_data.mat_atom_density), dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.mat_n_nuclides),
+            dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density),
+            dptr!(&mat_data.awr_table),
             dptr!(&mat_data.nu_bar_const),
-            dptr!(&nuc_data.nu_bar_energies), dptr!(&nuc_data.nu_bar_values),
-            dptr!(&nuc_data.nu_bar_offsets), dptr!(&nuc_data.nu_bar_sizes),
-            dptr!(&nuc_data.fis_inc_energies), dptr!(&nuc_data.fis_dist_offsets),
-            dptr!(&nuc_data.fis_dist_sizes), dptr!(&nuc_data.fis_e_out),
-            dptr!(&nuc_data.fis_cdf), dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.nu_bar_energies),
+            dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets),
+            dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies),
+            dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes),
+            dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf),
+            dptr!(&nuc_data.fis_nuc_offsets),
             dptr!(&nuc_data.fis_nuc_n_inc),
-            dptr!(&nuc_data.level_q_values), dptr!(&nuc_data.level_thresholds),
-            dptr!(&nuc_data.level_offsets), dptr!(&nuc_data.level_counts),
-            dptr!(&nuc_data.level_basis), dptr!(&nuc_data.level_coeffs),
-            dptr!(&nuc_data.level_basis_offsets), dptr!(&nuc_data.level_coeffs_offsets),
-            dptr!(&nuc_data.level_has_kernel), dptr!(&nuc_data.level_mt),
-            dptr!(&nuc_data.ang_energies), dptr!(&nuc_data.ang_mu),
-            dptr!(&nuc_data.ang_cdf), dptr!(&nuc_data.ang_dist_offsets),
-            dptr!(&nuc_data.ang_dist_sizes), dptr!(&nuc_data.ang_nuc_offsets),
-            dptr!(&nuc_data.ang_nuc_n_energies), dptr!(&nuc_data.ang_is_cm),
-            dptr!(&sab_data.inc_energies), sab_data.n_inc as u64,
-            dptr!(&sab_data.eout_offsets), dptr!(&sab_data.eout_sizes),
-            dptr!(&sab_data.e_out), dptr!(&sab_data.cdf_e),
-            dptr!(&sab_data.mu_offsets), dptr!(&sab_data.mu_sizes),
-            dptr!(&sab_data.mu), dptr!(&sab_data.cdf_mu),
-            dptr!(&sab_data.xs), sab_data.energy_max.to_bits(),
+            dptr!(&nuc_data.level_q_values),
+            dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets),
+            dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis),
+            dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets),
+            dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel),
+            dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies),
+            dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf),
+            dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes),
+            dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies),
+            dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies),
+            sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets),
+            dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out),
+            dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets),
+            dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu),
+            dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs),
+            sab_data.energy_max.to_bits(),
             dptr!(&sab_data.pdf_e),
-            dptr!(&nuc_data.urr_energies), dptr!(&nuc_data.urr_cum_prob),
-            dptr!(&nuc_data.urr_total_f), dptr!(&nuc_data.urr_elastic_f),
-            dptr!(&nuc_data.urr_fission_f), dptr!(&nuc_data.urr_capture_f),
-            dptr!(&nuc_data.urr_offsets), dptr!(&nuc_data.urr_n_energies),
-            dptr!(&nuc_data.urr_n_bands), dptr!(&nuc_data.urr_multiply_smooth),
+            dptr!(&nuc_data.urr_energies),
+            dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f),
+            dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f),
+            dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets),
+            dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands),
+            dptr!(&nuc_data.urr_multiply_smooth),
             geom_type as u64,
             dptr!(&nuc_data.total_xs),
             dptr!(&nuc_data.total_xs_offsets),
@@ -1464,17 +1748,31 @@ impl GpuTransportContext {
         let max_steps_i32 = max_steps as i32;
 
         unsafe {
-            self.stream.launch_builder(&k_trace)
+            self.stream
+                .launch_builder(&k_trace)
                 .arg(&d_params)
-                .arg(&mut d_pos_x).arg(&mut d_pos_y).arg(&mut d_pos_z)
-                .arg(&mut d_dir_x).arg(&mut d_dir_y).arg(&mut d_dir_z)
-                .arg(&mut d_energy).arg(&mut d_cell).arg(&mut d_alive)
-                .arg(&mut d_rng_state).arg(&mut d_rng_inc)
-                .arg(&mut d_fis_x).arg(&mut d_fis_y).arg(&mut d_fis_z)
-                .arg(&mut d_fis_e).arg(&mut d_fis_w)
-                .arg(&mut d_fis_count).arg(&max_fis_i32)
-                .arg(&mut d_trace).arg(&mut d_step_counts)
-                .arg(&n_i32).arg(&max_steps_i32)
+                .arg(&mut d_pos_x)
+                .arg(&mut d_pos_y)
+                .arg(&mut d_pos_z)
+                .arg(&mut d_dir_x)
+                .arg(&mut d_dir_y)
+                .arg(&mut d_dir_z)
+                .arg(&mut d_energy)
+                .arg(&mut d_cell)
+                .arg(&mut d_alive)
+                .arg(&mut d_rng_state)
+                .arg(&mut d_rng_inc)
+                .arg(&mut d_fis_x)
+                .arg(&mut d_fis_y)
+                .arg(&mut d_fis_z)
+                .arg(&mut d_fis_e)
+                .arg(&mut d_fis_w)
+                .arg(&mut d_fis_count)
+                .arg(&max_fis_i32)
+                .arg(&mut d_trace)
+                .arg(&mut d_step_counts)
+                .arg(&n_i32)
+                .arg(&max_steps_i32)
                 .launch(cfg)?;
         }
 

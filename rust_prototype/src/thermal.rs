@@ -147,14 +147,18 @@ impl ThermalScatteringData {
         let k_boltzmann = 8.617_333_262e-5; // eV/K
         let kt = temperature_k * k_boltzmann;
 
-        if self.kts.len() == 1 { return 0; }
+        if self.kts.len() == 1 {
+            return 0;
+        }
 
         // Find bounding temperatures
         let mut i = 0;
         while i + 1 < self.kts.len() && self.kts[i + 1] < kt {
             i += 1;
         }
-        if i + 1 >= self.kts.len() { return self.kts.len() - 1; }
+        if i + 1 >= self.kts.len() {
+            return self.kts.len() - 1;
+        }
 
         let f = (kt - self.kts[i]) / (self.kts[i + 1] - self.kts[i]);
         if xi < f { i + 1 } else { i }
@@ -162,7 +166,9 @@ impl ThermalScatteringData {
 
     /// Get total thermal scattering cross section at given energy and temperature index.
     pub fn total_xs(&self, energy: f64, temp_idx: usize) -> f64 {
-        if energy > self.energy_max { return 0.0; }
+        if energy > self.energy_max {
+            return 0.0;
+        }
         let mut sigma = self.inelastic_xs(energy, temp_idx);
         if let Some(ref elastic) = self.elastic {
             sigma += elastic[temp_idx].xs(energy);
@@ -181,17 +187,35 @@ impl ElasticThermal {
     /// Evaluate elastic thermal scattering cross section.
     pub fn xs(&self, energy: f64) -> f64 {
         match self {
-            Self::Coherent { bragg_edges, factors } => {
+            Self::Coherent {
+                bragg_edges,
+                factors,
+            } => {
                 // σ(E) = (1/E) Σ_{E_i < E} s_i  (Eq. 79 in OpenMC docs)
                 let idx = bragg_edges.partition_point(|&e| e < energy);
-                if idx == 0 { 0.0 } else { factors[idx - 1] / energy }
+                if idx == 0 {
+                    0.0
+                } else {
+                    factors[idx - 1] / energy
+                }
             }
-            Self::Incoherent { bound_xs, debye_waller } |
-            Self::IncoherentDiscrete { bound_xs, debye_waller, .. } => {
+            Self::Incoherent {
+                bound_xs,
+                debye_waller,
+            }
+            | Self::IncoherentDiscrete {
+                bound_xs,
+                debye_waller,
+                ..
+            } => {
                 // σ(E) = (σ_b/2) · (1 - e^{-4EW'}) / (2EW')  (Eq. 80)
                 let w = *debye_waller;
                 let x = 4.0 * energy * w;
-                if x < 1e-10 { *bound_xs } else { bound_xs / 2.0 * (1.0 - (-x).exp()) / (2.0 * energy * w) }
+                if x < 1e-10 {
+                    *bound_xs
+                } else {
+                    bound_xs / 2.0 * (1.0 - (-x).exp()) / (2.0 * energy * w)
+                }
             }
         }
     }
@@ -208,7 +232,9 @@ impl ThermalScatteringData {
     /// The energy does NOT change for elastic scattering — only the angle changes.
     pub fn sample(&self, energy: f64, temp_idx: usize, rng: &mut Rng) -> (f64, f64) {
         let sigma_inel = self.inelastic_xs(energy, temp_idx);
-        let sigma_el = self.elastic.as_ref()
+        let sigma_el = self
+            .elastic
+            .as_ref()
             .map(|el| el[temp_idx].xs(energy))
             .unwrap_or(0.0);
         let sigma_total = sigma_inel + sigma_el;
@@ -233,10 +259,15 @@ impl ThermalScatteringData {
     fn sample_elastic_angle(&self, energy: f64, temp_idx: usize, rng: &mut Rng) -> f64 {
         let elastic = self.elastic.as_ref().expect("elastic data required");
         match &elastic[temp_idx] {
-            ElasticThermal::Coherent { bragg_edges, factors } => {
+            ElasticThermal::Coherent {
+                bragg_edges,
+                factors,
+            } => {
                 // Sample Bragg edge with probability s_i / Σs_j (Eq. 81)
                 let n = bragg_edges.partition_point(|&e| e < energy);
-                if n == 0 { return 2.0 * rng.uniform() - 1.0; }
+                if n == 0 {
+                    return 2.0 * rng.uniform() - 1.0;
+                }
                 let total_s = factors[n - 1];
                 let xi = rng.uniform() * total_s;
                 let edge_idx = factors[..n].partition_point(|&f| f < xi);
@@ -248,12 +279,20 @@ impl ThermalScatteringData {
             ElasticThermal::Incoherent { debye_waller, .. } => {
                 // μ = (1/c) · ln(1 + ξ·(e^{2c} - 1)) - 1 (Eq. 83)
                 let c = 2.0 * energy * debye_waller;
-                if c < 1e-10 { return 2.0 * rng.uniform() - 1.0; }
+                if c < 1e-10 {
+                    return 2.0 * rng.uniform() - 1.0;
+                }
                 let xi = rng.uniform();
                 let mu = (1.0 / c) * (1.0 + xi * ((2.0 * c).exp() - 1.0)).ln() - 1.0;
                 mu.clamp(-1.0, 1.0)
             }
-            ElasticThermal::IncoherentDiscrete { energy: e_grid, mu_out, n_mu, debye_waller, .. } => {
+            ElasticThermal::IncoherentDiscrete {
+                energy: e_grid,
+                mu_out,
+                n_mu,
+                debye_waller,
+                ..
+            } => {
                 // Discrete equiprobable cosines with interpolation + smearing (Eq. 84-87)
                 sample_discrete_elastic_angle(energy, e_grid, mu_out, *n_mu, *debye_waller, rng)
             }
@@ -264,7 +303,9 @@ impl ThermalScatteringData {
     fn sample_inelastic(&self, energy: f64, temp_idx: usize, rng: &mut Rng) -> (f64, f64) {
         let inel = &self.inelastic[temp_idx];
         match &inel.dist {
-            InelasticDist::Continuous(c) => sample_continuous_inelastic(energy, &inel.energy, c, rng),
+            InelasticDist::Continuous(c) => {
+                sample_continuous_inelastic(energy, &inel.energy, c, rng)
+            }
             InelasticDist::Discrete(d) => sample_discrete_inelastic(energy, &inel.energy, d, rng),
         }
     }
@@ -288,12 +329,18 @@ fn sample_continuous_inelastic(
     rng: &mut Rng,
 ) -> (f64, f64) {
     let n_inc = inc_energy.len();
-    if n_inc == 0 { return (energy, 2.0 * rng.uniform() - 1.0); }
+    if n_inc == 0 {
+        return (energy, 2.0 * rng.uniform() - 1.0);
+    }
 
     // Step 1: Find bounding incoming energies
     let mut i = inc_energy.partition_point(|&e| e < energy);
-    if i == 0 { i = 1; }
-    if i >= n_inc { i = n_inc - 1; }
+    if i == 0 {
+        i = 1;
+    }
+    if i >= n_inc {
+        i = n_inc - 1;
+    }
     let i_lo = i - 1;
     let i_hi = i;
 
@@ -309,9 +356,15 @@ fn sample_continuous_inelastic(
 
     // Get the energy_out distribution for table ℓ
     let start = c.offsets[ell];
-    let end = if ell + 1 < c.offsets.len() { c.offsets[ell + 1] } else { c.e_out.len() };
+    let end = if ell + 1 < c.offsets.len() {
+        c.offsets[ell + 1]
+    } else {
+        c.e_out.len()
+    };
     let n_out = end - start;
-    if n_out < 2 { return (energy, 2.0 * rng.uniform() - 1.0); }
+    if n_out < 2 {
+        return (energy, 2.0 * rng.uniform() - 1.0);
+    }
 
     let e_out = &c.e_out[start..end];
     let pdf = &c.pdf_e[start..end];
@@ -320,8 +373,12 @@ fn sample_continuous_inelastic(
     // Step 3: Sample outgoing energy bin from CDF
     let xi2 = rng.uniform();
     let mut j = cdf.partition_point(|&c| c < xi2);
-    if j == 0 { j = 1; }
-    if j >= n_out { j = n_out - 1; }
+    if j == 0 {
+        j = 1;
+    }
+    if j >= n_out {
+        j = n_out - 1;
+    }
     let j = j - 1; // cdf[j] < xi2 <= cdf[j+1]
 
     // Step 4: Linear-linear interpolation for outgoing energy (Eq. 34)
@@ -387,8 +444,16 @@ fn sample_continuous_inelastic(
             let mu_k = mu_vals[k];
 
             // Smear: μ = μ_k + min(μ_k - μ_{k-1}, μ_{k+1} - μ_k) · (ξ - 0.5)
-            let left = if k > 0 { mu_k - mu_vals[k - 1] } else { mu_k + 1.0 };
-            let right = if k + 1 < n_mu { mu_vals[k + 1] - mu_k } else { 1.0 - mu_k };
+            let left = if k > 0 {
+                mu_k - mu_vals[k - 1]
+            } else {
+                mu_k + 1.0
+            };
+            let right = if k + 1 < n_mu {
+                mu_vals[k + 1] - mu_k
+            } else {
+                1.0 - mu_k
+            };
             let half_width = left.min(right);
             mu_k + half_width * (rng.uniform() - 0.5)
         } else {
@@ -417,12 +482,18 @@ fn sample_discrete_inelastic(
     rng: &mut Rng,
 ) -> (f64, f64) {
     let n_inc = inc_energy.len();
-    if n_inc == 0 { return (energy, 2.0 * rng.uniform() - 1.0); }
+    if n_inc == 0 {
+        return (energy, 2.0 * rng.uniform() - 1.0);
+    }
 
     // Find bounding incoming energies
     let mut i = inc_energy.partition_point(|&e| e < energy);
-    if i == 0 { i = 1; }
-    if i >= n_inc { i = n_inc - 1; }
+    if i == 0 {
+        i = 1;
+    }
+    if i >= n_inc {
+        i = n_inc - 1;
+    }
     let i_lo = i - 1;
 
     let f = if (inc_energy[i] - inc_energy[i_lo]).abs() < 1e-30 {
@@ -491,12 +562,18 @@ fn sample_discrete_elastic_angle(
     rng: &mut Rng,
 ) -> f64 {
     let n_e = e_grid.len();
-    if n_e == 0 || n_mu == 0 { return 2.0 * rng.uniform() - 1.0; }
+    if n_e == 0 || n_mu == 0 {
+        return 2.0 * rng.uniform() - 1.0;
+    }
 
     // Find bounding energies
     let mut i = e_grid.partition_point(|&e| e < energy);
-    if i == 0 { i = 1; }
-    if i >= n_e { i = n_e - 1; }
+    if i == 0 {
+        i = 1;
+    }
+    if i >= n_e {
+        i = n_e - 1;
+    }
     let i_lo = i - 1;
 
     let f = if (e_grid[i] - e_grid[i_lo]).abs() < 1e-30 {
@@ -540,7 +617,9 @@ fn sample_discrete_elastic_angle(
 /// First/last bins have weight 1, second/second-to-last have weight 4,
 /// all others have weight 10.
 fn sample_skewed_bin(n: usize, rng: &mut Rng) -> usize {
-    if n <= 2 { return (rng.uniform() * n as f64) as usize; }
+    if n <= 2 {
+        return (rng.uniform() * n as f64) as usize;
+    }
 
     let total: f64 = if n <= 4 {
         // All have explicit weights
@@ -553,26 +632,42 @@ fn sample_skewed_bin(n: usize, rng: &mut Rng) -> usize {
     let mut cum = 0.0;
     for i in 0..n {
         cum += skewed_weight(i, n);
-        if xi < cum { return i; }
+        if xi < cum {
+            return i;
+        }
     }
     n - 1
 }
 
 fn skewed_weight(i: usize, n: usize) -> f64 {
-    if i == 0 || i == n - 1 { 1.0 }
-    else if i == 1 || i == n - 2 { 4.0 }
-    else { 10.0 }
+    if i == 0 || i == n - 1 {
+        1.0
+    } else if i == 1 || i == n - 2 {
+        4.0
+    } else {
+        10.0
+    }
 }
 
 /// Linear interpolation on a sorted grid.
 fn interp_lin(x: &[f64], y: &[f64], xq: f64) -> f64 {
-    if x.is_empty() { return 0.0; }
-    if xq <= x[0] { return y[0]; }
-    if xq >= x[x.len() - 1] { return y[x.len() - 1]; }
+    if x.is_empty() {
+        return 0.0;
+    }
+    if xq <= x[0] {
+        return y[0];
+    }
+    if xq >= x[x.len() - 1] {
+        return y[x.len() - 1];
+    }
 
     let mut i = x.partition_point(|&v| v < xq);
-    if i == 0 { i = 1; }
-    if i >= x.len() { return y[x.len() - 1]; }
+    if i == 0 {
+        i = 1;
+    }
+    if i >= x.len() {
+        return y[x.len() - 1];
+    }
 
     let f = (xq - x[i - 1]) / (x[i] - x[i - 1]);
     y[i - 1] + f * (y[i] - y[i - 1])
@@ -641,12 +736,9 @@ mod tests {
         // binary-search inversion hits the mid bin for xi≈0.75.
         let inc_energy = vec![1.0_f64, 2.0_f64];
         let offsets = vec![0_usize, 3_usize];
-        let e_out  = vec![0.1_f64, 0.5_f64, 0.9_f64,
-                          0.2_f64, 1.0_f64, 1.8_f64];
-        let pdf_e  = vec![1.0_f64, 1.0_f64, 1.0_f64,
-                          1.0_f64, 1.0_f64, 1.0_f64];
-        let cdf_e  = vec![0.0_f64, 0.5_f64, 1.0_f64,
-                          0.0_f64, 0.5_f64, 1.0_f64];
+        let e_out = vec![0.1_f64, 0.5_f64, 0.9_f64, 0.2_f64, 1.0_f64, 1.8_f64];
+        let pdf_e = vec![1.0_f64, 1.0_f64, 1.0_f64, 1.0_f64, 1.0_f64, 1.0_f64];
+        let cdf_e = vec![0.0_f64, 0.5_f64, 1.0_f64, 0.0_f64, 0.5_f64, 1.0_f64];
         // One μ bin per (ℓ, j): μ = 0.0. No smearing exercised.
         let mu_offsets = vec![0_usize, 1, 2, 3, 4, 5];
         let mu = vec![0.0_f64; 6];
@@ -657,8 +749,17 @@ mod tests {
         let pdf_mu = vec![0.5_f64; mu.len()];
         let cdf_mu = vec![1.0_f64; mu.len()];
         let c = ContinuousInelastic {
-            n_inc, offsets, interp, e_out, pdf_e, cdf_e,
-            mu_interp, mu_offsets, mu, pdf_mu, cdf_mu,
+            n_inc,
+            offsets,
+            interp,
+            e_out,
+            pdf_e,
+            cdf_e,
+            mu_interp,
+            mu_offsets,
+            mu,
+            pdf_mu,
+            cdf_mu,
         };
         (inc_energy, c)
     }
@@ -699,7 +800,9 @@ mod tests {
         // At E_in = E_lo = 1.0 (f=0 so statistical pick always chooses lo
         // once xi > 0 ≈ always), e_out should fall inside tabulated
         // range. Allow a few outliers from boundary numerics.
-        assert!(sum_in_table_range > (trials * 95) / 100,
-                "only {sum_in_table_range}/{trials} within tabulated range");
+        assert!(
+            sum_in_table_range > (trials * 95) / 100,
+            "only {sum_in_table_range}/{trials} within tabulated range"
+        );
     }
 }

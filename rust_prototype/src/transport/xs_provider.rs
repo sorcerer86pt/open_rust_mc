@@ -8,7 +8,10 @@
 use std::sync::Arc;
 
 use crate::decompose;
-use crate::hdf5_reader::{self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData, NuclideFileReader, UrrProbabilityTables};
+use crate::hdf5_reader::{
+    self, AngularDistribution, DiscreteLevelInfo, EnergyDistribution, NuBarTable, NuclideData,
+    NuclideFileReader, UrrProbabilityTables,
+};
 use crate::kernel::SvdKernel;
 use crate::physics::collision::MicroXs;
 use crate::table::PointwiseTable;
@@ -135,21 +138,40 @@ impl NuclideKernels {
 
     /// Get the discrete level info slices.
     pub fn discrete_level_info(&self) -> Vec<DiscreteLevelInfo> {
-        self.discrete_levels.iter().map(|l| l.info.clone()).collect()
+        self.discrete_levels
+            .iter()
+            .map(|l| l.info.clone())
+            .collect()
     }
 
     /// Total memory of SVD kernels (bytes), excluding metadata.
     pub fn svd_memory_bytes(&self) -> usize {
         let mut total = 0;
-        if let Some(k) = &self.elastic { total += k.kernel.memory_bytes(); }
-        if let Some(t) = &self.total_table { total += t.memory_bytes(); }
-        if let Some(k) = &self.inelastic { total += k.kernel.memory_bytes(); }
-        if let Some(k) = &self.n2n { total += k.kernel.memory_bytes(); }
-        if let Some(k) = &self.n3n { total += k.kernel.memory_bytes(); }
-        if let Some(k) = &self.fission { total += k.kernel.memory_bytes(); }
-        if let Some(k) = &self.capture { total += k.kernel.memory_bytes(); }
+        if let Some(k) = &self.elastic {
+            total += k.kernel.memory_bytes();
+        }
+        if let Some(t) = &self.total_table {
+            total += t.memory_bytes();
+        }
+        if let Some(k) = &self.inelastic {
+            total += k.kernel.memory_bytes();
+        }
+        if let Some(k) = &self.n2n {
+            total += k.kernel.memory_bytes();
+        }
+        if let Some(k) = &self.n3n {
+            total += k.kernel.memory_bytes();
+        }
+        if let Some(k) = &self.fission {
+            total += k.kernel.memory_bytes();
+        }
+        if let Some(k) = &self.capture {
+            total += k.kernel.memory_bytes();
+        }
         for lvl in &self.discrete_levels {
-            if let Some(k) = &lvl.kernel { total += k.kernel.memory_bytes(); }
+            if let Some(k) = &lvl.kernel {
+                total += k.kernel.memory_bytes();
+            }
         }
         total
     }
@@ -194,7 +216,9 @@ impl XsProvider for SvdXsProvider {
         let nuc = &self.nuclides[nuclide_idx];
 
         // Single binary search on the shared energy grid — reused by all 6 reactions.
-        let any_kernel = nuc.elastic.as_ref()
+        let any_kernel = nuc
+            .elastic
+            .as_ref()
             .or(nuc.fission.as_ref())
             .or(nuc.capture.as_ref())
             .or(nuc.inelastic.as_ref())
@@ -219,26 +243,36 @@ impl XsProvider for SvdXsProvider {
         };
 
         // Log-log interpolation between grid points (matching OpenMC/pointwise table)
-        let elastic = nuc.elastic.as_ref()
+        let elastic = nuc
+            .elastic
+            .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let inelastic = match &nuc.inelastic {
             Some(k) => k.reconstruct_interp(idx, log_frac),
-            None if !nuc.discrete_levels.is_empty() => {
-                nuc.discrete_levels.iter()
-                    .filter(|lvl| energy >= lvl.info.threshold)
-                    .filter_map(|lvl| lvl.kernel.as_ref())
-                    .map(|k| k.reconstruct_interp(idx, log_frac).max(0.0))
-                    .sum::<f64>()
-            }
+            None if !nuc.discrete_levels.is_empty() => nuc
+                .discrete_levels
+                .iter()
+                .filter(|lvl| energy >= lvl.info.threshold)
+                .filter_map(|lvl| lvl.kernel.as_ref())
+                .map(|k| k.reconstruct_interp(idx, log_frac).max(0.0))
+                .sum::<f64>(),
             None => 0.0,
         };
-        let n2n = nuc.n2n.as_ref()
+        let n2n = nuc
+            .n2n
+            .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
-        let n3n = nuc.n3n.as_ref()
+        let n3n = nuc
+            .n3n
+            .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
-        let fission = nuc.fission.as_ref()
+        let fission = nuc
+            .fission
+            .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
-        let mut capture = nuc.capture.as_ref()
+        let mut capture = nuc
+            .capture
+            .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
 
         let total = match &nuc.total_table {
@@ -276,11 +310,17 @@ impl XsProvider for SvdXsProvider {
         self.nuclides[nuclide_idx].has_continuum_inelastic
     }
 
-    fn elastic_angular_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::AngularDistribution> {
+    fn elastic_angular_dist(
+        &self,
+        nuclide_idx: usize,
+    ) -> Option<&hdf5_reader::AngularDistribution> {
         self.nuclides[nuclide_idx].elastic_angle.as_ref()
     }
 
-    fn discrete_level_angles(&self, nuclide_idx: usize) -> &[Option<hdf5_reader::AngularDistribution>] {
+    fn discrete_level_angles(
+        &self,
+        nuclide_idx: usize,
+    ) -> &[Option<hdf5_reader::AngularDistribution>] {
         &self.nuclides[nuclide_idx].discrete_level_angles
     }
 
@@ -399,29 +439,6 @@ fn build_kernel_from_reader(
     Some(ReactionKernel { kernel, coeffs })
 }
 
-/// Build an SVD kernel from pre-computed XS values on the shared grid.
-fn build_kernel_from_xs(
-    xs: &[f64],
-    shared_grid: &Arc<[f64]>,
-    svd_rank: usize,
-) -> Option<ReactionKernel> {
-    let n_e = xs.len();
-    if n_e == 0 { return None; }
-
-    let log_xs: Vec<f64> = xs.iter().map(|&v| (v.max(1e-30)).log10()).collect();
-
-    let rank = svd_rank;
-    let mut basis = vec![0.0_f64; n_e * rank];
-    for i in 0..n_e {
-        basis[i * rank] = log_xs[i];
-    }
-
-    let kernel = SvdKernel::new(basis, vec![1.0; rank], Arc::clone(shared_grid), rank, n_e, 1);
-    let mut coeffs = vec![0.0_f64; rank];
-    coeffs[0] = 1.0;
-    Some(ReactionKernel { kernel, coeffs })
-}
-
 /// Load a complete nuclide from HDF5 in a single pass.
 ///
 /// Opens the file once, reads energy grids once, then reads all reactions
@@ -441,29 +458,49 @@ pub fn load_nuclide(
         Err(e) => {
             eprintln!("    WARNING: failed to open {}: {e}", h5_path.display());
             return NuclideKernels {
-                elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, pointwise_xs: None, inelastic: None, n2n: None, n3n: None,
-                fission: None, capture: None, awr: awr_fallback,
-                nu_bar_const: nu_bar_fallback, nu_bar_table: None,
-                discrete_levels: vec![], discrete_level_angles: vec![],
+                elastic: None,
+                total_table: None,
+                total_xs_raw: None,
+                missing_xs: None,
+                pointwise_xs: None,
+                inelastic: None,
+                n2n: None,
+                n3n: None,
+                fission: None,
+                capture: None,
+                awr: awr_fallback,
+                nu_bar_const: nu_bar_fallback,
+                nu_bar_table: None,
+                discrete_levels: vec![],
+                discrete_level_angles: vec![],
                 has_continuum_inelastic: false,
-                elastic_angle: None, fission_energy_dist: None, urr_tables: None,
+                elastic_angle: None,
+                fission_energy_dist: None,
+                urr_tables: None,
             };
         }
     };
 
     let awr = reader.awr().unwrap_or(awr_fallback);
-    println!("    AWR = {awr:.3} ({} temps, {} energy pts)",
-             reader.temp_labels.len(), reader.union_grid.len());
+    println!(
+        "    AWR = {awr:.3} ({} temps, {} energy pts)",
+        reader.temp_labels.len(),
+        reader.union_grid.len()
+    );
 
     // Create shared energy grid — one Arc for all reactions in this nuclide
     let shared_grid: Arc<[f64]> = reader.union_grid.clone().into();
 
     let nu_bar_table = reader.nu_bar().ok();
-    if let Some(ref t) = nu_bar_table {
-        if !t.energies.is_empty() {
-            println!("    nu-bar(E): {} pts, {:.3} @ thermal, {:.3} @ 1 MeV",
-                     t.energies.len(), t.lookup(0.0253), t.lookup(1.0e6));
-        }
+    if let Some(ref t) = nu_bar_table
+        && !t.energies.is_empty()
+    {
+        println!(
+            "    nu-bar(E): {} pts, {:.3} @ thermal, {:.3} @ 1 MeV",
+            t.energies.len(),
+            t.lookup(0.0253),
+            t.lookup(1.0e6)
+        );
     }
 
     // Discrete levels — all read from the same open file
@@ -481,10 +518,15 @@ pub fn load_nuclide(
         discrete_level_angles.push(angle);
         discrete_levels.push(DiscreteLevel { info, kernel });
     }
-    let loaded_count = discrete_levels.iter().filter(|l| l.kernel.is_some()).count();
+    let loaded_count = discrete_levels
+        .iter()
+        .filter(|l| l.kernel.is_some())
+        .count();
     let angles_count = discrete_level_angles.iter().filter(|a| a.is_some()).count();
     if n_levels > 0 {
-        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum}, angle_dists={angles_count})");
+        println!(
+            "    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum}, angle_dists={angles_count})"
+        );
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
@@ -494,56 +536,88 @@ pub fn load_nuclide(
 
     let elastic_angle = reader.angular_distribution(2);
     if let Some(ref a) = elastic_angle {
-        println!("    Elastic angular dist: {} energies, CM={}", a.energies.len(), a.center_of_mass);
+        println!(
+            "    Elastic angular dist: {} energies, CM={}",
+            a.energies.len(),
+            a.center_of_mass
+        );
     }
 
-    let urr_temp = reader.temp_labels.get(temp_idx).cloned().unwrap_or_else(|| "294K".to_string());
+    let urr_temp = reader
+        .temp_labels
+        .get(temp_idx)
+        .cloned()
+        .unwrap_or_else(|| "294K".to_string());
     let urr_tables = reader.urr_tables(&urr_temp);
     if let Some(ref u) = urr_tables {
-        println!("    URR: {} energies, {} bands, {:.0}–{:.0} eV",
-                 u.energies.len(), u.n_bands,
-                 u.energies.first().unwrap_or(&0.0), u.energies.last().unwrap_or(&0.0));
+        println!(
+            "    URR: {} energies, {} bands, {:.0}–{:.0} eV",
+            u.energies.len(),
+            u.n_bands,
+            u.energies.first().unwrap_or(&0.0),
+            u.energies.last().unwrap_or(&0.0)
+        );
     }
 
     let total_xs_vec = reader.compute_total_xs(temp_idx);
-    let total_table = total_xs_vec.as_ref().map(|xs| {
-        PointwiseTable::from_shared_grid(shared_grid.clone(), xs.clone())
-    });
+    let total_table = total_xs_vec
+        .as_ref()
+        .map(|xs| PointwiseTable::from_shared_grid(shared_grid.clone(), xs.clone()));
     let elastic = build_kernel_from_reader(&reader, 2, svd_rank, temp_idx, &shared_grid);
-    if elastic.is_some() { println!("    MT=2 (elastic)"); }
+    if elastic.is_some() {
+        println!("    MT=2 (elastic)");
+    }
     let inelastic = build_kernel_from_reader(&reader, 4, svd_rank, temp_idx, &shared_grid);
-    if inelastic.is_some() { println!("    MT=4 (inelastic)"); }
-    else if !discrete_levels.is_empty() { println!("    MT=4 (inelastic) — synthesized from {} discrete levels", discrete_levels.len()); }
+    if inelastic.is_some() {
+        println!("    MT=4 (inelastic)");
+    } else if !discrete_levels.is_empty() {
+        println!(
+            "    MT=4 (inelastic) — synthesized from {} discrete levels",
+            discrete_levels.len()
+        );
+    }
     let n2n = build_kernel_from_reader(&reader, 16, svd_rank, temp_idx, &shared_grid);
-    if n2n.is_some() { println!("    MT=16 (n,2n)"); }
+    if n2n.is_some() {
+        println!("    MT=16 (n,2n)");
+    }
     let n3n = build_kernel_from_reader(&reader, 17, svd_rank, temp_idx, &shared_grid);
-    if n3n.is_some() { println!("    MT=17 (n,3n)"); }
+    if n3n.is_some() {
+        println!("    MT=17 (n,3n)");
+    }
     let fission = build_kernel_from_reader(&reader, 18, svd_rank, temp_idx, &shared_grid);
-    if fission.is_some() { println!("    MT=18 (fission)"); }
+    if fission.is_some() {
+        println!("    MT=18 (fission)");
+    }
     let capture = build_kernel_from_reader(&reader, 102, svd_rank, temp_idx, &shared_grid);
-    if capture.is_some() { println!("    MT=102 (capture)"); }
+    if capture.is_some() {
+        println!("    MT=102 (capture)");
+    }
 
     let missing_xs = total_xs_vec.as_ref().map(|total| {
         let n = shared_grid.len();
         let mut partial_sum = vec![0.0_f64; n];
         for mt in [2_u32, 16, 17, 18, 102] {
-            if let Ok(data) = reader.read_reaction(mt) {
-                if let Some(xs) = data.xs_per_temp.get(temp_idx) {
-                    for i in 0..n.min(xs.len()) {
-                        partial_sum[i] += xs[i].max(0.0);
-                    }
+            if let Ok(data) = reader.read_reaction(mt)
+                && let Some(xs) = data.xs_per_temp.get(temp_idx)
+            {
+                for i in 0..n.min(xs.len()) {
+                    partial_sum[i] += xs[i].max(0.0);
                 }
             }
         }
         if let Ok(data) = reader.read_reaction(4) {
             if let Some(xs) = data.xs_per_temp.get(temp_idx) {
-                for i in 0..n.min(xs.len()) { partial_sum[i] += xs[i].max(0.0); }
+                for i in 0..n.min(xs.len()) {
+                    partial_sum[i] += xs[i].max(0.0);
+                }
             }
         } else {
             for mt in 51..=91 {
-                if let Ok(data) = reader.read_reaction(mt) {
-                    if let Some(xs) = data.xs_per_temp.get(temp_idx) {
-                        for i in 0..n.min(xs.len()) { partial_sum[i] += xs[i].max(0.0); }
+                if let Ok(data) = reader.read_reaction(mt)
+                    && let Some(xs) = data.xs_per_temp.get(temp_idx)
+                {
+                    for i in 0..n.min(xs.len()) {
+                        partial_sum[i] += xs[i].max(0.0);
                     }
                 }
             }
@@ -562,7 +636,16 @@ pub fn load_nuclide(
     let pointwise_xs = reader.compute_pointwise_xs(temp_idx);
 
     NuclideKernels {
-        elastic, total_table, total_xs_raw: total_xs_vec, missing_xs, pointwise_xs, inelastic, n2n, n3n, fission, capture,
+        elastic,
+        total_table,
+        total_xs_raw: total_xs_vec,
+        missing_xs,
+        pointwise_xs,
+        inelastic,
+        n2n,
+        n3n,
+        fission,
+        capture,
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
@@ -627,7 +710,10 @@ impl NuclideTableData {
     }
 
     pub fn discrete_level_info(&self) -> Vec<DiscreteLevelInfo> {
-        self.discrete_levels.iter().map(|l| l.info.clone()).collect()
+        self.discrete_levels
+            .iter()
+            .map(|l| l.info.clone())
+            .collect()
     }
 
     pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
@@ -651,14 +737,28 @@ impl NuclideTableData {
     /// Total memory of pointwise tables (bytes), excluding metadata.
     pub fn table_memory_bytes(&self) -> usize {
         let mut total = 0;
-        if let Some(t) = &self.elastic { total += t.memory_bytes(); }
-        if let Some(t) = &self.inelastic { total += t.memory_bytes(); }
-        if let Some(t) = &self.n2n { total += t.memory_bytes(); }
-        if let Some(t) = &self.n3n { total += t.memory_bytes(); }
-        if let Some(t) = &self.fission { total += t.memory_bytes(); }
-        if let Some(t) = &self.capture { total += t.memory_bytes(); }
+        if let Some(t) = &self.elastic {
+            total += t.memory_bytes();
+        }
+        if let Some(t) = &self.inelastic {
+            total += t.memory_bytes();
+        }
+        if let Some(t) = &self.n2n {
+            total += t.memory_bytes();
+        }
+        if let Some(t) = &self.n3n {
+            total += t.memory_bytes();
+        }
+        if let Some(t) = &self.fission {
+            total += t.memory_bytes();
+        }
+        if let Some(t) = &self.capture {
+            total += t.memory_bytes();
+        }
         for lvl in &self.discrete_levels {
-            if let Some(t) = &lvl.table { total += t.memory_bytes(); }
+            if let Some(t) = &lvl.table {
+                total += t.memory_bytes();
+            }
         }
         total
     }
@@ -681,13 +781,13 @@ impl XsProvider for TableXsProvider {
         let elastic = nuc.elastic.as_ref().map_or(0.0, |t| t.lookup(energy));
         let inelastic = match &nuc.inelastic {
             Some(t) => t.lookup(energy),
-            None if !nuc.discrete_levels.is_empty() => {
-                nuc.discrete_levels.iter()
-                    .filter(|lvl| energy >= lvl.info.threshold)
-                    .filter_map(|lvl| lvl.table.as_ref())
-                    .map(|t| t.lookup(energy).max(0.0))
-                    .sum::<f64>()
-            }
+            None if !nuc.discrete_levels.is_empty() => nuc
+                .discrete_levels
+                .iter()
+                .filter(|lvl| energy >= lvl.info.threshold)
+                .filter_map(|lvl| lvl.table.as_ref())
+                .map(|t| t.lookup(energy).max(0.0))
+                .sum::<f64>(),
             None => 0.0,
         };
         let n2n = nuc.n2n.as_ref().map_or(0.0, |t| t.lookup(energy));
@@ -706,7 +806,15 @@ impl XsProvider for TableXsProvider {
         let nu_bar = nuc.nu_bar_at(energy);
 
         MicroXs {
-            total, elastic, inelastic, n2n, n3n, fission, capture, nu_bar, awr: nuc.awr,
+            total,
+            elastic,
+            inelastic,
+            n2n,
+            n3n,
+            fission,
+            capture,
+            nu_bar,
+            awr: nuc.awr,
         }
     }
 
@@ -722,11 +830,17 @@ impl XsProvider for TableXsProvider {
         self.nuclides[nuclide_idx].has_continuum_inelastic
     }
 
-    fn elastic_angular_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::AngularDistribution> {
+    fn elastic_angular_dist(
+        &self,
+        nuclide_idx: usize,
+    ) -> Option<&hdf5_reader::AngularDistribution> {
         self.nuclides[nuclide_idx].elastic_angle.as_ref()
     }
 
-    fn discrete_level_angles(&self, nuclide_idx: usize) -> &[Option<hdf5_reader::AngularDistribution>] {
+    fn discrete_level_angles(
+        &self,
+        nuclide_idx: usize,
+    ) -> &[Option<hdf5_reader::AngularDistribution>] {
         &self.nuclides[nuclide_idx].discrete_level_angles
     }
 
@@ -755,7 +869,10 @@ fn build_table_from_reader(
         return None;
     }
     let t = temp_idx.min(data.n_temp() - 1);
-    Some(PointwiseTable::from_shared_grid(Arc::clone(shared_grid), data.xs_per_temp[t].clone()))
+    Some(PointwiseTable::from_shared_grid(
+        Arc::clone(shared_grid),
+        data.xs_per_temp[t].clone(),
+    ))
 }
 
 /// Load a complete nuclide from HDF5 as pointwise tables (OpenMC-style).
@@ -777,29 +894,46 @@ pub fn load_nuclide_table(
         Err(e) => {
             eprintln!("    WARNING: failed to open {}: {e}", h5_path.display());
             return NuclideTableData {
-                elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
-                fission: None, capture: None, awr: awr_fallback,
-                nu_bar_const: nu_bar_fallback, nu_bar_table: None,
-                discrete_levels: vec![], discrete_level_angles: vec![],
+                elastic: None,
+                total_table: None,
+                inelastic: None,
+                n2n: None,
+                n3n: None,
+                fission: None,
+                capture: None,
+                awr: awr_fallback,
+                nu_bar_const: nu_bar_fallback,
+                nu_bar_table: None,
+                discrete_levels: vec![],
+                discrete_level_angles: vec![],
                 has_continuum_inelastic: false,
-                elastic_angle: None, fission_energy_dist: None, urr_tables: None,
+                elastic_angle: None,
+                fission_energy_dist: None,
+                urr_tables: None,
             };
         }
     };
 
     let awr = reader.awr().unwrap_or(awr_fallback);
-    println!("    AWR = {awr:.3} ({} temps, {} energy pts)",
-             reader.temp_labels.len(), reader.union_grid.len());
+    println!(
+        "    AWR = {awr:.3} ({} temps, {} energy pts)",
+        reader.temp_labels.len(),
+        reader.union_grid.len()
+    );
 
     // Create shared energy grid for all tables in this nuclide
     let shared_grid: Arc<[f64]> = reader.union_grid.clone().into();
 
     let nu_bar_table = reader.nu_bar().ok();
-    if let Some(ref t) = nu_bar_table {
-        if !t.energies.is_empty() {
-            println!("    nu-bar(E): {} pts, {:.3} @ thermal, {:.3} @ 1 MeV",
-                     t.energies.len(), t.lookup(0.0253), t.lookup(1.0e6));
-        }
+    if let Some(ref t) = nu_bar_table
+        && !t.energies.is_empty()
+    {
+        println!(
+            "    nu-bar(E): {} pts, {:.3} @ thermal, {:.3} @ 1 MeV",
+            t.energies.len(),
+            t.lookup(0.0253),
+            t.lookup(1.0e6)
+        );
     }
 
     let level_infos = reader.discrete_levels(awr);
@@ -815,7 +949,9 @@ pub fn load_nuclide_table(
     let loaded_count = discrete_levels.iter().filter(|l| l.table.is_some()).count();
     let angles_count = discrete_level_angles.iter().filter(|a| a.is_some()).count();
     if n_levels > 0 {
-        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum}, angle_dists={angles_count})");
+        println!(
+            "    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum}, angle_dists={angles_count})"
+        );
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
@@ -825,36 +961,70 @@ pub fn load_nuclide_table(
 
     let elastic_angle = reader.angular_distribution(2);
     if let Some(ref a) = elastic_angle {
-        println!("    Elastic angular dist: {} energies, CM={}", a.energies.len(), a.center_of_mass);
+        println!(
+            "    Elastic angular dist: {} energies, CM={}",
+            a.energies.len(),
+            a.center_of_mass
+        );
     }
 
-    let urr_temp = reader.temp_labels.get(temp_idx).cloned().unwrap_or_else(|| "294K".to_string());
+    let urr_temp = reader
+        .temp_labels
+        .get(temp_idx)
+        .cloned()
+        .unwrap_or_else(|| "294K".to_string());
     let urr_tables = reader.urr_tables(&urr_temp);
     if let Some(ref u) = urr_tables {
-        println!("    URR: {} energies, {} bands, {:.0}–{:.0} eV",
-                 u.energies.len(), u.n_bands,
-                 u.energies.first().unwrap_or(&0.0), u.energies.last().unwrap_or(&0.0));
+        println!(
+            "    URR: {} energies, {} bands, {:.0}–{:.0} eV",
+            u.energies.len(),
+            u.n_bands,
+            u.energies.first().unwrap_or(&0.0),
+            u.energies.last().unwrap_or(&0.0)
+        );
     }
 
-    let total_table = reader.compute_total_xs(temp_idx).map(|xs| {
-        PointwiseTable::from_shared_grid(shared_grid.clone(), xs)
-    });
+    let total_table = reader
+        .compute_total_xs(temp_idx)
+        .map(|xs| PointwiseTable::from_shared_grid(shared_grid.clone(), xs));
     let elastic = build_table_from_reader(&reader, 2, temp_idx, &shared_grid);
-    if elastic.is_some() { println!("    MT=2 (elastic)"); }
+    if elastic.is_some() {
+        println!("    MT=2 (elastic)");
+    }
     let inelastic = build_table_from_reader(&reader, 4, temp_idx, &shared_grid);
-    if inelastic.is_some() { println!("    MT=4 (inelastic)"); }
-    else if !discrete_levels.is_empty() { println!("    MT=4 (inelastic) — synthesized from {} discrete levels", discrete_levels.len()); }
+    if inelastic.is_some() {
+        println!("    MT=4 (inelastic)");
+    } else if !discrete_levels.is_empty() {
+        println!(
+            "    MT=4 (inelastic) — synthesized from {} discrete levels",
+            discrete_levels.len()
+        );
+    }
     let n2n = build_table_from_reader(&reader, 16, temp_idx, &shared_grid);
-    if n2n.is_some() { println!("    MT=16 (n,2n)"); }
+    if n2n.is_some() {
+        println!("    MT=16 (n,2n)");
+    }
     let n3n = build_table_from_reader(&reader, 17, temp_idx, &shared_grid);
-    if n3n.is_some() { println!("    MT=17 (n,3n)"); }
+    if n3n.is_some() {
+        println!("    MT=17 (n,3n)");
+    }
     let fission = build_table_from_reader(&reader, 18, temp_idx, &shared_grid);
-    if fission.is_some() { println!("    MT=18 (fission)"); }
+    if fission.is_some() {
+        println!("    MT=18 (fission)");
+    }
     let capture = build_table_from_reader(&reader, 102, temp_idx, &shared_grid);
-    if capture.is_some() { println!("    MT=102 (capture)"); }
+    if capture.is_some() {
+        println!("    MT=102 (capture)");
+    }
 
     NuclideTableData {
-        elastic, total_table, inelastic, n2n, n3n, fission, capture,
+        elastic,
+        total_table,
+        inelastic,
+        n2n,
+        n3n,
+        fission,
+        capture,
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
