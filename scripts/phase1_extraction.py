@@ -129,7 +129,7 @@ def main():
     else:
         energies, temperatures, A = extract_with_h5py(h5_path)
 
-    print(f"\n=== Matrix A constructed ===")
+    print("\n=== Matrix A constructed ===")
     print(f"Shape: {A.shape} (N_E={A.shape[0]}, N_T={A.shape[1]})")
     print(f"Memory: {A.nbytes / 1e6:.1f} MB")
 
@@ -157,7 +157,7 @@ def main():
     print(f"  A_raw_u235_mt18.npy  ({A.nbytes / 1e6:.1f} MB)")
     print(f"  A_log_u235_mt18.npy  ({A_log.nbytes / 1e6:.1f} MB)")
     print(f"  energies_u235.npy    ({energies.nbytes / 1e6:.1f} MB)")
-    print(f"  temperatures_u235.npy")
+    print("  temperatures_u235.npy")
 
     return energies, temperatures, A, A_log
 

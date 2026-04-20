@@ -17,7 +17,6 @@ import json
 import os
 import resource
 import subprocess
-import sys
 import time
 
 import openmc
@@ -196,7 +195,7 @@ def main():
     print("HONESTY TEST — Three-Way Comparison")
     print("  SVD-compressed vs Pointwise Table vs OpenMC")
     print("=" * 70)
-    print(f"\n  Benchmark:  Godiva (HEU-MET-FAST-001)")
+    print("\n  Benchmark:  Godiva (HEU-MET-FAST-001)")
     print(f"  Particles:  {args.particles}")
     print(f"  Batches:    {args.batches} ({args.inactive} inactive)")
     print(f"  SVD rank:   {args.rank}")
@@ -276,7 +275,7 @@ def main():
         mem_ratio = tbl["xs_memory_kb"] / svd["xs_memory_kb"] if svd["xs_memory_kb"] > 0 else 0
         speed_ratio = tbl["sim_ms"] / svd["sim_ms"] if svd["sim_ms"] > 0 else 0
 
-        print(f"\n  SVD vs Table:")
+        print("\n  SVD vs Table:")
         print(f"    k_eff gap          = {dk:.0f} pcm")
         print(f"    Memory compression = {mem_ratio:.1f}x")
         print(f"    Simulation speedup = {speed_ratio:.2f}x")
@@ -285,7 +284,7 @@ def main():
         svd = results["Rust SVD"]
         omc = results["OpenMC"]
         dk = abs(svd["k_eff"] - omc["k_eff"]) / omc["k_eff"] * 1e5
-        print(f"\n  SVD vs OpenMC:")
+        print("\n  SVD vs OpenMC:")
         print(f"    k_eff gap = {dk:.0f} pcm")
 
     # Save results

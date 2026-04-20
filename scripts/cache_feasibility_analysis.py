@@ -54,14 +54,14 @@ def cache_tier_analysis(N_E: int, N_T: int):
     # But in practice, OpenMC stores ~20 temperatures for interpolation
     original_20T = original_per_temp * 20
 
-    print(f"\nOriginal pointwise table (U-235, MT=18 only):")
+    print("\nOriginal pointwise table (U-235, MT=18 only):")
     print(f"  Per temperature:  {original_per_temp / 1024:.0f} KB")
     print(f"  {N_T} temperatures: {original_total / 1024:.0f} KB")
     print(f"  20 temperatures:  {original_20T / 1024:.0f} KB")
     print(f"  Fits in L3?       {'YES' if original_total < L3 else 'NO'}")
     print(f"  Note: full U-235 has ~50 reactions, total ~{original_total * 50 / 1024**2:.0f} MB")
 
-    print(f"\nSVD representation for rank k:")
+    print("\nSVD representation for rank k:")
     print(f"  {'k':>3}  {'U (N_E×k)':>12}  {'Σ+V^T':>10}  {'Total':>10}  {'L1?':>5}  {'L2?':>5}  {'L3?':>5}  {'Ratio':>8}")
     print(f"  {'-'*3}  {'-'*12}  {'-'*10}  {'-'*10}  {'-'*5}  {'-'*5}  {'-'*5}  {'-'*8}")
 
@@ -92,7 +92,7 @@ def cache_tier_analysis(N_E: int, N_T: int):
     # The real win: V^T is so small it's essentially free
     print(f"\n  Key insight: V^T (temperature coefficients) at k=4 = "
           f"{4 * N_T * 8} bytes — fits in a single cache line!")
-    print(f"  The hot path is: σ(E) = Σ_i u_i(E) · (σ_i · v_i^T(T))")
+    print("  The hot path is: σ(E) = Σ_i u_i(E) · (σ_i · v_i^T(T))")
     print(f"  Per energy point: k multiply-adds = {4*2} FLOPs at k=4")
 
     return results
@@ -246,11 +246,11 @@ def reconstruction_flops(N_E: int, k: int):
     # vs. table lookup: ~100 ns L3 hit, ~200 ns cache miss to RAM
     print(f"  SVD dot product: {flops_per_point} FLOPs = {ns_per_lookup:.1f} ns "
           f"(at 3 GHz with FMA)")
-    print(f"  Table lookup (L3 hit):   ~30-100 ns")
-    print(f"  Table lookup (RAM miss): ~100-200 ns")
-    print(f"  Binary search overhead:  ~10-20 comparisons × 5 ns = ~50-100 ns")
-    print(f"\n  SVD advantage: data is ALREADY in cache (U fits in L2/L3)")
-    print(f"  Table disadvantage: random access pattern → frequent cache misses")
+    print("  Table lookup (L3 hit):   ~30-100 ns")
+    print("  Table lookup (RAM miss): ~100-200 ns")
+    print("  Binary search overhead:  ~10-20 comparisons × 5 ns = ~50-100 ns")
+    print("\n  SVD advantage: data is ALREADY in cache (U fits in L2/L3)")
+    print("  Table disadvantage: random access pattern → frequent cache misses")
     print(f"  Per history ({lookups_per_history} lookups): "
           f"SVD = {flops_per_history} FLOPs, "
           f"Table = {lookups_per_history}×(search + fetch) ≈ {lookups_per_history * 150 / 1000:.0f} μs")
@@ -345,14 +345,14 @@ def main():
         print(f"  k={k}: max_err={worst:.2e}, P99_resonance={p99:.2e}, "
               f"U fits in {fits}, size={cache_info['size_total']/1024:.0f}KB")
 
-    print(f"\n  CONCLUSION:")
-    print(f"  • SVD basis vectors (U) fit comfortably in L3 cache at any practical k")
-    print(f"  • Temperature coefficients (V^T) fit in a few cache lines")
-    print(f"  • Reconstruction is a k-wide dot product — pure ALU, no memory stalls")
-    print(f"  • The Memory Wall is solved: compute-bound beats memory-bound")
-    print(f"\n  → For the Rust engine: store U[:,0:k] contiguously per nuclide,")
-    print(f"    precompute σ_i·v_i(T) at the start of each batch,")
-    print(f"    reconstruct σ(E) = Σ u_i(E)·c_i with a k-wide FMA loop")
+    print("\n  CONCLUSION:")
+    print("  • SVD basis vectors (U) fit comfortably in L3 cache at any practical k")
+    print("  • Temperature coefficients (V^T) fit in a few cache lines")
+    print("  • Reconstruction is a k-wide dot product — pure ALU, no memory stalls")
+    print("  • The Memory Wall is solved: compute-bound beats memory-bound")
+    print("\n  → For the Rust engine: store U[:,0:k] contiguously per nuclide,")
+    print("    precompute σ_i·v_i(T) at the start of each batch,")
+    print("    reconstruct σ(E) = Σ u_i(E)·c_i with a k-wide FMA loop")
 
 
 if __name__ == "__main__":

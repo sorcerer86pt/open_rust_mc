@@ -15,7 +15,6 @@ Run inside WSL with: conda activate openmc && python phase4_keff_benchmark.py
 
 import os
 import sys
-import shutil
 import numpy as np
 
 import openmc
@@ -260,7 +259,7 @@ def main():
         print(f"  {label:<15} {k_val:>10.5f} {k_unc:>10.5f} {delta_pcm:>10.1f} {sig:>14}")
 
     # ── Verdict ──────────────────────────────────────────────────────
-    print(f"\n  TARGET: Δk < 10 pcm")
+    print("\n  TARGET: Δk < 10 pcm")
     for label, k_rank, k_val, k_unc in results:
         if k_rank is not None:
             delta = abs(k_val - k_baseline) / k_baseline * 1e5

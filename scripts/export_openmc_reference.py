@@ -64,7 +64,7 @@ def main():
     np.save(energy_path, energy_union)
     np.save(temp_path, np.array([float(t.rstrip('K')) for t in temperatures]))
 
-    print(f"\nSaved reference data:")
+    print("\nSaved reference data:")
     print(f"  {ref_path} ({ref_matrix.nbytes / 1e6:.1f} MB)")
     print(f"  {energy_path}")
     print(f"  {temp_path}")

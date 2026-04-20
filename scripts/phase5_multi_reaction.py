@@ -59,7 +59,7 @@ def analyze_reaction(u235, mt, label):
         print(f"    k={k+1}: {c*100:.8f}%")
 
     # Reconstruction error per region per k
-    print(f"\n  Reconstruction accuracy (max relative error, linear scale):")
+    print("\n  Reconstruction accuracy (max relative error, linear scale):")
     print(f"  {'k':>4}  {'Thermal':>12}  {'Resonance':>12}  {'Fast':>12}  {'Overall':>12}")
 
     mask_th = energies < 1.0

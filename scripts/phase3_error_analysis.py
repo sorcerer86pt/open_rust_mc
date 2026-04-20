@@ -290,13 +290,13 @@ def main():
     print(f"  Compression > 80%?  {'YES' if comp_ok else 'NO'}")
 
     if err_ok and comp_ok:
-        print(f"\n→ CHECKPOINT 3 PASSED. Ready for k_eff benchmark (Phase 4).")
+        print("\n→ CHECKPOINT 3 PASSED. Ready for k_eff benchmark (Phase 4).")
     elif comp_ok:
-        print(f"\n→ Error too high. Try increasing k or adjusting sparse threshold.")
-        print(f"  Consider windowed SVD (Phase 5.3) for better regional accuracy.")
+        print("\n→ Error too high. Try increasing k or adjusting sparse threshold.")
+        print("  Consider windowed SVD (Phase 5.3) for better regional accuracy.")
     else:
-        print(f"\n→ Compression insufficient. The data may have high effective rank.")
-        print(f"  Consider WMP for resonance region + SVD for smooth regions.")
+        print("\n→ Compression insufficient. The data may have high effective rank.")
+        print("  Consider WMP for resonance region + SVD for smooth regions.")
 
     return sparse_results
 

@@ -65,7 +65,7 @@ def check_wmp_available():
         try:
             u235 = openmc.data.IncidentNeutron.from_hdf5(H5)
             if hasattr(u235, 'resonances') and u235.resonances is not None:
-                print(f"  Resonance data available in nuclide file")
+                print("  Resonance data available in nuclide file")
                 return "embedded"
         except Exception:
             pass
@@ -221,8 +221,8 @@ def main():
               f"{ratio_wmp:>9.1f}x  {r['max_err']:>10.2e}  "
               f"{r['thermal_max']:>10.2e}  {r['fast_max']:>10.2e}")
 
-    print(f"\n  * WMP memory is estimated at ~2 KB (analytical representation)")
-    print(f"    Actual WMP stores ~100 multipole terms per nuclide")
+    print("\n  * WMP memory is estimated at ~2 KB (analytical representation)")
+    print("    Actual WMP stores ~100 multipole terms per nuclide")
 
     # Comparison table
     print(f"\n{'='*70}")
@@ -242,9 +242,9 @@ def main():
     print(f"  {'Hybrid SVD(k=2)+WMP':<30}  {total_hyb_wmp:>9.0f}K  {hyb_k2['max_err']:>10.2e}  {'0 (WMP)':>12}")
     print(f"  {'Hybrid SVD(k=2)+table(res)':<30}  {total_hyb_tbl:>9.0f}K  {hyb_k2['max_err']:>10.2e}  {'0 (exact)':>12}")
 
-    print(f"\n  Key insight: the hybrid approach gets the best of both worlds:")
-    print(f"    - SVD (k=1 or k=2) handles 99.4% of the spectrum nearly for free")
-    print(f"    - WMP handles the resonance peaks with analytical precision")
+    print("\n  Key insight: the hybrid approach gets the best of both worlds:")
+    print("    - SVD (k=1 or k=2) handles 99.4% of the spectrum nearly for free")
+    print("    - WMP handles the resonance peaks with analytical precision")
     print(f"    - Combined memory: ~{total_hyb_wmp:.0f} KB vs {table_mem:.0f} KB table ({table_mem/total_hyb_wmp:.0f}x reduction)")
 
 

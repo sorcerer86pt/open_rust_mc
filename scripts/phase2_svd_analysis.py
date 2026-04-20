@@ -41,7 +41,7 @@ def perform_svd(A_log: np.ndarray):
 
     print(f"\nSingular values: {S}")
     print(f"Number of singular values: {len(S)}")
-    print(f"\nRatios σ_k/σ_1:")
+    print("\nRatios σ_k/σ_1:")
     for k, s in enumerate(S):
         print(f"  σ_{k+1}/σ_1 = {s/S[0]:.10e}")
 
@@ -61,18 +61,18 @@ def analyze_spectrum(S: np.ndarray, A_log: np.ndarray):
 
     if ratio_2_1 < 0.01:
         scenario = "A (EXCELLENT)"
-        print(f"→ SCENARIO A: Effective rank is very low. SVD compression is highly viable.")
+        print("→ SCENARIO A: Effective rank is very low. SVD compression is highly viable.")
     elif ratio_2_1 < 0.1:
         scenario = "B (GOOD)"
-        print(f"→ SCENARIO B: SVD viable with moderate k. May need optimizations.")
+        print("→ SCENARIO B: SVD viable with moderate k. May need optimizations.")
     else:
         scenario = "C (CHALLENGING)"
-        print(f"→ SCENARIO C: SVD alone may be insufficient. Consider hybrid WMP+SVD.")
+        print("→ SCENARIO C: SVD alone may be insufficient. Consider hybrid WMP+SVD.")
 
     # Energy captured
     S2 = S ** 2
     energy_cumulative = np.cumsum(S2) / np.sum(S2)
-    print(f"\nCumulative energy captured:")
+    print("\nCumulative energy captured:")
     for k, ec in enumerate(energy_cumulative):
         print(f"  k={k+1}: {ec * 100:.8f}%")
 
@@ -86,12 +86,12 @@ def analyze_spectrum(S: np.ndarray, A_log: np.ndarray):
         err = np.sqrt(np.sum(S[k:] ** 2)) / norm_A
         errors_frobenius.append(err)
 
-    print(f"\nReconstruction error (Frobenius, relative):")
+    print("\nReconstruction error (Frobenius, relative):")
     for k, err in enumerate(errors_frobenius):
         print(f"  k={k+1}: ε = {err:.2e}")
 
     # Find minimum k for each threshold
-    print(f"\nMinimum k for error thresholds:")
+    print("\nMinimum k for error thresholds:")
     thresholds = [1e-2, 1e-4, 1e-6, 1e-8, 1e-10, 1e-12]
     results = {}
     for threshold in thresholds:

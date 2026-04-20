@@ -201,7 +201,7 @@ def print_loocv_summary(all_loocv):
         print()
 
     # P99 version
-    print(f"\nWorst-case LOO P99 error per window per k:")
+    print("\nWorst-case LOO P99 error per window per k:")
     print(f"\n{'k':>4}", end="")
     for wname in all_loocv:
         print(f"  {wname:>14}", end="")
@@ -251,7 +251,7 @@ def budget_comparison(window_results, all_loocv, A_raw, A_log, energies, tempera
 
     # Windowed SVD: allocate k per window to minimize total error
     # Strategy: give each window enough k to reach ~same error level
-    print(f"\nWindowed SVD (independent SVD per energy region):")
+    print("\nWindowed SVD (independent SVD per energy region):")
 
     # Try uniform k allocation first
     for k_per_window in range(2, N_T):
@@ -287,7 +287,7 @@ def budget_comparison(window_results, all_loocv, A_raw, A_log, energies, tempera
               f"{improvement:.1f}×)")
 
     # Adaptive allocation: give resonance windows more k
-    print(f"\n  Adaptive allocation (more k to resonance windows):")
+    print("\n  Adaptive allocation (more k to resonance windows):")
     configs = [
         {"Thermal": 2, "Low Resonance": 5, "Mid Resonance": 5, "High Resonance": 4, "Fast": 2},
         {"Thermal": 2, "Low Resonance": 6, "Mid Resonance": 6, "High Resonance": 5, "Fast": 2},
@@ -382,7 +382,7 @@ def main():
     print(f"Matrix: {N_E} × {N_T}, temperatures: {list(temperatures)}")
 
     # 1. SVD per window
-    print(f"\nWindows defined:")
+    print("\nWindows defined:")
     for name, lo, hi in WINDOWS:
         mask = (energies >= lo) & (energies < hi)
         print(f"  {name:>18}: {lo:>10.1f} – {'∞' if hi == np.inf else f'{hi:.1f}':>10} eV  "
