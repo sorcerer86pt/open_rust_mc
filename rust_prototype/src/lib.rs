@@ -22,3 +22,4 @@ pub mod physics;
 pub mod table;
 pub mod thermal;
 pub mod transport;
+pub mod wmp;

@@ -343,21 +343,24 @@ fn sample_continuous_inelastic(
         }
     };
 
-    // Step 5: Scale to kinematic bounds (Eq. 31, 35)
-    let start_lo = c.offsets[i_lo];
-    let end_lo = if i_lo + 1 < c.offsets.len() { c.offsets[i_lo + 1] } else { c.e_out.len() };
-    let start_hi = c.offsets[i_hi];
-    let end_hi = if i_hi + 1 < c.offsets.len() { c.offsets[i_hi + 1] } else { c.e_out.len() };
-
-    let e_min = c.e_out[start_lo] + f * (c.e_out[start_hi] - c.e_out[start_lo]);
-    let e_max = c.e_out[end_lo - 1] + f * (c.e_out[end_hi - 1] - c.e_out[end_lo - 1]);
-
-    let e_ell_min = e_out[0];
-    let e_ell_max = e_out[n_out - 1];
-    let e_out_final = if (e_ell_max - e_ell_min).abs() < 1e-30 {
+    // Step 5: Remap to the incident energy. OpenMC
+    // (src/secondary_thermal.cpp, IncoherentInelasticAE::sample_params)
+    // uses a two-branch piecewise form keyed off the chosen table's
+    // incident energy E_l = inc_energy[ell]:
+    //     if E_out < 0.5 * E_l: E_out *= 2*E_in/E_l - 1
+    //     else:                 E_out += E_in - E_l
+    // This matches NJOY/ACE-file thermal-scattering conventions and
+    // diverges from the canonical Eqs 31/35 linear-bounds remap
+    // described in the OpenMC manual. The piecewise form is what
+    // actually runs in the reference implementation, so we mirror it
+    // to keep thermal spectra consistent (important for PWR k_inf).
+    let e_l = inc_energy[ell];
+    let e_out_final = if e_l <= 0.0 {
         e_hat
+    } else if e_hat < 0.5 * e_l {
+        e_hat * (2.0 * energy / e_l - 1.0)
     } else {
-        e_min + (e_hat - e_ell_min) / (e_ell_max - e_ell_min) * (e_max - e_min)
+        e_hat + energy - e_l
     };
     let e_out_final = e_out_final.max(0.0);
 
@@ -623,5 +626,80 @@ mod tests {
         assert_eq!(skewed_weight(2, 5), 10.0);
         assert_eq!(skewed_weight(3, 5), 4.0);
         assert_eq!(skewed_weight(4, 5), 1.0);
+    }
+
+    // ── Continuous inelastic iwt=2 piecewise remap (OpenMC form) ──
+    //
+    // Regression for the NJOY/ACE-convention remap ported from
+    // OpenMC's IncoherentInelasticAE::sample_params. We drive the
+    // sampler with a minimal, deterministic ContinuousInelastic table
+    // and assert energy bounds and the two-branch behaviour.
+
+    fn build_minimal_continuous_inelastic() -> (Vec<f64>, ContinuousInelastic) {
+        // Two incident-energy tables at E = 1.0 and 2.0 eV. Each table
+        // has 3 outgoing-energy points; a linear CDF 0.0, 0.5, 1.0 so a
+        // binary-search inversion hits the mid bin for xi≈0.75.
+        let inc_energy = vec![1.0_f64, 2.0_f64];
+        let offsets = vec![0_usize, 3_usize];
+        let e_out  = vec![0.1_f64, 0.5_f64, 0.9_f64,
+                          0.2_f64, 1.0_f64, 1.8_f64];
+        let pdf_e  = vec![1.0_f64, 1.0_f64, 1.0_f64,
+                          1.0_f64, 1.0_f64, 1.0_f64];
+        let cdf_e  = vec![0.0_f64, 0.5_f64, 1.0_f64,
+                          0.0_f64, 0.5_f64, 1.0_f64];
+        // One μ bin per (ℓ, j): μ = 0.0. No smearing exercised.
+        let mu_offsets = vec![0_usize, 1, 2, 3, 4, 5];
+        let mu = vec![0.0_f64; 6];
+
+        let n_inc = inc_energy.len();
+        let interp = vec![2_u32; n_inc]; // lin-lin
+        let mu_interp = vec![2_u32; mu_offsets.len()];
+        let pdf_mu = vec![0.5_f64; mu.len()];
+        let cdf_mu = vec![1.0_f64; mu.len()];
+        let c = ContinuousInelastic {
+            n_inc, offsets, interp, e_out, pdf_e, cdf_e,
+            mu_interp, mu_offsets, mu, pdf_mu, cdf_mu,
+        };
+        (inc_energy, c)
+    }
+
+    #[test]
+    fn thermal_sample_continuous_stays_positive_and_bounded() {
+        let (inc_energy, c) = build_minimal_continuous_inelastic();
+        let mut rng = Rng::new(2026, 42);
+        for _ in 0..500 {
+            let e_in = 1.0 + rng.uniform();
+            let (e_out, mu) = sample_continuous_inelastic(e_in, &inc_energy, &c, &mut rng);
+            assert!(e_out >= 0.0, "E_out must be non-negative, got {e_out}");
+            // Hard upper bound: the larger of the two branches' outputs,
+            // roughly E_in + (largest tabulated E_hat) ≈ 2 + 1.8 = 3.8.
+            assert!(e_out < 5.0, "E_out runaway: {e_out} at E_in={e_in}");
+            assert!((-1.0..=1.0).contains(&mu));
+        }
+    }
+
+    #[test]
+    fn thermal_sample_at_table_energy_is_near_tabulated_eout() {
+        // When E_in exactly equals a table's incident energy, both
+        // branches of the piecewise remap collapse to identity:
+        // low branch: e_hat * (2*E_in/E_l - 1) = e_hat * 1 = e_hat
+        // high branch: e_hat + E_in - E_l = e_hat
+        // → returned E_out must equal sampled e_hat.
+        let (inc_energy, c) = build_minimal_continuous_inelastic();
+        let mut rng = Rng::new(2027, 1);
+        let trials = 2000;
+        let mut sum_in_table_range = 0;
+        for _ in 0..trials {
+            let (e_out, _) = sample_continuous_inelastic(1.0, &inc_energy, &c, &mut rng);
+            // Table-1 e_out range is [0.1, 0.9]; allow for either table pick.
+            if (0.1..=1.8).contains(&e_out) {
+                sum_in_table_range += 1;
+            }
+        }
+        // At E_in = E_lo = 1.0 (f=0 so statistical pick always chooses lo
+        // once xi > 0 ≈ always), e_out should fall inside tabulated
+        // range. Allow a few outliers from boundary numerics.
+        assert!(sum_in_table_range > (trials * 95) / 100,
+                "only {sum_in_table_range}/{trials} within tabulated range");
     }
 }

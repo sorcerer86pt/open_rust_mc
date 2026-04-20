@@ -1,0 +1,98 @@
+Carlo Neutron Transport\\
+\large An implementation-led benchmark with positive, mixed,
+and negative results}
+
+\author{F.~Rodrigues}
+\date{\today}
+\maketitle
+
+\begin{abstract}
+Continuous-energy Monte Carlo transport codes spend a large
+fraction of wall-clock time looking up microscopic cross
+sections in pointwise tables indexed by energy and temperature.
+We set out to test whether a truncated singular value
+decomposition (SVD) of $\log_{10} \sigma(E, T)$ is a
+defensible alternative to the pointwise table, and whether a
+hybrid that couples SVD with Windowed Multipole (WMP) over the
+resolved resonance region offers a compelling
+memory--throughput profile. We built a pure-Rust transport
+engine that implements a pointwise-table provider, an SVD
+provider, and a WMP+SVD hybrid provider behind the same
+interface, validated the engine against OpenMC~$0.15.3$
+(closing an initial $127$~pcm offset to $-1$~pcm after tracing
+four transport-level bugs), and measured the representations
+head-to-head on a $9$-nuclide thermal PWR pin cell and on the
+Godiva fast benchmark. The findings are a mixture of
+positive, mixed, and negative, and we report them plainly.
+
+\textbf{Positive.}
+(i)~The singular spectrum of ENDF/B-VII.1 $\log\sigma$
+matrices decays rapidly. $43$ of $47$ non-redundant $^{235}$U
+reaction channels are rank-one to machine precision.
+Rank-$6$ reconstructs the full energy grid at machine precision
+at $44$~ns per lookup against $91$~ns for a binary-search
+pointwise table (kernel-level $2.0\times$).
+(ii)~In-engine, SVD rank-$5$ agrees with the same engine's
+pointwise table to $6$--$47$~pcm on PWR pin cell $k_\infty$
+across two hardware tiers; both agree with OpenMC within one
+$\mathrm{SEM}$ at desktop ten-seed statistics.
+(iii)~End-to-end CPU SVD rank-$5$ runs $1.18\times$--$1.90\times$
+faster than the in-engine pointwise table, hardware-dependent.
+
+\textbf{Mixed.}
+(iv)~The trade-off on GPU is opposite. GPU pointwise is
+$1.30\times$ \emph{faster} than GPU SVD rank-$5$ on PWR pin
+cell because four clad nuclides lack an MT$=4$ block and
+their total inelastic must be synthesised from $13$
+discrete-level SVD kernels per lookup. SVD is a CPU win on
+this geometry and a GPU draw-to-loss.
+(v)~The hybrid SVD+WMP provider reproduces $k_\infty$ to
+$86$~pcm of its own SVD baseline, but runs $2.06\times$
+slower than CPU SVD because the Humlicek W4 Faddeeva
+evaluation is $\sim\!15\times$ more expensive per lookup than
+the SVD FMA. WMP buys memory (see next point) at the cost of
+throughput.
+
+\textbf{Negative.}
+(vi)~The WMP representation packs the resolved-resonance data
+of our nine nuclides into $1.37$~MB against $177.7$~MB for a
+hypothetical four-channel ($\sigma_\text{el}, \sigma_\text{t},
+\sigma_\text{f}, \sigma_\text{cap}$), six-temperature
+pointwise table on the same nuclide set ($132.9\times$). That
+is a density ratio between two data layouts, not the memory
+reduction an actual Monte Carlo engine sees. Our engine
+carries SVD kernels for the discrete inelastic levels
+($41$ per U nuclide, $10$--$13$ per Zr), for total inelastic,
+for $(n,2n)$ and $(n,3n)$, and for the URR residue total;
+none of these are covered by the public MIT WMP library. The
+measured in-engine reduction from hybrid over full-SVD is
+$1.06\times$; in absolute terms the hybrid engine carries
+$5\times$ \emph{more} memory than the pointwise-table
+baseline. The two numbers are both real; they measure
+different things, and the engine-scale one is the one that
+matters for a reader who plans to build a transport solver.
+
+\textbf{Scope.}
+Measurements are for a nine-nuclide thermal pin cell and a
+three-nuclide fast sphere, both on consumer desktop and
+laptop hardware. Full-core behaviour
+($\gtrsim\!200$ nuclides, minor actinides, fission products,
+multiple S($\alpha$,$\beta$) libraries) is not evaluated here,
+and the compression gap on engine-level memory would widen or
+shrink with the reaction-channel mix there. We report the
+measurements we made and flag what they do not cover.
+
+The $132.9\times$ representation-byte ratio and the
+$1.06\times$ engine-level reduction are both measured,
+both reproducible, and measure different things; we make
+that distinction explicit throughout the paper so a reader
+who plans to build a transport engine on top of this work
+can calibrate expectations.
+\end{abstract}
+
+\noindent\textbf{Keywords:} Monte Carlo, cross-section
+compression, singular value decomposition, windowed multipole,
+nuclear data, GPU transport, benchmark, trade-offs.
+
+\tableofcontents
+

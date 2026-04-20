@@ -375,12 +375,14 @@ fn process_standard_collision<XS: XsProvider>(
     let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
     let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
     let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+    let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
 
     let inelastic_data = if !level_info.is_empty() {
         Some(InelasticData {
             levels: &level_info,
             level_xs: &level_xs,
             has_continuum: has_cont,
+            level_angles,
         })
     } else {
         None

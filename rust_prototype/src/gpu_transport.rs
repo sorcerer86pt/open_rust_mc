@@ -12,7 +12,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 73;
+const N_PARAMS: usize = 97;
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -71,6 +71,15 @@ pub struct GpuNuclideData {
     pub level_coeffs_offsets: CudaSlice<i32>, // per-level offset into level_coeffs
     pub level_has_kernel: CudaSlice<i32>,     // per-level: 1 if kernel exists, 0 if not
     pub level_mt: CudaSlice<i32>,             // per-level: MT number (51-91)
+    // Per-discrete-level CM-frame angular distributions (ENDF MT=51-91).
+    // Indexed by global level index (same space as level_q_values).
+    pub lev_ang_energies: CudaSlice<f64>,     // flat: incident-energy grid per level
+    pub lev_ang_mu: CudaSlice<f64>,           // flat: cosine values
+    pub lev_ang_cdf: CudaSlice<f64>,          // flat: CDF values
+    pub lev_ang_dist_off: CudaSlice<i32>,     // per (global_level, energy_idx) → offset
+    pub lev_ang_dist_sz: CudaSlice<i32>,      // per (global_level, energy_idx) → size
+    pub lev_ang_lev_off: CudaSlice<i32>,      // per global level → offset into lev_ang_energies
+    pub lev_ang_lev_ne: CudaSlice<i32>,       // per global level → number of incident energies
     // Anisotropic elastic scattering angular distributions
     pub ang_energies: CudaSlice<f64>,         // flat: energy grids for angular dist
     pub ang_mu: CudaSlice<f64>,               // flat: cosine values
@@ -127,6 +136,30 @@ pub struct GpuMaterialData {
     pub nu_bar_const: CudaSlice<f64>,
 }
 
+/// Windowed-Multipole data on GPU, keyed by nuclide index. Empty (all
+/// `has[i] = 0`) for the SVD-only path; populated for `--mode hybrid`.
+/// The kernel reads poles as `double2` (16-byte aligned) via pointer cast
+/// over the raw f64 storage; `pole_offsets[i]` is in complex units.
+pub struct GpuWmpData {
+    pub has: CudaSlice<i32>,              // [n_nuc]
+    pub e_min: CudaSlice<f64>,            // [n_nuc]
+    pub e_max: CudaSlice<f64>,            // [n_nuc]
+    pub spacing: CudaSlice<f64>,          // [n_nuc]
+    pub sqrt_awr: CudaSlice<f64>,         // [n_nuc]
+    pub t_kelvin: CudaSlice<f64>,         // [n_nuc]
+    pub fit_order: CudaSlice<i32>,        // [n_nuc]
+    pub n_windows: CudaSlice<i32>,        // [n_nuc]
+    pub fissionable: CudaSlice<i32>,      // [n_nuc]
+    pub poles: CudaSlice<f64>,            // flat f64 (re/im pairs), read as double2
+    pub pole_offsets: CudaSlice<i32>,     // [n_nuc], offsets in complex units
+    pub windows: CudaSlice<i32>,          // flat (n_windows * 2) per nuclide
+    pub window_offsets: CudaSlice<i32>,   // [n_nuc]
+    pub broaden: CudaSlice<i8>,           // flat n_windows per nuclide
+    pub broaden_offsets: CudaSlice<i32>,  // [n_nuc]
+    pub curvefit: CudaSlice<f64>,         // flat n_windows*(fit_order+1)*3 per nuclide
+    pub curvefit_offsets: CudaSlice<i32>, // [n_nuc]
+}
+
 /// Result of debug trace on GPU.
 pub struct GpuTraceResult {
     pub data: Vec<f64>,       // [n_particles * max_steps * TRACE_COLS]
@@ -150,7 +183,22 @@ impl GpuTransportContext {
     /// Compile all CUDA kernels and initialize GPU context.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let ctx = CudaContext::new(0)?;
-        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        // Tune nvrtc/ptxas for our target hardware (Ampere: RTX 3080,
+        // RTX A1000 laptop — both sm_86). Verbose ptxas output
+        // (`--ptxas-options=-v -warn-spills`) surfaces register usage
+        // and spills during JIT for occupancy tuning per NVIDIA BPG §10.2.
+        // If cudarc returns a compile error the log is attached; on
+        // success the driver may still print to stderr if
+        // `CUDA_CACHE_DISABLE=1` + `CUDA_CACHE_LOG=1` are set.
+        let opts = nvrtc::CompileOptions {
+            arch: Some("sm_86"),
+            options: vec![
+                "--ptxas-options=-v".to_string(),
+                "-Xptxas".to_string(), "-warn-spills".to_string(),
+            ],
+            ..Default::default()
+        };
+        let ptx = nvrtc::compile_ptx_with_opts(TRANSPORT_KERNELS, opts)?;
         let module = ctx.load_module(ptx)?;
 
         let k_init_source = module.load_function("init_source")?;
@@ -198,7 +246,7 @@ impl GpuTransportContext {
                 ptr
             }};
         }
-        let params_vec: Vec<u64> = vec![
+        let mut params_vec: Vec<u64> = vec![
             dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
             dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
             dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
@@ -242,6 +290,11 @@ impl GpuTransportContext {
             dptr!(&nuc_data.pw_offsets),
             dptr!(&nuc_data.has_pw),
         ];
+        // Debug helper only reads the elastic-angular slots; pad the
+        // remaining slots (WMP + per-level angular) with nulls so the
+        // runtime TransportParams layout check passes. These arrays are
+        // not referenced from the `debug_angular_sample` kernel.
+        while params_vec.len() < N_PARAMS { params_vec.push(0_u64); }
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
 
@@ -290,7 +343,7 @@ impl GpuTransportContext {
         macro_rules! dptr {
             ($slice:expr) => {{ let (ptr, _guard) = $slice.device_ptr(&self.stream); ptr }};
         }
-        let params_vec: Vec<u64> = vec![
+        let mut params_vec: Vec<u64> = vec![
             dptr!(&nuc_data.all_basis), dptr!(&nuc_data.all_coeffs),
             dptr!(&nuc_data.all_energy_grids), dptr!(&nuc_data.basis_offsets),
             dptr!(&nuc_data.grid_offsets), dptr!(&nuc_data.n_energies),
@@ -334,6 +387,7 @@ impl GpuTransportContext {
             dptr!(&nuc_data.pw_offsets),
             dptr!(&nuc_data.has_pw),
         ];
+        while params_vec.len() < N_PARAMS { params_vec.push(0_u64); }
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
 
@@ -469,10 +523,20 @@ impl GpuTransportContext {
         let mut lev_has_kernel_vec: Vec<i32> = Vec::new();
         let mut lev_mt_vec: Vec<i32> = Vec::new();
 
+        // Per-global-level angular distribution flattening. Indexed by
+        // the same global level index as lev_q_vec etc.
+        let mut lev_ang_e_vec: Vec<f64> = Vec::new();
+        let mut lev_ang_mu_vec: Vec<f64> = Vec::new();
+        let mut lev_ang_cdf_vec: Vec<f64> = Vec::new();
+        let mut lev_ang_doff_vec: Vec<i32> = Vec::new();
+        let mut lev_ang_dsz_vec: Vec<i32> = Vec::new();
+        let mut lev_ang_loff_vec: Vec<i32> = Vec::new();
+        let mut lev_ang_lne_vec: Vec<i32> = Vec::new();
+
         for (nuc_idx, nuc) in nuclides.iter().enumerate() {
             lev_off_vec[nuc_idx] = lev_q_vec.len() as i32;
             lev_cnt_vec[nuc_idx] = nuc.discrete_levels.len() as i32;
-            for lev in &nuc.discrete_levels {
+            for (li, lev) in nuc.discrete_levels.iter().enumerate() {
                 lev_q_vec.push(lev.info.q_value);
                 lev_thr_vec.push(lev.info.threshold);
                 lev_mt_vec.push(lev.info.mt as i32);
@@ -487,14 +551,40 @@ impl GpuTransportContext {
                     lev_basis_off_vec.push(0);
                     lev_coeffs_off_vec.push(0);
                 }
+                // Per-level angular dist: optional slice aligned with
+                // discrete_levels. Missing → mark as 0 energies so the
+                // GPU device fn returns isotropic μ_cm.
+                let ang = nuc.discrete_level_angles.get(li).and_then(|o| o.as_ref());
+                match ang {
+                    Some(ad) if !ad.energies.is_empty() => {
+                        lev_ang_loff_vec.push(lev_ang_e_vec.len() as i32);
+                        lev_ang_lne_vec.push(ad.energies.len() as i32);
+                        for (ei, e) in ad.energies.iter().enumerate() {
+                            lev_ang_e_vec.push(*e);
+                            let dist = &ad.distributions[ei];
+                            lev_ang_doff_vec.push(lev_ang_mu_vec.len() as i32);
+                            lev_ang_dsz_vec.push(dist.mu.len() as i32);
+                            lev_ang_mu_vec.extend_from_slice(&dist.mu);
+                            lev_ang_cdf_vec.extend_from_slice(&dist.cdf);
+                        }
+                    }
+                    _ => {
+                        lev_ang_loff_vec.push(0);
+                        lev_ang_lne_vec.push(0);
+                    }
+                }
             }
         }
         if lev_q_vec.is_empty() {
             lev_q_vec.push(0.0); lev_thr_vec.push(0.0); lev_mt_vec.push(0);
             lev_has_kernel_vec.push(0); lev_basis_off_vec.push(0); lev_coeffs_off_vec.push(0);
+            lev_ang_loff_vec.push(0); lev_ang_lne_vec.push(0);
         }
         if lev_basis_vec.is_empty() { lev_basis_vec.push(0.0); }
         if lev_coeffs_vec.is_empty() { lev_coeffs_vec.push(0.0); }
+        if lev_ang_e_vec.is_empty() { lev_ang_e_vec.push(0.0); }
+        if lev_ang_mu_vec.is_empty() { lev_ang_mu_vec.push(0.0); lev_ang_cdf_vec.push(0.0); }
+        if lev_ang_doff_vec.is_empty() { lev_ang_doff_vec.push(0); lev_ang_dsz_vec.push(0); }
 
         let n_total_levels: usize = lev_cnt_vec.iter().map(|&c| c as usize).sum();
         println!("  GPU: {} discrete levels, {:.1} MB level basis",
@@ -640,6 +730,13 @@ impl GpuTransportContext {
             level_coeffs_offsets: self.stream.clone_htod(&lev_coeffs_off_vec)?,
             level_has_kernel: self.stream.clone_htod(&lev_has_kernel_vec)?,
             level_mt: self.stream.clone_htod(&lev_mt_vec)?,
+            lev_ang_energies: self.stream.clone_htod(&lev_ang_e_vec)?,
+            lev_ang_mu: self.stream.clone_htod(&lev_ang_mu_vec)?,
+            lev_ang_cdf: self.stream.clone_htod(&lev_ang_cdf_vec)?,
+            lev_ang_dist_off: self.stream.clone_htod(&lev_ang_doff_vec)?,
+            lev_ang_dist_sz: self.stream.clone_htod(&lev_ang_dsz_vec)?,
+            lev_ang_lev_off: self.stream.clone_htod(&lev_ang_loff_vec)?,
+            lev_ang_lev_ne: self.stream.clone_htod(&lev_ang_lne_vec)?,
             ang_energies: self.stream.clone_htod(&ang_e_vec)?,
             ang_mu: self.stream.clone_htod(&ang_mu_vec)?,
             ang_cdf: self.stream.clone_htod(&ang_cdf_vec)?,
@@ -801,6 +898,106 @@ impl GpuTransportContext {
         })
     }
 
+    /// Upload per-nuclide Windowed-Multipole data to the GPU. `wmps[i] = None`
+    /// means nuclide `i` stays on the SVD/pointwise path in the transport
+    /// kernel (parallels `HybridSvdWmpXsProvider` on the CPU).
+    pub fn upload_wmp_data(
+        &self,
+        wmps: &[Option<(Arc<crate::wmp::WindowedMultipole>, f64)>],
+    ) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
+        let n_nuc = wmps.len().max(1);
+        let mut has_vec = vec![0_i32; n_nuc];
+        let mut e_min_vec = vec![0.0_f64; n_nuc];
+        let mut e_max_vec = vec![0.0_f64; n_nuc];
+        let mut spacing_vec = vec![0.0_f64; n_nuc];
+        let mut sqrt_awr_vec = vec![0.0_f64; n_nuc];
+        let mut t_kelvin_vec = vec![0.0_f64; n_nuc];
+        let mut fit_order_vec = vec![0_i32; n_nuc];
+        let mut n_windows_vec = vec![0_i32; n_nuc];
+        let mut fissionable_vec = vec![0_i32; n_nuc];
+
+        let mut poles_vec: Vec<f64> = Vec::new();
+        let mut pole_off_vec = vec![0_i32; n_nuc];
+        let mut windows_vec: Vec<i32> = Vec::new();
+        let mut win_off_vec = vec![0_i32; n_nuc];
+        let mut broaden_vec: Vec<i8> = Vec::new();
+        let mut bro_off_vec = vec![0_i32; n_nuc];
+        let mut curvefit_vec: Vec<f64> = Vec::new();
+        let mut cf_off_vec = vec![0_i32; n_nuc];
+
+        let mut covered = 0usize;
+        for (i, wmp_opt) in wmps.iter().enumerate() {
+            if let Some((wmp, t_k)) = wmp_opt {
+                has_vec[i] = 1;
+                e_min_vec[i] = wmp.e_min;
+                e_max_vec[i] = wmp.e_max;
+                spacing_vec[i] = wmp.spacing;
+                sqrt_awr_vec[i] = wmp.sqrt_awr;
+                t_kelvin_vec[i] = *t_k;
+                fit_order_vec[i] = wmp.fit_order as i32;
+                n_windows_vec[i] = wmp.n_windows as i32;
+                fissionable_vec[i] = if wmp.fissionable { 1 } else { 0 };
+
+                // Poles: flattened to (re, im) pairs; offset in complex units
+                // so `double2*` pointer arithmetic in the kernel is straight.
+                pole_off_vec[i] = (poles_vec.len() / 2) as i32;
+                for c in &wmp.poles {
+                    poles_vec.push(c.re);
+                    poles_vec.push(c.im);
+                }
+
+                win_off_vec[i] = windows_vec.len() as i32;
+                windows_vec.extend_from_slice(&wmp.windows);
+
+                bro_off_vec[i] = broaden_vec.len() as i32;
+                broaden_vec.extend(wmp.broaden_poly.iter().map(|&b| b as i8));
+
+                cf_off_vec[i] = curvefit_vec.len() as i32;
+                curvefit_vec.extend_from_slice(&wmp.curvefit);
+
+                covered += 1;
+            }
+        }
+
+        // Keep all device buffers non-empty so device pointers are valid.
+        if poles_vec.is_empty() { poles_vec.extend_from_slice(&[0.0_f64, 0.0_f64]); }
+        if windows_vec.is_empty() { windows_vec.push(0); windows_vec.push(0); }
+        if broaden_vec.is_empty() { broaden_vec.push(0); }
+        if curvefit_vec.is_empty() { curvefit_vec.push(0.0); }
+
+        println!("  GPU: WMP payload = {:.1} KB ({} / {} nuclides covered)",
+            (poles_vec.len() * 8 + windows_vec.len() * 4
+             + broaden_vec.len() + curvefit_vec.len() * 8) as f64 / 1024.0,
+            covered, wmps.len());
+
+        Ok(GpuWmpData {
+            has: self.stream.clone_htod(&has_vec)?,
+            e_min: self.stream.clone_htod(&e_min_vec)?,
+            e_max: self.stream.clone_htod(&e_max_vec)?,
+            spacing: self.stream.clone_htod(&spacing_vec)?,
+            sqrt_awr: self.stream.clone_htod(&sqrt_awr_vec)?,
+            t_kelvin: self.stream.clone_htod(&t_kelvin_vec)?,
+            fit_order: self.stream.clone_htod(&fit_order_vec)?,
+            n_windows: self.stream.clone_htod(&n_windows_vec)?,
+            fissionable: self.stream.clone_htod(&fissionable_vec)?,
+            poles: self.stream.clone_htod(&poles_vec)?,
+            pole_offsets: self.stream.clone_htod(&pole_off_vec)?,
+            windows: self.stream.clone_htod(&windows_vec)?,
+            window_offsets: self.stream.clone_htod(&win_off_vec)?,
+            broaden: self.stream.clone_htod(&broaden_vec)?,
+            broaden_offsets: self.stream.clone_htod(&bro_off_vec)?,
+            curvefit: self.stream.clone_htod(&curvefit_vec)?,
+            curvefit_offsets: self.stream.clone_htod(&cf_off_vec)?,
+        })
+    }
+
+    /// Create an empty WMP placeholder (no nuclide covered). Used by the
+    /// SVD-only and pointwise paths to keep the kernel ABI uniform.
+    pub fn upload_wmp_data_empty(&self, n_nuc: usize) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
+        let wmps: Vec<Option<(Arc<crate::wmp::WindowedMultipole>, f64)>> = (0..n_nuc).map(|_| None).collect();
+        self.upload_wmp_data(&wmps)
+    }
+
     /// Run one batch of transport on GPU.
     ///
     /// geom_type: 0=PWR pin cell, 1=Godiva bare sphere.
@@ -811,6 +1008,7 @@ impl GpuTransportContext {
         nuc_data: &GpuNuclideData,
         mat_data: &GpuMaterialData,
         sab_data: &GpuSabData,
+        wmp_data: &GpuWmpData,
         max_steps: u32,
         geom_type: i32,
     ) -> Result<GpuBatchResult, Box<dyn std::error::Error>> {
@@ -966,6 +1164,30 @@ impl GpuTransportContext {
             dptr!(&nuc_data.pointwise_xs),             // 70 P_PW_XS
             dptr!(&nuc_data.pw_offsets),               // 71 P_PW_OFF
             dptr!(&nuc_data.has_pw),                   // 72 P_HAS_PW
+            dptr!(&wmp_data.has),                      // 73 P_WMP_HAS
+            dptr!(&wmp_data.e_min),                    // 74 P_WMP_E_MIN
+            dptr!(&wmp_data.e_max),                    // 75 P_WMP_E_MAX
+            dptr!(&wmp_data.spacing),                  // 76 P_WMP_SPACING
+            dptr!(&wmp_data.sqrt_awr),                 // 77 P_WMP_SQRT_AWR
+            dptr!(&wmp_data.t_kelvin),                 // 78 P_WMP_T_KELVIN
+            dptr!(&wmp_data.fit_order),                // 79 P_WMP_FIT_ORDER
+            dptr!(&wmp_data.n_windows),                // 80 P_WMP_N_WINDOWS
+            dptr!(&wmp_data.fissionable),              // 81 P_WMP_FISSIONABLE
+            dptr!(&wmp_data.poles),                    // 82 P_WMP_POLES
+            dptr!(&wmp_data.pole_offsets),             // 83 P_WMP_POLE_OFF
+            dptr!(&wmp_data.windows),                  // 84 P_WMP_WINDOWS
+            dptr!(&wmp_data.window_offsets),           // 85 P_WMP_WIN_OFF
+            dptr!(&wmp_data.broaden),                  // 86 P_WMP_BROADEN
+            dptr!(&wmp_data.broaden_offsets),          // 87 P_WMP_BROADEN_OFF
+            dptr!(&wmp_data.curvefit),                 // 88 P_WMP_CURVEFIT
+            dptr!(&wmp_data.curvefit_offsets),         // 89 P_WMP_CF_OFF
+            dptr!(&nuc_data.lev_ang_energies),         // 90 P_LEV_ANG_ENERGIES
+            dptr!(&nuc_data.lev_ang_mu),               // 91 P_LEV_ANG_MU
+            dptr!(&nuc_data.lev_ang_cdf),              // 92 P_LEV_ANG_CDF
+            dptr!(&nuc_data.lev_ang_dist_off),         // 93 P_LEV_ANG_DIST_OFF
+            dptr!(&nuc_data.lev_ang_dist_sz),          // 94 P_LEV_ANG_DIST_SZ
+            dptr!(&nuc_data.lev_ang_lev_off),          // 95 P_LEV_ANG_LEV_OFF
+            dptr!(&nuc_data.lev_ang_lev_ne),           // 96 P_LEV_ANG_LEV_NE
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -1098,6 +1320,7 @@ impl GpuTransportContext {
         nuc_data: &GpuNuclideData,
         mat_data: &GpuMaterialData,
         sab_data: &GpuSabData,
+        wmp_data: &GpuWmpData,
         max_steps: u32,
         geom_type: i32,
     ) -> Result<GpuTraceResult, Box<dyn std::error::Error>> {
@@ -1209,6 +1432,30 @@ impl GpuTransportContext {
             dptr!(&nuc_data.pointwise_xs),
             dptr!(&nuc_data.pw_offsets),
             dptr!(&nuc_data.has_pw),
+            dptr!(&wmp_data.has),
+            dptr!(&wmp_data.e_min),
+            dptr!(&wmp_data.e_max),
+            dptr!(&wmp_data.spacing),
+            dptr!(&wmp_data.sqrt_awr),
+            dptr!(&wmp_data.t_kelvin),
+            dptr!(&wmp_data.fit_order),
+            dptr!(&wmp_data.n_windows),
+            dptr!(&wmp_data.fissionable),
+            dptr!(&wmp_data.poles),
+            dptr!(&wmp_data.pole_offsets),
+            dptr!(&wmp_data.windows),
+            dptr!(&wmp_data.window_offsets),
+            dptr!(&wmp_data.broaden),
+            dptr!(&wmp_data.broaden_offsets),
+            dptr!(&wmp_data.curvefit),
+            dptr!(&wmp_data.curvefit_offsets),
+            dptr!(&nuc_data.lev_ang_energies),
+            dptr!(&nuc_data.lev_ang_mu),
+            dptr!(&nuc_data.lev_ang_cdf),
+            dptr!(&nuc_data.lev_ang_dist_off),
+            dptr!(&nuc_data.lev_ang_dist_sz),
+            dptr!(&nuc_data.lev_ang_lev_off),
+            dptr!(&nuc_data.lev_ang_lev_ne),
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;

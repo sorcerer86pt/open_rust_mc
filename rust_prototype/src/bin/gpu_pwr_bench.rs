@@ -23,12 +23,17 @@ fn main() {
 mod cuda_main {
     use std::io::Write;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Instant;
 
     use clap::Parser;
 
-    use open_rust_mc::gpu_transport::{GpuTransportContext, GpuNuclideData, GpuMaterialData, GpuSabData};
+    use open_rust_mc::gpu_transport::{GpuTransportContext, GpuNuclideData, GpuMaterialData, GpuSabData, GpuWmpData};
     use open_rust_mc::transport::xs_provider;
+    use open_rust_mc::wmp::WindowedMultipole;
+
+    #[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+    enum GpuMode { Svd, Hybrid }
 
     #[derive(Parser)]
     #[command(name = "gpu_pwr_bench", about = "GPU event-based PWR pin cell benchmark")]
@@ -55,7 +60,31 @@ mod cuda_main {
         /// and `--rank` only affects discrete inelastic levels.
         #[arg(long, default_value_t = false)]
         force_svd: bool,
+        /// XS provider mode. `svd` = pure SVD/pointwise; `hybrid` = SVD +
+        /// Windowed-Multipole in the RRR window for nuclides that have WMP data.
+        #[arg(short, long, value_enum, default_value_t = GpuMode::Svd)]
+        mode: GpuMode,
     }
+
+    /// WMP filename + target temperature per nuclide, parallel to PWR_NUCLIDES.
+    /// None entries (empty string) keep the SVD/pointwise path.
+    const PWR_WMP_SPECS: &[(&str, f64)] = &[
+        ("092235.h5", 900.0),  // 0  U235 fuel
+        ("092238.h5", 900.0),  // 1  U238 fuel
+        ("008016.h5", 900.0),  // 2  O16 fuel
+        ("001001.h5", 600.0),  // 3  H1 water
+        ("040090.h5", 600.0),  // 4  Zr90 clad
+        ("040091.h5", 600.0),  // 5  Zr91 clad
+        ("040092.h5", 600.0),  // 6  Zr92 clad
+        ("040094.h5", 600.0),  // 7  Zr94 clad
+        ("008016.h5", 600.0),  // 8  O16 water
+    ];
+
+    const GODIVA_WMP_SPECS: &[(&str, f64)] = &[
+        ("092234.h5", 294.0),
+        ("092235.h5", 294.0),
+        ("092238.h5", 294.0),
+    ];
 
     const PWR_NUCLIDES: &[(&str, f64, f64, usize)] = &[
         ("U235.h5", 233.025, 2.43, 3),  // 0  fuel: 900K
@@ -180,6 +209,7 @@ mod cuda_main {
         nuc_data: &GpuNuclideData,
         mat_data: &GpuMaterialData,
         sab_data: &GpuSabData,
+        wmp_data: &GpuWmpData,
         label: &str,
         n: usize,
         batches: u32,
@@ -207,7 +237,7 @@ mod cuda_main {
             for batch in 1..=batches {
                 let batch_id = batch + seed * batches;
                 let result = gpu.run_batch(
-                    &source_bank, batch_id, nuc_data, mat_data, sab_data, 1_000_000, geom_type
+                    &source_bank, batch_id, nuc_data, mat_data, sab_data, wmp_data, 1_000_000, geom_type
                 ).expect("GPU batch failed");
 
                 if seeds == 1 {
@@ -333,12 +363,49 @@ mod cuda_main {
             gpu.upload_sab_data_empty().expect("empty S(a,b)")
         };
 
+        // ── Load Windowed-Multipole data when --mode hybrid ──
+        let wmp_data = match args.mode {
+            GpuMode::Svd => gpu.upload_wmp_data_empty(nuclide_specs.len())
+                .expect("upload empty WMP"),
+            GpuMode::Hybrid => {
+                let wmp_dir = args.data_dir.parent().map(|p| p.join("wmp"))
+                    .unwrap_or_else(|| args.data_dir.join("..").join("wmp"));
+                let wmp_specs: &[(&str, f64)] = if is_godiva { GODIVA_WMP_SPECS } else { PWR_WMP_SPECS };
+                let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> = Vec::with_capacity(wmp_specs.len());
+                let mut covered = 0usize;
+                for &(wmp_file, t_kelvin) in wmp_specs {
+                    let path = wmp_dir.join(wmp_file);
+                    if !path.exists() {
+                        println!("  WMP not found: {}", path.display());
+                        wmps.push(None);
+                        continue;
+                    }
+                    match WindowedMultipole::from_hdf5(&path) {
+                        Ok(wmp) => {
+                            println!("  Loaded WMP {wmp_file} at T={t_kelvin} K   \
+                                (E {:.2e}..{:.2e} eV, {} poles, {} windows)",
+                                wmp.e_min, wmp.e_max, wmp.n_poles, wmp.n_windows);
+                            covered += 1;
+                            wmps.push(Some((Arc::new(wmp), t_kelvin)));
+                        }
+                        Err(e) => {
+                            println!("  WMP load failed for {wmp_file}: {e:?}");
+                            wmps.push(None);
+                        }
+                    }
+                }
+                println!("  Hybrid: {covered} / {} nuclides covered by WMP", wmp_specs.len());
+                gpu.upload_wmp_data(&wmps).expect("upload WMP")
+            }
+        };
+
         let gpu_init_ms = t_gpu.elapsed().as_secs_f64() * 1000.0;
         println!("  GPU ready in {gpu_init_ms:.0} ms");
 
         // ── Run benchmark ──
-        let mut r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data,
-                                   &format!("GPU SVD {geom_label}"), n,
+        let mode_label = match args.mode { GpuMode::Svd => "SVD", GpuMode::Hybrid => "Hybrid SVD+WMP" };
+        let mut r = run_gpu_seeds(&gpu, &nuc_data, &mat_data, &sab_data, &wmp_data,
+                                   &format!("GPU {mode_label} {geom_label}"), n,
                                    args.batches, inactive, args.seeds, geom_type);
         r.load_ms = load_ms + gpu_init_ms;
 

@@ -1,0 +1,741 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue]{hyperref}
+\usepackage{siunitx}
+\usepackage[margin=2.3cm]{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  xleftmargin=1em,
+  frame=single,
+  framerule=0.3pt,
+  framesep=3pt,
+}
+
+\title{Computational Physics Bill of Materials\\
+\large open\_rust\_mc: equations, invocation conditions, and edge cases}
+\author{F.~Rodrigues}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document enumerates every mathematical operation executed by the
+\texttt{open\_rust\_mc} neutron transport engine on the hot path:
+the governing equation, the condition that triggers its use, and the
+numerical guards and physical edge cases that the implementation
+handles. It is intended as a companion to the main paper and as a
+reference for reviewers verifying physics parity with OpenMC. All
+file and line references point at
+\texttt{rust\_prototype/src/} unless otherwise noted; CUDA kernel
+references point at \texttt{rust\_prototype/gpu/cuda/transport.cu}.
+\end{abstract}
+
+\tableofcontents
+
+%% ============================================================
+\section{Conventions and units}
+
+Energies are in electron-volts unless noted. Cross sections are in
+barns ($10^{-24}$~cm$^2$). Temperatures are carried as $kT$ in eV
+on the hot path (avoids multiplying by Boltzmann's constant inside
+the kernel). $A$ denotes the atomic weight ratio (AWR) of the target
+to the neutron, read from the HDF5 \texttt{atomic\_weight\_ratio}
+attribute. The neutron mass $m_n$ does not appear explicitly:
+all kinematics are expressed in neutron-mass units so that
+$E = \tfrac{1}{2} v^2$ with $v$ in $\sqrt{\mathrm{eV}/m_n}$.
+Angular cosines $\mu = \cos\theta$ are always in $[-1, 1]$ and are
+clamped to that interval after any floating-point operation that
+could overshoot.
+
+All sampling routines take a reference to a \texttt{Rng} drawing
+from a PCG-64 stream (\S\ref{sec:rng}). \texttt{rng.uniform()}
+returns a pseudo-random $\xi \in [0, 1)$.
+
+%% ============================================================
+\section{Cross-section representation}
+
+The engine supports two interchangeable cross-section providers,
+selected at runtime. Both implement the same \texttt{XsProvider}
+trait and return a \texttt{MicroXs} struct holding the six
+reaction channels plus total.
+
+\subsection{Pointwise table (OpenMC-compatible baseline)}
+
+For each nuclide and library temperature, OpenMC stores
+$\sigma(E_i, T_j)$ on a union energy grid
+$\{E_i\}_{i=0}^{N_E - 1}$. For a query energy $E$ with
+$E_i \leq E < E_{i+1}$:
+\begin{equation}
+\sigma(E) = \sigma_i \left(\sigma_{i+1}/\sigma_i\right)^{f}, \qquad
+f = \frac{\ln(E/E_i)}{\ln(E_{i+1}/E_i)}.
+\label{eq:loglog}
+\end{equation}
+\textbf{Guards} (\texttt{table.rs:100--112}):
+\begin{itemize}
+  \item $E < E_0 \Rightarrow \sigma(E) = \sigma_0$ (left extrapolation is disabled).
+  \item $E \geq E_{N_E - 1} \Rightarrow \sigma(E) = \sigma_{N_E - 1}$.
+  \item If $\sigma_i \leq 0$ or $\sigma_{i+1} \leq 0$, fall back to
+  linear interpolation:
+  $\sigma(E) = \sigma_i + f_\text{lin} (\sigma_{i+1} - \sigma_i)$
+  with $f_\text{lin} = (E - E_i)/(E_{i+1} - E_i)$.
+  \item Index resolution uses a log-uniform hash with
+  $8192$ bins (Brown 2014), falling back to a bounded binary
+  search for bins with more than $32$ grid points.
+\end{itemize}
+
+\subsection{SVD reconstruction}
+
+For each nuclide, reaction, and the pre-clamped matrix
+$\mathbf{A}_{ij} = \max(\sigma(E_i, T_j), 10^{-30})$, we store
+the truncated SVD of $\mathbf{L} = \log_{10} \mathbf{A}$:
+\begin{equation}
+\mathbf{L} \approx \mathbf{U}_k \boldsymbol{\Sigma}_k \mathbf{V}_k^\top,
+\qquad
+\mathbf{B} := \mathbf{U}_k \boldsymbol{\Sigma}_k.
+\end{equation}
+At a grid point $E_i$ and temperature-weighted coefficient vector
+$\mathbf{c} \in \mathbb{R}^k$:
+\begin{equation}
+\log_{10} \tilde\sigma(E_i, T) = \sum_{\ell = 1}^{k} B_{i\ell}\, c_\ell,
+\qquad
+\tilde\sigma(E_i, T) = 2^{\left(\log_{10}\tilde\sigma\right)\cdot \log_2 10}.
+\label{eq:svd_eval}
+\end{equation}
+Between grid points, log-log interpolation is applied on
+$\log_{10} \tilde\sigma$ directly, yielding one $\mathrm{exp}_2$ call
+per query (\texttt{kernel.rs:87}).
+
+\textbf{Pre-clamp} below $10^{-30}$~barn avoids $-\infty$ in the
+log; zero cross sections (far below reaction threshold) appear as
+$-30$ in the log-matrix and are reconstructed as
+$\tilde\sigma \approx 10^{-30}$, which the collision routines
+treat as identically zero.
+
+\textbf{Hash lookup} for the grid index (\texttt{kernel.rs}): a
+log-uniform $8192$-bin table maps $\log_{10} E$ to the nearest
+grid index in $O(1)$. One binary search per nuclide per collision
+is shared across all reaction channels because reactions of the
+same nuclide share the union energy grid.
+
+\subsection{Temperature interpolation (Ducru kernel)}
+\label{sec:ducru}
+
+Library temperatures $\{T_j\}_{j=0}^{N_T-1}$ are typically
+$\{294, 600, 900, 1200, 2500\}$ K. For target temperature $T$
+different from all $T_j$, the coefficient vector is:
+\begin{equation}
+c_\ell(T) = \sum_{j=0}^{N_T - 1} w_j(T)\, V_{j\ell},
+\qquad
+w_j(T) = \sqrt{\frac{T_j T}{(T_j + T)^2}}
+\prod_{i \neq j}
+\frac{T - T_i}{T + T_i} \cdot \frac{T_j + T_i}{T_j - T_i}.
+\label{eq:ducru}
+\end{equation}
+Equation~(\ref{eq:ducru}) is exact at library temperatures
+(weights are zero except at the matching $j$) and reproduces
+Doppler broadening to $\sim\!0.1\%$ over $300$--$3000$~K.
+
+\textbf{Stochastic alternative} (\texttt{thermal.rs:146}): for
+S($\alpha$,$\beta$) data OpenMC uses a single-random-number
+bracketing interpolation,
+\begin{equation}
+  T_\text{sample} =
+  \begin{cases}
+    T_{j+1}, & \xi < (T - T_j)/(T_{j+1} - T_j) \\
+    T_j, & \text{otherwise},
+  \end{cases}
+\end{equation}
+which we reproduce for bit-level agreement on thermal scattering
+(\S\ref{sec:sab}).
+
+\subsection{Total cross section}
+
+OpenMC's HDF5 layout provides MT$=3$ (total nonelastic) for most
+nuclides. If present, the total is assembled exactly:
+\begin{equation}
+\sigma_t(E) = \sigma_{\mathrm{MT2}}(E) + \sigma_{\mathrm{MT3}}(E).
+\end{equation}
+Otherwise it is synthesised from the leaf reactions stored in
+the HDF5 file (\texttt{hdf5\_reader.rs:402--444}):
+\begin{equation}
+\sigma_t(E) = \sum_{\mathrm{MT} \in \mathcal{L}} \sigma_\mathrm{MT}(E),
+\qquad
+\mathcal{L} \cap \{1, 3, 4, 18, 27, 101\} = \varnothing,
+\end{equation}
+i.e. the sum-MTs are excluded to avoid double-counting. For
+SVD-mode URR lookup, $\sigma_t$ is used directly and the
+capture channel is assigned the residue
+$\sigma_c = \max(0, \sigma_t - \sum_{r \neq c} \sigma_r)$ so that
+charged-particle and first-chance fission channels (MT$=$19, 20,
+21, 103, 107, \ldots), which are not individually represented,
+are absorbed into the capture macroscopic (same convention as
+OpenMC). This is the fix that resolved the
+$+2500$~pcm GPU force-SVD PWR bias.
+
+%% ============================================================
+\section{Reaction channel sampling}
+
+Given a collision nuclide with microscopic cross sections
+$(\sigma_2, \sigma_4, \sigma_{16}, \sigma_{17}, \sigma_{18},
+\sigma_{102})$ for (elastic, inelastic, $(n,2n)$, $(n,3n)$,
+fission, capture), the reaction is sampled by cumulative marching
+(\texttt{collision.rs:74--91}):
+\begin{equation}
+\text{reaction} = \min\left\{r : \sum_{r' \leq r} \sigma_{r'} \geq
+\xi \sigma_t\right\},
+\qquad \xi \sim U[0, 1).
+\end{equation}
+
+\textbf{URR override} (\S\ref{sec:urr}) is applied to
+$(\sigma_2, \sigma_{18}, \sigma_{102})$ before the sampling test
+when $E$ falls inside the URR band of the nuclide.
+
+%% ============================================================
+\section{Elastic scattering}
+
+\subsection{Two-body kinematics (cold target)}
+
+When the neutron energy $E$ exceeds $400 k_B T$, the target is
+treated as stationary (SVM error $< 0.1\%$). Given the CM-frame
+scattering cosine $\mu_\text{cm}$ sampled from the tabulated
+angular distribution (\S\ref{sec:angle}):
+\begin{equation}
+E' = E\left[\frac{1 + \alpha}{2} +
+\frac{(1 - \alpha)\mu_\text{cm}}{2}\right],
+\qquad
+\alpha = \left(\frac{A - 1}{A + 1}\right)^2.
+\end{equation}
+The lab-frame cosine is
+\begin{equation}
+\mu_\text{lab} = \frac{1 + A \mu_\text{cm}}
+{\sqrt{1 + 2 A \mu_\text{cm} + A^2}}.
+\label{eq:mulab_general}
+\end{equation}
+
+\textbf{Hydrogen edge case} ($A \leq 1 + 10^{-10}$,
+\texttt{scatter.rs:30--34}): the denominator in
+\eqref{eq:mulab_general} approaches zero at $\mu_\text{cm} = -1$
+and the expression becomes numerically unstable. We substitute
+the analytic limit:
+\begin{equation}
+\mu_\text{lab} = \sqrt{\max\!\left(\tfrac{1 + \mu_\text{cm}}{2},\, 0\right)}
+\qquad (A = 1).
+\end{equation}
+The $\max(\cdot,0)$ guard protects against $\mu_\text{cm} = -1$
+producing $\sqrt{-\epsilon_\text{machine}}$.
+
+\subsection{Free-gas thermal (warm target)}
+
+When $E < 400 k_B T$, the target velocity $\mathbf{v}_T$ is sampled
+from a Maxwell-Boltzmann distribution with the standard rejection
+scheme of Coveyou--Cashwell--Everett:
+\begin{equation}
+f(v_T) \propto v_T^2 \exp(-\beta^2 v_T^2), \qquad
+\beta = \sqrt{\frac{A}{2 k_B T}}.
+\end{equation}
+The relative velocity $\mathbf{v}_r = \mathbf{v}_n - \mathbf{v}_T$
+and relative energy
+$E_r = \tfrac{1}{2}\mu|\mathbf{v}_r|^2$ with
+$\mu = A/(A+1)$ are computed. The scatter is performed in the CM
+frame of $\mathbf{v}_n + \mathbf{v}_T$ at energy $E_r$ using the
+cold-target formulas, then transformed back (\texttt{scatter.rs:91--160}).
+
+\textbf{Guard:} if $|\mathbf{v}_r| < 10^{-20}$, the neutron and
+target are numerically coincident; return the input $(E, \hat{\Omega})$
+unchanged to avoid division by zero.
+
+\subsection{Angular distribution sampling}
+\label{sec:angle}
+
+Each nuclide carries tabular $(\mu, \mathrm{CDF})$ pairs indexed
+by incident energy $E_k$. For $E$ between two incident-energy
+grid points $E_k$ and $E_{k+1}$, we use correlated CDF sampling
+(\texttt{hdf5\_reader.rs:598--631}):
+\begin{equation}
+\xi \sim U[0,1); \quad
+\mu_k = \mathrm{CDF}^{-1}_k(\xi); \quad
+\mu_{k+1} = \mathrm{CDF}^{-1}_{k+1}(\xi); \quad
+\mu = (1 - f_E)\mu_k + f_E \mu_{k+1},
+\end{equation}
+with $f_E = (E - E_k)/(E_{k+1} - E_k)$. The same $\xi$ is used
+at both grid points; this preserves the distribution shape
+between library energies (otherwise the interpolation would
+mix modes incorrectly). The result is clamped to $[-1, 1]$.
+
+\textbf{Edge case}: if the nuclide has no tabular angular data
+(\texttt{elastic\_angle} field is \texttt{None}), scattering is
+isotropic in CM: $\mu_\text{cm} = 2\xi - 1$.
+
+%% ============================================================
+\section{Inelastic scattering}
+
+\subsection{Discrete levels (MT = 51--90)}
+
+For each level $i$ with excitation energy $|Q_i|$ read from the
+HDF5 attribute, the threshold in the lab frame is
+\begin{equation}
+E_\text{thr}^{(i)} = |Q_i|\,\frac{A + 1}{A}.
+\end{equation}
+Levels with $E \geq E_\text{thr}^{(i)}$ are energetically
+accessible. Their cross sections are summed at the current
+energy, and level $i$ is sampled in proportion
+(\texttt{collision.rs:185--237}):
+\begin{equation}
+P(\text{level } i) = \sigma_i(E)\, \Big/ \sum_j \sigma_j(E).
+\end{equation}
+Two-body kinematics with negative $Q$:
+\begin{equation}
+E_\text{cm}^\text{in} = E\,\frac{A}{A+1},
+\qquad
+E_\text{cm}^\text{out} = E_\text{cm}^\text{in} + Q_i,
+\end{equation}
+then the CM angular sample and a frame transform give
+$(E', \mu_\text{lab})$.
+
+\textbf{Guard} (\texttt{scatter.rs:184--186}): if numerical noise
+in cross-section interpolation puts $E$ just below
+$E_\text{thr}^{(i)}$ but the sampler has already selected level
+$i$, the code falls back to elastic scattering (Q = 0) rather
+than emitting a particle with negative CM energy.
+
+\subsection{Continuum inelastic (MT = 91, evaporation)}
+\label{sec:mt91}
+
+When the HDF5 level enumeration marks MT$=91$ as ``continuum''
+(i.e. the top of the level scheme spills into a continuum above
+the highest resolved level), the outgoing neutron energy is
+sampled from a Weisskopf evaporation spectrum
+(\texttt{collision.rs:217--230}):
+\begin{equation}
+f(E_\text{out}) \propto E_\text{out}\, \exp(-E_\text{out}/T),
+\qquad
+T = \sqrt{E^*/a},\quad
+a = A/8 \ \mathrm{MeV}^{-1},
+\end{equation}
+with excitation energy $E^* = E\, A/(A+1)$ (neglect binding).
+The sample uses the two-uniform product trick:
+$E_\text{out} = -T \ln(\xi_1 \xi_2)$.
+
+\textbf{Clamps}:
+\begin{itemize}
+  \item $E^* \geq 0.1$~MeV: below this the evaporation model is
+  physically meaningless; we use $0.1$~MeV as the excitation
+  floor to avoid $T = 0$.
+  \item $E_\text{out} \leq 0.9\, E^*$: bounds the unphysical
+  high-energy tail of the evaporation PDF in regions where the
+  neutron would otherwise be forbidden by energy conservation.
+\end{itemize}
+
+\subsection{$(n,2n)$, $(n,3n)$}
+
+Both reactions bank extra neutrons onto the fission bank with
+evaporation energies from a crude $T = E/10$ spectrum
+(\texttt{collision.rs:258--261}). Since the reactions are small
+($< 1\%$ of absorption at typical incident energies) their
+sampled outgoing energies have negligible impact on $k_\infty$;
+the reactions matter for multiplicity, not spectrum shape.
+The primary neutron continues as an elastic scatter; the
+$\bar{\nu}$-like contribution is the secondary particles
+($1$ for $n,2n$; $2$ for $n,3n$).
+
+%% ============================================================
+\section{Unresolved resonance region (URR)}
+\label{sec:urr}
+
+Between $\sim\!10$~keV and $\sim\!150$~keV (actinide-dependent),
+resolved resonances overlap so strongly that they must be
+represented statistically. OpenMC stores probability tables
+with $N_b = 20$ bands per energy, giving for each band the
+values (or multiplicative factors) of the elastic, fission, and
+capture cross sections. We sample one band per collision with a
+single uniform $\xi$ applied to the band CDF
+(\texttt{transport/xs\_provider.rs:150--174}):
+\begin{equation}
+b = \min\{b : \sum_{b' \leq b} p_{b'} \geq \xi\}.
+\end{equation}
+The resulting factors $(f_e, f_f, f_c)$ are applied to the smooth
+XS as either multiplicative (\texttt{multiply\_smooth = true} in
+the HDF5 file, the common case for uranium actinides) or
+absolute (\texttt{multiply\_smooth = false}):
+\begin{equation}
+(\sigma_e, \sigma_f, \sigma_c) \leftarrow
+\begin{cases}
+(f_e \sigma_e,\ f_f \sigma_f,\ f_c \sigma_c), & \text{multiply} \\
+(f_e,\ f_f,\ f_c), & \text{absolute}.
+\end{cases}
+\end{equation}
+\textbf{Total recomputation}: after the override, the total is
+rebuilt from partials,
+$\sigma_t = \sigma_e + \sigma_i + \sigma_{2n} + \sigma_{3n}
++ \sigma_f + \sigma_c$, and the reaction sampler
+(\eqref{eq:svd_eval}) uses the rebuilt total. This is critical:
+the GPU force-SVD path originally kept $\sigma_t$ from the
+smooth total and picked up a $+5500$~pcm bias on PWR pin cell
+until the recomputation was added.
+
+\textbf{Out-of-range guard}: outside $[E_\text{URR,min},
+E_\text{URR,max}]$ the override is skipped entirely
+(\texttt{if !urr.in\_range(E) \{ return; \}}).
+
+%% ============================================================
+\section{S($\alpha$,$\beta$) bound thermal scattering}
+\label{sec:sab}
+
+For H in H$_2$O, graphite, beryllium, and similar materials the
+free-atom elastic model is replaced below $E_\text{max} \approx
+3.75$~eV by the tabulated $S(\alpha, \beta)$ data in the
+matching HDF5 file (\texttt{c\_H\_in\_H2O.h5}). The data layout
+has three separable pieces:
+
+\subsection{Inelastic (continuous, iwt = 2)}
+
+For H in H$_2$O this is the dominant mode. Given incident energy
+$E$ and its bracketing grid points $E_k \leq E < E_{k+1}$
+(\texttt{thermal.rs:284--299}):
+\begin{enumerate}
+  \item Sample $\xi_1, \xi_2 \sim U[0,1)$.
+  \item Invert $\text{CDF}(E_\text{out}|E_k)$ at $\xi_1$ to get
+  $E^{(k)}_\text{out}$; similarly at $E_{k+1}$ to get
+  $E^{(k+1)}_\text{out}$.
+  \item Scale to physical outgoing energy using OpenMC Eq.~31--35:
+  \begin{equation}
+  E_\text{out} = E_\text{out,min} + (E_\text{out,max} - E_\text{out,min})
+  \cdot \frac{E^{(*)}_\text{out} - E_\text{out,min}^{(k)}}
+  {E_\text{out,max}^{(k)} - E_\text{out,min}^{(k)}},
+  \end{equation}
+  where $(*)$ is the interpolation between grid-point samples
+  with $f_E = (E - E_k)/(E_{k+1} - E_k)$.
+  \item Sample a scattering cosine from the $N_\mu = 8$--$16$
+  discrete equiprobable $\mu$-bin table at the chosen
+  $(E, E_\text{out})$, with discrete-cosine smearing $\pm 0.5$
+  bin width.
+\end{enumerate}
+
+\subsection{Inelastic (discrete, iwt = 0 or 1)}
+
+Legacy libraries store $E_\text{out}$ as a small number of
+equiprobable (iwt=1) or skewed (iwt=0) outgoing-energy bins.
+Sample the bin uniformly for iwt=1, or with the skewed weights
+$(0.05, 0.05, \ldots, 0.1, \ldots, 0.05)$ for iwt=0.
+
+\subsection{Elastic}
+
+Three mutually exclusive forms depending on binding:
+\begin{itemize}
+  \item \textbf{Coherent} (crystalline, e.g. graphite, Be):
+  $\sigma(E) = (1/E) \sum_{E_i < E} s_i$, where $\{E_i, s_i\}$
+  are the Bragg edges and structure factors. Sample a Bragg
+  edge proportional to $s_i$, compute the scattering angle
+  from Bragg's law.
+  \item \textbf{Incoherent} (disordered solids):
+  $\sigma(E) = \sigma_b \cdot (1 - e^{-4 E W'})/(2 E W')$, with
+  $W'$ the Debye-Waller integral per atom and $\sigma_b$ the
+  bound cross section. Angle samples from
+  $\mu = 1 + \ln(\xi + (1-\xi) e^{-4 E W'})/(2 E W')$.
+  \item \textbf{None} (liquid water for H): omitted entirely.
+\end{itemize}
+
+\subsection{Temperature interpolation}
+
+Stochastic bracketing as in \S\ref{sec:ducru}: a single $\xi$
+selects $T_j$ or $T_{j+1}$ per collision, with probability
+proportional to the bracketing interval.
+
+\textbf{Hand-off to free gas}: above $E_\text{max}$ the
+S($\alpha$,$\beta$) provider is bypassed and the collision
+falls through to the standard free-gas elastic model
+(\S4.2) with the full-atom elastic cross section.
+
+%% ============================================================
+\section{Fission}
+
+\subsection{Average neutron yield $\bar{\nu}(E)$}
+
+From the \texttt{reaction\_018/product\_0/nu} HDF5 dataset
+(total = prompt + delayed), interpolated linearly in energy
+(\texttt{collision.rs:156}):
+\begin{equation}
+\bar\nu(E) = \bar\nu_k + f(\bar\nu_{k+1} - \bar\nu_k),
+\qquad f = (E - E_k)/(E_{k+1} - E_k).
+\end{equation}
+Typical: $\bar\nu_{U235}(0.025~\mathrm{eV}) = 2.435$,
+$\bar\nu_{U235}(1~\mathrm{MeV}) = 2.530$.
+
+\textbf{Fallback}: if no nu-product is found in
+\texttt{reaction\_018} (e.g. U-234 has fission but no neutron
+yield dataset in ENDF/B-VII.1), use the constant value
+$\bar\nu = 2.4$.
+
+\subsection{Stochastic rounding of $\bar\nu w$}
+
+Per-particle weight $w$ (default $1.0$ on PWR, $1/N_\text{batch}$
+in variance-reduction modes) is multiplied by $\bar\nu$ and
+stochastically rounded to an integer number of fission sites
+(\texttt{collision.rs:244--252}):
+\begin{equation}
+N = \lfloor \bar\nu w \rfloor +
+\mathbb{1}\left[\xi < (\bar\nu w - \lfloor \bar\nu w \rfloor)\right].
+\end{equation}
+This preserves $\mathbb{E}[N] = \bar\nu w$ without floor bias.
+
+\subsection{Fission spectrum}
+
+\textbf{Default (tabulated)}: continuous outgoing-energy
+distribution from the HDF5 \texttt{energy\_distribution} block.
+Given $E_\text{in}$ bracketed by $E_k, E_{k+1}$:
+\begin{equation}
+E_\text{out} = (1 - f_E)\,\mathrm{CDF}^{-1}_k(\xi) +
+f_E\,\mathrm{CDF}^{-1}_{k+1}(\xi),
+\end{equation}
+correlated across the two grid points as for the angular
+distribution (\S\ref{sec:angle}).
+
+\textbf{Fallback (Watt, U-235 parameters)}: if tabulated data is
+unavailable, the Cranberg parameters
+$a = 988$~keV, $b = 2.249$~MeV$^{-1}$ reproduce U-235 at
+thermal to $3\%$:
+\begin{equation}
+\chi(E_\text{out}) \propto \exp(-E_\text{out}/a)\,
+\sinh\!\sqrt{b E_\text{out}}.
+\end{equation}
+Rejection sampling with a Maxwell-like proposal.
+
+\subsection{Emitted neutron direction}
+
+Isotropic in the lab frame (standard assumption for prompt
+neutrons): $\mu = 2\xi_1 - 1$, $\phi = 2\pi\xi_2$.
+
+%% ============================================================
+\section{Random number generator}
+\label{sec:rng}
+
+PCG-64 with the standard multiplier and per-particle stream
+increment (\texttt{rng.rs:39--47}):
+\begin{equation}
+\begin{aligned}
+s_{n+1} &= a\, s_n + c, \qquad a = 6\,364\,136\,223\,846\,793\,005,\\
+r_n &= \mathrm{rot}_{s_n \gg 59}\!\left(((s_n \gg 18) \oplus s_n) \gg 27\right),
+\end{aligned}
+\end{equation}
+where $\mathrm{rot}_k$ is a 32-bit rotate right by $k$. A uniform
+$\xi \in [0, 1)$ uses $53$ bits from two consecutive $r_n$:
+\begin{equation}
+\xi = (\mathrm{high}_{26} \cdot 2^{27} + \mathrm{low}_{27})/2^{53}.
+\end{equation}
+
+\textbf{Seeding}: deterministic per particle,
+$s_0 = (\text{batch index}) \cdot a + (\text{particle id})$, so runs
+are exactly reproducible given the batch/particle index layout.
+
+%% ============================================================
+\section{Geometry}
+
+\subsection{Surfaces (enum dispatch)}
+
+Six primitives, each with a closed-form ray-intersection
+distance. Given ray $\mathbf{r}(t) = \mathbf{p} + t\hat{\Omega}$:
+
+\textbf{Plane} $\hat{\mathbf{n}} \cdot \mathbf{x} = D$
+(\texttt{surface.rs:111--117}):
+\begin{equation}
+t = \frac{D - \hat{\mathbf{n}}\cdot\mathbf{p}}
+{\hat{\mathbf{n}}\cdot\hat{\Omega}}.
+\end{equation}
+Guard: return \texttt{None} if $|\hat{\mathbf{n}}\cdot\hat{\Omega}| <
+10^{-12}$ (ray parallel to plane) or if $t < 10^{-12}$
+(behind the ray origin; this also avoids self-intersection after
+a surface crossing).
+
+\textbf{Sphere} $|\mathbf{x} - \mathbf{x}_0|^2 = R^2$
+(\texttt{surface.rs:134--135}): solve the quadratic
+$t^2 + 2 B t + C = 0$ with $B = \hat{\Omega} \cdot
+(\mathbf{p} - \mathbf{x}_0)$ and
+$C = |\mathbf{p} - \mathbf{x}_0|^2 - R^2$; return the smallest
+positive root, or \texttt{None} if the discriminant is negative
+or all roots are non-positive.
+
+\textbf{Cylinder-Z} (axis parallel to $\hat{z}$):
+project $\mathbf{p}, \hat{\Omega}$ onto the $xy$-plane and solve
+the same quadratic as the sphere in $2$D. Used for fuel pin
+and clad surfaces.
+
+\textbf{Half-space convention}: for each cell, a surface is
+listed with $\pm$ sign indicating which side the interior lies
+on. Membership test:
+$\mathrm{sgn}(\hat{\mathbf{n}} \cdot \mathbf{x} - D) = \pm$
+(\texttt{cell.rs}).
+
+\subsection{Cell finding}
+
+Linear scan through the cell list on each surface crossing.
+A BVH is built for the lattice but currently not used in
+the transport loop. Scan cost is $O(N_\text{cells})$ per
+crossing; PWR pin cell has $3$ cells, Godiva has $2$, so the
+overhead is negligible at these scales.
+
+%% ============================================================
+\section{Transport loop}
+
+\subsection{Tracking mode selection}
+
+On setup (\texttt{simulate.rs:73--148}), the code computes the
+ratio of the maximum macroscopic total cross section over cells
+to the minimum. If the ratio exceeds $20\times$, delta tracking
+would reject $>\!95\%$ of virtual collisions and is rejected
+in favour of surface tracking. For the PWR pin cell
+(fuel/moderator contrast $\approx\!646\times$), surface tracking
+is mandatory; for Godiva (single material) there is no delta
+tracking to do.
+
+\subsection{Surface tracking}
+
+Step the neutron to the nearest surface of its current cell:
+\begin{equation}
+d_\text{surf} = \min_{s \in \partial\text{cell}} d_s(\mathbf{r}, \hat{\Omega}),
+\end{equation}
+sample the collision distance $d_\text{coll}$ from an
+exponential:
+\begin{equation}
+d_\text{coll} = -\ln(\xi) / \Sigma_t^\text{mat}(E),
+\end{equation}
+and advance to $\min(d_\text{surf}, d_\text{coll})$. If the
+neutron hits the surface first, move to the adjacent cell and
+apply the appropriate boundary condition (\S13.4).
+
+\subsection{Delta tracking (Woodcock)}
+
+Majorant $\Sigma_t^\text{maj}(E) = \max_\text{cell}
+\Sigma_t^\text{cell}(E)$ computed on a log-uniform energy grid
+and interpolated linearly (\texttt{simulate.rs:48--57}).
+Sampling:
+\begin{equation}
+d = -\ln(\xi_1) / \Sigma_t^\text{maj}(E),
+\end{equation}
+advance and test virtual vs real collision:
+\begin{equation}
+\xi_2 < \Sigma_t^\text{cell}(E) / \Sigma_t^\text{maj}(E)
+\;\Rightarrow\; \text{real collision; else virtual, continue}.
+\end{equation}
+A $5\%$ safety margin is added to the majorant to absorb
+floating-point drift in the per-cell total.
+
+\subsection{Boundary conditions}
+
+Three types (enum \texttt{BoundaryCondition}):
+\begin{itemize}
+  \item \textbf{Vacuum / Leakage}: $\hat{\Omega}$ points outward on
+  crossing $\Rightarrow$ kill particle, tally leakage.
+  \item \textbf{Reflective}: specular reflection,
+  $\hat{\Omega}' = \hat{\Omega} - 2(\hat{\Omega}\cdot\hat{\mathbf{n}})
+  \hat{\mathbf{n}}$. PWR pin cell uses reflective on the
+  outer box.
+  \item \textbf{Transmission}: transparent to particle; used on
+  internal cell boundaries.
+\end{itemize}
+
+%% ============================================================
+\section{k-eigenvalue power iteration}
+
+\subsection{Source iteration}
+
+For each batch $n = 0, 1, \ldots$:
+\begin{enumerate}
+  \item Normalise the source bank to $N_\text{batch}$ particles
+  (resample with replacement if $|\text{bank}| \neq N_\text{batch}$).
+  \item Transport each particle birth-to-death, banking fission
+  sites at each fission event (quantity sampled per
+  \S9.2).
+  \item Estimate $k_\text{eff}$ for this batch:
+  \begin{equation}
+  k_\text{eff}^{(n)} = \frac{1}{N_\text{batch}}
+  \sum_i w_i \bar\nu(E_i),
+  \end{equation}
+  where the sum runs over fission events, $w_i$ is the
+  particle weight at the event, and $\bar\nu(E_i)$ is the
+  nuclide-and-energy-dependent fission yield.
+  \item Discard the first $N_\text{inactive}$ batches
+  (fission source still converging); average the remaining
+  active batches:
+  \begin{equation}
+  \bar k = \frac{1}{N_\text{active}}
+  \sum_{n = N_\text{inactive}}^{N_\text{active} - 1} k_\text{eff}^{(n)},
+  \qquad
+  \sigma_{\bar k} = \sqrt{\frac{\sum_n (k^{(n)} - \bar k)^2}
+  {N_\text{active}(N_\text{active}-1)}}.
+  \end{equation}
+\end{enumerate}
+
+\subsection{Seed-level confidence}
+
+The per-seed error bars in the main paper use the unbiased
+sample standard deviation of the active-batch $k$ estimates;
+$\sigma_\text{seed}$ across independent seeds is reported
+as the standard error of the seed-mean.
+
+%% ============================================================
+\section{Summary table}
+
+\begin{longtable}{@{}lllll@{}}
+\caption{Physics bill of materials: equation $\to$ invocation
+condition $\to$ edge cases.} \label{tab:bom}\\
+\toprule
+Section & Equation & Invocation & Edge cases / guards \\
+\midrule
+\endfirsthead
+\toprule
+Section & Equation & Invocation & Edge cases / guards \\
+\midrule
+\endhead
+SVD eval & $\sum_\ell B_{i\ell} c_\ell$ & every XS lookup & clamp $\sigma_\text{in} \geq 10^{-30}$ \\
+Log-log & $\sigma_i(\sigma_{i+1}/\sigma_i)^f$ & between grid points & $\sigma \leq 0 \Rightarrow$ linear \\
+Ducru T & Eq.~\eqref{eq:ducru} & $T \notin \{T_j\}$ & exact at library $T_j$ \\
+Total $\sigma$ & $\mathrm{MT}2 + \mathrm{MT}3$ & per collision & no MT3 $\Rightarrow$ sum leaf \\
+Reaction & $\xi\sigma_t$ march & per collision & URR override first \\
+Elastic & Eq.~\eqref{eq:mulab_general} & $A > 1+10^{-10}$ & H: Eq.~$\sqrt{(1+\mu_\mathrm{cm})/2}$ \\
+Free-gas & MB target & $E < 400 k_B T$ & $|v_r| < 10^{-20} \Rightarrow$ skip \\
+Angle & correlated CDF & all scatter & no data $\Rightarrow$ isotropic \\
+Discrete level & two-body $Q$ & $E \geq E_\mathrm{thr}$ & below thr $\Rightarrow$ elastic \\
+Continuum & Weisskopf & MT91 continuum & $E^* \geq 0.1$ MeV, $E_\mathrm{out} \leq 0.9 E^*$ \\
+$(n,xn)$ & bank $x-1$ & $\sigma_{16,17} > 0$ & evaporation $T = E/10$ \\
+URR & band sample $\xi$ & $E \in [\mathrm{URR}]$ & recompute $\sigma_t$ \\
+S($\alpha$,$\beta$) & Eq.~31--35 & $E < E_\mathrm{max}$ & hand off to free-gas above \\
+Fission $\bar\nu$ & tabulated $\bar\nu(E)$ & fission event & no nu dataset $\Rightarrow$ 2.4 \\
+Fission $\chi$ & tabulated CDF & fission event & no tab $\Rightarrow$ Watt \\
+Stoch round & floor $+ [\xi < r]$ & every fission & preserves $\mathbb{E}$ \\
+PCG-64 & Eq.~state update & every $\xi$ draw & 64-bit state per stream \\
+Surface & closed-form $t$ & every crossing & $|n\cdot\Omega| < 10^{-12}$ \\
+Delta tracking & majorant & contrast $\leq 20\times$ & else surface \\
+Power iter & bank normalise & every batch & discard inactive \\
+\bottomrule
+\end{longtable}
+
+%% ============================================================
+\section*{Known approximations}
+
+\begin{itemize}
+  \item $(n,2n)$ and $(n,3n)$ secondary-neutron energy
+  distributions use a crude $T = E/10$ evaporation rather than
+  the tabulated product distributions. Impact on $k_\infty$ for
+  PWR or Godiva: $< 20$~pcm.
+  \item Delayed neutrons are lumped into the prompt
+  $\bar\nu$ and emitted with zero time delay. $k_\infty$ is
+  insensitive; time-dependent simulations are not supported.
+  \item Charged-particle emission (MT$=$103, 104, 107, \ldots)
+  is absorbed into the capture channel by the total-minus-partials
+  residue, which is energy-correct but species-incorrect. Tally
+  reactions at the level of capture MTs will be wrong; $k_\infty$
+  is correct.
+  \item Photonuclear and photon-transport channels are absent.
+\end{itemize}
+
+\end{document}

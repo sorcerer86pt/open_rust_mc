@@ -1,0 +1,105 @@
+\section{Introduction}
+\label{sec:intro}
+
+Continuous-energy Monte Carlo codes such as
+OpenMC~\cite{romano2015openmc}, MCNP, and Serpent store
+nuclear data as pointwise tables. Per reaction channel and
+per library temperature, a piecewise-linear or log-log
+interpolation array carries $10^4$--$10^5$ grid points for
+light nuclides and $10^5$--$10^6$ for dense-resonance
+actinides. A full-library actinide set at a handful of
+temperatures exceeds the working-set of contemporary L2/L3
+caches, and every collision pays for a binary search plus a
+log-log blend through a large monotonic array.
+
+Prior work attacks this bottleneck along three axes. Adaptive
+resampling machine-learned models retain $10$--$50\%$ of the
+pointwise data at $\leq 97$~pcm criticality
+error~\cite{ml_resampling_2025,ml_fullcore_2026}. The
+Windowed Multipole (WMP)
+method~\cite{josey2015wmp,forget2014wmp,hybrid_wn_2021} gives
+an analytical pole--residue representation of the resolved
+resonance region with on-the-fly Doppler broadening. GPU
+rewrites reorganise the transport loop to amortise the lookup
+across warps~\cite{tramm2024,tramm2014xsbench}.
+
+This paper asks a narrower question. Can a truncated SVD of
+the $\log_{10}$-transformed matrix $\mathbf{A} \in
+\mathbb{R}^{N_E \times N_T}$ replace the pointwise table as a
+drop-in cross-section representation, and if so, at what
+cost? We implemented three providers (pointwise table, SVD
+kernel, and SVD+WMP hybrid) inside a single pure-Rust
+transport engine, plus matching CUDA paths for pointwise and
+SVD (and a standalone CUDA WMP evaluator), and measured
+fidelity, throughput, and memory side-by-side.
+
+The answer, reported in full in Sections~\ref{sec:pwr} and
+\ref{sec:hybrid}, is \emph{qualified}: SVD is a defensible
+drop-in on the thermal pin cell we tested; the hybrid
+implementation works end-to-end and reproduces $k_\infty$
+inside one $\mathrm{SEM}$ of the pointwise baseline; the
+throughput picture is hardware-dependent and favours pointwise
+tables on our GPU; and the memory picture at engine scale is
+\emph{not} the $132.9\times$ reduction a representation-byte
+analysis suggests. We document the trade-offs explicitly and
+retract the earlier memory headline.
+
+\paragraph{Contributions.}
+\begin{itemize}
+\item A singular-spectrum measurement showing $43$ of $47$
+  non-redundant $^{235}$U reactions are rank-one to machine
+  precision at $T = 294$~K across six library temperatures,
+  with a per-reaction distribution and Pareto
+  (Sec.~\ref{sec:xs_pareto}, Fig.~\ref{fig:svd_spectrum}).
+\item A rank-$k$ SVD reconstruction kernel for pointwise
+  cross sections, with Ducru temperature
+  interpolation~\cite{ducru2017}. Rank-$6$ reaches machine
+  precision at $44$~ns/lookup against $91$~ns for a
+  binary-search pointwise table (kernel-level $2.0\times$).
+\item A PWR pin cell rank sweep ($9$ nuclides,
+  S($\alpha$,$\beta$), URR, discrete levels) showing CPU SVD
+  rank-$5$ matches the in-engine pointwise table on
+  $k_\infty$ to $6$--$47$~pcm on two hardware tiers at
+  $1.18\times$--$1.90\times$ throughput
+  (Sec.~\ref{sec:pwr}).
+\item A matching event-based CUDA solver~\cite{tramm2024} for
+  both providers, showing GPU pointwise is $1.30\times$
+  faster than GPU SVD on PWR pin cell, inverting the CPU
+  ordering (Sec.~\ref{sec:gpu}).
+\item A hybrid SVD+WMP engine: pure-Rust Faddeeva reader and
+  evaluator matching OpenMC Python to $\sim\!10^{-6}$
+  relative error, wired into a
+  \texttt{HybridSvdWmpXsProvider}. PWR pin cell $k_\infty =
+  1.32557 \pm 0.00070$, $86$~pcm from the CPU-SVD baseline;
+  hybrid throughput $2.06\times$ slower than CPU SVD.
+  In-engine memory $1.06\times$ the full-SVD baseline
+  (Sec.~\ref{sec:hybrid}).
+\item A CUDA port of the WMP evaluator, bit-exact against the
+  CPU path ($\leq 5 \cdot 10^{-14}$ relative at double
+  precision), with $7.0\times$ GPU-vs-CPU per-lookup
+  throughput on an RTX~$3080$
+  (Sec.~\ref{sec:gpu_wmp}).
+\item A tracing and closure of the original $127$~pcm engine
+  offset from OpenMC~$0.15.3$ via four corrections (XS-audit
+  exonerating the total-XS assembly; a $\bar\nu$ delayed-yield
+  reader fix; correlated-CDF $\rightarrow$ stochastic-bin
+  sampling for angular and fission distributions; increasing
+  inactive batches from $20$ to $100$ with a Shannon-entropy
+  monitor). Final ten-seed $k_\infty$ agrees with OpenMC to
+  $-1$~pcm (Sec.~\ref{sec:offset}).
+\item A clear separation of two memory measurements: the
+  WMP representation-byte ratio against a hypothetical
+  four-channel pointwise table is $132.9\times$ for our
+  nine-nuclide set, and the measured in-engine reduction
+  from hybrid over full-SVD is $1.06\times$. The hybrid
+  engine in absolute terms is $4.8$--$5.1\times$ larger than
+  the pointwise-table baseline, because discrete-level SVD
+  kernels dominate memory and are not covered by the public
+  WMP library. The gap between representation-byte ratios
+  and engine-scale savings is the main cautionary finding of
+  this paper, and we discuss what would need to be true for
+  a WMP-scale reduction to land at engine level
+  (Sec.~\ref{sec:hybrid_mem}, Sec.~\ref{sec:hybrid_mem_engine}).
+\end{itemize}
+
+%% ============================================================

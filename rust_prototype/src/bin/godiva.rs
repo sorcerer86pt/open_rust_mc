@@ -63,6 +63,13 @@ struct Args {
     /// of time/particle and k_eff across all seeds.
     #[arg(short, long, default_value_t = 1)]
     seeds: u32,
+
+    /// Replace the fixed `--inactive` count with runtime Shannon-entropy
+    /// plateau detection. The simulator discards settle batches until
+    /// the fission-site entropy's sliding-window CV drops below 1e-3
+    /// (bounded by the policy's [20, 200] min/max inactive).
+    #[arg(long, default_value_t = false)]
+    auto_inactive: bool,
 }
 
 const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
@@ -151,6 +158,9 @@ fn run_multi_seed<XS: XsProvider>(
             inactive,
             particles_per_batch: args.particles,
             seed: seed as u64,
+            auto_inactive: if args.auto_inactive {
+                Some(open_rust_mc::transport::simulate::EntropyConvergence::default())
+            } else { None },
         };
 
         if args.seeds > 1 {
@@ -165,7 +175,7 @@ fn run_multi_seed<XS: XsProvider>(
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let active: Vec<f64> = results.iter()
-            .filter(|r| r.batch > inactive)
+            .filter(|r| r.active)
             .map(|r| r.k_eff)
             .collect();
         let n = active.len() as f64;
@@ -197,7 +207,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
             kernels.push(xs_provider::NuclideKernels {
                 elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, pointwise_xs: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
-                nu_bar_table: None, discrete_levels: vec![],
+                nu_bar_table: None, discrete_levels: vec![], discrete_level_angles: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
                 fission_energy_dist: None, urr_tables: None,
             });
@@ -222,7 +232,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
             tables.push(xs_provider::NuclideTableData {
                 elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
-                nu_bar_table: None, discrete_levels: vec![],
+                nu_bar_table: None, discrete_levels: vec![], discrete_level_angles: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
                 fission_energy_dist: None, urr_tables: None,
             });

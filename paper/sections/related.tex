@@ -1,0 +1,22 @@
+\section{Related work}
+\label{sec:related}
+
+Adaptive resampling machine-learned
+models~\cite{ml_resampling_2025,ml_fullcore_2026} retain
+$10$--$50\%$ of the pointwise data with $\leq 97$~pcm
+criticality error. Our approach is orthogonal (replace the
+representation, not subsample the array). Windowed Multipole
+for Doppler broadening is due to
+\cite{josey2015wmp,forget2014wmp}; hybrid multipole + windowed
+networks in RMC code~\cite{hybrid_wn_2021} pair multipole with
+a second analytical method; our hybrid pairs multipole with
+SVD. Event-based GPU transport follows the Tramm
+architecture~\cite{tramm2024} and shares the memory-bottleneck
+diagnosis of earlier XSBench studies~\cite{tramm2014xsbench}.
+Cross-isotope basis sharing was investigated and found not
+viable beyond the first singular vector (subspace angle
+$>\!85^\circ$ at $k=2$ between $^{235}$U, $^{238}$U,
+$^{239}$Pu), a finding that echoes KV-cache compression
+experience in a different domain~\cite{minicache2024}.
+
+%% ============================================================

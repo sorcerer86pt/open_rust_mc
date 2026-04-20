@@ -1,0 +1,51 @@
+\section{Threats to validity}
+\label{sec:threats}
+
+\paragraph{Scope of benchmarks.}
+Nine nuclides (thermal PWR pin cell) and three nuclides (fast
+Godiva). Full-core LWR analyses carry $\gtrsim 200$ nuclides;
+the hybrid memory picture scales with the reaction-channel
+mix and could look very different there.
+
+\paragraph{S($\alpha$,$\beta$) coverage.}
+Only H in H$_2$O is exercised. D$_2$O, graphite, ZrH, and
+other thermal libraries are not validated.
+
+\paragraph{Sampling convention.}
+Our original correlated-CDF sampling is a valid choice; we
+switched to OpenMC's stochastic-bin convention because that
+is what we were comparing against. A fully independent
+reference (MCNP, Serpent) would reveal whether OpenMC itself
+is biased, which we do not investigate here.
+
+\paragraph{Charged-particle absorption.}
+Channels MT$=103$, $107$, first-chance fission
+(MT$=19$--$21$) are absorbed into the capture macroscopic.
+$k_\infty$ is correct under this convention; MT-level
+reaction-rate tallies are not.
+
+\paragraph{Statistical confidence.}
+All comparisons use $\mathrm{SEM} =
+\sigma_\text{seed}/\sqrt{N_\text{seeds}}$, not
+$\sigma_\text{seed}$ itself. Desktop sweeps use
+$N_\text{seeds} = 10$; hybrid sweep uses five.
+
+\paragraph{Hybrid memory.}
+The $132.9\times$ representation-byte ratio is not an
+in-engine reduction. In-engine reduction is $1.06\times$
+(Sec.~\ref{sec:hybrid_mem_engine}). The $132.9\times$
+density ratio is reported for what it is; the
+$1.06\times$ engine-level reduction is the number an
+engine builder would care about.
+
+\paragraph{GPU SVD.}
+Slower than GPU pointwise on PWR pin cell because of the Zr
+clad level-sum cost. A per-warp level-sum cache would likely
+fix this but is not implemented.
+
+\paragraph{GPU hybrid.}
+Only the WMP evaluator itself is validated on GPU; the
+transport-loop integration is not done. No in-engine GPU
+hybrid $k_\infty$ or throughput is reported.
+
+%% ============================================================

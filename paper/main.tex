@@ -1,0 +1,39 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage[colorlinks=true,linkcolor=blue,citecolor=blue]{hyperref}
+\usepackage{siunitx}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage[numbers,sort&compress]{natbib}
+\bibliographystyle{unsrtnat}
+
+\begin{document}
+
+% ─── Front matter ────────────────────────────────────────────
+\input{sections/abstract}
+
+\tableofcontents
+
+% ─── Body ────────────────────────────────────────────────────
+\input{sections/intro}
+\input{sections/method}
+\input{sections/implementation}
+\input{sections/spectrum}
+\input{sections/godiva}
+\input{sections/pwr}
+\input{sections/gpu}
+\input{sections/hybrid}
+\input{sections/gpu_wmp}
+\input{sections/threats}
+\input{sections/related}
+\input{sections/conclusion}
+\input{sections/backmatter}
+
+% ─── Bibliography ────────────────────────────────────────────
+\bibliography{references}
+
+\end{document}

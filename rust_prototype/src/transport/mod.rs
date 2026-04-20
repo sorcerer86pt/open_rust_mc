@@ -6,3 +6,4 @@ pub mod particle;
 pub mod rng;
 pub mod simulate;
 pub mod xs_provider;
+pub mod hybrid_xs;

@@ -172,6 +172,7 @@ pub fn inelastic_scatter(
     dir: Vec3,
     awr: f64,
     q_value: f64,
+    angle: Option<&crate::hdf5_reader::AngularDistribution>,
     rng: &mut Rng,
 ) -> (f64, Vec3) {
     // Threshold check: inelastic is only possible if E > |Q|*(A+1)/A
@@ -195,8 +196,13 @@ pub fn inelastic_scatter(
         return elastic_scatter(energy, dir, awr, rng);
     }
 
-    // Isotropic scattering in CM frame
-    let mu_cm = 2.0 * rng.uniform() - 1.0;
+    // CM-frame scattering cosine: prefer the ENDF tabulated angular
+    // distribution (OpenMC UncorrelatedAngleEnergy); fall back to isotropic
+    // when the nuclide's evaluation does not store one for this level.
+    let mu_cm = match angle {
+        Some(dist) => dist.sample_mu(energy, rng),
+        None => 2.0 * rng.uniform() - 1.0,
+    };
 
     // CM velocity of the system (in sqrt-energy units)
     // v_cm_system = sqrt(E / (A+1)^2) * (A+1) ... simplified:
@@ -324,7 +330,7 @@ mod tests {
         let n = 10_000;
         for _ in 0..n {
             let (e_el, _) = elastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, &mut Rng::new(42, 1));
-            let (e_in, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, &mut rng);
+            let (e_in, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, None, &mut rng);
             elastic_sum += e_el;
             inelastic_sum += e_in;
         }
@@ -340,7 +346,7 @@ mod tests {
         let e0 = 1000.0; // 1 keV — below 45 keV threshold
         let awr = 235.0;
         let q = -45_000.0;
-        let (e_new, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, &mut rng);
+        let (e_new, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, None, &mut rng);
         assert!(e_new > e0 * 0.95, "e_new={e_new}, e0={e0}");
     }
 
@@ -357,7 +363,7 @@ mod tests {
             let mut sum = 0.0;
             let n = 1000;
             for _ in 0..n {
-                let (e_out, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, &mut rng);
+                let (e_out, _) = inelastic_scatter(e0, Vec3::new(0.0, 0.0, 1.0), awr, q, None, &mut rng);
                 sum += e_out;
             }
             let avg = sum / n as f64;

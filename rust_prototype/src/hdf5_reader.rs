@@ -592,9 +592,14 @@ impl AngularDistribution {
     /// Sample the scattering cosine mu at a given energy.
     ///
     /// Uses correlated CDF interpolation: the same random number is used
-    /// to invert both adjacent CDFs, then the resulting mu values are
-    /// linearly interpolated. This preserves distribution shape while
-    /// avoiding the variance of stochastic bin selection.
+    /// We follow OpenMC's convention (src/distribution_angle.cpp):
+    /// stochastic bin selection plus a single CDF inversion inside the
+    /// chosen bin, rather than a correlated double inversion with
+    /// linear interpolation. With interpolation factor
+    /// `r = (E - E_lo) / (E_hi - E_lo)`, we pick the high-bin
+    /// distribution with probability `r` and sample from it directly.
+    /// Uses two random draws total (one for bin, one for mu) — the
+    /// same number OpenMC uses.
     pub fn sample_mu(&self, energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
         if self.energies.is_empty() {
             return 2.0 * rng.uniform() - 1.0; // isotropic fallback
@@ -621,13 +626,14 @@ impl AngularDistribution {
 
         let e_lo = self.energies[idx];
         let e_hi = self.energies[idx + 1];
-        let frac = (energy - e_lo) / (e_hi - e_lo);
+        let r = (energy - e_lo) / (e_hi - e_lo);
 
-        // Correlated sampling: same xi for both CDF inversions
-        let xi = rng.uniform();
-        let mu_lo = self.distributions[idx].sample_with_xi(xi);
-        let mu_hi = self.distributions[idx + 1].sample_with_xi(xi);
-        (mu_lo * (1.0 - frac) + mu_hi * frac).clamp(-1.0, 1.0)
+        // OpenMC-style stochastic bin selection:
+        //   if r > ξ_bin: take high bin; else take low bin.
+        //   Then sample mu from the chosen bin with a fresh ξ_mu.
+        let pick_hi = rng.uniform() < r;
+        let dist = if pick_hi { &self.distributions[idx + 1] } else { &self.distributions[idx] };
+        dist.sample(rng).clamp(-1.0, 1.0)
     }
 }
 
@@ -906,6 +912,11 @@ pub struct EnergyDistribution {
 pub struct TabularEnergyDist {
     /// Outgoing energies (eV), sorted ascending.
     pub e_out: Vec<f64>,
+    /// PDF values at each `e_out`, used for the quadratic lin-lin CDF
+    /// inversion. Populated from HDF5 channel 1 when available; if the
+    /// reader left it empty, `sample_with_xi` falls back to the linear
+    /// (histogram-PDF) approximation.
+    pub pdf: Vec<f64>,
     /// CDF values, sorted ascending [0, 1].
     pub cdf: Vec<f64>,
 }
@@ -913,7 +924,13 @@ pub struct TabularEnergyDist {
 impl EnergyDistribution {
     /// Sample an outgoing energy at a given incident energy.
     ///
-    /// Uses deterministic linear interpolation between adjacent incident energy bins.
+    /// Matches OpenMC's ContinuousTabular::sample (ENDF Law 4 / Law 61)
+    /// convention (src/distribution_energy.cpp): stochastic bin
+    /// selection between the two bracketing incident-energy bins, plus
+    /// a scaled kinematic adjustment that remaps the sampled outgoing
+    /// energy from the chosen bin's [E_min, E_max] to the
+    /// linearly-interpolated bounds [E_1, E_K] between both bins.
+    /// Uses two random draws total (bin selection + CDF inversion).
     pub fn sample(&self, incident_energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
         if self.energies.is_empty() {
             return incident_energy;
@@ -921,32 +938,52 @@ impl EnergyDistribution {
 
         let n = self.energies.len();
         if incident_energy <= self.energies[0] {
-            return self.distributions[0].sample(rng);
+            return self.distributions[0].sample(rng).max(1e-5);
         }
         if incident_energy >= self.energies[n - 1] {
-            return self.distributions[n - 1].sample(rng);
+            return self.distributions[n - 1].sample(rng).max(1e-5);
         }
 
         let idx = match self.energies.binary_search_by(|e| {
             e.partial_cmp(&incident_energy).unwrap_or(std::cmp::Ordering::Less)
         }) {
-            Ok(i) => return self.distributions[i].sample(rng),
+            Ok(i) => return self.distributions[i].sample(rng).max(1e-5),
             Err(i) => if i > 0 { i - 1 } else { 0 },
         };
 
         if idx + 1 >= n {
-            return self.distributions[idx].sample(rng);
+            return self.distributions[idx].sample(rng).max(1e-5);
         }
 
-        // Correlated sampling: same xi for both CDF inversions
         let e_lo = self.energies[idx];
         let e_hi = self.energies[idx + 1];
-        let frac = (incident_energy - e_lo) / (e_hi - e_lo);
+        let r = (incident_energy - e_lo) / (e_hi - e_lo);
 
-        let xi = rng.uniform();
-        let e_out_lo = self.distributions[idx].sample_with_xi(xi);
-        let e_out_hi = self.distributions[idx + 1].sample_with_xi(xi);
-        (e_out_lo * (1.0 - frac) + e_out_hi * frac).max(1e-5)
+        // Stochastic bin selection: take high bin with probability r.
+        let pick_hi = rng.uniform() < r;
+        let l = if pick_hi { idx + 1 } else { idx };
+        let dist_l = &self.distributions[l];
+
+        // Sample E_out from the chosen bin.
+        let e_out = dist_l.sample(rng);
+
+        // Scaled kinematic adjustment: map E_out from the chosen bin's
+        // [e_out_min_l, e_out_max_l] to the linearly interpolated
+        // [E_1, E_K] where
+        //   E_1 = (1-r) e_out_min[idx] + r e_out_min[idx+1]
+        //   E_K = (1-r) e_out_max[idx] + r e_out_max[idx+1]
+        let (el1_lo, el1_hi) = dist_l.bounds();
+        let (ea_lo, ea_hi) = self.distributions[idx].bounds();
+        let (eb_lo, eb_hi) = self.distributions[idx + 1].bounds();
+        let e1 = (1.0 - r) * ea_lo + r * eb_lo;
+        let ek = (1.0 - r) * ea_hi + r * eb_hi;
+        let span_l = el1_hi - el1_lo;
+        let adjusted = if span_l.abs() < 1e-30 {
+            e_out
+        } else {
+            e1 + (e_out - el1_lo) * (ek - e1) / span_l
+        };
+        adjusted.max(1e-5)
     }
 }
 
@@ -955,6 +992,24 @@ impl TabularEnergyDist {
         self.sample_with_xi(rng.uniform())
     }
 
+    /// Return (E_out_min, E_out_max) for this incident-energy bin, used
+    /// by EnergyDistribution::sample for the OpenMC scaled kinematic
+    /// adjustment.
+    fn bounds(&self) -> (f64, f64) {
+        if self.e_out.is_empty() {
+            (0.0, 0.0)
+        } else {
+            (self.e_out[0], *self.e_out.last().unwrap())
+        }
+    }
+
+    /// Quadratic lin-lin CDF inversion (OpenMC Tabular::sample,
+    /// src/distribution.cpp). With PDF `p_k` at `E_k`, slope
+    /// `m = (p_{k+1} - p_k)/(E_{k+1} - E_k)`, and `Δc = ξ − c_k`,
+    ///     E = E_k + (√(p_k² + 2 m Δc) − p_k) / m   (m ≠ 0)
+    ///     E = E_k + Δc / p_k                        (histogram, m = 0)
+    /// Falls back to linear `(cdf, E_out)` when PDF is unavailable —
+    /// which matches the old implementation bit-for-bit.
     fn sample_with_xi(&self, xi: f64) -> f64 {
         let n = self.cdf.len();
         if n < 2 {
@@ -973,13 +1028,38 @@ impl TabularEnergyDist {
         let cdf_hi = self.cdf[idx + 1];
         let e_lo = self.e_out[idx];
         let e_hi = self.e_out[idx + 1];
+        let de = e_hi - e_lo;
 
         if (cdf_hi - cdf_lo).abs() < 1e-15 {
-            return e_lo;
+            return e_lo.max(1e-5);
         }
 
+        // Quadratic lin-lin path requires PDF aligned 1:1 with e_out.
+        if self.pdf.len() == n && de > 0.0 {
+            let p_lo = self.pdf[idx];
+            let p_hi = self.pdf[idx + 1];
+            let m = (p_hi - p_lo) / de;
+            let dc = xi - cdf_lo;
+            let e = if m.abs() < 1e-30 {
+                if p_lo.abs() < 1e-30 {
+                    e_lo
+                } else {
+                    e_lo + dc / p_lo
+                }
+            } else {
+                let disc = p_lo * p_lo + 2.0 * m * dc;
+                if disc < 0.0 {
+                    e_lo
+                } else {
+                    e_lo + (disc.sqrt() - p_lo) / m
+                }
+            };
+            return e.max(1e-5);
+        }
+
+        // Fallback: histogram-PDF (linear CDF) inversion.
         let frac = (xi - cdf_lo) / (cdf_hi - cdf_lo);
-        (e_lo + frac * (e_hi - e_lo)).max(1e-5)
+        (e_lo + frac * de).max(1e-5)
     }
 }
 
@@ -1065,9 +1145,12 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
             (0..energies.len()).map(|i| i * per_e).collect()
         };
 
-        // Parse per-energy distributions
+        // Parse per-energy distributions. Layout is [3, n_total] =
+        // (e_out, pdf, cdf). PDF is needed for the quadratic lin-lin
+        // CDF inversion (OpenMC Tabular::sample).
         let e_out_values = &dist_raw[..n_total];
-        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+        let pdf_values   = &dist_raw[n_total..2 * n_total];
+        let cdf_values   = &dist_raw[2 * n_total..3 * n_total];
 
         let n_energies = energies.len();
         let mut distributions = Vec::with_capacity(n_energies);
@@ -1078,14 +1161,16 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
             if start >= end || start >= n_total {
                 distributions.push(TabularEnergyDist {
                     e_out: vec![1e5, 2e6],
-                    cdf: vec![0.0, 1.0],
+                    pdf:   vec![1.0, 1.0],
+                    cdf:   vec![0.0, 1.0],
                 });
                 continue;
             }
 
             distributions.push(TabularEnergyDist {
                 e_out: e_out_values[start..end].to_vec(),
-                cdf: cdf_values[start..end].to_vec(),
+                pdf:   pdf_values[start..end].to_vec(),
+                cdf:   cdf_values[start..end].to_vec(),
             });
         }
 
@@ -1118,6 +1203,9 @@ pub struct UrrProbabilityTables {
     pub capture_factor: Vec<Vec<f64>>,
     /// Whether to multiply by smooth (average) cross-sections.
     pub multiply_smooth: bool,
+    /// ENDF interpolation scheme between adjacent URR energies.
+    /// 2 = lin-lin (default), 5 = log-log.
+    pub interpolation: u8,
 }
 
 /// Sampled URR cross-section multipliers for one collision.
@@ -1139,6 +1227,12 @@ impl UrrProbabilityTables {
 
     /// Sample URR factors at a given energy.
     ///
+    /// Follows OpenMC `calculate_urr_xs` (src/nuclide.cpp): sample one ξ,
+    /// look up the band independently at both bracketing energies via the
+    /// per-energy cumulative CDF, then interpolate the XS values between
+    /// the two energies (lin-lin for interpolation=2, log-log for =5).
+    /// At the lower/upper grid edge we fall back to single-energy lookup.
+    ///
     /// Returns cross-section multipliers if `multiply_smooth=true`,
     /// or absolute cross-sections if `multiply_smooth=false`.
     pub fn sample(&self, energy: f64, xi: f64) -> UrrFactors {
@@ -1147,31 +1241,48 @@ impl UrrProbabilityTables {
             return UrrFactors { total: 1.0, elastic: 1.0, fission: 1.0, capture: 1.0 };
         }
 
-        // Find energy bracket
-        let idx = match self.energies.binary_search_by(|e| {
+        // Bracket [i_lo, i_lo+1] with E_i <= energy < E_{i+1}; clamp at edges.
+        let i_lo = match self.energies.binary_search_by(|e| {
             e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
         }) {
             Ok(i) => i,
             Err(i) => if i > 0 { i - 1 } else { 0 },
         };
-        let idx = idx.min(n_e - 1);
 
-        // Find the probability band using cumulative probability
-        let cum = &self.cum_prob[idx];
-        let mut band = 0;
-        for (j, &cp) in cum.iter().enumerate() {
-            if xi <= cp {
-                band = j;
-                break;
+        // Single-energy sampling helper (used at edges or when n_e == 1).
+        let pick = |idx: usize| -> (f64, f64, f64, f64) {
+            let cum = &self.cum_prob[idx];
+            // upper_bound on the CDF: the first band whose cumulative prob
+            // is strictly greater than ξ. Matches OpenMC's upper_bound_index.
+            let mut band = cum.len() - 1;
+            for (j, &cp) in cum.iter().enumerate() {
+                if xi < cp { band = j; break; }
             }
-            band = j;
+            (self.total_factor[idx][band],
+             self.elastic_factor[idx][band],
+             self.fission_factor[idx][band],
+             self.capture_factor[idx][band])
+        };
+
+        if n_e == 1 || i_lo + 1 >= n_e || energy <= self.energies[0] {
+            let (total, elastic, fission, capture) = pick(i_lo.min(n_e - 1));
+            return UrrFactors { total, elastic, fission, capture };
         }
 
+        // Interpolate between E_i and E_{i+1}.
+        let e_lo = self.energies[i_lo];
+        let e_hi = self.energies[i_lo + 1];
+        let f = match self.interpolation {
+            5 => (energy / e_lo).ln() / (e_hi / e_lo).ln(),
+            _ => (energy - e_lo) / (e_hi - e_lo),
+        };
+        let (t_lo, el_lo, fi_lo, c_lo) = pick(i_lo);
+        let (t_hi, el_hi, fi_hi, c_hi) = pick(i_lo + 1);
         UrrFactors {
-            total: self.total_factor[idx][band],
-            elastic: self.elastic_factor[idx][band],
-            fission: self.fission_factor[idx][band],
-            capture: self.capture_factor[idx][band],
+            total:   (1.0 - f) * t_lo  + f * t_hi,
+            elastic: (1.0 - f) * el_lo + f * el_hi,
+            fission: (1.0 - f) * fi_lo + f * fi_hi,
+            capture: (1.0 - f) * c_lo  + f * c_hi,
         }
     }
 }
@@ -1226,6 +1337,12 @@ pub fn read_urr_tables(path: &Path, temp_label: &str) -> Result<Option<UrrProbab
         attrs.get("multiply_smooth"),
         Some(hdf5_pure::AttrValue::I64(1))
     );
+    // ENDF interpolation scheme for the URR energy grid.
+    // 2 = lin-lin (OpenMC default), 5 = log-log.
+    let interpolation = match attrs.get("interpolation") {
+        Some(hdf5_pure::AttrValue::I64(v)) => *v as u8,
+        _ => 2,
+    };
 
     // Read energy grid
     let energy_ds = match temp_group.dataset("energy") {
@@ -1286,6 +1403,7 @@ pub fn read_urr_tables(path: &Path, temp_label: &str) -> Result<Option<UrrProbab
         fission_factor,
         capture_factor,
         multiply_smooth,
+        interpolation,
     }))
 }
 
@@ -1430,8 +1548,18 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
 
 /// Read nu-bar from an already-opened reaction_018 group.
 fn read_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Result<NuBarTable> {
+    // Collect prompt + each delayed product as an energy-dependent yield
+    // table (or a constant). Previous implementation averaged tabulated
+    // delayed yields into a single constant, which introduced a
+    // systematic bias (U-238: -0.009, U-235: -0.002 in ν̄) because the
+    // delayed yield varies with incident energy. Total ν̄(E) is the
+    // sum of prompt(E) + Σ delayed_i(E); when values differ on the
+    // energy grid we interpolate linearly.
     let subgroups = rxn_group.groups().unwrap_or_default();
     let mut prompt_table: Option<NuBarTable> = None;
+    // Each delayed product contributes an (energies, values) table or a
+    // single scalar ("constant over all E").
+    let mut delayed_tables: Vec<NuBarTable> = Vec::new();
     let mut delayed_constants: Vec<f64> = Vec::new();
 
     for product_name in &subgroups {
@@ -1445,26 +1573,37 @@ fn read_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Result<NuBarTable
         let shape = yield_ds.shape().unwrap_or_default();
         let raw = match yield_ds.read_f64() { Ok(r) => r, Err(_) => continue };
 
-        if is_prompt {
-            if shape.len() == 2 && shape[0] == 2 {
-                let n = shape[1] as usize;
-                if raw.len() >= 2 * n {
-                    prompt_table = Some(NuBarTable { energies: raw[..n].to_vec(), values: raw[n..2*n].to_vec() });
-                }
-            } else if shape.len() == 1 && shape[0] == 1 {
-                prompt_table = Some(NuBarTable { energies: vec![1e-5, 20.0e6], values: vec![raw[0], raw[0]] });
-            }
-        } else if shape.len() == 2 && shape[0] == 2 {
+        if shape.len() == 2 && shape[0] == 2 {
             let n = shape[1] as usize;
-            if raw.len() >= 2 * n { delayed_constants.push(raw[n..2*n].iter().sum::<f64>() / n as f64); }
+            if raw.len() >= 2 * n {
+                let t = NuBarTable { energies: raw[..n].to_vec(), values: raw[n..2*n].to_vec() };
+                if is_prompt { prompt_table = Some(t); }
+                else { delayed_tables.push(t); }
+            }
         } else if shape.len() == 1 && shape[0] == 1 {
-            delayed_constants.push(raw[0]);
+            if is_prompt {
+                prompt_table = Some(NuBarTable { energies: vec![1e-5, 20.0e6], values: vec![raw[0], raw[0]] });
+            } else {
+                delayed_constants.push(raw[0]);
+            }
         }
     }
-    match prompt_table {
-        Some(mut t) => { let d: f64 = delayed_constants.iter().sum(); for v in &mut t.values { *v += d; } Ok(t) }
-        None => Ok(NuBarTable { energies: vec![], values: vec![] }),
+
+    let mut prompt = match prompt_table {
+        Some(t) => t,
+        None => return Ok(NuBarTable { energies: vec![], values: vec![] }),
+    };
+
+    let d_const: f64 = delayed_constants.iter().sum();
+    for v in &mut prompt.values { *v += d_const; }
+
+    for d in &delayed_tables {
+        for (i, &e) in prompt.energies.iter().enumerate() {
+            prompt.values[i] += d.lookup(e);
+        }
     }
+
+    Ok(prompt)
 }
 
 /// Read angular distribution from an already-open file.
@@ -1529,16 +1668,21 @@ fn read_fission_edist_from_file(file: &hdf5_pure::File, nuclide_name: &str) -> O
             arr.iter().map(|&v| v as usize).collect()
         } else { let per_e = n_total / energies.len(); (0..energies.len()).map(|i| i * per_e).collect() };
         let e_out_values = &dist_raw[..n_total];
-        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+        let pdf_values   = &dist_raw[n_total..2 * n_total];
+        let cdf_values   = &dist_raw[2 * n_total..3 * n_total];
         let n_energies = energies.len();
         let mut distributions = Vec::with_capacity(n_energies);
         for i in 0..n_energies {
             let start = offsets.get(i).copied().unwrap_or(0);
             let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
             if start >= end || start >= n_total {
-                distributions.push(TabularEnergyDist { e_out: vec![1e5, 2e6], cdf: vec![0.0, 1.0] });
+                distributions.push(TabularEnergyDist { e_out: vec![1e5, 2e6], pdf: vec![1.0, 1.0], cdf: vec![0.0, 1.0] });
             } else {
-                distributions.push(TabularEnergyDist { e_out: e_out_values[start..end].to_vec(), cdf: cdf_values[start..end].to_vec() });
+                distributions.push(TabularEnergyDist {
+                    e_out: e_out_values[start..end].to_vec(),
+                    pdf:   pdf_values[start..end].to_vec(),
+                    cdf:   cdf_values[start..end].to_vec(),
+                });
             }
         }
         return Some(EnergyDistribution { energies, distributions });
@@ -1554,6 +1698,10 @@ fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &s
     let temp_group = urr.group(temp_label).ok()?;
     let attrs = temp_group.attrs().unwrap_or_default();
     let multiply_smooth = matches!(attrs.get("multiply_smooth"), Some(hdf5_pure::AttrValue::I64(1)));
+    let interpolation = match attrs.get("interpolation") {
+        Some(hdf5_pure::AttrValue::I64(v)) => *v as u8,
+        _ => 2,
+    };
     let energies = temp_group.dataset("energy").ok()?.read_f64().ok()?;
     let n_e = energies.len();
     let table_ds = temp_group.dataset("table").ok()?;
@@ -1575,7 +1723,7 @@ fn read_urr_from_file(file: &hdf5_pure::File, nuclide_name: &str, temp_label: &s
         fission_factor.push((0..n_bands).map(|b| table_raw[base + 3 * n_bands + b]).collect());
         capture_factor.push((0..n_bands).map(|b| table_raw[base + 4 * n_bands + b]).collect());
     }
-    Some(UrrProbabilityTables { energies, n_bands, cum_prob, total_factor, elastic_factor, fission_factor, capture_factor, multiply_smooth })
+    Some(UrrProbabilityTables { energies, n_bands, cum_prob, total_factor, elastic_factor, fission_factor, capture_factor, multiply_smooth, interpolation })
 }
 
 // ── Thermal Scattering HDF5 Reader ─────────────────────────────────────
@@ -1992,4 +2140,312 @@ fn interpolate_to_grid(x_src: &[f64], y_src: &[f64], x_dst: &[f64]) -> Vec<f64> 
         }
     }
     out
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    //! Statistical tests for the OpenMC stochastic-bin samplers.
+    //!
+    //! These verify behavior invariant under the sampler rewrite
+    //! (correlated single-ξ → stochastic-bin two-ξ). They use a small
+    //! deterministic seed and enough draws that the statistics are
+    //! stable to several sigma.
+    use super::*;
+    use crate::transport::rng::Rng;
+
+    fn build_two_bin_angular(
+        energies: &[f64],
+        low_bin_mu_cdf: &[(f64, f64)],
+        high_bin_mu_cdf: &[(f64, f64)],
+    ) -> AngularDistribution {
+        let split = |pts: &[(f64, f64)]| TabularMuDist {
+            mu: pts.iter().map(|p| p.0).collect(),
+            cdf: pts.iter().map(|p| p.1).collect(),
+        };
+        AngularDistribution {
+            energies: energies.to_vec(),
+            distributions: vec![split(low_bin_mu_cdf), split(high_bin_mu_cdf)],
+            center_of_mass: true,
+        }
+    }
+
+    #[test]
+    fn angular_sample_mu_stays_in_bounds() {
+        // Two bins: low bin isotropic, high bin forward-peaked.
+        let dist = build_two_bin_angular(
+            &[1e4, 1e6],
+            &[(-1.0, 0.0), (1.0, 1.0)],          // uniform [-1, 1]
+            &[(-1.0, 0.0), (0.0, 0.1), (1.0, 1.0)], // more weight near +1
+        );
+        let mut rng = Rng::new(42, 0);
+        for _ in 0..10_000 {
+            let e = 1e4 + rng.uniform() * (1e6 - 1e4);
+            let mu = dist.sample_mu(e, &mut rng);
+            assert!((-1.0..=1.0).contains(&mu), "mu out of range: {mu}");
+        }
+    }
+
+    #[test]
+    fn angular_sample_mu_isotropic_within_bin_has_zero_mean() {
+        // Both bins isotropic → <mu> ≈ 0.
+        let dist = build_two_bin_angular(
+            &[1.0, 2.0],
+            &[(-1.0, 0.0), (1.0, 1.0)],
+            &[(-1.0, 0.0), (1.0, 1.0)],
+        );
+        let mut rng = Rng::new(7, 0);
+        let n = 100_000;
+        let mean: f64 = (0..n).map(|_| dist.sample_mu(1.5, &mut rng)).sum::<f64>() / n as f64;
+        assert!(mean.abs() < 1e-2, "<mu> = {mean}, expected ≈ 0");
+    }
+
+    #[test]
+    fn angular_sample_mu_forward_peaked_is_positive() {
+        // Both bins strongly forward-peaked — most mass near mu = +1.
+        // CDF = mu^10-ish via (mu, cdf) = [(-1, 0), (0.8, 0.1), (1.0, 1.0)].
+        let dist = build_two_bin_angular(
+            &[1.0, 2.0],
+            &[(-1.0, 0.0), (0.8, 0.1), (1.0, 1.0)],
+            &[(-1.0, 0.0), (0.8, 0.1), (1.0, 1.0)],
+        );
+        let mut rng = Rng::new(11, 0);
+        let n = 50_000;
+        let mean: f64 = (0..n).map(|_| dist.sample_mu(1.5, &mut rng)).sum::<f64>() / n as f64;
+        assert!(mean > 0.5, "<mu> = {mean}, expected strongly positive");
+    }
+
+    #[test]
+    fn angular_sample_mu_stochastic_bin_respects_r() {
+        // Low bin always returns near -1, high bin always returns near +1.
+        // At E = E_lo + 0.25*(E_hi - E_lo), pick_hi fires 25% of the time
+        // → <mu> ≈ 0.25*(+1) + 0.75*(-1) = -0.5.
+        let dist = build_two_bin_angular(
+            &[0.0, 1.0],
+            &[(-1.0, 0.0), (-0.999, 1.0)], // nearly δ at -1
+            &[(0.999, 0.0), (1.0, 1.0)],    // nearly δ at +1
+        );
+        let mut rng = Rng::new(3, 0);
+        let e = 0.25; // r = 0.25
+        let n = 100_000;
+        let mean: f64 = (0..n).map(|_| dist.sample_mu(e, &mut rng)).sum::<f64>() / n as f64;
+        assert!((mean - (-0.5)).abs() < 2e-2,
+                "stochastic-bin mean {mean} does not match r=0.25 prediction -0.5");
+    }
+
+    #[test]
+    fn angular_sample_mu_edge_below_grid_uses_first_bin() {
+        // E below first energy → always sample from first bin.
+        let dist = build_two_bin_angular(
+            &[10.0, 20.0],
+            &[(-1.0, 0.0), (-0.99, 1.0)],
+            &[(0.99, 0.0), (1.0, 1.0)],
+        );
+        let mut rng = Rng::new(99, 0);
+        for _ in 0..1_000 {
+            let mu = dist.sample_mu(5.0, &mut rng);
+            assert!(mu < -0.9, "below grid should sample first bin: got {mu}");
+        }
+    }
+
+    #[test]
+    fn angular_sample_mu_edge_above_grid_uses_last_bin() {
+        let dist = build_two_bin_angular(
+            &[10.0, 20.0],
+            &[(-1.0, 0.0), (-0.99, 1.0)],
+            &[(0.99, 0.0), (1.0, 1.0)],
+        );
+        let mut rng = Rng::new(100, 0);
+        for _ in 0..1_000 {
+            let mu = dist.sample_mu(50.0, &mut rng);
+            assert!(mu > 0.9, "above grid should sample last bin: got {mu}");
+        }
+    }
+
+    fn build_two_bin_energy(
+        incident: &[f64],
+        low_bin_eout_cdf: &[(f64, f64)],
+        high_bin_eout_cdf: &[(f64, f64)],
+    ) -> EnergyDistribution {
+        let split = |pts: &[(f64, f64)]| {
+            // Derive a histogram-PDF so the quadratic inverter reduces to
+            // linear behaviour, preserving legacy test expectations.
+            let e_out: Vec<f64> = pts.iter().map(|p| p.0).collect();
+            let cdf: Vec<f64> = pts.iter().map(|p| p.1).collect();
+            let mut pdf = vec![0.0_f64; e_out.len()];
+            for k in 0..e_out.len().saturating_sub(1) {
+                let de = e_out[k + 1] - e_out[k];
+                if de > 0.0 { pdf[k] = (cdf[k + 1] - cdf[k]) / de; }
+            }
+            let n = e_out.len();
+            if n >= 2 {
+                let tail = pdf[n - 2];
+                pdf[n - 1] = tail;
+            }
+            TabularEnergyDist { e_out, pdf, cdf }
+        };
+        EnergyDistribution {
+            energies: incident.to_vec(),
+            distributions: vec![split(low_bin_eout_cdf), split(high_bin_eout_cdf)],
+        }
+    }
+
+    #[test]
+    fn energy_sample_stays_positive_and_bounded() {
+        let dist = build_two_bin_energy(
+            &[1e4, 1e6],
+            &[(0.1e6, 0.0), (5.0e6, 1.0)],  // [0.1, 5] MeV
+            &[(0.1e6, 0.0), (10.0e6, 1.0)], // [0.1, 10] MeV
+        );
+        let mut rng = Rng::new(123, 0);
+        for _ in 0..10_000 {
+            let e_inc = 1e4 + rng.uniform() * (1e6 - 1e4);
+            let e_out = dist.sample(e_inc, &mut rng);
+            assert!(e_out >= 1e-5, "sample below floor: {e_out}");
+            // Scaled kinematic remap can stretch beyond a single bin's nominal
+            // range, but must stay inside the union-of-bins envelope + tolerance.
+            assert!(e_out <= 1.1e7, "sample implausibly large: {e_out}");
+        }
+    }
+
+    #[test]
+    fn energy_sample_scaled_kinematic_interpolates_bounds() {
+        // Low bin E_out in [1, 2] MeV, high bin in [3, 6] MeV.
+        // At r = 0.5, scaled kinematic remap should place samples roughly
+        // in [2, 4] MeV regardless of which bin was drawn.
+        let dist = build_two_bin_energy(
+            &[0.0, 1.0],
+            &[(1.0e6, 0.0), (2.0e6, 1.0)],
+            &[(3.0e6, 0.0), (6.0e6, 1.0)],
+        );
+        let mut rng = Rng::new(77, 0);
+        let n = 5_000;
+        let mut min_e = f64::INFINITY;
+        let mut max_e = 0.0_f64;
+        for _ in 0..n {
+            let e = dist.sample(0.5, &mut rng);
+            if e < min_e { min_e = e; }
+            if e > max_e { max_e = e; }
+        }
+        // Allow generous margin; the essential claim is that the scaled
+        // remap keeps samples in the interpolated [E_1, E_K] envelope.
+        assert!(min_e >= 1.9e6 && min_e <= 2.1e6,
+                "min E_out = {min_e} should be near 2.0e6");
+        assert!(max_e >= 3.8e6 && max_e <= 4.2e6,
+                "max E_out = {max_e} should be near 4.0e6");
+    }
+
+    #[test]
+    fn energy_sample_below_grid_uses_first_bin() {
+        let dist = build_two_bin_energy(
+            &[10.0, 20.0],
+            &[(1.0e6, 0.0), (2.0e6, 1.0)],
+            &[(5.0e6, 0.0), (6.0e6, 1.0)],
+        );
+        let mut rng = Rng::new(44, 0);
+        for _ in 0..500 {
+            let e = dist.sample(1.0, &mut rng);
+            assert!(e >= 1.0e6 && e <= 2.0e6,
+                    "below-grid sample {e} not in first bin [1e6, 2e6]");
+        }
+    }
+
+    // ── Quadratic lin-lin CDF inversion (OpenMC Tabular::sample) ──
+    //
+    // With a linear-rising PDF from 0 to p_max over a single bin, the
+    // closed-form inverse gives E = E_lo + sqrt(2 * m * Δc) / m when
+    // cdf[0] = 0. Feeding ξ = 0.5 should place the sample at the point
+    // where the cumulative area equals 0.5 — for a triangular PDF over
+    // [0, 1] MeV with total area 1, that is E ≈ 0.707 MeV.
+
+    #[test]
+    fn energy_tabular_quadratic_triangular_pdf_inverse() {
+        let e_out = vec![0.0_f64, 1.0e6];
+        let pdf   = vec![0.0_f64, 2.0e-6]; // triangular, ∫ = 1
+        let cdf   = vec![0.0_f64, 1.0];
+        let t = TabularEnergyDist { e_out, pdf, cdf };
+        let sample = t.sample_with_xi(0.5);
+        // Analytical inverse: E = sqrt(0.5) * 1e6 ≈ 707_107 eV.
+        let expected = (0.5_f64).sqrt() * 1.0e6;
+        assert!((sample - expected).abs() / expected < 1e-5,
+                "quadratic sample {sample} vs expected {expected}");
+    }
+
+    #[test]
+    fn energy_tabular_quadratic_falls_back_to_linear_when_pdf_missing() {
+        let e_out = vec![0.0_f64, 1.0e6];
+        let cdf   = vec![0.0_f64, 1.0];
+        let t = TabularEnergyDist { e_out, pdf: vec![], cdf };
+        let sample = t.sample_with_xi(0.5);
+        // Linear fallback: E = 0.5 * 1e6 = 5e5 eV.
+        assert!((sample - 5.0e5).abs() < 1e-3, "fallback {sample}");
+    }
+
+    // ── URR probability table interpolation (OpenMC calculate_urr_xs) ──
+
+    fn build_two_point_urr(interpolation: u8) -> UrrProbabilityTables {
+        // Single-band tables at two energies: factor 1.0 at E_lo, factor 2.0
+        // at E_hi. All bands share the same factor so the band pick is
+        // irrelevant; this isolates the energy interpolation.
+        UrrProbabilityTables {
+            energies: vec![100.0, 1000.0],
+            n_bands: 1,
+            cum_prob: vec![vec![1.0], vec![1.0]],
+            total_factor:   vec![vec![1.0], vec![2.0]],
+            elastic_factor: vec![vec![1.0], vec![2.0]],
+            fission_factor: vec![vec![1.0], vec![2.0]],
+            capture_factor: vec![vec![1.0], vec![2.0]],
+            multiply_smooth: true,
+            interpolation,
+        }
+    }
+
+    #[test]
+    fn urr_lin_lin_interpolation_midpoint() {
+        let urr = build_two_point_urr(2);
+        let f = urr.sample(550.0, 0.5); // (550-100)/(1000-100) = 0.5
+        assert!((f.elastic - 1.5).abs() < 1e-12, "lin-lin elastic {}", f.elastic);
+        assert!((f.total   - 1.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn urr_log_log_interpolation_sqrt_point() {
+        // Log-log with factors 1.0 and 2.0 at 100 and 1000 eV; at E = 100*sqrt(10)
+        // the log-fraction is 0.5, so lin interpolation of the factors is 1.5.
+        let urr = build_two_point_urr(5);
+        let e = 100.0 * 10_f64.sqrt();
+        let f = urr.sample(e, 0.5);
+        assert!((f.elastic - 1.5).abs() < 1e-10, "log-log elastic {}", f.elastic);
+    }
+
+    #[test]
+    fn urr_band_selected_independently_per_energy() {
+        // Two bands, cutoff shifts with energy so that ξ = 0.5 picks band 0
+        // at E_lo but band 1 at E_hi. Factors encode which band was chosen.
+        let urr = UrrProbabilityTables {
+            energies: vec![100.0, 200.0],
+            n_bands: 2,
+            cum_prob: vec![
+                vec![0.9, 1.0], // at E_lo: ξ=0.5 < 0.9 → band 0
+                vec![0.1, 1.0], // at E_hi: ξ=0.5 > 0.1 → band 1
+            ],
+            total_factor:   vec![vec![10.0, 99.0], vec![88.0, 20.0]],
+            elastic_factor: vec![vec![10.0, 99.0], vec![88.0, 20.0]],
+            fission_factor: vec![vec![ 0.0,  0.0], vec![ 0.0,  0.0]],
+            capture_factor: vec![vec![ 0.0,  0.0], vec![ 0.0,  0.0]],
+            multiply_smooth: false,
+            interpolation: 2,
+        };
+        // At E=150, f=0.5. Expected elastic = 0.5*10 + 0.5*20 = 15.
+        let f = urr.sample(150.0, 0.5);
+        assert!((f.elastic - 15.0).abs() < 1e-12, "indep band elastic {}", f.elastic);
+    }
+
+    #[test]
+    fn urr_at_grid_edge_falls_back_to_single_energy() {
+        let urr = build_two_point_urr(2);
+        let f_lo = urr.sample(100.0, 0.5);
+        let f_hi = urr.sample(1000.0, 0.5);
+        assert!((f_lo.elastic - 1.0).abs() < 1e-12);
+        assert!((f_hi.elastic - 2.0).abs() < 1e-12);
+    }
 }

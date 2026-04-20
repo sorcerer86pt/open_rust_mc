@@ -1,0 +1,69 @@
+\section{Implementation}
+\label{sec:impl}
+
+The engine is pure Rust with no C dependency; nuclear data
+reads directly from OpenMC HDF5 files via \texttt{hdf5-pure},
+including the complex-typed WMP pole arrays (decoded from raw
+little-endian bytes because the crate does not expose
+compound types). Physics covers: energy-dependent
+$\bar\nu(E)$ from prompt+delayed neutron yields (with the
+per-energy interpolation of each delayed product fixed, see
+Sec.~\ref{sec:offset}); tabulated outgoing energy
+distributions for fission using OpenMC's stochastic bin
+selection plus scaled kinematic adjustment (fixed); elastic
+angular distributions from tabular $(\mu, \text{CDF})$ data
+using the same stochastic-bin convention (fixed); discrete
+inelastic levels MT$=51$--$91$ with real $Q$-values from HDF5
+attributes; continuum inelastic (evaporation spectrum);
+URR probability tables with band sampling;
+S($\alpha$,$\beta$) thermal scattering for H in H$_2$O;
+free-gas thermal below $400 k_B T$ with Maxwell-Boltzmann
+target sampling; Shannon-entropy source-convergence monitor
+on a Cartesian $8^3$ mesh; CSG geometry; PCG-$64$ PRNG; rayon
+parallel transport on CPU.
+
+The CUDA solver is event-based~\cite{tramm2024}: particles
+compact by atomic alive-list scatter, energy-sorted into
+$256$ log-scale bins, and processed by a persistent kernel
+that runs $N$ transport steps per launch. All SVD basis is
+\texttt{f64}. A runtime flag clears the uploaded pointwise
+tables so SVD reconstructs every reaction channel. The WMP
+evaluator lives in \texttt{src/wmp.rs} (CPU) and as a set of
+\texttt{\_\_device\_\_} helpers plus an
+\texttt{extern "C" \_\_global\_\_ wmp\_test\_eval} kernel in
+\texttt{gpu/cuda/transport.cu} (GPU).
+
+\paragraph{Hardware.}
+Laptop: AMD Ryzen~$7$ (6-core), $16$~GB DDR4, NVIDIA
+RTX~A$1000$ laptop GPU ($16$ SMs, $1.5$~MB L2). Desktop: AMD
+Ryzen~$7$ $9800$X3D (8-core, $96$~MB L3 V-cache), $64$~GB
+DDR5-$6000$, NVIDIA RTX~$3080$ ($68$~SMs, $10$~GB, $5$~MB L2).
+
+\paragraph{Reference implementation version.}
+All $k_\infty$ and $k_\mathrm{eff}$ comparison numbers use
+OpenMC~$0.15.3$ commit
+\texttt{27e38e894697bb32a1dac7848d2618818b6b8daf}
+(WSL~$2$, Ubuntu~$24.04$, conda \texttt{openmc} environment).
+Nuclear data is ENDF/B-VII.$1$ (HDF5 archive from
+\url{https://openmc.org/data}) for both our engine and the
+OpenMC reference; cross-section evaluation uses the same
+library at $T = 294$~K, with S$(\alpha,\beta)$ data
+\texttt{c\_H\_in\_H2O.h5} for the PWR pin cell. Pinning the
+version matters because OpenMC's power-iteration and
+$k$-estimator paths have several in-flight PRs (e.g., $\#3788$,
+$\#3790$, $\#3495$); between-release drift in the reference
+$k$ could shift any ``$\Delta$ vs OpenMC (pcm)'' number
+quoted in this paper.
+
+\paragraph{Statistics convention.}
+Per-seed $k$ estimates are averaged across active batches
+with an unbiased within-run standard error; we report
+$\sigma_\text{seed}$ as the sample standard deviation of the
+per-seed means across $N_\text{seeds}$ seeds, and use the
+standard error of the mean $\mathrm{SEM} =
+\sigma_\text{seed} / \sqrt{N_\text{seeds}}$ as the noise
+budget whenever a mean-to-reference comparison is quoted. A
+``within $X$~SEM'' statement uses this quantity. Laptop
+sweeps use five seeds; desktop sweeps use ten seeds.
+
+%% ============================================================

@@ -45,6 +45,10 @@ pub struct NuclideKernels {
     pub nu_bar_table: Option<NuBarTable>,
     /// Discrete inelastic level data (MT=51-91) with SVD kernels.
     pub discrete_levels: Vec<DiscreteLevel>,
+    /// CM-frame angular distribution per discrete level, aligned with
+    /// `discrete_levels`. Entry is `None` when the evaluation does not
+    /// tabulate an angular distribution for that MT — isotropic fallback.
+    pub discrete_level_angles: Vec<Option<AngularDistribution>>,
     /// Whether continuum inelastic (MT=91) is present.
     pub has_continuum_inelastic: bool,
     /// Angular distribution for elastic scattering (MT=2).
@@ -56,6 +60,10 @@ pub struct NuclideKernels {
 }
 
 /// A discrete inelastic level with its cross-section kernel and Q-value.
+///
+/// CM-frame angular distributions live on `NuclideKernels::discrete_level_angles`
+/// (parallel vec), so the trait can return a contiguous slice without
+/// allocating per collision.
 pub struct DiscreteLevel {
     pub info: DiscreteLevelInfo,
     pub kernel: Option<ReactionKernel>,
@@ -272,6 +280,10 @@ impl XsProvider for SvdXsProvider {
         self.nuclides[nuclide_idx].elastic_angle.as_ref()
     }
 
+    fn discrete_level_angles(&self, nuclide_idx: usize) -> &[Option<hdf5_reader::AngularDistribution>] {
+        &self.nuclides[nuclide_idx].discrete_level_angles
+    }
+
     fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
     }
@@ -432,7 +444,8 @@ pub fn load_nuclide(
                 elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, pointwise_xs: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback, nu_bar_table: None,
-                discrete_levels: vec![], has_continuum_inelastic: false,
+                discrete_levels: vec![], discrete_level_angles: vec![],
+                has_continuum_inelastic: false,
                 elastic_angle: None, fission_energy_dist: None, urr_tables: None,
             };
         }
@@ -458,16 +471,20 @@ pub fn load_nuclide(
     let has_continuum = level_infos.iter().any(|l| l.mt == 91);
     let n_levels = level_infos.len();
     let mut discrete_levels: Vec<DiscreteLevel> = Vec::with_capacity(n_levels);
+    let mut discrete_level_angles: Vec<Option<AngularDistribution>> = Vec::with_capacity(n_levels);
     for info in level_infos {
         // Must match top-level svd_rank so the GPU kernel can use a single
         // rank value for basis stride (P_RANK). Using a different per-level
         // rank causes the GPU to read garbage data from wrong basis offsets.
         let kernel = build_kernel_from_reader(&reader, info.mt, svd_rank, temp_idx, &shared_grid);
+        let angle = reader.angular_distribution(info.mt);
+        discrete_level_angles.push(angle);
         discrete_levels.push(DiscreteLevel { info, kernel });
     }
     let loaded_count = discrete_levels.iter().filter(|l| l.kernel.is_some()).count();
+    let angles_count = discrete_level_angles.iter().filter(|a| a.is_some()).count();
     if n_levels > 0 {
-        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum})");
+        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum}, angle_dists={angles_count})");
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
@@ -550,6 +567,7 @@ pub fn load_nuclide(
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
         discrete_levels,
+        discrete_level_angles,
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,
@@ -581,6 +599,7 @@ pub struct NuclideTableData {
     pub nu_bar_const: f64,
     pub nu_bar_table: Option<NuBarTable>,
     pub discrete_levels: Vec<TableDiscreteLevel>,
+    pub discrete_level_angles: Vec<Option<AngularDistribution>>,
     pub has_continuum_inelastic: bool,
     pub elastic_angle: Option<AngularDistribution>,
     pub fission_energy_dist: Option<EnergyDistribution>,
@@ -707,6 +726,10 @@ impl XsProvider for TableXsProvider {
         self.nuclides[nuclide_idx].elastic_angle.as_ref()
     }
 
+    fn discrete_level_angles(&self, nuclide_idx: usize) -> &[Option<hdf5_reader::AngularDistribution>] {
+        &self.nuclides[nuclide_idx].discrete_level_angles
+    }
+
     fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
     }
@@ -757,7 +780,8 @@ pub fn load_nuclide_table(
                 elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback, nu_bar_table: None,
-                discrete_levels: vec![], has_continuum_inelastic: false,
+                discrete_levels: vec![], discrete_level_angles: vec![],
+                has_continuum_inelastic: false,
                 elastic_angle: None, fission_energy_dist: None, urr_tables: None,
             };
         }
@@ -782,13 +806,16 @@ pub fn load_nuclide_table(
     let has_continuum = level_infos.iter().any(|l| l.mt == 91);
     let n_levels = level_infos.len();
     let mut discrete_levels: Vec<TableDiscreteLevel> = Vec::with_capacity(n_levels);
+    let mut discrete_level_angles: Vec<Option<AngularDistribution>> = Vec::with_capacity(n_levels);
     for info in level_infos {
         let table = build_table_from_reader(&reader, info.mt, temp_idx, &shared_grid);
+        discrete_level_angles.push(reader.angular_distribution(info.mt));
         discrete_levels.push(TableDiscreteLevel { info, table });
     }
     let loaded_count = discrete_levels.iter().filter(|l| l.table.is_some()).count();
+    let angles_count = discrete_level_angles.iter().filter(|a| a.is_some()).count();
     if n_levels > 0 {
-        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum})");
+        println!("    Discrete levels: {loaded_count}/{n_levels} (continuum={has_continuum}, angle_dists={angles_count})");
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
@@ -832,6 +859,7 @@ pub fn load_nuclide_table(
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
         discrete_levels,
+        discrete_level_angles,
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,

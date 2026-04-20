@@ -40,6 +40,10 @@ pub struct InelasticData<'a> {
     pub level_xs: &'a [f64],
     /// Whether continuum inelastic (MT=91) is included.
     pub has_continuum: bool,
+    /// Per-level CM-frame angular distribution. Empty slice or any `None`
+    /// entry means "isotropic" — matches the old fallback. Aligns 1:1 with
+    /// `levels` when populated.
+    pub level_angles: &'a [Option<AngularDistribution>],
 }
 
 /// Outcome of processing a collision.
@@ -93,12 +97,21 @@ pub fn process_collision(
     // Inelastic scattering
     cum += xs.inelastic;
     if xi < cum {
-        let q_value = sample_inelastic_level(particle.energy, xs.awr, inelastic_data, rng);
+        let (q_value, level_idx) = sample_inelastic_level(
+            particle.energy, xs.awr, inelastic_data, rng,
+        );
+        // Discrete level (not continuum / fallback) may carry its own
+        // CM-frame angular distribution; else scatter isotropically.
+        let angle = level_idx
+            .and_then(|i| inelastic_data
+                .and_then(|d| d.level_angles.get(i))
+                .and_then(|o| o.as_ref()));
         let (new_energy, new_dir) = super::scatter::inelastic_scatter(
             particle.energy,
             particle.dir,
             xs.awr,
             q_value,
+            angle,
             rng,
         );
         particle.energy = new_energy;
@@ -121,6 +134,7 @@ pub fn process_collision(
             particle.dir,
             xs.awr,
             -particle.energy * 0.1, // approximate Q for (n,2n)
+            None,
             rng,
         );
         particle.energy = new_energy;
@@ -143,6 +157,7 @@ pub fn process_collision(
             particle.dir,
             xs.awr,
             -particle.energy * 0.2, // approximate Q for (n,3n)
+            None,
             rng,
         );
         particle.energy = new_energy;
@@ -187,10 +202,10 @@ fn sample_inelastic_level(
     awr: f64,
     inelastic_data: Option<&InelasticData<'_>>,
     rng: &mut Rng,
-) -> f64 {
+) -> (f64, Option<usize>) {
     let data = match inelastic_data {
         Some(d) if !d.levels.is_empty() && !d.level_xs.is_empty() => d,
-        _ => return -45_000.0, // fallback: ~45 keV excitation
+        _ => return (-45_000.0, None), // fallback: ~45 keV excitation
     };
 
     // Sum cross-sections for levels that are energetically accessible
@@ -204,7 +219,7 @@ fn sample_inelastic_level(
     }
 
     if accessible.is_empty() || xs_sum <= 0.0 {
-        return -45_000.0; // fallback
+        return (-45_000.0, None); // fallback
     }
 
     // Sample proportionally to cross-section
@@ -216,25 +231,22 @@ fn sample_inelastic_level(
             let level = &data.levels[idx];
             if level.mt == 91 && data.has_continuum {
                 // Continuum inelastic: compute effective Q from evaporation model
-                // E* = E_cm - S_n (neutron separation energy)
-                // Use evaporation temperature: T = sqrt(E*/a), a ~ A/8
                 let a_param = awr / 8.0; // level density parameter (MeV^-1)
-                let e_cm_mev = energy * awr / ((awr + 1.0) * 1.0e6); // CM energy in MeV
-                let e_excitation = e_cm_mev.max(0.1); // minimum excitation
+                let e_cm_mev = energy * awr / ((awr + 1.0) * 1.0e6);
+                let e_excitation = e_cm_mev.max(0.1);
                 let temp_mev = (e_excitation / a_param).sqrt();
-                // Sample outgoing CM energy from Maxwellian: E = -T * ln(xi1*xi2)
                 let e_out_mev = -temp_mev * (rng.uniform() * rng.uniform()).ln();
-                let e_out_mev = e_out_mev.min(e_cm_mev * 0.9); // can't exceed available
-                // Effective Q = -(E_cm - E_out) * (A+1)/A in eV
+                let e_out_mev = e_out_mev.min(e_cm_mev * 0.9);
                 let q_eff = -(e_cm_mev - e_out_mev) * 1.0e6;
-                return q_eff;
+                // Continuum: no discrete angular distribution — isotropic.
+                return (q_eff, None);
             }
-            return level.q_value;
+            return (level.q_value, Some(idx));
         }
     }
 
-    // Shouldn't reach here, but return last level's Q
-    data.levels[accessible.last().map_or(0, |&(i, _)| i)].q_value
+    let last = accessible.last().map_or(0, |&(i, _)| i);
+    (data.levels[last].q_value, Some(last))
 }
 
 /// Determine the number of fission neutrons to bank.
@@ -416,6 +428,7 @@ mod tests {
             levels: &levels,
             level_xs: &level_xs,
             has_continuum: false,
+            level_angles: &[],
         };
 
         let mut p = Particle::new(
@@ -428,5 +441,106 @@ mod tests {
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy
+    }
+
+    // ── Per-level MT=51-91 anisotropic angular distribution plumbing ──
+    //
+    // Sampling a level whose CM-frame distribution is forward-peaked should
+    // yield ⟨mu_cm⟩ > 0 — the final lab-frame scatter direction shows a
+    // clear forward preference against the incident axis. The old isotropic
+    // behaviour gave ⟨mu_cm⟩ ≈ 0 and ⟨dir.x⟩ near a nuclide-specific value
+    // dominated by the recoil kinematics (same for every incident).
+
+    fn build_forward_peaked_angle() -> crate::hdf5_reader::AngularDistribution {
+        use crate::hdf5_reader::{AngularDistribution, TabularMuDist};
+        // Single-energy tab: essentially a delta at mu_cm = +1 (linear CDF
+        // from 0.9 .. 1.0 over [0.9, 1.0], zero below).
+        let d = TabularMuDist {
+            mu:  vec![-1.0, 0.9, 1.0],
+            cdf: vec![ 0.0, 0.0, 1.0],
+        };
+        AngularDistribution {
+            energies: vec![1.0, 2.0e7],
+            distributions: vec![
+                TabularMuDist { mu: d.mu.clone(), cdf: d.cdf.clone() },
+                d,
+            ],
+            center_of_mass: true,
+        }
+    }
+
+    #[test]
+    fn per_level_angular_dist_is_used_when_provided() {
+        let mut rng = Rng::new(2026, 1);
+        let xs = MicroXs {
+            total: 1.0, elastic: 0.0, inelastic: 1.0,
+            n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0,
+            nu_bar: 0.0, awr: 235.0,
+        };
+        let levels = vec![
+            DiscreteLevelInfo { mt: 51, q_value: -50_000.0, threshold: 50_213.0 },
+        ];
+        let level_xs = vec![1.0];
+        let angle = build_forward_peaked_angle();
+        let angles = vec![Some(angle)];
+        let data = InelasticData {
+            levels: &levels,
+            level_xs: &level_xs,
+            has_continuum: false,
+            level_angles: &angles,
+        };
+
+        let mut sum_x = 0.0;
+        let trials = 4000;
+        for _ in 0..trials {
+            let mut p = Particle::new(
+                crate::geometry::Vec3::new(0.0, 0.0, 0.0),
+                crate::geometry::Vec3::new(1.0, 0.0, 0.0),
+                1.0e6, 0,
+            );
+            let outcome = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
+            assert!(matches!(outcome, CollisionOutcome::Scatter));
+            sum_x += p.dir.x;
+        }
+        // Forward-peaked CM distribution → lab direction biased forward:
+        // ⟨dir.x⟩ must be well above 0.5; isotropic gave ~0.0.
+        let mean_x = sum_x / trials as f64;
+        assert!(mean_x > 0.5, "expected forward bias, got mean dir.x = {mean_x}");
+    }
+
+    #[test]
+    fn per_level_fallback_to_isotropic_when_angles_empty() {
+        let mut rng = Rng::new(2027, 1);
+        let xs = MicroXs {
+            total: 1.0, elastic: 0.0, inelastic: 1.0,
+            n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0,
+            nu_bar: 0.0, awr: 235.0,
+        };
+        let levels = vec![
+            DiscreteLevelInfo { mt: 51, q_value: -50_000.0, threshold: 50_213.0 },
+        ];
+        let level_xs = vec![1.0];
+        let data = InelasticData {
+            levels: &levels,
+            level_xs: &level_xs,
+            has_continuum: false,
+            level_angles: &[], // empty → isotropic path
+        };
+        let mut sum_x = 0.0;
+        let trials = 4000;
+        for _ in 0..trials {
+            let mut p = Particle::new(
+                crate::geometry::Vec3::new(0.0, 0.0, 0.0),
+                crate::geometry::Vec3::new(1.0, 0.0, 0.0),
+                1.0e6, 0,
+            );
+            let _ = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
+            sum_x += p.dir.x;
+        }
+        let mean_x = sum_x / trials as f64;
+        // Isotropic in CM plus two-body kinematics on a heavy nucleus (A=235)
+        // leaves a weak forward bias around 0.5. Must stay well below the
+        // forward-peaked case (> 0.5 there, well over 0.8 in practice).
+        assert!(mean_x < 0.6, "isotropic should not be strongly forward: {mean_x}");
     }
 }

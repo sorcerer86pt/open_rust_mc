@@ -1,0 +1,33 @@
+\section{GPU transport}
+\label{sec:gpu}
+
+The event-based CUDA solver~\cite{tramm2024} implements both
+providers inside the same kernel; a runtime
+\texttt{-{}-force-svd} flag clears the uploaded pointwise
+tables so the SVD path reconstructs every reaction channel
+from the basis.
+
+\paragraph{GPU pointwise beats GPU SVD on PWR.}
+On desktop GPU pointwise is $1.30\times$ faster than GPU SVD
+($6\,111$ vs $7\,946$~ns/p, Table~\ref{tab:keff_pwr_desktop}).
+The cause is specific to this geometry: four clad nuclides
+(Zr-$90$, Zr-$91$, Zr-$92$, Zr-$94$) do not carry an MT$=4$
+total-inelastic block in the ENDF/B-VII.1 HDF5; their total
+inelastic is synthesised at lookup time by summing
+$13$ discrete-level SVD kernels. On CPU the scalar pipeline
+amortises this; on GPU it dominates the SVD-path runtime.
+A per-warp cache keyed on $(n, E_\text{idx})$ after the
+energy sort would close the gap, and we note this as
+engineering work that the present paper does not cover. As
+measured, GPU SVD on PWR pin cell is \emph{not} a win over
+GPU pointwise.
+
+\paragraph{Fidelity parity at desktop statistics.}
+GPU pointwise $k_\infty = 1.32692 \pm 0.00041$ and GPU SVD
+$k_\infty = 1.32650 \pm 0.00042$ (pre-correction sampler).
+The two GPU paths agree to $42$~pcm,
+$\approx\!1.4\,\mathrm{SEM}_\text{combined}$. With the
+corrected sampler from Sec.~\ref{sec:offset} we expect both
+to move closer to OpenMC; that re-run is pending.
+
+%% ============================================================

@@ -123,12 +123,44 @@
 #define P_PW_XS          70
 #define P_PW_OFF         71
 #define P_HAS_PW         72
-#define N_PARAMS          73
+// ── Windowed-Multipole (hybrid) — per-nuclide WMP data ─────────────────
+#define P_WMP_HAS         73
+#define P_WMP_E_MIN       74
+#define P_WMP_E_MAX       75
+#define P_WMP_SPACING     76
+#define P_WMP_SQRT_AWR    77
+#define P_WMP_T_KELVIN    78
+#define P_WMP_FIT_ORDER   79
+#define P_WMP_N_WINDOWS   80
+#define P_WMP_FISSIONABLE 81
+#define P_WMP_POLES       82
+#define P_WMP_POLE_OFF    83
+#define P_WMP_WINDOWS     84
+#define P_WMP_WIN_OFF     85
+#define P_WMP_BROADEN     86
+#define P_WMP_BROADEN_OFF 87
+#define P_WMP_CURVEFIT    88
+#define P_WMP_CF_OFF      89
+
+// Per-discrete-level CM-frame angular distributions (MT=51-91). Indexed
+// by the same global level index as P_LEVEL_Q / P_LEVEL_MT. A zero
+// P_LEV_ANG_LEV_NE entry means "no tabulated angular dist" — the kernel
+// falls back to isotropic in the CM frame, matching the old behaviour.
+#define P_LEV_ANG_ENERGIES 90
+#define P_LEV_ANG_MU       91
+#define P_LEV_ANG_CDF      92
+#define P_LEV_ANG_DIST_OFF 93
+#define P_LEV_ANG_DIST_SZ  94
+#define P_LEV_ANG_LEV_OFF  95
+#define P_LEV_ANG_LEV_NE   96
+#define N_PARAMS          97
 
 // Access helpers — read from the flat u64 params buffer
 // PTR_F removed — all basis data is now f64 (PTR_D)
 #define PTR_D(p, idx)   ((const double*) (p)[(idx)])
 #define PTR_I(p, idx)   ((const int*)    (p)[(idx)])
+#define PTR_B(p, idx)   ((const signed char*) (p)[(idx)])
+#define PTR_D2(p, idx)  ((const double2*) (p)[(idx)])
 #define SCALAR_I(p, idx) ((int)(p)[(idx)])
 #define SCALAR_D(p, idx) __longlong_as_double((long long)(p)[(idx)])
 
@@ -165,6 +197,17 @@ __device__ void pcg_init(PcgState* rng, unsigned long long seed, unsigned long l
     rng->state += seed;
     pcg_next(rng);
 }
+
+// NOTE: a `warp_atomic_alloc` helper (prefix-scan via `__shfl_up_sync`
+// + one `atomicAdd` per warp) was prototyped here and discarded before
+// committing: `__shfl_up_sync(mask, val, off)` is undefined when source
+// lane `(lane_id - off)` is not in `mask`, and fission / (n,2n) / (n,3n)
+// branches reach this atomic with sparse active masks. In smoke runs
+// Godiva k_eff collapsed from ~1.00 to ~0.63 because neutrons were
+// banked at wrong offsets. A correct implementation must use
+// cooperative_groups::coalesced_threads() or run every lane in the
+// warp with `my_count = 0` fallback under a full-warp mask (0xffffffff).
+// Until that lands, plain `atomicAdd` is the ground truth.
 
 // ═══════════════════════════════════════════════════════════════════════
 // Geometry
@@ -273,7 +316,7 @@ __device__ int energy_index(const double* grid, int n_e, double energy) {
     if (energy <= grid[0]) return 0;
     if (energy >= grid[n_e-1]) return n_e-1;
     int lo=0, hi=n_e-1;
-    while (hi-lo > 1) { int mid=(lo+hi)/2; if (grid[mid]<=energy) lo=mid; else hi=mid; }
+    while (hi-lo > 1) { int mid=(lo+hi) >> 1; if (grid[mid]<=energy) lo=mid; else hi=mid; }
     return lo;
 }
 
@@ -322,62 +365,100 @@ __device__ double nu_bar_lookup(
     if (E <= e[0]) return v[0];
     if (E >= e[n-1]) return v[n-1];
     int lo=0, hi=n-1;
-    while (hi-lo>1) { int mid=(lo+hi)/2; if (e[mid]<=E) lo=mid; else hi=mid; }
+    while (hi-lo>1) { int mid=(lo+hi) >> 1; if (e[mid]<=E) lo=mid; else hi=mid; }
     double f = (E-e[lo]) / (e[hi]-e[lo]);
     return v[lo] + f*(v[hi]-v[lo]);
+}
+
+// CDF-invert E_out within one bin using a pre-drawn xi.
+__device__ __forceinline__ double sample_eout_bin(
+    double xi, const double* eo, const double* cd, int sz)
+{
+    if (sz <= 1) return eo[0];
+    int lo=0, hi=sz-1;
+    while (hi-lo > 1) { int mid=(lo+hi) >> 1; if (cd[mid] <= xi) lo=mid; else hi=mid; }
+    double f = (xi - cd[lo]) / fmax(cd[hi]-cd[lo], 1e-30);
+    return eo[lo] + f * (eo[hi] - eo[lo]);
 }
 
 __device__ double sample_fission_energy(
     double E_inc, PcgState* rng, Params p, int hit_nuc)
 {
     int fi_off = __ldg(&PTR_I(p, P_FIS_NUC_OFF)[hit_nuc]);
-    int fi_n = __ldg(&PTR_I(p, P_FIS_NUC_NINC)[hit_nuc]);
+    int fi_n   = __ldg(&PTR_I(p, P_FIS_NUC_NINC)[hit_nuc]);
     if (fi_n <= 0) {
+        // Watt fallback when no tabulated spectrum available.
         double a=0.988, x1=-log(fmax(pcg_uniform(rng),1e-30));
         double x2=-log(fmax(pcg_uniform(rng),1e-30));
         double c=cos(PI/2.0*pcg_uniform(rng));
         return a*(x1+x2*c*c)*1e6;
     }
     const double* inc_e = &PTR_D(p, P_FIS_INC_E)[fi_off];
-    // Edge cases
+
+    // Edge: below grid — sample directly from first bin.
     if (E_inc <= inc_e[0]) {
         int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off];
-        if (sz<=1) return E_inc*0.5;
-        double xi=pcg_uniform(rng);
-        const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
-        return eo[lo]+f*(eo[hi]-eo[lo]);
+        return fmax(sample_eout_bin(pcg_uniform(rng),
+                                    &PTR_D(p, P_FIS_E_OUT)[off],
+                                    &PTR_D(p, P_FIS_CDF)[off], sz), 1e-5);
     }
+    // Edge: above grid — sample from last bin.
     if (E_inc >= inc_e[fi_n-1]) {
         int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+fi_n-1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+fi_n-1];
-        if (sz<=1) return E_inc*0.5;
-        double xi=pcg_uniform(rng);
-        const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
-        return eo[lo]+f*(eo[hi]-eo[lo]);
+        return fmax(sample_eout_bin(pcg_uniform(rng),
+                                    &PTR_D(p, P_FIS_E_OUT)[off],
+                                    &PTR_D(p, P_FIS_CDF)[off], sz), 1e-5);
     }
+
     // Binary search for bracket
-    int ie; { int lo=0,hi=fi_n-1;
-        while(hi-lo>1){int mid=(lo+hi)/2;if(inc_e[mid]<=E_inc)lo=mid;else hi=mid;} ie=lo; }
-    // Correlated sampling: one xi, invert both CDFs, interpolate
-    double xi = pcg_uniform(rng);
-    double e0, e1;
-    { int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+ie], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+ie];
-      if(sz<=1){ e0=E_inc*0.5; }
-      else { const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30); e0=eo[lo]+f*(eo[hi]-eo[lo]); }
-    }
-    { int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+ie+1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+ie+1];
-      if(sz<=1){ e1=E_inc*0.5; }
-      else { const double* eo=&PTR_D(p, P_FIS_E_OUT)[off]; const double* cd=&PTR_D(p, P_FIS_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30); e1=eo[lo]+f*(eo[hi]-eo[lo]); }
-    }
-    double frac=(E_inc-inc_e[ie])/(inc_e[ie+1]-inc_e[ie]);
-    return fmax((1.0-frac)*e0+frac*e1, 1e-5);
+    int ie; { int lo=0, hi=fi_n-1;
+        while(hi-lo>1){int mid=(lo+hi) >> 1; if(inc_e[mid]<=E_inc) lo=mid; else hi=mid;} ie=lo; }
+
+    // OpenMC stochastic-bin sampling + scaled kinematic remap
+    // (distribution_energy.cpp ContinuousTabular::sample).
+    double r = (E_inc - inc_e[ie]) / fmax(inc_e[ie+1] - inc_e[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen_lo = fi_off + ie;
+    int chosen_hi = fi_off + ie + 1;
+    int chosen = pick_hi ? chosen_hi : chosen_lo;
+    int off_l = PTR_I(p, P_FIS_DIST_OFF)[chosen];
+    int sz_l  = PTR_I(p, P_FIS_DIST_SZ)[chosen];
+    const double* eo_l = &PTR_D(p, P_FIS_E_OUT)[off_l];
+    const double* cd_l = &PTR_D(p, P_FIS_CDF)[off_l];
+    double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, sz_l);
+
+    // Scaled kinematic adjustment: remap e_out from chosen bin's
+    // [el1_lo, el1_hi] to the interpolated [e1, eK] between both bins.
+    int off_a = PTR_I(p, P_FIS_DIST_OFF)[chosen_lo];
+    int sz_a  = PTR_I(p, P_FIS_DIST_SZ)[chosen_lo];
+    int off_b = PTR_I(p, P_FIS_DIST_OFF)[chosen_hi];
+    int sz_b  = PTR_I(p, P_FIS_DIST_SZ)[chosen_hi];
+    const double* eo_a = &PTR_D(p, P_FIS_E_OUT)[off_a];
+    const double* eo_b = &PTR_D(p, P_FIS_E_OUT)[off_b];
+    double el1_lo = eo_l[0];
+    double el1_hi = (sz_l > 0) ? eo_l[sz_l-1] : el1_lo;
+    double ea_lo  = eo_a[0];
+    double ea_hi  = (sz_a > 0) ? eo_a[sz_a-1] : ea_lo;
+    double eb_lo  = eo_b[0];
+    double eb_hi  = (sz_b > 0) ? eo_b[sz_b-1] : eb_lo;
+    double e1 = (1.0 - r) * ea_lo + r * eb_lo;
+    double eK = (1.0 - r) * ea_hi + r * eb_hi;
+    double span_l = el1_hi - el1_lo;
+    double adjusted = (fabs(span_l) < 1e-30) ? e_out
+                    : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
+    return fmax(adjusted, 1e-5);
+}
+
+// CDF-invert mu within one bin using a pre-drawn xi.
+__device__ __forceinline__ double sample_mu_bin(
+    double xi, const double* mu, const double* cd, int sz)
+{
+    if (sz <= 1) return 2.0*xi - 1.0;
+    int lo=0, hi=sz-1;
+    while (hi-lo > 1) { int mid=(lo+hi) >> 1; if (cd[mid] <= xi) lo=mid; else hi=mid; }
+    double f = (xi - cd[lo]) / fmax(cd[hi]-cd[lo], 1e-30);
+    double m = mu[lo] + f * (mu[hi] - mu[lo]);
+    return fmax(-1.0, fmin(1.0, m));
 }
 
 __device__ double sample_angular_dist(
@@ -387,46 +468,84 @@ __device__ double sample_angular_dist(
     int a_ne = __ldg(&PTR_I(p, P_ANG_NUC_NE)[hit_nuc]);
     if (a_ne <= 0) return 2.0*pcg_uniform(rng)-1.0;
     const double* ae = &PTR_D(p, P_ANG_ENERGIES)[a_off];
+
     // Edge: below grid
     if (E <= ae[0]) {
         int off=PTR_I(p, P_ANG_DIST_OFF)[a_off], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off];
-        if (sz<=1) return 2.0*pcg_uniform(rng)-1.0;
-        double xi=pcg_uniform(rng);
-        const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
-        return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
+        return sample_mu_bin(pcg_uniform(rng),
+                             &PTR_D(p, P_ANG_MU)[off],
+                             &PTR_D(p, P_ANG_CDF)[off], sz);
     }
     // Edge: above grid
     if (E >= ae[a_ne-1]) {
         int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+a_ne-1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+a_ne-1];
-        if (sz<=1) return 2.0*pcg_uniform(rng)-1.0;
-        double xi=pcg_uniform(rng);
-        const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
-        return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
+        return sample_mu_bin(pcg_uniform(rng),
+                             &PTR_D(p, P_ANG_MU)[off],
+                             &PTR_D(p, P_ANG_CDF)[off], sz);
     }
+
     // Binary search for energy bracket
-    int ie; { int lo=0,hi=a_ne-1;
-        while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
-    // Correlated sampling: one xi, invert both CDFs, interpolate mu
-    double xi = pcg_uniform(rng);
-    double mu0, mu1;
-    { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
-      if(sz<=1){ mu0=2.0*xi-1.0; }
-      else { const double* ma=&PTR_D(p, P_ANG_MU)[off]; const double* ca=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ca[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-ca[lo])/fmax(ca[hi]-ca[lo],1e-30); mu0=ma[lo]+f*(ma[hi]-ma[lo]); }
+    int ie; { int lo=0, hi=a_ne-1;
+        while(hi-lo>1){int mid=(lo+hi) >> 1; if(ae[mid]<=E) lo=mid; else hi=mid;} ie=lo; }
+
+    // OpenMC stochastic-bin sampling (distribution_angle.cpp):
+    //   r = (E - E_lo)/(E_hi - E_lo); pick_hi = (ξ_bin < r); then sample
+    //   μ from the chosen bin with a fresh ξ_μ. Two draws total.
+    double r = (E - ae[ie]) / fmax(ae[ie+1] - ae[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen = pick_hi ? (a_off + ie + 1) : (a_off + ie);
+    int off = PTR_I(p, P_ANG_DIST_OFF)[chosen];
+    int sz  = PTR_I(p, P_ANG_DIST_SZ)[chosen];
+    return sample_mu_bin(pcg_uniform(rng),
+                         &PTR_D(p, P_ANG_MU)[off],
+                         &PTR_D(p, P_ANG_CDF)[off], sz);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Per-discrete-level angular distribution sampler (MT=51-91).
+// Mirrors CPU AngularDistribution::sample_mu via stochastic-bin selection
+// on the level's own energy grid. `global_lev_idx` is the index into the
+// flat per-nuclide level array (same space as P_LEVEL_MT / P_LEVEL_Q).
+// Returns 2*ξ−1 when the level has no tabulated angular distribution —
+// matches the CPU isotropic fallback.
+// ═══════════════════════════════════════════════════════════════════════
+__device__ double sample_level_angular(
+    double E, PcgState* rng, Params p, int global_lev_idx)
+{
+    int n_e = __ldg(&PTR_I(p, P_LEV_ANG_LEV_NE)[global_lev_idx]);
+    if (n_e <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
+
+    int e_off = __ldg(&PTR_I(p, P_LEV_ANG_LEV_OFF)[global_lev_idx]);
+    const double* ae = &PTR_D(p, P_LEV_ANG_ENERGIES)[e_off];
+
+    // Below / above grid: pick the edge distribution directly.
+    if (E <= ae[0]) {
+        int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[e_off];
+        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off];
+        return sample_mu_bin(pcg_uniform(rng),
+                             &PTR_D(p, P_LEV_ANG_MU)[off],
+                             &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
     }
-    { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie+1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie+1];
-      if(sz<=1){ mu1=2.0*xi-1.0; }
-      else { const double* mb=&PTR_D(p, P_ANG_MU)[off]; const double* cb=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cb[mid]<=xi)lo=mid;else hi=mid;}
-        double f=(xi-cb[lo])/fmax(cb[hi]-cb[lo],1e-30); mu1=mb[lo]+f*(mb[hi]-mb[lo]); }
+    if (E >= ae[n_e - 1]) {
+        int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[e_off + n_e - 1];
+        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off + n_e - 1];
+        return sample_mu_bin(pcg_uniform(rng),
+                             &PTR_D(p, P_LEV_ANG_MU)[off],
+                             &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
     }
-    double frac=(E-ae[ie])/(ae[ie+1]-ae[ie]);
-    return fmax(-1.0,fmin(1.0,(1.0-frac)*mu0+frac*mu1));
+
+    int ie; { int lo = 0, hi = n_e - 1;
+        while (hi - lo > 1) { int mid = (lo + hi) / 2;
+            if (ae[mid] <= E) lo = mid; else hi = mid; } ie = lo; }
+
+    double r = (E - ae[ie]) / fmax(ae[ie+1] - ae[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen = e_off + (pick_hi ? ie + 1 : ie);
+    int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[chosen];
+    int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[chosen];
+    return sample_mu_bin(pcg_uniform(rng),
+                         &PTR_D(p, P_LEV_ANG_MU)[off],
+                         &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
 }
 
 __device__ double sab_total_xs(double E, Params p) {
@@ -437,7 +556,7 @@ __device__ double sab_total_xs(double E, Params p) {
     if (E <= e[0]) return xs[0];
     if (E >= e[n-1]) return xs[n-1];
     int lo=0,hi=n-1;
-    while(hi-lo>1){int mid=(lo+hi)/2;if(e[mid]<=E)lo=mid;else hi=mid;}
+    while(hi-lo>1){int mid=(lo+hi) >> 1;if(e[mid]<=E)lo=mid;else hi=mid;}
     double f=(E-e[lo])/fmax(e[hi]-e[lo],1e-30);
     return xs[lo]+f*(xs[hi]-xs[lo]);
 }
@@ -457,7 +576,7 @@ __device__ void sab_sample(
     else if (E_in >= inc_e[n-1]) { i_hi = n-1; }
     else {
         int lo=0, hi=n-1;
-        while(hi-lo>1){int mid=(lo+hi)/2; if(inc_e[mid]<=E_in) lo=mid; else hi=mid;}
+        while(hi-lo>1){int mid=(lo+hi) >> 1; if(inc_e[mid]<=E_in) lo=mid; else hi=mid;}
         i_hi = hi;
     }
     int i_lo = i_hi - 1;
@@ -479,7 +598,7 @@ __device__ void sab_sample(
     double xi_e = pcg_uniform(rng);
     int j = 1;
     { int lo=0, hi=eo_sz-1;
-      while(hi-lo>1){int mid=(lo+hi)/2; if(cdf_e[mid]<xi_e) lo=mid; else hi=mid;}
+      while(hi-lo>1){int mid=(lo+hi) >> 1; if(cdf_e[mid]<xi_e) lo=mid; else hi=mid;}
       j = (lo == 0 && cdf_e[0] >= xi_e) ? 0 : lo;
     }
     if (j >= eo_sz-1) j = eo_sz-2;
@@ -542,7 +661,7 @@ __device__ void apply_urr(
     if (E < ue[0] || E > ue[n_e-1]) return;
     // Find energy index
     int ie=0; { int lo=0,hi=n_e-1;
-        while(hi-lo>1){int mid=(lo+hi)/2;if(ue[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
+        while(hi-lo>1){int mid=(lo+hi) >> 1;if(ue[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
     // Sample band
     int base = off*n_b + ie*n_b;
     const double* cp = &PTR_D(p, P_URR_CUM_PROB)[base];
@@ -573,15 +692,18 @@ __device__ void rotate_direction(
 {
     double sin_mu = sqrt(fmax(0.0, 1.0-mu*mu));
     double w2 = (*dz)*(*dz);
+    // Paired trig via a single SFU dispatch (NVIDIA BPG §12.1.1).
+    double s_phi, c_phi;
+    sincos(phi, &s_phi, &c_phi);
     if (w2 < 0.999) {
         double inv_sq = 1.0/sqrt(1.0-w2);
-        double dx2=mu*(*dx)+sin_mu*((*dx)*(*dz)*cos(phi)-(*dy)*sin(phi))*inv_sq;
-        double dy2=mu*(*dy)+sin_mu*((*dy)*(*dz)*cos(phi)+(*dx)*sin(phi))*inv_sq;
-        double dz2=mu*(*dz)-sin_mu*sqrt(1.0-w2)*cos(phi);
+        double dx2=mu*(*dx)+sin_mu*((*dx)*(*dz)*c_phi-(*dy)*s_phi)*inv_sq;
+        double dy2=mu*(*dy)+sin_mu*((*dy)*(*dz)*c_phi+(*dx)*s_phi)*inv_sq;
+        double dz2=mu*(*dz)-sin_mu*sqrt(1.0-w2)*c_phi;
         *dx=dx2; *dy=dy2; *dz=dz2;
     } else {
         double sign = (*dz > 0.0) ? 1.0 : -1.0;
-        *dx=sin_mu*cos(phi); *dy=sin_mu*sin(phi)*sign; *dz=mu*sign;
+        *dx=sin_mu*c_phi; *dy=sin_mu*s_phi*sign; *dz=mu*sign;
     }
 }
 
@@ -633,14 +755,14 @@ __device__ double sample_angular_dist_stairstep(
     int ie=0;
     if (E <= ae[0]) ie=0;
     else if (E >= ae[a_ne-1]) ie=a_ne-1;
-    else { int lo=0,hi=a_ne-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
+    else { int lo=0,hi=a_ne-1; while(hi-lo>1){int mid=(lo+hi) >> 1;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
     int off = PTR_I(p, P_ANG_DIST_OFF)[a_off+ie];
     int sz = PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
     if (sz <= 1) return 2.0*xi-1.0;
     const double* mu = &PTR_D(p, P_ANG_MU)[off];
     const double* cd = &PTR_D(p, P_ANG_CDF)[off];
     int lo=0, hi=sz-1;
-    while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+    while(hi-lo>1){int mid=(lo+hi) >> 1;if(cd[mid]<=xi)lo=mid;else hi=mid;}
     double f = (xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
     return fmax(-1.0, fmin(1.0, mu[lo]+f*(mu[hi]-mu[lo])));
 }
@@ -657,7 +779,7 @@ __device__ double sample_angular_dist_interp(
         int off=PTR_I(p, P_ANG_DIST_OFF)[a_off], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off];
         if (sz<=1) return 2.0*xi-1.0;
         const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi) >> 1;if(cd[mid]<=xi)lo=mid;else hi=mid;}
         double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
         return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
     }
@@ -665,23 +787,23 @@ __device__ double sample_angular_dist_interp(
         int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+a_ne-1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+a_ne-1];
         if (sz<=1) return 2.0*xi-1.0;
         const double* mu=&PTR_D(p, P_ANG_MU)[off]; const double* cd=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cd[mid]<=xi)lo=mid;else hi=mid;}
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi) >> 1;if(cd[mid]<=xi)lo=mid;else hi=mid;}
         double f=(xi-cd[lo])/fmax(cd[hi]-cd[lo],1e-30);
         return fmax(-1.0,fmin(1.0,mu[lo]+f*(mu[hi]-mu[lo])));
     }
     int ie; { int lo=0,hi=a_ne-1;
-        while(hi-lo>1){int mid=(lo+hi)/2;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
+        while(hi-lo>1){int mid=(lo+hi) >> 1;if(ae[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
     double mu0, mu1;
     { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie];
       if(sz<=1){ mu0=2.0*xi-1.0; }
       else { const double* ma=&PTR_D(p, P_ANG_MU)[off]; const double* ca=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(ca[mid]<=xi)lo=mid;else hi=mid;}
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi) >> 1;if(ca[mid]<=xi)lo=mid;else hi=mid;}
         double f=(xi-ca[lo])/fmax(ca[hi]-ca[lo],1e-30); mu0=ma[lo]+f*(ma[hi]-ma[lo]); }
     }
     { int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+ie+1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+ie+1];
       if(sz<=1){ mu1=2.0*xi-1.0; }
       else { const double* mb=&PTR_D(p, P_ANG_MU)[off]; const double* cb=&PTR_D(p, P_ANG_CDF)[off];
-        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi)/2;if(cb[mid]<=xi)lo=mid;else hi=mid;}
+        int lo=0,hi=sz-1; while(hi-lo>1){int mid=(lo+hi) >> 1;if(cb[mid]<=xi)lo=mid;else hi=mid;}
         double f=(xi-cb[lo])/fmax(cb[hi]-cb[lo],1e-30); mu1=mb[lo]+f*(mb[hi]-mb[lo]); }
     }
     double frac=(E-ae[ie])/(ae[ie+1]-ae[ie]);
@@ -749,7 +871,8 @@ extern "C" __global__ void init_source(
     pcg_init(&rng, batch_seed+(unsigned long long)tid*100000ULL, (unsigned long long)tid);
     double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
     double st=sqrt(1.0-mu*mu);
-    ddx[tid]=st*cos(phi); ddy[tid]=st*sin(phi); ddz[tid]=mu;
+    double s_phi, c_phi; sincos(phi, &s_phi, &c_phi);
+    ddx[tid]=st*c_phi; ddy[tid]=st*s_phi; ddz[tid]=mu;
     rng_state[tid]=rng.state; rng_inc[tid]=rng.inc;
 }
 
@@ -757,21 +880,37 @@ extern "C" __global__ void init_source(
 // PERSISTENT TRANSPORT KERNEL
 // ═══════════════════════════════════════════════════════════════════════
 
+// Forward declaration — defined after transport kernels, used by
+// the hybrid XS path in transport_persistent.
+__device__ void wmp_eval(
+    double e, double t_kelvin,
+    double e_min, double e_max, double spacing, double sqrt_awr,
+    int n_windows, int fit_order, int fissionable,
+    const double2* poles,
+    const int* windows,
+    const signed char* broaden_poly,
+    const double* curvefit,
+    double* out_s, double* out_a, double* out_f);
+
 extern "C" __global__ void __launch_bounds__(256, 2)
 transport_persistent(
     Params p,
     const int* __restrict__ compact_idx, int n_alive,
-    // Mutable particle state (SoA)
-    double* pos_x, double* pos_y, double* pos_z,
-    double* dir_x, double* dir_y, double* dir_z,
-    double* energy, int* cell_idx, int* alive,
-    unsigned long long* rng_state_arr, unsigned long long* rng_inc_arr,
+    // Mutable particle state (SoA). `__restrict__` lets ptxas assume no
+    // aliasing between these SoA arrays, freeing registers that would
+    // otherwise have to re-reload invariants across the step loop
+    // (NVIDIA BPG §10.2 — reduces stack spills under launch_bounds 256×2).
+    double* __restrict__ pos_x, double* __restrict__ pos_y, double* __restrict__ pos_z,
+    double* __restrict__ dir_x, double* __restrict__ dir_y, double* __restrict__ dir_z,
+    double* __restrict__ energy, int* __restrict__ cell_idx, int* __restrict__ alive,
+    unsigned long long* __restrict__ rng_state_arr, unsigned long long* __restrict__ rng_inc_arr,
     // Fission bank
-    double* fis_x, double* fis_y, double* fis_z,
-    double* fis_e, double* fis_w,
-    int* fis_count, int max_fis,
+    double* __restrict__ fis_x, double* __restrict__ fis_y, double* __restrict__ fis_z,
+    double* __restrict__ fis_e, double* __restrict__ fis_w,
+    int* __restrict__ fis_count, int max_fis,
     // Counters
-    int* cnt_coll, int* cnt_fis, int* cnt_leak, int* cnt_surf,
+    int* __restrict__ cnt_coll, int* __restrict__ cnt_fis,
+    int* __restrict__ cnt_leak, int* __restrict__ cnt_surf,
     int steps_per_launch)
 {
     int lane = blockIdx.x * blockDim.x + threadIdx.x;
@@ -909,12 +1048,53 @@ transport_persistent(
                 }
             }
 
-            // URR — modifies s_el, s_fis, s_cap. Recompute micro_t to match CPU behavior.
-            {
+            // Hybrid SVD+WMP: if this nuclide has WMP coverage and E is inside
+            // the resolved-resonance window, replace elastic/fission/capture with
+            // the windowed-multipole evaluation and suppress URR (resonances are
+            // already explicit via poles). Outside the window the SVD/PW path
+            // stands and URR applies as usual.
+            bool in_wmp = false;
+            if (__ldg(&PTR_I(p, P_WMP_HAS)[ni])) {
+                double e_lo = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
+                double e_hi = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
+                if (E >= e_lo && E <= e_hi) in_wmp = true;
+            }
+
+            if (!in_wmp) {
+                // URR — modifies s_el, s_fis, s_cap. Recompute micro_t to match CPU behavior.
                 double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
                 apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
-                // Adjust micro_t by the delta in URR-affected channels
                 micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
+            } else {
+                int pole_off = __ldg(&PTR_I(p, P_WMP_POLE_OFF)[ni]);
+                int win_off  = __ldg(&PTR_I(p, P_WMP_WIN_OFF)[ni]);
+                int bro_off  = __ldg(&PTR_I(p, P_WMP_BROADEN_OFF)[ni]);
+                int cf_off   = __ldg(&PTR_I(p, P_WMP_CF_OFF)[ni]);
+                double w_emin = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
+                double w_emax = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
+                double w_spc  = __ldg(&PTR_D(p, P_WMP_SPACING)[ni]);
+                double w_sqra = __ldg(&PTR_D(p, P_WMP_SQRT_AWR)[ni]);
+                double w_tk   = __ldg(&PTR_D(p, P_WMP_T_KELVIN)[ni]);
+                int w_nw      = __ldg(&PTR_I(p, P_WMP_N_WINDOWS)[ni]);
+                int w_fo      = __ldg(&PTR_I(p, P_WMP_FIT_ORDER)[ni]);
+                int w_fiss    = __ldg(&PTR_I(p, P_WMP_FISSIONABLE)[ni]);
+
+                const double2* w_poles    = PTR_D2(p, P_WMP_POLES) + pole_off;
+                const int* w_windows      = PTR_I(p, P_WMP_WINDOWS) + win_off;
+                const signed char* w_bro  = PTR_B(p, P_WMP_BROADEN) + bro_off;
+                const double* w_curvefit  = PTR_D(p, P_WMP_CURVEFIT) + cf_off;
+
+                double w_s = 0.0, w_a = 0.0, w_f = 0.0;
+                wmp_eval(E, w_tk, w_emin, w_emax, w_spc, w_sqra,
+                         w_nw, w_fo, w_fiss,
+                         w_poles, w_windows, w_bro, w_curvefit,
+                         &w_s, &w_a, &w_f);
+
+                double new_el  = fmax(w_s, 0.0);
+                double new_fis = fmax(w_f, 0.0);
+                double new_cap = fmax(w_a - w_f, 0.0);
+                micro_t = new_el + s_inel + s_n2n + s_n3n + new_fis + new_cap;
+                s_el = new_el; s_fis = new_fis; s_cap = new_cap;
             }
 
             // S(alpha,beta) for H1 (nuclide idx 3 in PWR)
@@ -1023,9 +1203,10 @@ transport_persistent(
                         px2=0.0; py2=-vrh_z*ip; pz2=vrh_y*ip;
                     }
                     double qx=vrh_y*pz2-vrh_z*py2, qy=vrh_z*px2-vrh_x*pz2, qz=vrh_x*py2-vrh_y*px2;
-                    double sx2=mu_cm*vrh_x+st*(cos(phi)*px2+sin(phi)*qx);
-                    double sy2=mu_cm*vrh_y+st*(cos(phi)*py2+sin(phi)*qy);
-                    double sz2=mu_cm*vrh_z+st*(cos(phi)*pz2+sin(phi)*qz);
+                    double s_phi, c_phi; sincos(phi, &s_phi, &c_phi);
+                    double sx2=mu_cm*vrh_x+st*(c_phi*px2+s_phi*qx);
+                    double sy2=mu_cm*vrh_y+st*(c_phi*py2+s_phi*qy);
+                    double sz2=mu_cm*vrh_z+st*(c_phi*pz2+s_phi*qz);
                     double vox=vcx+vcn*sx2, voy=vcy+vcn*sy2, voz=vcz+vcn*sz2;
                     double vo=sqrt(vox*vox+voy*voy+voz*voz);
                     E=0.5*vo*vo; if(E<1e-11)E=1e-11;
@@ -1119,22 +1300,41 @@ transport_persistent(
                 int n_lev=__ldg(&PTR_I(p, P_LEVEL_COUNTS)[hit_nuc]);
                 double Q=-0.5e6; int selected=0;
                 if (n_lev>0) {
-                    double lxs_sum=0.0, lxs_cum[64]; int na=0;
+                    // Two-pass single-scan sampling (NVIDIA BPG §10.2: local
+                    // arrays with runtime indexing spill to DRAM). Pass 1
+                    // sums per-level XS; pass 2 re-computes and selects on
+                    // the fly — SVD cost doubles vs the old cached array,
+                    // but registers stay tight and 256-byte stack load
+                    // disappears.
+                    double lxs_sum=0.0;
                     int g_off=__ldg(&PTR_I(p, P_GRID_OFFSETS)[hit_nuc]);
                     int n_e=__ldg(&PTR_I(p, P_N_ENERGIES)[hit_nuc]);
                     int e_idx=energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off],n_e,E);
-                    for(int l=0;l<n_lev&&l<64;l++){
-                        int gl=lv_off+l; double lxs=0.0;
+                    int lev_cap = n_lev < 64 ? n_lev : 64;
+                    #pragma unroll 1
+                    for(int l=0;l<lev_cap;l++){
+                        int gl=lv_off+l;
                         if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])&&__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
-                            lxs=svd_reconstruct(
+                            lxs_sum += svd_reconstruct(
                                 &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
                                 &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],e_idx,rank);
                         }
-                        lxs_sum+=lxs; lxs_cum[l]=lxs_sum; na++;
                     }
                     if(lxs_sum>0.0){
                         double xi_l=pcg_uniform(&rng)*lxs_sum;
-                        for(int l=0;l<na;l++){if(xi_l<lxs_cum[l]){selected=l;break;}selected=l;}
+                        double run=0.0;
+                        selected = lev_cap - 1; // last accessible level as fallback
+                        #pragma unroll 1
+                        for(int l=0;l<lev_cap;l++){
+                            int gl=lv_off+l; double lxs=0.0;
+                            if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])&&__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
+                                lxs=svd_reconstruct(
+                                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],e_idx,rank);
+                            }
+                            run += lxs;
+                            if (xi_l < run) { selected = l; break; }
+                        }
                         Q=__ldg(&PTR_D(p, P_LEVEL_Q)[lv_off+selected]);
                     }
                 }
@@ -1166,7 +1366,15 @@ transport_persistent(
                     double phi=2.0*PI*pcg_uniform(&rng);
                     rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                 } else {
-                    double mu_cm=2.0*pcg_uniform(&rng)-1.0;
+                    // Prefer per-level ENDF angular distribution (MT=51-91)
+                    // when the evaluation stored one. Continuum MT=91 and
+                    // "no tabulated data" paths fall back to isotropic CM.
+                    double mu_cm;
+                    if (n_lev > 0 && sel_mt != 91) {
+                        mu_cm = sample_level_angular(E, &rng, p, lv_off + selected);
+                    } else {
+                        mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
+                    }
                     double ap1 = A + 1.0;
                     double e_n_cm = e_cm_out * A / ap1;
                     double v_n_i = sqrt(2.0 * e_n_cm);
@@ -1464,9 +1672,10 @@ extern "C" __global__ void debug_transport_trace(
                             px2=0.0; py2=-vrh_z*ip; pz2=vrh_y*ip;
                         }
                         double qx=vrh_y*pz2-vrh_z*py2, qy=vrh_z*px2-vrh_x*pz2, qz=vrh_x*py2-vrh_y*px2;
-                        double sx2=mu_cm*vrh_x+st*(cos(phi)*px2+sin(phi)*qx);
-                        double sy2=mu_cm*vrh_y+st*(cos(phi)*py2+sin(phi)*qy);
-                        double sz2=mu_cm*vrh_z+st*(cos(phi)*pz2+sin(phi)*qz);
+                        double s_phi, c_phi; sincos(phi, &s_phi, &c_phi);
+                        double sx2=mu_cm*vrh_x+st*(c_phi*px2+s_phi*qx);
+                        double sy2=mu_cm*vrh_y+st*(c_phi*py2+s_phi*qy);
+                        double sz2=mu_cm*vrh_z+st*(c_phi*pz2+s_phi*qz);
                         double vox=vcx+vcn*sx2, voy=vcy+vcn*sy2, voz=vcz+vcn*sz2;
                         double vo=sqrt(vox*vox+voy*voy+voz*voz);
                         E=0.5*vo*vo; if(E<1e-11)E=1e-11;
@@ -1516,4 +1725,207 @@ extern "C" __global__ void debug_transport_trace(
     energy[tid]=E; cell_idx[tid]=cell; alive[tid]=is_alive;
     rng_state_arr[tid]=rng.state; rng_inc_arr[tid]=rng.inc;
     step_counts[tid] = actual_steps;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Windowed Multipole (WMP) evaluator for hybrid SVD+WMP mode.
+// Mirrors src/wmp.rs (Humlicek W4 Faddeeva + broadened curvefit + pole sum).
+// ═══════════════════════════════════════════════════════════════════════
+
+#define WMP_K_BOLTZMANN 8.6173285e-5
+#define WMP_INV_SQRT_PI 0.5641895835477563
+
+__device__ __forceinline__ double2 c2mul(double2 a, double2 b) {
+    return make_double2(a.x*b.x - a.y*b.y, a.x*b.y + a.y*b.x);
+}
+__device__ __forceinline__ double2 c2add(double2 a, double2 b) { return make_double2(a.x+b.x, a.y+b.y); }
+__device__ __forceinline__ double2 c2sub(double2 a, double2 b) { return make_double2(a.x-b.x, a.y-b.y); }
+__device__ __forceinline__ double2 c2scale(double2 a, double s) { return make_double2(a.x*s, a.y*s); }
+__device__ __forceinline__ double2 c2div(double2 a, double2 b) {
+    double d = b.x*b.x + b.y*b.y;
+    return make_double2((a.x*b.x + a.y*b.y)/d, (a.y*b.x - a.x*b.y)/d);
+}
+
+__device__ double2 wmp_horner(double2 z, const double* c, int n) {
+    double2 acc = make_double2(c[n-1], 0.0);
+    for (int i = n-2; i >= 0; --i) {
+        acc = c2mul(acc, z);
+        acc.x += c[i];
+    }
+    return acc;
+}
+
+__device__ double2 wmp_faddeeva(double2 z) {
+    // Iterative form — avoid the recursive conjugate fold-up. CUDA supports
+    // recursion but the extra stack frame blows local memory when this is
+    // called from transport_persistent under __launch_bounds__(256, 2),
+    // which has high register pressure. Instead: flip to upper half plane,
+    // compute there, and un-flip at the end.
+    bool conj = (z.y < 0.0);
+    if (conj) z.y = -z.y;
+
+    double x = z.x, y = z.y;
+    double s = fabs(x) + y;
+    double2 t = make_double2(y, -x);
+    double2 result;
+
+    if (s >= 15.0) {
+        double2 u = c2mul(t, t);
+        double2 num = c2scale(t, WMP_INV_SQRT_PI);
+        double2 den = make_double2(u.x + 0.5, u.y);
+        result = c2div(num, den);
+    } else if (s >= 5.5) {
+        double2 u = c2mul(t, t);
+        double2 uu = c2mul(u, u);
+        double2 num = c2mul(t, make_double2(1.410474 + u.x*WMP_INV_SQRT_PI, u.y*WMP_INV_SQRT_PI));
+        double2 den = make_double2(0.75 + 3.0*u.x + uu.x, 3.0*u.y + uu.y);
+        result = c2div(num, den);
+    } else if (y >= 0.195 * fabs(x) - 0.176) {
+        const double p_c[5] = {16.4955, 20.20933, 11.96482, 3.778987, 0.5642236};
+        const double q_c[6] = {16.4955, 38.82363, 39.27121, 21.69274, 6.699398, 1.0};
+        double2 num = wmp_horner(t, p_c, 5);
+        double2 den = wmp_horner(t, q_c, 6);
+        result = c2div(num, den);
+    } else {
+        // Region IV
+        double2 u = c2mul(t, t);
+        const double p_c[7] = {36183.31, -3321.9905, 1540.787, -219.0313, 35.76683, -1.320522, 0.56419};
+        const double q_c[8] = {32066.6, -24322.84, 9022.228, -2186.181, 364.2191, -61.57037, 1.841439, -1.0};
+        double2 p = wmp_horner(u, p_c, 7);
+        double2 q = wmp_horner(u, q_c, 8);
+        double e_abs = exp(u.x);
+        double ss, cc;
+        sincos(u.y, &ss, &cc);
+        double2 exp_u = make_double2(e_abs*cc, e_abs*ss);
+        double2 corr = c2mul(t, c2div(p, q));
+        result = c2sub(exp_u, corr);
+    }
+
+    if (conj) {
+        // OpenMC convention: for Im(z) < 0, w(z) = -conj(w(z*)) where z* = conj(z)
+        result.x = -result.x;
+        // result.y stays positive (antisymmetric under conjugation)
+    }
+    return result;
+}
+
+__device__ double wmp_erf(double x) {
+    double sgn = (x < 0.0) ? -1.0 : 1.0;
+    double ax = fabs(x);
+    double tt = 1.0 / (1.0 + 0.3275911 * ax);
+    double y = 1.0 - (((((1.061405429*tt - 1.453152027)*tt + 1.421413741)*tt
+                        - 0.284496736)*tt + 0.254829592)*tt) * exp(-ax*ax);
+    return sgn * y;
+}
+
+__device__ void wmp_broaden_poly(double e, double dopp, int n, double* out) {
+    double sqrt_e = sqrt(e);
+    double beta = sqrt_e * dopp;
+    double half_inv_d2 = 0.5 / (dopp*dopp);
+    double quarter_inv_d4 = half_inv_d2 * half_inv_d2;
+    double erf_b, exp_mb2;
+    if (beta > 6.0) { erf_b = 1.0; exp_mb2 = 0.0; }
+    else { erf_b = wmp_erf(beta); exp_mb2 = exp(-beta*beta); }
+    out[0] = erf_b / e;
+    if (n > 1) out[1] = 1.0 / sqrt_e;
+    if (n > 2) out[2] = out[0] * (half_inv_d2 + e) + exp_mb2 / (beta * sqrt(PI));
+    for (int i = 1; i < n - 2; ++i) {
+        double di = (double)i;
+        if (i != 1) {
+            out[i+2] = -out[i-2] * (di - 1.0) * di * quarter_inv_d4
+                     + out[i] * (e + (1.0 + 2.0*di) * half_inv_d2);
+        } else {
+            out[i+2] = out[i] * (e + (1.0 + 2.0*di) * half_inv_d2);
+        }
+    }
+}
+
+__device__ void wmp_eval(
+    double e, double t_kelvin,
+    double e_min, double e_max, double spacing, double sqrt_awr,
+    int n_windows, int fit_order, int fissionable,
+    const double2* poles,
+    const int* windows,
+    const signed char* broaden_poly,
+    const double* curvefit,
+    double* out_s, double* out_a, double* out_f)
+{
+    *out_s = 0.0; *out_a = 0.0; *out_f = 0.0;
+    if (e < e_min || e > e_max) return;
+
+    double sqrt_kt = sqrt(WMP_K_BOLTZMANN * t_kelvin);
+    double sqrt_e = sqrt(e);
+    double inv_e = 1.0 / e;
+    double sqrt_e_min = sqrt(e_min);
+    int iw = (int)floor((sqrt_e - sqrt_e_min) / spacing);
+    if (iw < 0) iw = 0;
+    if (iw > n_windows - 1) iw = n_windows - 1;
+
+    int startw = windows[2*iw];
+    int endw   = windows[2*iw + 1];
+
+    int order1 = fit_order + 1;
+    const double* cf_base = curvefit + (size_t)iw * order1 * 3;
+
+    if (sqrt_kt != 0.0 && broaden_poly[iw]) {
+        double dopp = sqrt_awr / sqrt_kt;
+        double factors[8];
+        wmp_broaden_poly(e, dopp, order1, factors);
+        for (int ip = 0; ip < order1; ++ip) {
+            *out_s += cf_base[ip*3 + 0] * factors[ip];
+            *out_a += cf_base[ip*3 + 1] * factors[ip];
+            if (fissionable) *out_f += cf_base[ip*3 + 2] * factors[ip];
+        }
+    } else {
+        double temp = inv_e;
+        for (int ip = 0; ip < order1; ++ip) {
+            *out_s += cf_base[ip*3 + 0] * temp;
+            *out_a += cf_base[ip*3 + 1] * temp;
+            if (fissionable) *out_f += cf_base[ip*3 + 2] * temp;
+            temp *= sqrt_e;
+        }
+    }
+
+    if (startw >= 0 && endw > startw) {
+        double sqrt_pi_v = sqrt(PI);
+        double dopp = sqrt_awr / sqrt_kt;
+        for (int ip = startw; ip < endw; ++ip) {
+            double2 ea = poles[ip*4 + 0];
+            double2 rs = poles[ip*4 + 1];
+            double2 ra = poles[ip*4 + 2];
+            double2 rf = poles[ip*4 + 3];
+            double2 zc = make_double2((sqrt_e - ea.x)*dopp, -ea.y*dopp);
+            double2 w = wmp_faddeeva(zc);
+            double scale = dopp * inv_e * sqrt_pi_v;
+            double2 wv = c2scale(w, scale);
+            *out_s += c2mul(rs, wv).x;
+            *out_a += c2mul(ra, wv).x;
+            if (fissionable) *out_f += c2mul(rf, wv).x;
+        }
+    }
+}
+
+extern "C" __global__ void wmp_test_eval(
+    int n_e,
+    const double* energies,
+    double t_kelvin,
+    double e_min, double e_max, double spacing, double sqrt_awr,
+    int n_windows, int fit_order, int fissionable,
+    const double2* poles,
+    const int* windows,
+    const signed char* broaden_poly,
+    const double* curvefit,
+    double* out_s, double* out_a, double* out_f)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_e) return;
+    double s, a, f;
+    wmp_eval(energies[tid], t_kelvin,
+             e_min, e_max, spacing, sqrt_awr,
+             n_windows, fit_order, fissionable,
+             poles, windows, broaden_poly, curvefit,
+             &s, &a, &f);
+    out_s[tid] = s;
+    out_a[tid] = a;
+    out_f[tid] = f;
 }

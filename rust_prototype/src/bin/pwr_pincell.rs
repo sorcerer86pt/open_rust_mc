@@ -25,9 +25,27 @@ use open_rust_mc::thermal::ThermalScatteringData;
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
 use open_rust_mc::transport::xs_provider;
+use open_rust_mc::transport::hybrid_xs::HybridSvdWmpXsProvider;
+use open_rust_mc::wmp::WindowedMultipole;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
-enum XsMode { Svd, Table, Both }
+enum XsMode { Svd, Table, Both, Hybrid }
+
+/// WMP filename (ZZAAA.h5) and target temperature (K) per nuclide,
+/// parallel to NUCLIDE_SPECS. None = no WMP coverage for this nuclide.
+/// Temperatures match the `temp_idx` in NUCLIDE_SPECS:
+///   0=250K, 1=294K, 2=600K, 3=900K, 4=1200K, 5=2500K.
+const WMP_SPECS: &[(&str, f64)] = &[
+    ("092235.h5", 900.0),  // 0  U235 fuel
+    ("092238.h5", 900.0),  // 1  U238 fuel
+    ("008016.h5", 900.0),  // 2  O16 fuel
+    ("001001.h5", 600.0),  // 3  H1 water
+    ("040090.h5", 600.0),  // 4  Zr90 clad
+    ("040091.h5", 600.0),  // 5  Zr91 clad
+    ("040092.h5", 600.0),  // 6  Zr92 clad
+    ("040094.h5", 600.0),  // 7  Zr94 clad
+    ("008016.h5", 600.0),  // 8  O16 water
+];
 
 #[derive(Parser)]
 #[command(name = "pwr_pincell", about = "PWR pin cell benchmark (multi-material, multi-nuclide)")]
@@ -56,6 +74,11 @@ struct Args {
     /// Number of independent seeds for statistical benchmarking.
     #[arg(short, long, default_value_t = 1)]
     seeds: u32,
+
+    /// Replace the fixed `--inactive` count with runtime Shannon-entropy
+    /// plateau detection. See EntropyConvergence::default for thresholds.
+    #[arg(long, default_value_t = false)]
+    auto_inactive: bool,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
@@ -155,6 +178,9 @@ fn run_multi_seed<XS: XsProvider>(
             inactive,
             particles_per_batch: args.particles,
             seed: seed as u64,
+            auto_inactive: if args.auto_inactive {
+                Some(open_rust_mc::transport::simulate::EntropyConvergence::default())
+            } else { None },
         };
 
         if args.seeds > 1 {
@@ -169,7 +195,7 @@ fn run_multi_seed<XS: XsProvider>(
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let active: Vec<f64> = results.iter()
-            .filter(|r| r.batch > inactive)
+            .filter(|r| r.active)
             .map(|r| r.k_eff)
             .collect();
         let n = active.len() as f64;
@@ -360,7 +386,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
             kernels.push(xs_provider::NuclideKernels {
                 elastic: None, total_table: None, total_xs_raw: None, missing_xs: None, pointwise_xs: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
-                nu_bar_table: None, discrete_levels: vec![],
+                nu_bar_table: None, discrete_levels: vec![], discrete_level_angles: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
                 fission_energy_dist: None, urr_tables: None,
             });
@@ -378,6 +404,75 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     (provider, xs_mem, load_ms)
 }
 
+fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
+    println!("\n── Loading nuclear data (Hybrid SVD rank={} + WMP) ──", args.rank);
+    let t0 = Instant::now();
+
+    // First build the SVD provider exactly as `load_svd` does.
+    let (svd_provider, svd_mem, _) = load_svd(args);
+
+    // Now load per-nuclide WMP data.
+    let wmp_dir = args.data_dir.join("..").join("wmp");
+    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> = Vec::with_capacity(WMP_SPECS.len());
+    let mut wmp_bytes: usize = 0;
+    let mut covered = 0usize;
+    for &(wmp_file, t_kelvin) in WMP_SPECS {
+        let path = wmp_dir.join(wmp_file);
+        if !path.exists() {
+            println!("  WMP not found: {}", path.display());
+            wmps.push(None);
+            continue;
+        }
+        match WindowedMultipole::from_hdf5(&path) {
+            Ok(wmp) => {
+                wmp_bytes += wmp_payload_bytes(&wmp);
+                println!("  Loaded WMP {wmp_file} at T={t_kelvin} K   \
+                    (E {:.2e}..{:.2e} eV, {} poles, {} windows)",
+                    wmp.e_min, wmp.e_max, wmp.n_poles, wmp.n_windows);
+                covered += 1;
+                wmps.push(Some((Arc::new(wmp), t_kelvin)));
+            }
+            Err(e) => {
+                println!("  WMP load failed for {wmp_file}: {e:?}");
+                wmps.push(None);
+            }
+        }
+    }
+
+    let provider = HybridSvdWmpXsProvider::new(svd_provider, wmps);
+    let report = provider.memory_report();
+    let total_mem = report.current_total();
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("  Hybrid ready in {load_ms:.0} ms  ({} / {} nuclides with WMP)",
+        covered, WMP_SPECS.len());
+    println!("  Memory (current scaffolding):");
+    println!("    full SVD basis     = {:.1} KB", report.current_svd_bytes as f64 / 1024.0);
+    println!("    WMP payload        = {:.1} KB", report.wmp_payload_bytes as f64 / 1024.0);
+    println!("    TOTAL (current)    = {:.1} KB", report.current_total() as f64 / 1024.0);
+    println!("  Memory (smooth-only projection, measured from loaded data):");
+    println!("    smooth-only SVD    = {:.1} KB", report.smooth_only_svd_bytes as f64 / 1024.0);
+    println!("    WMP payload        = {:.1} KB", report.wmp_payload_bytes as f64 / 1024.0);
+    println!("    TOTAL (projected)  = {:.1} KB", report.smooth_only_total() as f64 / 1024.0);
+    println!("    reduction vs full  = {:.1}x",
+        report.current_total() as f64 / report.smooth_only_total() as f64);
+
+    (provider, total_mem, load_ms)
+}
+
+/// Count bytes of the WMP raw payload (poles + windows + curvefit +
+/// broaden_poly) — mirrors the Python experiment for apples-to-apples.
+fn wmp_payload_bytes(wmp: &WindowedMultipole) -> usize {
+    // poles: n_poles * 4 * 16 bytes (complex128)
+    let poles = wmp.n_poles * 4 * 16;
+    // windows: n_windows * 2 * 4 bytes (int32)
+    let windows = wmp.n_windows * 2 * 4;
+    // curvefit: n_windows * (fit_order+1) * 3 * 8 bytes
+    let curvefit = wmp.n_windows * (wmp.fit_order + 1) * 3 * 8;
+    // broaden_poly: n_windows * 1 byte
+    let broaden = wmp.n_windows;
+    poles + windows + curvefit + broaden
+}
+
 fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     println!("\n── Loading nuclear data (pointwise table) ──");
     let t0 = Instant::now();
@@ -390,7 +485,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
             tables.push(xs_provider::NuclideTableData {
                 elastic: None, total_table: None, inelastic: None, n2n: None, n3n: None,
                 fission: None, capture: None, awr, nu_bar_const: nu_bar,
-                nu_bar_table: None, discrete_levels: vec![],
+                nu_bar_table: None, discrete_levels: vec![], discrete_level_angles: vec![],
                 has_continuum_inelastic: false, elastic_angle: None,
                 fission_energy_dist: None, urr_tables: None,
             });
@@ -478,6 +573,17 @@ fn main() {
             );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell");
+            println!("{}", "=".repeat(60));
+            print_benchmark(&r);
+        }
+        XsMode::Hybrid => {
+            let (provider, xs_mem, load_ms) = load_hybrid(&args);
+            let r = run_multi_seed(
+                &format!("Hybrid SVD(rank={})+WMP", args.rank),
+                &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+            );
+            println!("\n{}", "=".repeat(60));
+            println!("RESULTS — PWR Pin Cell (Hybrid SVD + WMP)");
             println!("{}", "=".repeat(60));
             print_benchmark(&r);
         }

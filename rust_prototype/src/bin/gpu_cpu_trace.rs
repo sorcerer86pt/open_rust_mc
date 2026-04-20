@@ -534,8 +534,9 @@ mod cuda_main {
                 Err(_) => gpu.upload_sab_data_empty().expect("sab"),
             }
         } else { gpu.upload_sab_data_empty().expect("sab") };
+        let wmp_data = gpu.upload_wmp_data_empty(NUCLIDE_SPECS.len()).expect("wmp empty");
 
-        let gpu_trace = gpu.run_debug_trace(&source, &nuc_data, &mat_data, &sab_data, max_steps as u32, 0).expect("GPU trace");
+        let gpu_trace = gpu.run_debug_trace(&source, &nuc_data, &mat_data, &sab_data, &wmp_data, max_steps as u32, 0).expect("GPU trace");
 
         let header = "particle,step,energy,pos_x,pos_y,pos_z,cell,material,macro_total,d_coll,d_surf,event,hit_nuc,micro_el,micro_inel,micro_fis,micro_cap,out_energy,rng_xi";
         // Write GPU CSV
