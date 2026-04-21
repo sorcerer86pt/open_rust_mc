@@ -798,41 +798,50 @@ impl XsProvider for TableXsProvider {
             .or(nuc.n3n.as_ref());
         let idx = any_table.map_or(0, |t| t.bracket_idx(energy));
 
+        // Draw ONE stochastic-temperature pick per nuclide per collision
+        // and reuse it for every channel lookup. This keeps partial
+        // channels (el + in + fis + cap + ...) consistent with a single
+        // library endpoint — otherwise per-channel independent picks
+        // mix 600 K elastic with 900 K capture on the same collision,
+        // which biases k_inf. Equivalent to what OpenMC does at the
+        // particle-collision level.
+        let use_hi = any_table.is_some_and(|t| t.draw_pick());
+
         let elastic = nuc
             .elastic
             .as_ref()
-            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+            .map_or(0.0, |t| t.lookup_at_idx_with_pick(energy, idx, use_hi));
         let inelastic = match &nuc.inelastic {
-            Some(t) => t.lookup_at_idx(energy, idx),
+            Some(t) => t.lookup_at_idx_with_pick(energy, idx, use_hi),
             None if !nuc.discrete_levels.is_empty() => nuc
                 .discrete_levels
                 .iter()
                 .filter(|lvl| energy >= lvl.info.threshold)
                 .filter_map(|lvl| lvl.table.as_ref())
-                .map(|t| t.lookup_at_idx(energy, idx).max(0.0))
+                .map(|t| t.lookup_at_idx_with_pick(energy, idx, use_hi).max(0.0))
                 .sum::<f64>(),
             None => 0.0,
         };
         let n2n = nuc
             .n2n
             .as_ref()
-            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+            .map_or(0.0, |t| t.lookup_at_idx_with_pick(energy, idx, use_hi));
         let n3n = nuc
             .n3n
             .as_ref()
-            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+            .map_or(0.0, |t| t.lookup_at_idx_with_pick(energy, idx, use_hi));
         let fission = nuc
             .fission
             .as_ref()
-            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+            .map_or(0.0, |t| t.lookup_at_idx_with_pick(energy, idx, use_hi));
         let mut capture = nuc
             .capture
             .as_ref()
-            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+            .map_or(0.0, |t| t.lookup_at_idx_with_pick(energy, idx, use_hi));
 
         let total = match &nuc.total_table {
             Some(tt) => {
-                let tot = tt.lookup_at_idx(energy, idx);
+                let tot = tt.lookup_at_idx_with_pick(energy, idx, use_hi);
                 capture = (tot - elastic - inelastic - n2n - n3n - fission).max(0.0);
                 tot
             }

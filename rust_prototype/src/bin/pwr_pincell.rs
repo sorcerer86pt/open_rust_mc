@@ -94,15 +94,21 @@ struct Args {
     auto_inactive: bool,
 
     /// Operating-temperature offset added to every nuclide's library
-    /// temperature (K) to force OpenMC-style stochastic pseudo-
-    /// interpolation between two library endpoints. Example: each
-    /// nuclide's NUCLIDE_SPECS temp is shifted by +N so fuel at 900 K
-    /// becomes 900+N, water at 600 K becomes 600+N, etc. Values that
-    /// land on-library (e.g., offset=300 → 900→1200) snap to the
-    /// exact library column; values strictly between endpoints force
-    /// the table path to load two endpoints and draw stochastically.
+    /// temperature (K). Shortcut for --fuel-offset and --mod-offset.
     #[arg(long)]
     target_temp_offset: Option<f64>,
+
+    /// Offset (K) applied only to fuel nuclides (U-235, U-238, O-16 in
+    /// fuel; NUCLIDE_SPECS indices 0, 1, 2). Isolates fuel-side Doppler
+    /// from moderator-side thermal-scattering effects for PWR off-
+    /// library diagnostics.
+    #[arg(long)]
+    fuel_offset: Option<f64>,
+
+    /// Offset (K) applied only to moderator and clad nuclides
+    /// (H-1, Zr-90..94, O-16 in water; NUCLIDE_SPECS indices 3..=8).
+    #[arg(long)]
+    mod_offset: Option<f64>,
 
     /// Override the SVD rank used for discrete inelastic levels
     /// (MT=51-91). rank=1 captures them (weak T-dependence).
@@ -470,12 +476,22 @@ fn load_thermal(data_dir: &std::path::Path) -> Vec<Option<Arc<ThermalScatteringD
     thermal
 }
 
+/// Resolve the temperature offset (K) to apply for NUCLIDE_SPECS index
+/// `nuc_idx`. Fuel (0, 1, 2) vs moderator/clad (3..=8) split. If no
+/// per-group knob is set, falls back to the global `--target-temp-offset`.
+/// Returns `None` when no offset applies (use legacy single-T loader).
+fn resolve_offset_for(nuc_idx: usize, args: &Args) -> Option<f64> {
+    let is_fuel = matches!(nuc_idx, 0 | 1 | 2);
+    let specific = if is_fuel { args.fuel_offset } else { args.mod_offset };
+    specific.or(args.target_temp_offset)
+}
+
 fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     println!("\n── Loading nuclear data (SVD, rank={}) ──", args.rank);
     let t0 = Instant::now();
 
     let mut kernels = Vec::new();
-    for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS {
+    for (nuc_idx, &(filename, awr, nu_bar, nuc_temp_idx)) in NUCLIDE_SPECS.iter().enumerate() {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
@@ -501,10 +517,11 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 urr_tables: None,
             });
         } else {
-            // Route through the at-temp loader when --target-temp-offset
-            // or --discrete-rank is set; otherwise keep the legacy
+            let offset_here = resolve_offset_for(nuc_idx, args);
+            // Route through the at-temp loader when any offset or
+            // --discrete-rank is set; otherwise keep the legacy
             // single-T fast path for bit-for-bit backwards compat.
-            match (args.target_temp_offset, args.discrete_rank) {
+            match (offset_here, args.discrete_rank) {
                 (None, None) => kernels.push(xs_provider::load_nuclide(
                     &path,
                     args.rank,
@@ -678,7 +695,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     let t0 = Instant::now();
 
     let mut tables = Vec::new();
-    for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS {
+    for (nuc_idx, &(filename, awr, nu_bar, nuc_temp_idx)) in NUCLIDE_SPECS.iter().enumerate() {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
@@ -701,7 +718,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
                 urr_tables: None,
             });
         } else {
-            match args.target_temp_offset {
+            match resolve_offset_for(nuc_idx, args) {
                 None => tables.push(xs_provider::load_nuclide_table(
                     &path, nuc_temp_idx, awr, nu_bar,
                 )),

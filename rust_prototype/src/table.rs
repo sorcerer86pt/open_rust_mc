@@ -287,12 +287,41 @@ impl StochTempTable {
         self.lo.bracket_idx(energy)
     }
 
-    /// Stochastic lookup at a pre-computed grid index.
+    /// Stochastic lookup at a pre-computed grid index. Draws its own xi
+    /// per call — use [`lookup_at_idx_with_pick`] when a single MicroXs
+    /// build touches multiple channels and they must all use the same
+    /// library endpoint (consistency of partial channels within a
+    /// collision is a correctness requirement for OpenMC-style
+    /// pseudo-interpolation).
     #[inline]
     pub fn lookup_at_idx(&self, energy: f64, idx: usize) -> f64 {
         match &self.hi {
             Some(hi) if draw_xi() > self.p_lo => hi.lookup_at_idx(energy, idx),
             _ => self.lo.lookup_at_idx(energy, idx),
+        }
+    }
+
+    /// Stochastic lookup with an externally-chosen endpoint. `use_hi =
+    /// true` picks the upper library temp; `false` picks the lower. The
+    /// caller should draw one xi at the start of a collision's MicroXs
+    /// build and pass the same `use_hi` to every channel lookup so all
+    /// partial channels come from the same library temperature.
+    #[inline]
+    pub fn lookup_at_idx_with_pick(&self, energy: f64, idx: usize, use_hi: bool) -> f64 {
+        match &self.hi {
+            Some(hi) if use_hi => hi.lookup_at_idx(energy, idx),
+            _ => self.lo.lookup_at_idx(energy, idx),
+        }
+    }
+
+    /// Draw a consistent pick for this stochastic table. Returns
+    /// `(use_hi, p_lo)` — `use_hi = draw_xi() > p_lo`. Returns
+    /// `(false, 1.0)` for single-temp tables (lo is authoritative).
+    #[inline]
+    pub fn draw_pick(&self) -> bool {
+        match &self.hi {
+            Some(_) => draw_xi() > self.p_lo,
+            None => false,
         }
     }
 
