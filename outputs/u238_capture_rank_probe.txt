@@ -1,13 +1,19 @@
 U-238 capture MT=102: off-library 900 K held out
-  bracket = (600K, 1200K); sqrt(T)-linear alpha = 0.5426
+  bracket = (600K, 1200K); sqrt(T) alpha = 0.5426; ducru_unity = (0.4142, 0.5858)
   singular-value ratios s_k/s_0 = [1.00e+00, 2.77e-01, 6.76e-02, 1.81e-02, 6.10e-03]
 
-  rank   global L2    RRR (1e0–1e4 eV)    6.67-eV (6–300 eV)
-     1   6.054e-01           6.055e-01             6.059e-01
-     2   1.135e-01           1.135e-01             1.136e-01
-     3   2.498e-02           2.498e-02             2.497e-02
-     4   2.729e-02           2.729e-02             2.728e-02
-     5   2.717e-02           2.717e-02             2.716e-02
+                    scheme  rank   global L2         RRR   6.67-band  peak ratio
+        raw sqrt(T)-linear     -   2.423e-02   2.424e-02   2.423e-02      1.0221
+           raw ducru-unity     -   1.838e-02   1.838e-02   1.838e-02      1.0089
+      SVD + sqrt(T)-linear     1   6.054e-01   6.055e-01   6.059e-01      0.4584
+         SVD + ducru-unity     1   6.247e-01   6.247e-01   6.251e-01      0.4337
+      SVD + sqrt(T)-linear     2   1.135e-01   1.135e-01   1.136e-01      1.1483
+         SVD + ducru-unity     2   1.071e-01   1.071e-01   1.072e-01      1.1324
+      SVD + sqrt(T)-linear     3   2.498e-02   2.498e-02   2.497e-02      1.0210
+         SVD + ducru-unity     3   1.483e-02   1.483e-02   1.481e-02      1.0112
+      SVD + sqrt(T)-linear     4   2.729e-02   2.729e-02   2.728e-02      1.0103
+         SVD + ducru-unity     4   2.120e-02   2.120e-02   2.119e-02      0.9977
+      SVD + sqrt(T)-linear     5   2.717e-02   2.717e-02   2.716e-02      1.0108
+         SVD + ducru-unity     5   2.111e-02   2.111e-02   2.110e-02      0.9979
 
-  raw sqrt(T)-linear of two library columns (no SVD, for reference):
-    global=2.423e-02  RRR=2.424e-02  6.67=2.423e-02
+  peak-ratio column measured at E = 6.673 eV (truth = 4482.8 barns)
