@@ -1516,7 +1516,7 @@ fn sqrt_temp_alpha(target: f64, t_lo: f64, t_hi: f64) -> f64 {
     }
 }
 
-/// Linearly interpolate total XS (in √T) between two library endpoints.
+/// Interpolate total XS between two library endpoints using √T-linear.
 /// Used to build the SVD-path `total_table` at an off-library temperature
 /// so the "total − partials → capture" calibration stays consistent with
 /// the SVD-reconstructed partial channels.
@@ -1596,6 +1596,14 @@ fn build_kernel_at_temp(
         if i_lo == i_hi {
             kernel.temp_coeffs(i_lo)
         } else {
+            // √T-linear interpolation — partition-of-unity on the
+            // V^T columns; exact at both library endpoints and monotone
+            // in between. Works well for fast spectra (Godiva). For
+            // thermal systems with narrow resonances (PWR U-238 6.67 eV)
+            // this is too coarse; 2-point Ducru is L2-optimal but not
+            // unity-preserving, so resonance-accurate off-library SVD
+            // interpolation remains future work. Use --mode wmp for
+            // resonance-driven problems at off-library T.
             let c_lo = kernel.temp_coeffs(i_lo);
             let c_hi = kernel.temp_coeffs(i_hi);
             let alpha = sqrt_temp_alpha(
