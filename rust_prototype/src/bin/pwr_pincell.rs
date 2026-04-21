@@ -22,7 +22,7 @@ use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
 use open_rust_mc::hdf5_reader;
 use open_rust_mc::thermal::ThermalScatteringData;
-use open_rust_mc::transport::hybrid_xs::HybridSvdWmpXsProvider;
+use open_rust_mc::transport::hybrid_xs::{HybridSvdWmpXsProvider, HybridTableWmpXsProvider};
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
 use open_rust_mc::transport::xs_provider;
@@ -33,7 +33,12 @@ enum XsMode {
     Svd,
     Table,
     Both,
+    /// SVD + Windowed Multipole hybrid (kept for regression comparison).
     Hybrid,
+    /// ACE pointwise table + Windowed Multipole — industry baseline.
+    Wmp,
+    /// Four-way honesty test: SVD vs Table vs SVD+WMP vs ACE+WMP.
+    All,
 }
 
 /// WMP filename (ZZAAA.h5) and target temperature (K) per nuclide,
@@ -87,6 +92,22 @@ struct Args {
     /// plateau detection. See EntropyConvergence::default for thresholds.
     #[arg(long, default_value_t = false)]
     auto_inactive: bool,
+
+    /// Operating-temperature offset added to every nuclide's library
+    /// temperature (K) to force OpenMC-style stochastic pseudo-
+    /// interpolation between two library endpoints. Example: each
+    /// nuclide's NUCLIDE_SPECS temp is shifted by +N so fuel at 900 K
+    /// becomes 900+N, water at 600 K becomes 600+N, etc. Values that
+    /// land on-library (e.g., offset=300 → 900→1200) snap to the
+    /// exact library column; values strictly between endpoints force
+    /// the table path to load two endpoints and draw stochastically.
+    #[arg(long)]
+    target_temp_offset: Option<f64>,
+
+    /// Override the SVD rank used for discrete inelastic levels
+    /// (MT=51-91). rank=1 captures them (weak T-dependence).
+    #[arg(long)]
+    discrete_rank: Option<usize>,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
@@ -480,13 +501,28 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 urr_tables: None,
             });
         } else {
-            kernels.push(xs_provider::load_nuclide(
-                &path,
-                args.rank,
-                nuc_temp_idx,
-                awr,
-                nu_bar,
-            ));
+            // Route through the at-temp loader when --target-temp-offset
+            // or --discrete-rank is set; otherwise keep the legacy
+            // single-T fast path for bit-for-bit backwards compat.
+            match (args.target_temp_offset, args.discrete_rank) {
+                (None, None) => kernels.push(xs_provider::load_nuclide(
+                    &path,
+                    args.rank,
+                    nuc_temp_idx,
+                    awr,
+                    nu_bar,
+                )),
+                (offset, drank) => {
+                    let base_t = open_rust_mc::hdf5_reader::NuclideFileReader::open(&path)
+                        .ok()
+                        .and_then(|r| r.temperatures.get(nuc_temp_idx).copied())
+                        .unwrap_or(294.0);
+                    let target = base_t + offset.unwrap_or(0.0);
+                    kernels.push(xs_provider::load_nuclide_at_temp(
+                        &path, args.rank, target, awr, nu_bar, drank,
+                    ));
+                }
+            }
         }
     }
 
@@ -587,6 +623,56 @@ fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
     (provider, total_mem, load_ms)
 }
 
+/// Load ACE pointwise table + WMP in the resolved-resonance window.
+/// Industry baseline — matches godiva's `--mode wmp`.
+fn load_wmp_hybrid(args: &Args) -> (HybridTableWmpXsProvider, usize, f64) {
+    println!("\n── Loading nuclear data (ACE pointwise + WMP in RRR) ──");
+    let t0 = Instant::now();
+    let (table_provider, table_mem, _) = load_table(args);
+
+    let wmp_dir = args.data_dir.join("..").join("wmp");
+    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> =
+        Vec::with_capacity(WMP_SPECS.len());
+    let mut covered = 0usize;
+    for &(wmp_file, t_kelvin) in WMP_SPECS {
+        let path = wmp_dir.join(wmp_file);
+        if !path.exists() {
+            println!("  WMP not found: {}", path.display());
+            wmps.push(None);
+            continue;
+        }
+        match WindowedMultipole::from_hdf5(&path) {
+            Ok(wmp) => {
+                println!(
+                    "  Loaded WMP {wmp_file} at T={t_kelvin} K  ({:.3e}-{:.3e} eV, {} poles, {} windows)",
+                    wmp.e_min, wmp.e_max, wmp.n_poles, wmp.n_windows
+                );
+                covered += 1;
+                wmps.push(Some((Arc::new(wmp), t_kelvin)));
+            }
+            Err(e) => {
+                println!("  WMP load failed for {wmp_file}: {e:?}");
+                wmps.push(None);
+            }
+        }
+    }
+
+    let provider = HybridTableWmpXsProvider::new(table_provider, wmps);
+    let report = provider.memory_report();
+    let xs_mem = report.smooth_only_total();
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "  WMP covers {covered}/{} nuclides",
+        WMP_SPECS.len()
+    );
+    println!(
+        "  Loaded in {load_ms:.0} ms  |  XS memory (smooth-only): {:.1} KB  [in-solver table total: {:.1} KB]",
+        xs_mem as f64 / 1024.0,
+        table_mem as f64 / 1024.0,
+    );
+    (provider, xs_mem, load_ms)
+}
+
 fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     println!("\n── Loading nuclear data (pointwise table) ──");
     let t0 = Instant::now();
@@ -615,12 +701,21 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
                 urr_tables: None,
             });
         } else {
-            tables.push(xs_provider::load_nuclide_table(
-                &path,
-                nuc_temp_idx,
-                awr,
-                nu_bar,
-            ));
+            match args.target_temp_offset {
+                None => tables.push(xs_provider::load_nuclide_table(
+                    &path, nuc_temp_idx, awr, nu_bar,
+                )),
+                Some(offset) => {
+                    let base_t = open_rust_mc::hdf5_reader::NuclideFileReader::open(&path)
+                        .ok()
+                        .and_then(|r| r.temperatures.get(nuc_temp_idx).copied())
+                        .unwrap_or(294.0);
+                    let target = base_t + offset;
+                    tables.push(xs_provider::load_nuclide_table_at_temp(
+                        &path, target, awr, nu_bar,
+                    ));
+                }
+            }
         }
     }
 
@@ -831,6 +926,90 @@ fn main() {
                 tbl.xs_memory_bytes as f64 / svd.xs_memory_bytes as f64,
                 svd.xs_memory_bytes as f64 / 1024.0,
                 tbl.xs_memory_bytes as f64 / 1024.0
+            );
+        }
+        XsMode::Wmp => {
+            let (provider, xs_mem, load_ms) = load_wmp_hybrid(&args);
+            let r = run_multi_seed(
+                "ACE+WMP",
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &provider,
+                xs_mem,
+                load_ms,
+            );
+            println!("\n{}", "=".repeat(60));
+            println!("RESULTS — PWR Pin Cell (ACE+WMP baseline)");
+            println!("{}", "=".repeat(60));
+            print_benchmark(&r);
+        }
+        XsMode::All => {
+            let (svd_prov, svd_mem, svd_load) = load_svd(&args);
+            let svd = run_multi_seed(
+                &format!("SVD (rank={})", args.rank),
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &svd_prov,
+                svd_mem,
+                svd_load,
+            );
+            drop(svd_prov);
+
+            let (tbl_prov, tbl_mem, tbl_load) = load_table(&args);
+            let tbl = run_multi_seed(
+                "Pointwise Table",
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &tbl_prov,
+                tbl_mem,
+                tbl_load,
+            );
+            drop(tbl_prov);
+
+            let (wmp_prov, wmp_mem, wmp_load) = load_wmp_hybrid(&args);
+            let wmp = run_multi_seed(
+                "ACE+WMP",
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &wmp_prov,
+                wmp_mem,
+                wmp_load,
+            );
+
+            println!("\n{}", "=".repeat(60));
+            println!("PWR PIN CELL — THREE-WAY HONESTY TEST");
+            println!("{}", "=".repeat(60));
+            print_benchmark(&svd);
+            println!();
+            print_benchmark(&tbl);
+            println!();
+            print_benchmark(&wmp);
+
+            println!("\n  {}", "-".repeat(50));
+            println!("  COMPARISON (reference = ACE+WMP, industry baseline):");
+            let svd_gap = (svd.k_eff_mean() - wmp.k_eff_mean()).abs() * 1e5;
+            let tbl_gap = (tbl.k_eff_mean() - wmp.k_eff_mean()).abs() * 1e5;
+            println!("    k_inf gap SVD vs WMP    = {svd_gap:.0} pcm");
+            println!("    k_inf gap Table vs WMP  = {tbl_gap:.0} pcm");
+            println!(
+                "    ns/p  SVD / Table / WMP  = {:.1} / {:.1} / {:.1}",
+                svd.ns_per_particle_mean(),
+                tbl.ns_per_particle_mean(),
+                wmp.ns_per_particle_mean()
+            );
+            println!(
+                "    mem KB SVD / Table / WMP = {:.0} / {:.0} / {:.0}",
+                svd_mem as f64 / 1024.0,
+                tbl_mem as f64 / 1024.0,
+                wmp_mem as f64 / 1024.0,
             );
         }
     }
