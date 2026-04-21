@@ -14,6 +14,7 @@
 
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 use clap::Parser;
@@ -21,15 +22,22 @@ use clap::Parser;
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
+use open_rust_mc::transport::hybrid_xs::HybridTableWmpXsProvider;
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
 use open_rust_mc::transport::xs_provider;
+use open_rust_mc::wmp::WindowedMultipole;
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum XsMode {
     Svd,
     Table,
     Both,
+    /// ACE pointwise table + Windowed Multipole inside the resolved
+    /// resonance window. The industry-standard low-memory baseline.
+    Wmp,
+    /// Three-way honesty test: SVD vs Table vs ACE+WMP back-to-back.
+    All,
 }
 
 #[derive(Parser)]
@@ -102,6 +110,16 @@ const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
     ("U234.h5", 232.029, 2.49),
     ("U235.h5", 233.025, 2.43),
     ("U238.h5", 236.006, 2.49),
+];
+
+/// WMP file and evaluation temperature for each nuclide in `NUCLIDE_SPECS`.
+/// Must match the NUCLIDE_SPECS order. 294 K matches Godiva's room-temp
+/// operating condition; the WMP evaluator broadens on the fly from 0 K
+/// poles, so a single library covers all temperatures exactly.
+const WMP_SPECS: &[(&str, f64)] = &[
+    ("092234.h5", 294.0),
+    ("092235.h5", 294.0),
+    ("092238.h5", 294.0),
 ];
 
 /// Results from one seeded run.
@@ -402,6 +420,69 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     )
 }
 
+/// Load the ACE+WMP hybrid provider: pointwise tables everywhere (the
+/// inner path used by `--mode table`), overridden by WMP evaluation inside
+/// each nuclide's resolved-resonance window. Mirrors the industry
+/// standard low-memory Monte Carlo lookup used by OpenMC when WMP data
+/// is available.
+fn load_wmp_hybrid(args: &Args) -> (HybridTableWmpXsProvider, usize, f64) {
+    println!("\n── Loading nuclear data (ACE pointwise + WMP in RRR) ──");
+    let t0 = Instant::now();
+    let (table_provider, table_mem, _) = load_table(args);
+
+    let wmp_dir = args.data_dir.join("..").join("wmp");
+    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> =
+        Vec::with_capacity(WMP_SPECS.len());
+    let mut covered = 0usize;
+    for &(wmp_file, t_kelvin) in WMP_SPECS {
+        let path = wmp_dir.join(wmp_file);
+        if !path.exists() {
+            println!("  WMP not found: {}", path.display());
+            wmps.push(None);
+            continue;
+        }
+        match WindowedMultipole::from_hdf5(&path) {
+            Ok(wmp) => {
+                println!(
+                    "  Loaded WMP {wmp_file} at T={t_kelvin} K  ({:.3e}-{:.3e} eV, {} poles, {} windows)",
+                    wmp.e_min, wmp.e_max, wmp.n_poles, wmp.n_windows
+                );
+                covered += 1;
+                wmps.push(Some((Arc::new(wmp), t_kelvin)));
+            }
+            Err(e) => {
+                eprintln!("  Failed to load {wmp_file}: {e}");
+                wmps.push(None);
+            }
+        }
+    }
+
+    let provider = HybridTableWmpXsProvider::new(table_provider, wmps);
+    let report = provider.memory_report();
+    // Honest accounting: report the *smooth-only* memory, which is what
+    // a production implementation would actually carry (pointwise
+    // tables scrubbed of resonance energies + WMP payload). That matches
+    // the industry baseline the reviewer asked about.
+    let xs_mem = report.smooth_only_total();
+    let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "  WMP covers {covered}/{} nuclides",
+        WMP_SPECS.len()
+    );
+    println!(
+        "  Loaded in {load_ms:.0} ms  |  XS memory (smooth-only): {:.1} KB  [current in-solver: {:.1} KB]",
+        xs_mem as f64 / 1024.0,
+        (report.current_total()) as f64 / 1024.0,
+    );
+    println!(
+        "    breakdown: pointwise {:.1} KB + WMP payload {:.1} KB (in-solver table total was {:.1} KB)",
+        report.smooth_only_svd_bytes as f64 / 1024.0,
+        report.wmp_payload_bytes as f64 / 1024.0,
+        table_mem as f64 / 1024.0,
+    );
+    (provider, xs_mem, load_ms)
+}
+
 fn print_benchmark(r: &BenchmarkResult, _particles: u32) {
     let k_exp = 1.0000;
     let delta_pcm = (r.k_eff_mean() - k_exp).abs() / k_exp * 1e5;
@@ -597,6 +678,76 @@ fn main() {
             println!(
                 "  Table delta(exp)   = {:.0} pcm",
                 (tbl.k_eff_mean() - 1.0).abs() * 1e5
+            );
+        }
+        XsMode::Wmp => {
+            let (provider, xs_mem, load_ms) = load_wmp_hybrid(&args);
+            let r = run_multi_seed(
+                "ACE+WMP", &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
+            );
+            println!("\n{}", "=".repeat(60));
+            println!("RESULTS");
+            println!("{}", "=".repeat(60));
+            print_benchmark(&r, args.particles);
+        }
+        XsMode::All => {
+            let (svd_prov, svd_mem, svd_load) = load_svd(&args);
+            let svd = run_multi_seed(
+                &format!("SVD (rank={})", args.rank),
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &svd_prov,
+                svd_mem,
+                svd_load,
+            );
+            drop(svd_prov);
+
+            let (tbl_prov, tbl_mem, tbl_load) = load_table(&args);
+            let tbl = run_multi_seed(
+                "Pointwise Table",
+                &args,
+                &surfaces,
+                &cells,
+                &materials,
+                &tbl_prov,
+                tbl_mem,
+                tbl_load,
+            );
+            drop(tbl_prov);
+
+            let (wmp_prov, wmp_mem, wmp_load) = load_wmp_hybrid(&args);
+            let wmp = run_multi_seed(
+                "ACE+WMP", &args, &surfaces, &cells, &materials, &wmp_prov, wmp_mem, wmp_load,
+            );
+
+            println!("\n{}", "=".repeat(60));
+            println!("STATISTICAL BENCHMARK — THREE-WAY HONESTY TEST");
+            println!("{}", "=".repeat(60));
+            print_benchmark(&svd, args.particles);
+            println!();
+            print_benchmark(&tbl, args.particles);
+            println!();
+            print_benchmark(&wmp, args.particles);
+
+            println!("\n  {}", "-".repeat(50));
+            println!("  COMPARISON (reference = ACE+WMP, industry baseline):");
+            let svd_gap = (svd.k_eff_mean() - wmp.k_eff_mean()).abs() * 1e5;
+            let tbl_gap = (tbl.k_eff_mean() - wmp.k_eff_mean()).abs() * 1e5;
+            println!("    k_eff gap SVD vs WMP    = {svd_gap:.0} pcm");
+            println!("    k_eff gap Table vs WMP  = {tbl_gap:.0} pcm");
+            println!(
+                "    ns/p  SVD / Table / WMP  = {:.1} / {:.1} / {:.1}",
+                svd.ns_per_particle_mean(),
+                tbl.ns_per_particle_mean(),
+                wmp.ns_per_particle_mean()
+            );
+            println!(
+                "    mem KB SVD / Table / WMP = {:.0} / {:.0} / {:.0}",
+                svd_mem as f64 / 1024.0,
+                tbl_mem as f64 / 1024.0,
+                wmp_mem as f64 / 1024.0,
             );
         }
     }
