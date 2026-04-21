@@ -154,9 +154,9 @@ Two systems, labelled by CPU L3 capacity and GPU class:
 - **Large-L3**: AMD Ryzen 7 9800X3D (8-core, 96 MB L3 3D V-cache)
   + NVIDIA RTX 3080 (68 SMs, 10 GB, 5 MB L2), 64 GB DDR5-6000,
   Windows 11
-- **Small-L3**: Intel Core i7-12800H (12th-gen Alder Lake, 6 P + 8 E
-  cores, 24 MB L3 Smart Cache) + NVIDIA RTX A1000 (Ampere, 16 SMs,
-  4 GB, 1.5 MB L2), 32 GB DDR4
+- **Small-L3** (Dell Precision 5570): Intel Core i7-12800H (12th-gen
+  Alder Lake, 6 P + 8 E cores, 24 MB L3 Smart Cache) + NVIDIA RTX
+  A1000 (Ampere, 16 SMs, 4 GB, 1.5 MB L2), 32 GB DDR4
 - Nuclear data: ENDF/B-VII.1 HDF5 (5.8 GB)
 - OpenMC: v0.15.3 (WSL Ubuntu 24.04)
 
