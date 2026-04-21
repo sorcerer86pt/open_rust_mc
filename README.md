@@ -1,166 +1,204 @@
-# open_rust_mc — Cache-Resident Cross-Section Reconstruction via SVD
+# open_rust_mc
 
-A pure-Rust Monte Carlo neutronics engine that replaces multi-gigabyte
-pointwise cross-section tables with SVD-compressed basis vectors.
-Includes a head-to-head "honesty test" against pointwise table lookup
-and OpenMC, with multi-seed statistical benchmarking.
+A pure-Rust Monte Carlo neutron transport engine with pointwise-table
+and SVD cross-section providers on both CPU and GPU (CUDA). Reads
+OpenMC HDF5 nuclear data directly (no C dependency), runs k-eigenvalue
+simulations end-to-end, and is validated against OpenMC 0.15.3 on two
+reference benchmarks.
 
-## Key Results (10 independent seeds, 1M particles/batch)
+## Headline: Four providers, two benchmarks, |Δ| ≤ 51 pcm vs OpenMC
 
-| Metric | SVD (rank=5) | Pointwise Table | OpenMC |
-|--------|-------------|-----------------|--------|
-| Godiva k_eff | 1.00012 +/- 0.00007 | 0.99905 +/- 0.00013 | 0.99844 +/- 0.00006 |
-| Delta from experiment | **12 pcm** | 95 pcm | 156 pcm |
-| ns/particle (quiet) | 700 +/- 8 | 832 +/- 11 | — |
-| SVD speedup | 1.19x | baseline | — |
-| SVD fidelity cost | 107 pcm vs table | — | — |
-| GPU kernel speedup | 8.7x vs CPU | — | — |
-| Resonance integral error | < 0.2% all groups | exact | exact |
+The engine ships four cross-section backends behind the same interface:
 
-Note: timing was on a shared desktop workstation. k_eff is stable across
-all seeds; timing variance is from system load. On a dedicated HPC node
-the timing standard deviations would be substantially smaller.
+| Provider | Where | What |
+|----------|-------|------|
+| CPU table | `table.rs` | OpenMC-style pointwise lookup (binary search) |
+| CPU SVD | `kernel.rs` | FMA reconstruction from truncated basis |
+| GPU pointwise | `gpu.rs` (CUDA) | Pointwise table on device |
+| GPU SVD | `gpu.rs` (CUDA) | SVD reconstruction on device |
 
-| Metric | Value |
-|--------|-------|
-| CPU kernel speedup | 8-13x (isolated reconstruction benchmark) |
-| Memory reduction | 530x hybrid SVD+WMP (15 KB vs 7.8 MB) |
-| Rank-1 reactions | 47 of 52 U-235 channels |
+All four agree with OpenMC 0.15.3 to **|Δ| ≤ 51 pcm** on the PWR pin
+cell, and cluster **325–362 pcm** above the ICSBEP Godiva value — which
+is the known ENDF/B-VII.1 library bias, not an engine bias (OpenMC with
+the same library is in the same place). Tracing the original 78–127 pcm
+offset found three transport-level bugs; post-correction numbers are
+below.
 
-## Physics Implemented
+### PWR pin cell (9 nuclides, large-L3 system: Ryzen 9800X3D (96 MB L3) + RTX 3080)
 
-The engine reads OpenMC HDF5 nuclear data files directly and implements:
+10 seeds × 150 batches × 50k particles, 20 inactive:
 
-- **SVD-compressed cross-sections** for all reaction channels (MT=2, 4, 16-18, 51-91, 102)
-- **Ducru temperature interpolation** (kernel reconstruction, Ducru et al. 2017)
-- **Energy-dependent nu-bar** (total = prompt + delayed neutron yields from HDF5)
-- **Anisotropic scattering** (tabular mu/CDF angular distributions with stochastic interpolation)
-- **Data-driven fission spectrum** (continuous tabulated outgoing energy distributions)
-- **Discrete inelastic levels** (MT=51-91 with real Q-values, two-body kinematics)
-- **Continuum inelastic** (MT=91 evaporation spectrum)
-- **URR probability tables** (20-band sampling, multiply_smooth + absolute modes)
-- **Free gas thermal scattering** (Maxwell-Boltzmann target velocity below 400*kT)
-- **(n,2n) and (n,3n) reactions** (MT=16, MT=17)
-- **Void streaming** (particles free-stream through void gaps)
-- **Auto-detect tracking mode** (surface vs delta tracking based on geometry)
-- **Rayon parallel transport** (8.7x speedup over single-threaded)
+| Provider | rank | k∞ | Δ vs OpenMC (pcm) | ns/particle |
+|----------|:---:|------:|:---:|------:|
+| CPU table | — | 1.32793 | +23 | 21 316 |
+| **CPU SVD** | **5** | **1.32745** | **−25** | **15 511** |
+| GPU pointwise | — | 1.32821 | +51 | 5 967 |
+| GPU SVD | 5 | 1.32762 | −8 | 7 754 |
 
-## Optimisations
+OpenMC 0.15.3 reference: k∞ = 1.32770 ± 0.00009.
 
-- **f32 SVD basis** with f64 accumulator (halves memory, zero accuracy loss)
-- **Arc shared energy grids** across reactions per nuclide (saves 111 MB)
-- **exp2(x * LOG2_10)** replacing powf(10, x) (3-5x faster transcendental)
-- **Stack-allocated collision buffers** (eliminates 20M heap allocs per simulation)
-- **Single binary search** per nuclide per collision (5 of 6 eliminated)
-- **Hash-based O(1) energy index** (Brown 2014, 8192 bins) for SVD path
-- **CUDA GPU reconstruction** via cudarc (8.7x on RTX A1000, zero error)
+### Godiva (HEU-MET-FAST-001, same large-L3 system, same config)
 
-## Structure
+| Provider | rank | k_eff | Δ vs experiment (pcm) | ns/particle |
+|----------|:---:|------:|:---:|------:|
+| CPU table | — | 1.00330 | +330 | 1 207 |
+| **CPU SVD** | **5** | **1.00325** | **+325** | **846** |
+| GPU pointwise | — | 1.00339 | +339 | 302 |
+| GPU SVD | 5 | 1.00362 | +362 | 378 |
+
+The +325 to +362 pcm cluster matches the published ENDF/B-VII.1 Godiva
+bias; all four providers reproduce the library-level bias and do not
+add to it.
+
+## CUDA kernel
+
+`gpu.rs` implements both backends on device via `cudarc`:
+
+- **GPU pointwise** is the fastest path overall (5 967 ns/p on PWR
+  pin cell, 302 ns/p on Godiva — 3.6× and 4.0× the large-L3 CPU table).
+- **GPU SVD** is 1.25–1.30× slower than GPU pointwise. The clad
+  nuclides (Zr isotopes) lack an MT=4 block, so their total inelastic
+  must be synthesised from 13 discrete-level SVD kernels per lookup —
+  a CPU win that becomes a GPU draw.
+- Bit-parity with CPU SVD at machine precision (force-SVD parity test
+  passes across seeds).
+
+See `cuda_bench/svd_gpu_bench.cu` for the standalone reconstruction
+benchmark (~8.7× over CPU on RTX A1000; better on higher-end GPUs).
+
+## Physics implemented
+
+- Continuous-energy neutron transport, k-eigenvalue power iteration
+- Energy-dependent ν̄ (prompt + delayed) from HDF5
+- Anisotropic scattering (tabular μ/CDF, per-level angular on CPU and GPU)
+- Data-driven fission outgoing-energy spectrum
+- Discrete inelastic levels MT=51–91 with real Q-values
+- Continuum inelastic MT=91 (evaporation spectrum)
+- URR probability tables (multiply-smooth + absolute modes)
+- (n,2n) MT=16, (n,3n) MT=17
+- Free-gas thermal scattering (Maxwell–Boltzmann target sampling)
+- S(α,β) thermal scattering for H in H₂O (continuous + discrete,
+  Bragg edges, Debye–Waller)
+- Rayon parallel transport, CSG geometry with BVH, auto-selected
+  surface vs delta tracking
+
+## The SVD companion: compression study and paper
+
+The engine exists partly to host a head-to-head test of SVD-compressed
+cross sections against a pointwise baseline *in the same transport
+loop*. Findings are reported honestly — positive, mixed, and negative —
+in `paper/main.pdf` (“SVD-Compressed Cross Sections in Monte Carlo
+Neutron Transport: An implementation-led benchmark with positive,
+mixed, and negative results”).
+
+**Positive.** The singular spectrum of ENDF/B-VII.1 log σ(E,T) matrices
+decays rapidly; 43 of 47 non-redundant U-235 channels are rank-one to
+machine precision. Kernel-level, rank-6 SVD reconstructs at 44 ns vs
+91 ns for a binary-searched pointwise table (2.0×). In-engine, CPU SVD
+rank-5 runs 1.37×–1.90× faster than the CPU table on PWR pin cell and
+1.43× faster on Godiva, while staying within 13–47 pcm of the table’s
+own k∞.
+
+**Mixed.** The CPU trade-off inverts on GPU for the PWR pin cell
+(GPU pointwise 1.30× faster than GPU SVD). A WMP+SVD hybrid matches
+k∞ to 86 pcm but runs 2.06× slower than CPU SVD — the Humlicek W4
+Faddeeva evaluation is ~15× more expensive per lookup than the SVD FMA.
+
+**Negative.** The WMP representation alone packs 9 nuclides into
+1.37 MB against 177.7 MB for a hypothetical 4-channel × 6-temperature
+pointwise table (132.9× representation ratio) — but the full engine
+still has to carry SVD kernels for discrete inelastic levels, total
+inelastic, (n,2n), (n,3n), and URR residues (none covered by the
+public MIT WMP library). Measured engine-scale reduction of hybrid
+over full-SVD is only 1.06×, and the hybrid engine actually carries
+5× *more* memory than the pointwise baseline. Both numbers are real;
+they measure different things.
+
+## Repository layout
 
 ```
-rust_prototype/    Pure-Rust engine (reads HDF5 natively via hdf5-pure)
+rust_prototype/
   src/
     physics/       Collision processing, scattering kinematics
     transport/     Particle tracking, k-eigenvalue solver, XS providers
-    geometry/      CSG geometry, BVH acceleration
+    geometry/      CSG geometry, surfaces, BVH, lattices
     hdf5_reader.rs Pure-Rust HDF5 reader with single-pass caching
-    kernel.rs      SVD reconstruction hot path (FMA + hash lookup + Ducru)
-    gpu.rs         CUDA GPU reconstruction (feature-gated)
-    table.rs       Pointwise table lookup (OpenMC-style baseline)
+    thermal.rs     S(α,β) data structures + sampling
+    kernel.rs      CPU SVD reconstruction hot path
+    gpu.rs         CUDA backend (pointwise + SVD, feature-gated)
+    table.rs       Pointwise table (OpenMC-style baseline)
   src/bin/
-    godiva.rs      Godiva eigenvalue benchmark (--mode svd|table|both --seeds N)
-    pwr_pincell.rs PWR pin cell benchmark (8 nuclides, 3 materials)
-    gpu_bench.rs   GPU reconstruction benchmark (--features cuda)
-    bench_mem.rs   Memory/speed comparison tool
-scripts/           Python analysis pipeline
-  honesty_test.py  Three-way comparison: SVD vs Table vs OpenMC
-  resonance_integral_validation.py  Resonance integral accuracy
-cuda_bench/        Standalone CUDA benchmark kernel
-paper/             LaTeX manuscript (18 pages)
+    godiva.rs      Godiva benchmark (--mode svd|table|both, --seeds)
+    pwr_pincell.rs PWR pin cell benchmark (9 nuclides, 3 materials)
+    gpu_bench.rs   GPU reconstruction microbenchmark
+    bench_mem.rs   Memory comparison tool
+cuda_bench/        Standalone CUDA SVD reconstruction kernel
+scripts/           Python pipeline (HDF5 extraction, OpenMC cross-checks)
+paper/             LaTeX manuscript + figures
 ```
 
-## Quick Start
+## Quick start
 
-### Honesty test (SVD vs Table, head-to-head)
 ```bash
 cd rust_prototype
-cargo run --release --bin godiva -- ../data/endfb-vii.1-hdf5/neutron \
-  --mode both --rank 5 --batches 50 --inactive 10 --particles 20000
+cargo build --release
+
+# Nuclear data: ENDF/B-VII.1 HDF5 from https://openmc.org/data/
+DATA=../data/endfb-vii.1-hdf5/neutron
+
+# Smoke test (~10 s)
+cargo run --release --bin godiva -- $DATA --mode both --rank 5 \
+  --batches 15 --inactive 5 --particles 2000
+
+# Godiva, 10 seeds, publication-grade (~40 min CPU)
+cargo run --release --bin godiva -- $DATA --mode both --rank 5 \
+  --batches 150 --inactive 20 --particles 1000000 --seeds 10
+
+# PWR pin cell, 10 seeds
+cargo run --release --bin pwr_pincell -- $DATA --mode both --rank 5 \
+  --batches 150 --inactive 20 --particles 50000 --seeds 10
+
+# GPU (requires CUDA toolkit)
+cargo run --release --features cuda --bin gpu_bench -- $DATA \
+  --rank 5 --particles 1000000
+
+# Unit tests (36)
+cargo test --lib
 ```
 
-### Multi-seed statistical benchmark
-```bash
-cargo run --release --bin godiva -- ../data/endfb-vii.1-hdf5/neutron \
-  --mode both --rank 5 --batches 150 --inactive 20 --particles 1000000 --seeds 10
-```
+Detailed reproduction instructions and expected outputs:
+[BENCHMARKS.md](BENCHMARKS.md).
 
-### GPU benchmark (requires CUDA toolkit)
-```bash
-cargo run --release --features cuda --bin gpu_bench -- \
-  ../data/endfb-vii.1-hdf5/neutron --rank 5 --particles 1000000
-```
+## Hardware used for paper results
 
-### Run tests
-```bash
-cargo test --lib    # 32 tests
-```
+Two systems that differ in CPU L3 capacity and GPU class:
 
-### PWR pin cell (8 nuclides, 3 materials)
-```bash
-cargo run --release --bin pwr_pincell -- ../data/endfb-vii.1-hdf5/neutron \
-  --mode both --rank 5 --batches 100 --inactive 20 --particles 50000
-```
+- **Large-L3**: Ryzen 9800X3D (8-core, 96 MB L3 3D V-cache) +
+  RTX 3080 (68 SMs, 10 GB, 5 MB L2), 64 GB DDR5-6000
+- **Small-L3**: Ryzen 7 (6-core, 16 MB L3) + RTX A1000
+  (16 SMs, 1.5 MB L2), 16 GB DDR4
 
-### Rank sweep (accuracy vs speed tradeoff)
-```bash
-for RANK in 2 3 4 5 6; do
-  echo "=== Rank $RANK ==="
-  cargo run --release --bin godiva -- ../data/endfb-vii.1-hdf5/neutron \
-    --mode svd --rank $RANK --batches 50 --inactive 10 --particles 20000 --seeds 3
-done
-```
-
-### Resonance integral validation (requires Linux; WSL on Windows)
-```bash
-conda activate openmc
-python scripts/resonance_integral_validation.py
-```
-
-### Three-way comparison: SVD vs Table vs OpenMC (requires Linux; WSL on Windows)
-```bash
-conda activate openmc
-python scripts/honesty_test.py --particles 1000000 --batches 150
-```
-
-### Nuclear data
-Download ENDF/B-VII.1 HDF5 from https://openmc.org/data/ and extract to `data/`.
-
-For detailed benchmark instructions and expected results, see [BENCHMARKS.md](BENCHMARKS.md).
-
-## Godiva k_eff Progression
-
-| Physics | k_eff | Delta from expt |
-|---------|-------|----------------|
-| Constant nu-bar, isotropic, Watt spectrum | 0.994 | 600 pcm |
-| + Energy-dependent nu-bar from HDF5 | 1.059 | 5900 pcm |
-| + Anisotropic scattering (tabular CDF) | 0.965 | 3500 pcm |
-| + Data-driven fission spectrum | 1.006 | 600 pcm |
-| + URR probability tables | 1.007 | 700 pcm |
-| + Correlated CDF interpolation | 1.000 | 37 pcm |
-| + Phase 1 optimisations (10 seeds) | **1.00012** | **12 pcm** |
+The ~6× L3 ratio is what drives the hardware-dependent
+spread in CPU SVD speedup (1.37× on large-L3, 1.90× on
+small-L3). Nuclear data: ENDF/B-VII.1 HDF5 (5.8 GB).
+OpenMC reference: 0.15.3 (WSL Ubuntu 24.04).
 
 ## References
 
-- Ducru et al., "Kernel reconstruction methods for Doppler broadening," J. Comput. Phys. 335 (2017) 535-557
-- Tramm et al., "Performance Portable MC Particle Transport on Intel, NVIDIA, and AMD GPUs," EPJ Web Conf. 302 (2024) 04010
-- Brown, "New Hash-Based Energy Lookup Algorithm for MC Codes," Trans. ANS 111 (2014) 659-662
+- Ducru et al., “Kernel reconstruction methods for Doppler broadening,”
+  J. Comput. Phys. 335 (2017) 535–557
+- Tramm et al., “Performance Portable MC Particle Transport on Intel,
+  NVIDIA, and AMD GPUs,” EPJ Web Conf. 302 (2024) 04010
+- Brown, “New Hash-Based Energy Lookup Algorithm for MC Codes,”
+  Trans. ANS 111 (2014) 659–662
+- Romano et al., “OpenMC: A state-of-the-art Monte Carlo code for
+  research and development,” Ann. Nucl. Energy 82 (2015) 90–97
 
 ## Paper
 
-See `paper/svd_cross_section_compression.tex` — "Cache-Resident Cross-Section
-Reconstruction via Singular Value Decomposition for Monte Carlo Neutron Transport"
-
-Full reproducible benchmarks: see [BENCHMARKS.md](BENCHMARKS.md)
+`paper/main.pdf` — *SVD-Compressed Cross Sections in Monte Carlo
+Neutron Transport: An implementation-led benchmark with positive,
+mixed, and negative results.*
 
 ## License
 

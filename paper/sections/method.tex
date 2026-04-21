@@ -107,7 +107,7 @@ The cost side of that trade-off is not zero:
 \item \textbf{Compute per lookup.} Pointwise is a hashed
   index plus one log-log interpolation. SVD is a rank-$k$
   FMA sequence plus a Ducru temperature step
-  (Sec.~\ref{sec:ducru}). At $k = 5$ on desktop, SVD is
+  (Sec.~\ref{sec:ducru}). At $k = 5$ on the large-L3 system, SVD is
   $43$~ns/lookup against $91$~ns for the table
   (Sec.~\ref{sec:xs_pareto}) --- but this advantage depends
   entirely on the basis fitting in L2/L3 cache. A

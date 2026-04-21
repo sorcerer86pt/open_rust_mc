@@ -34,10 +34,17 @@ evaluator lives in \texttt{src/wmp.rs} (CPU) and as a set of
 \texttt{gpu/cuda/transport.cu} (GPU).
 
 \paragraph{Hardware.}
-Laptop: AMD Ryzen~$7$ (6-core), $16$~GB DDR4, NVIDIA
-RTX~A$1000$ laptop GPU ($16$ SMs, $1.5$~MB L2). Desktop: AMD
-Ryzen~$7$ $9800$X3D (8-core, $96$~MB L3 V-cache), $64$~GB
-DDR5-$6000$, NVIDIA RTX~$3080$ ($68$~SMs, $10$~GB, $5$~MB L2).
+We run on two systems that differ in CPU L3 capacity and GPU
+class; we label them by their cache size rather than their
+chassis. Small-L3 system: AMD Ryzen~$7$ (6-core,
+$16$~MB L3), $16$~GB DDR4, NVIDIA RTX~A$1000$ ($16$ SMs,
+$1.5$~MB L2). Large-L3 system: AMD Ryzen~$7$ $9800$X3D
+(8-core, $96$~MB L3 3D V-cache), $64$~GB DDR5-$6000$, NVIDIA
+RTX~$3080$ ($68$~SMs, $10$~GB, $5$~MB L2). References to
+``small-L3'' and ``large-L3'' below pick out the CPU+GPU pair;
+the $6\times$ L3 ratio on CPU is what drives the SVD speedup
+spread, and the GPU side swaps from A$1000$ to RTX~$3080$ at
+the same time.
 
 \paragraph{Reference implementation version.}
 All $k_\infty$ and $k_\mathrm{eff}$ comparison numbers use
@@ -63,7 +70,7 @@ per-seed means across $N_\text{seeds}$ seeds, and use the
 standard error of the mean $\mathrm{SEM} =
 \sigma_\text{seed} / \sqrt{N_\text{seeds}}$ as the noise
 budget whenever a mean-to-reference comparison is quoted. A
-``within $X$~SEM'' statement uses this quantity. Laptop
-sweeps use five seeds; desktop sweeps use ten seeds.
+``within $X$~SEM'' statement uses this quantity. Small-L3
+sweeps use five seeds; large-L3 sweeps use ten seeds.
 
 %% ============================================================

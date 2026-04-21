@@ -38,7 +38,7 @@ pointwise table (kernel-level $2.0\times$).
 pointwise table to $13$--$47$~pcm on PWR pin cell $k_\infty$
 across two hardware tiers; all four in-engine providers
 (CPU table/SVD, GPU pointwise/SVD) agree with OpenMC to
-$|\Delta| \le 51$~pcm at desktop ten-seed statistics. On
+$|\Delta| \le 51$~pcm at large-L3 ten-seed statistics. On
 Godiva the four providers cluster $325$--$362$~pcm above the
 ICSBEP experimental value, which is the known ENDF/B-VII.1
 Godiva bias; the engine reproduces the library-level bias
@@ -46,8 +46,8 @@ and does not add to it.
 (iii)~End-to-end CPU SVD rank-$5$ runs
 $1.37\times$--$1.90\times$ faster than the in-engine
 pointwise table on PWR pin cell, hardware-dependent; on
-Godiva CPU SVD is $1.43\times$ faster than the table on
-desktop.
+Godiva CPU SVD is $1.43\times$ faster than the table on the
+large-L3 system.
 
 \textbf{Mixed.}
 (iv)~The trade-off on GPU is opposite. GPU pointwise is
@@ -84,8 +84,8 @@ matters for a reader who plans to build a transport solver.
 
 \textbf{Scope.}
 Measurements are for a nine-nuclide thermal pin cell and a
-three-nuclide fast sphere, both on consumer desktop and
-laptop hardware. Full-core behaviour
+three-nuclide fast sphere, on two consumer systems with
+different CPU L3 size and GPU class. Full-core behaviour
 ($\gtrsim\!200$ nuclides, minor actinides, fission products,
 multiple S($\alpha$,$\beta$) libraries) is not evaluated here,
 and the compression gap on engine-level memory would widen or

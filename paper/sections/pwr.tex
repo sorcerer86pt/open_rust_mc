@@ -9,13 +9,13 @@ Zr-$90$--$94$ in clad, H-$1$ in moderator); three materials;
 cylindrical boundaries with reflective BC. The moderated
 spectrum spends substantial time inside the U-$238$ RRR.
 
-\subsection{Laptop rank sweep}
+\subsection{Small-L3 rank sweep}
 
 \begin{table}[htb]
 \centering
-\caption{PWR pin cell, laptop Ryzen~$7$. Five seeds, $50$
-batches ($20$ inactive), $10\,000$ particles per batch. OpenMC
-reference computed with the same input deck.}
+\caption{PWR pin cell, small-L3 system (Ryzen~$7$ + RTX~A$1000$).
+Five seeds, $50$ batches ($20$ inactive), $10\,000$ particles
+per batch. OpenMC reference computed with the same input deck.}
 \label{tab:keff_pwr}
 \begin{tabular}{@{}lcccccc@{}}
 \toprule
@@ -56,14 +56,14 @@ Figure~\ref{fig:pareto_pwr} summarises the rank sweep.
 \begin{figure}[htb]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/pareto_pwr.png}
-\caption{PWR pin cell, laptop. \emph{Left:} XS reconstruction
+\caption{PWR pin cell, small-L3 system. \emph{Left:} XS reconstruction
 cost against RMSE. \emph{Right:} $k_\infty$ versus SVD rank
 for CPU and GPU. Horizontal bands: OpenMC $0.15.3$, CPU
 pointwise, GPU pointwise. SEM error bars over five seeds.}
 \label{fig:pareto_pwr}
 \end{figure}
 
-\subsection{Desktop high-statistics benchmark}
+\subsection{Large-L3 high-statistics benchmark}
 \label{sec:pwr_desktop}
 
 Ten seeds, $150$ batches ($20$ inactive), $50\,000$ particles
@@ -74,16 +74,16 @@ and GPU paths were re-run together so the four rows are
 directly comparable.
 
 Figure~\ref{fig:throughput_pwr} collects the per-particle
-throughput across providers and hardware tiers.
+throughput across providers and across the two systems.
 
 \begin{figure}[htb]
 \centering
 \includegraphics[width=0.88\textwidth]{../outputs/pareto/throughput_pwr.png}
 \caption{PWR pin cell throughput (ns/particle, lower is
-better). CPU-SVD beats CPU-table on both hardware tiers.
+better). CPU-SVD beats CPU-table on both systems.
 GPU pointwise is the fastest path; GPU SVD is slower by
 $1.3\times$ because of the clad level-sum cost
-(Sec.~\ref{sec:gpu}). The hybrid SVD+WMP (desktop only,
+(Sec.~\ref{sec:gpu}). The hybrid SVD+WMP (large-L3 only,
 pre-correction sampler) is $2\times$ slower than CPU SVD
 because of Faddeeva evaluation cost
 (Sec.~\ref{sec:hybrid_e2e}).}
@@ -92,9 +92,9 @@ because of Faddeeva evaluation cost
 
 \begin{table}[htb]
 \centering
-\caption{PWR pin cell, desktop Ryzen~$9800$X3D + RTX~$3080$,
-all four providers post-correction. Ten seeds, $150$ batches
-($20$ inactive), $50\,000$ particles per batch.}
+\caption{PWR pin cell, large-L3 system (Ryzen~$9800$X3D +
+RTX~$3080$), all four providers post-correction. Ten seeds,
+$150$ batches ($20$ inactive), $50\,000$ particles per batch.}
 \label{tab:keff_pwr_desktop}
 \begin{tabular}{@{}lcccccc@{}}
 \toprule
@@ -111,7 +111,7 @@ GPU SVD (\texttt{-{}-force-svd})     & $5$  & $1.32762$ & $0.00034$ & $-8$  & $7
 \end{tabular}
 \end{table}
 
-\paragraph{Fidelity, desktop.}
+\paragraph{Fidelity, large-L3 system.}
 With $6.5 \cdot 10^6$ active histories per seed,
 $\sigma_\text{seed} \approx 27$--$57$~pcm and
 $\mathrm{SEM}_{10} \approx 9$--$18$~pcm. All four in-engine
@@ -127,14 +127,14 @@ pointwise excess ($+51$~pcm) is within
 $3\,\mathrm{SEM}_{10}$ and is plausibly a finite-statistics
 signature rather than a systematic.
 
-\paragraph{Throughput, desktop.}
+\paragraph{Throughput, large-L3 system.}
 CPU SVD at $15\,511$~ns/p is $1.37\times$ faster than the
-CPU pointwise table ($21\,316$~ns/p) on desktop; the laptop
-ratio ($1.90\times$) remains the larger figure because of
-differing cache behaviour. The headline CPU-SVD speedup
+CPU pointwise table ($21\,316$~ns/p) on the large-L3 system;
+the small-L3 ratio ($1.90\times$) is the larger figure because
+of differing cache behaviour. The headline CPU-SVD speedup
 of this paper is therefore
 $1.37\times$--$1.90\times$, hardware-dependent.
-GPU pointwise at $5\,967$~ns/p is $3.6\times$ the desktop
+GPU pointwise at $5\,967$~ns/p is $3.6\times$ the large-L3
 CPU table and the fastest path overall; GPU SVD at
 $7\,754$~ns/p is $1.30\times$ slower than GPU pointwise
 because of the clad level-sum cost (Sec.~\ref{sec:gpu}).
@@ -142,7 +142,7 @@ because of the clad level-sum cost (Sec.~\ref{sec:gpu}).
 \subsection{Engine-level offset from OpenMC, traced and closed}
 \label{sec:offset}
 
-The original desktop sweep placed the four in-engine
+The original large-L3 sweep placed the four in-engine
 providers $78$--$127$~pcm below
 OpenMC~$0.15.3$~\cite{romano2015openmc}. The offset was
 shared between CPU/GPU and between pointwise/SVD, so it was

@@ -8,7 +8,7 @@ tables so the SVD path reconstructs every reaction channel
 from the basis.
 
 \paragraph{GPU pointwise beats GPU SVD on PWR.}
-On desktop GPU pointwise is $1.30\times$ faster than GPU SVD
+On the large-L3 system GPU pointwise is $1.30\times$ faster than GPU SVD
 ($5\,967$ vs $7\,754$~ns/p, Table~\ref{tab:keff_pwr_desktop}).
 The cause is specific to this geometry: four clad nuclides
 (Zr-$90$, Zr-$91$, Zr-$92$, Zr-$94$) do not carry an MT$=4$
@@ -22,7 +22,7 @@ engineering work that the present paper does not cover. As
 measured, GPU SVD on PWR pin cell is \emph{not} a win over
 GPU pointwise.
 
-\paragraph{Fidelity parity at desktop statistics.}
+\paragraph{Fidelity parity at large-L3 statistics.}
 Post-correction GPU rows: GPU pointwise $k_\infty =
 1.32821 \pm 0.00033$ and GPU SVD $k_\infty = 1.32762 \pm
 0.00034$. The two GPU paths agree to $59$~pcm

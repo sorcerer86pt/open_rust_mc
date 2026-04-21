@@ -7,15 +7,16 @@ places no demand on the RRR. The ICSBEP benchmark value is
 $k_\text{eff}^\text{exp} = 1.0000 \pm 0.0010$
 (1~$\sigma$)~\cite{icsbep_hmf001}.
 Table~\ref{tab:keff_godiva_desktop} reports the post-correction
-four-provider desktop ten-seed benchmark at rank-$5$;
-Table~\ref{tab:keff_godiva_ranksweep} reports the pre-correction
-rank sweep retained for spectrum illustration; laptop five-seed
-results are in Table~\ref{tab:keff_godiva}.
+four-provider ten-seed benchmark on the large-L3 system at
+rank-$5$; Table~\ref{tab:keff_godiva_ranksweep} reports the
+pre-correction rank sweep retained for spectrum illustration;
+small-L3 five-seed results are in Table~\ref{tab:keff_godiva}.
 
 \begin{table}[htb]
 \centering
-\caption{Godiva $k_\text{eff}$, laptop Ryzen~$7$. Five seeds,
-$50$ batches, $10\,000$ particles per batch.}
+\caption{Godiva $k_\text{eff}$, small-L3 system (Ryzen~$7$ +
+RTX~A$1000$). Five seeds, $50$ batches, $10\,000$ particles
+per batch.}
 \label{tab:keff_godiva}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
@@ -34,7 +35,8 @@ SVD & $6$  & $1.00489$ & $0.00205$ & $1\,424$ & $2.14$ \\
 \begin{table}[htb]
 \centering
 \caption{Godiva post-correction four-provider benchmark,
-desktop Ryzen~$9800$X3D + RTX~$3080$. Ten seeds, $150$ batches
+large-L3 system (Ryzen~$9800$X3D + RTX~$3080$).
+Ten seeds, $150$ batches
 ($20$ inactive), $50\,000$ particles per batch. Stochastic-bin
 angular/fission sampling applied to all four providers
 (Sec.~\ref{sec:offset}). $\Delta_\text{exp}$ reports the offset
@@ -57,7 +59,7 @@ GPU SVD             & $5$  & $1.00362$ & $0.00053$ & $+362$ & $378$  & $2.46$ \\
 
 \begin{table}[htb]
 \centering
-\caption{Godiva CPU SVD rank sweep, desktop. Ten seeds,
+\caption{Godiva CPU SVD rank sweep, large-L3 system. Ten seeds,
 $150$ batches ($20$ inactive), $50\,000$ particles per batch.
 These rows used the pre-correction sampler and are retained
 only to illustrate rank-vs-$k_\text{eff}$ stability; the
@@ -91,26 +93,26 @@ ENDF/B-VIII.0~\cite{icsbep_hmf001}. Our engine reproduces
 that library-level bias and does not add an engine-level
 offset to it.
 
-On desktop Godiva the CPU SVD rank-$5$ provider is
+On the large-L3 system Godiva CPU SVD rank-$5$ is
 $1.43\times$ faster than the CPU pointwise table
 ($846$ vs $1\,207$~ns/p). The pre-correction rank sweep
 (Table~\ref{tab:keff_godiva_ranksweep}) inverts this ordering
 because the sampler change cleared an unrelated per-particle
 cost in SVD mode; we report both for reproducibility.
-GPU pointwise at $302$~ns/p is $4.0\times$ the desktop CPU
+GPU pointwise at $302$~ns/p is $4.0\times$ the large-L3 CPU
 table; GPU SVD rank-$5$ at $378$~ns/p is $1.25\times$ slower
-than GPU pointwise. On laptop Godiva (pre-correction,
+than GPU pointwise. On the small-L3 system (pre-correction,
 Table~\ref{tab:keff_godiva}), SVD rank-$2$ was $2.8\times$
 faster than the pointwise table at a modest $75$~pcm bias.
 
-Figure~\ref{fig:pareto_godiva} shows the laptop Pareto and
+Figure~\ref{fig:pareto_godiva} shows the small-L3 Pareto and
 Figure~\ref{fig:throughput_godiva} shows the post-correction
-desktop benchmark (throughput plus $k_\text{eff}$).
+large-L3 benchmark (throughput plus $k_\text{eff}$).
 
 \begin{figure}[htb]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/pareto.png}
-\caption{Godiva, laptop. \emph{Left:} XS reconstruction cost
+\caption{Godiva, small-L3 system. \emph{Left:} XS reconstruction cost
 against RMSE (geometric mean over eight reactions).
 \emph{Right:} $k_\text{eff}$ versus SVD rank, SEM error bars
 over five seeds. Horizontal band: pointwise-table reference
@@ -121,7 +123,7 @@ in the same engine.}
 \begin{figure}[htb]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/throughput_godiva.png}
-\caption{Godiva, desktop post-correction four-provider
+\caption{Godiva, large-L3 post-correction four-provider
 benchmark (ten seeds). \emph{Left:} ns/particle per provider
 (blue CPU, red GPU). \emph{Right:} $k_\text{eff}$ per
 provider, $\sigma_\text{seed}$ error bars; dashed line is the
