@@ -149,10 +149,10 @@ def plot_throughput_pwr():
     w = 0.36
     bars_l = ax.bar(x - w / 2, [v if v is not None else 0 for v in laptop],
                     w, color="#3478c7", edgecolor="black", lw=0.6,
-                    label="Laptop (Ryzen 7 + RTX A1000)")
+                    label="Small-L3 (i7-12800H + RTX A1000)")
     bars_d = ax.bar(x + w / 2, desktop,
                     w, color="#c75434", edgecolor="black", lw=0.6,
-                    label="Desktop (Ryzen 9800X3D + RTX 3080)")
+                    label="Large-L3 (Ryzen 9800X3D + RTX 3080)")
 
     for b, v in zip(bars_l, laptop):
         if v is None:

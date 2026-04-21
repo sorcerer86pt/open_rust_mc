@@ -84,7 +84,7 @@ for RANK in 2 3 4 5 6; do
 done
 ```
 
-Expected (RTX A1000 laptop):
+Expected (RTX A1000, small-L3 system):
 - CPU: ~37 ns/particle
 - GPU: ~4 ns/particle
 - Speedup: ~9x
@@ -149,14 +149,20 @@ Key tests:
 
 ## Hardware Used for Paper Results
 
-- CPU: Intel Core (specific model), Windows 11
-- GPU: NVIDIA RTX A1000 (Ampere, 16 SMs, 4 GB)
-- RAM: 32 GB
+Two systems, labelled by CPU L3 capacity and GPU class:
+
+- **Large-L3**: AMD Ryzen 7 9800X3D (8-core, 96 MB L3 3D V-cache)
+  + NVIDIA RTX 3080 (68 SMs, 10 GB, 5 MB L2), 64 GB DDR5-6000,
+  Windows 11
+- **Small-L3**: Intel Core i7-12800H (12th-gen Alder Lake, 6 P + 8 E
+  cores, 24 MB L3 Smart Cache) + NVIDIA RTX A1000 (Ampere, 16 SMs,
+  4 GB, 1.5 MB L2), 32 GB DDR4
 - Nuclear data: ENDF/B-VII.1 HDF5 (5.8 GB)
 - OpenMC: v0.15.3 (WSL Ubuntu 24.04)
 
-Note: CPU timing has high variance on desktop machines. For publication-quality
-numbers, run on a dedicated HPC node with CPU pinning and no competing processes.
+Note: CPU timing has high variance on consumer hardware. For
+publication-quality numbers, run on a dedicated HPC node with CPU
+pinning and no competing processes.
 
 ## Key Numbers Summary
 

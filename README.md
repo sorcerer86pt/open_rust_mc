@@ -175,10 +175,11 @@ Two systems that differ in CPU L3 capacity and GPU class:
 
 - **Large-L3**: Ryzen 9800X3D (8-core, 96 MB L3 3D V-cache) +
   RTX 3080 (68 SMs, 10 GB, 5 MB L2), 64 GB DDR5-6000
-- **Small-L3**: Ryzen 7 (6-core, 16 MB L3) + RTX A1000
-  (16 SMs, 1.5 MB L2), 16 GB DDR4
+- **Small-L3**: Intel Core i7-12800H (12th-gen Alder Lake,
+  6 P + 8 E cores, 24 MB L3 Smart Cache) + RTX A1000
+  (16 SMs, 1.5 MB L2), 32 GB DDR4
 
-The ~6× L3 ratio is what drives the hardware-dependent
+The 4× L3 ratio is what drives the hardware-dependent
 spread in CPU SVD speedup (1.37× on large-L3, 1.90× on
 small-L3). Nuclear data: ENDF/B-VII.1 HDF5 (5.8 GB).
 OpenMC reference: 0.15.3 (WSL Ubuntu 24.04).
