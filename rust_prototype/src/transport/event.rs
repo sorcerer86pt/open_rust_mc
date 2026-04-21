@@ -392,22 +392,33 @@ pub fn transport_batch_event<XS: XsProvider>(
     while bank.alive_count() > 0 && event_count < max_events {
         event_count += 1;
 
-        // ── EVENT 1: Sort by energy (scaffold — not yet exploited by
-        // batched XS lookup; retained to keep the event-loop shape
-        // future-proof for GPU/SIMD batching work). ──
-        bank.sort_by_energy();
-
-        // ── EVENT 2-5: process all particles in parallel, then
-        // serial-apply the updates. Each `step_particle` call is
-        // independent (reads an immutable snapshot of the bank),
-        // so rayon's work-stealing scheduler parallelises freely.
-        let n = bank.len();
-        let outcomes: Vec<ParticleStepOutcome> = (0..n)
-            .into_par_iter()
-            .map(|pi| step_particle(pi, &bank, surfaces, cells, materials, xs_provider))
+        // ── Rayon auto-chunks the alive-particle list; each worker
+        // gets a contiguous bank-index range so `step_particle`'s
+        // reads of the SoA bank arrays (pos, dir, energy, cell_idx,
+        // rng_state, …) are sequential per task. That bank-SoA
+        // locality dominates any energy-sort locality you'd get
+        // from basis rows: measured on 9800X3D, iterating in
+        // sorted-energy order (via `sorted_idx.par_iter()`) was
+        // 3× slower at 5k–50k particles because the 8 bank arrays
+        // scatter under a random permutation. We filter the dead
+        // before dispatch so later cycles don't pay rayon-task
+        // overhead for already-terminated particles — k shrinks
+        // fast on Godiva and most cycles see a small fraction of
+        // the initial bank. The `sorted_idx` machinery is kept
+        // for GPU/SIMD batched-XS experiments that can actually
+        // exploit it. ──
+        let alive_indices: Vec<usize> = (0..bank.len()).filter(|&pi| bank.alive[pi]).collect();
+        let outcomes: Vec<(usize, ParticleStepOutcome)> = alive_indices
+            .par_iter()
+            .map(|&pi| {
+                (
+                    pi,
+                    step_particle(pi, &bank, surfaces, cells, materials, xs_provider),
+                )
+            })
             .collect();
 
-        for (pi, o) in outcomes.into_iter().enumerate() {
+        for (pi, o) in outcomes {
             bank.pos[pi] = o.pos;
             bank.dir[pi] = o.dir;
             bank.energy[pi] = o.energy;
