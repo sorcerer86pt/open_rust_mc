@@ -59,8 +59,8 @@ retract the earlier memory headline.
 \item A PWR pin cell rank sweep ($9$ nuclides,
   S($\alpha$,$\beta$), URR, discrete levels) showing CPU SVD
   rank-$5$ matches the in-engine pointwise table on
-  $k_\infty$ to $6$--$47$~pcm on two hardware tiers at
-  $1.18\times$--$1.90\times$ throughput
+  $k_\infty$ to $13$--$47$~pcm on two hardware tiers at
+  $1.37\times$--$1.90\times$ throughput
   (Sec.~\ref{sec:pwr}).
 \item A matching event-based CUDA solver~\cite{tramm2024} for
   both providers, showing GPU pointwise is $1.30\times$
@@ -79,14 +79,17 @@ retract the earlier memory headline.
   precision), with $7.0\times$ GPU-vs-CPU per-lookup
   throughput on an RTX~$3080$
   (Sec.~\ref{sec:gpu_wmp}).
-\item A tracing and closure of the original $127$~pcm engine
-  offset from OpenMC~$0.15.3$ via four corrections (XS-audit
-  exonerating the total-XS assembly; a $\bar\nu$ delayed-yield
-  reader fix; correlated-CDF $\rightarrow$ stochastic-bin
-  sampling for angular and fission distributions; increasing
-  inactive batches from $20$ to $100$ with a Shannon-entropy
-  monitor). Final ten-seed $k_\infty$ agrees with OpenMC to
-  $-1$~pcm (Sec.~\ref{sec:offset}).
+\item A tracing and closure of the original $78$--$127$~pcm
+  engine offset from OpenMC~$0.15.3$ via three corrections
+  (XS-audit exonerating the total-XS assembly; a
+  $\bar\nu$ delayed-yield reader fix; correlated-CDF
+  $\rightarrow$ stochastic-bin sampling for angular and
+  fission distributions, ported to both CPU and GPU paths).
+  Ten-seed $k_\infty$ on all four providers now agrees with
+  OpenMC to $|\Delta| \le 51$~pcm (CPU table $-12$, CPU SVD
+  $-25$, GPU pointwise $+51$, GPU SVD $-8$), with a
+  Shannon-entropy source-convergence monitor added as
+  runtime diagnostic (Sec.~\ref{sec:offset}).
 \item A clear separation of two memory measurements: the
   WMP representation-byte ratio against a hypothetical
   four-channel pointwise table is $132.9\times$ for our

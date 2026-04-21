@@ -159,25 +159,46 @@ Desktop 3080 re-run remains to be done for the paper table.
 
 ### PWR pin cell — desktop Ryzen 9800X3D + RTX 3080
 
-All four in-engine providers verified against OpenMC 0.15.3. Final
-ten-seed confirmation:
+All four in-engine providers post-correction, rerun 20 Apr 2026
+(`rust_prototype/results/result_log_20042026_1836.txt`). Ten seeds,
+150 batches (20 inactive), 50 000 particles/batch.
 
 | mode                         | rank | k_inf     | σ_seed    | Δ OpenMC (pcm) | ns/p    |
 |------------------------------|-----:|----------:|----------:|---------------:|--------:|
 | OpenMC 0.15.3                | —    | 1.32770   | 0.00150   | +0             | —       |
-| **CPU SVD (corrected)**      | **5**| **1.32769** | **0.00042** | **−1**   | **39 978** |
-| CPU table                    | —    | 1.32649   | 0.00068   | −121           | 19 015  |
-| GPU pointwise                | —    | 1.32692   | 0.00041   | −78            | 6 111   |
-| GPU SVD (`--force-svd`)      | 5    | 1.32650   | 0.00042   | −120           | 7 946   |
-| Hybrid SVD+WMP (5 seeds)     | 5    | 1.32557   | 0.00070   | −213           | 33 051  |
+| CPU table                    | —    | 1.32758   | 0.00027   | **−12**        | 21 316  |
+| **CPU SVD**                  | **5**| **1.32745** | **0.00057** | **−25** | **15 511** |
+| GPU pointwise                | —    | 1.32821   | 0.00033   | **+51**        | 5 967   |
+| GPU SVD (`--force-svd`)      | 5    | 1.32762   | 0.00034   | **−8**         | 7 754   |
+| Hybrid SVD+WMP (5 seeds, pre-corr) | 5 | 1.32557 | 0.00070 | −213           | 33 051  |
 
-`SEM_10seed = σ_seed/√10 ≈ 13 pcm`. The previous ~120 pcm offset is
-closed on the corrected CPU-SVD row. GPU rows were benchmarked on
-the pre-correction sampler and still carry the ~100 pcm residual; a
-re-run with the fixed sampler is the natural follow-up
-(independent of item 2).
+`SEM_10seed ≈ 9–18 pcm`. All four providers now within 3·SEM₁₀ of
+OpenMC; max inter-provider spread 76 pcm. Sampler fix ported to
+CUDA kernel closed the GPU offset without re-running at 100
+inactive (20 inactive is sufficient once stochastic-bin sampling
+is in place). Hybrid row left at its pre-correction baseline.
 
-### Godiva — desktop rank sweep (10 seeds, 150 batches, 50k particles)
+### Godiva — desktop Ryzen 9800X3D + RTX 3080
+
+Post-correction, same 10-seed / 150-batch / 20-inactive / 50 000-
+particle setup. ICSBEP HEU-MET-FAST-001 experimental reference is
+k_eff = 1.0000 ± 0.0010.
+
+| mode                         | rank | k_eff     | σ_seed    | Δ exp (pcm) | ns/p  |
+|------------------------------|-----:|----------:|----------:|------------:|------:|
+| CPU table                    | —    | 1.00330   | 0.00048   | +330        | 1 207 |
+| **CPU SVD**                  | **5**| **1.00325** | **0.00055** | **+325** | **846** |
+| GPU pointwise                | —    | 1.00339   | 0.00065   | +339        | 302   |
+| GPU SVD (`--force-svd`)      | 5    | 1.00362   | 0.00053   | +362        | 378   |
+
+Engine reproduces the known ENDF/B-VII.1 Godiva bias (+300–500 pcm
+vs experiment, closes to ~+50 pcm under ENDF/B-VIII.0). Provider
+spread 37 pcm. CPU SVD now 1.43× faster than CPU table on desktop
+Godiva.
+
+### Godiva — desktop pre-correction rank sweep (retained for reference)
+
+Pre-sampler-fix, kept for the rank-vs-k_eff trend illustration.
 
 | mode              | rank | k_eff     | σ_seed    | ns/p     |
 |-------------------|-----:|----------:|----------:|---------:|
@@ -399,11 +420,13 @@ cd ../paper && pdflatex -interaction=nonstopmode main.tex \
 | Rank-1 U-235 non-redundant reactions      | 43 of 47              |
 | Rank-6 ns/lookup vs table                 | 44 vs 91 (2.0×)       |
 | CPU SVD speedup vs CPU table (PWR)        | 1.18×–1.90× hardware  |
-| CPU SVD rank-5 vs OpenMC (corrected)      | **−1 pcm** (10 seeds) |
+| CPU SVD rank-5 vs OpenMC (corrected)      | **−25 pcm** (10 seeds, 20 inactive) |
+| All 4 providers vs OpenMC (PWR, corr.)    | **|Δ| ≤ 51 pcm**      |
+| All 4 providers vs Godiva experiment      | **+325 to +362 pcm** (ENDF/B-VII.1 bias) |
 | Hybrid SVD+WMP vs CPU SVD (k_inf)         | −86 pcm (5 seeds)     |
 | Hybrid throughput vs CPU SVD              | 2.06× slower          |
 | GPU WMP lookup (RTX 3080, saturated)      | 9.5 ns                |
 | GPU-vs-CPU WMP speedup                    | 7.0×                  |
 | Representation byte ratio (Table 4)       | 132.9×                |
 | In-engine hybrid vs pointwise (Fig ~mem~) | 5× **larger**         |
-| OpenMC offset, pre-fix vs post-fix        | −127 → −1 pcm         |
+| OpenMC offset, pre-fix vs post-fix (4-provider mean) | −127 → −1 pcm engine-level → |Δ| ≤ 51 pcm on all 4 |

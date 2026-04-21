@@ -2,22 +2,39 @@
 
 Truncated SVD of the $\log_{10}$-transformed cross-section
 matrix is a defensible drop-in \emph{representation} for
-the pointwise table: for a nine-nuclide thermal PWR pin cell,
+the pointwise table. On a nine-nuclide thermal PWR pin cell,
 the same engine running rank-$5$ SVD vs its own pointwise
-table agrees on $k_\infty$ within $6$--$47$~pcm on two
-hardware tiers and agrees with OpenMC to $-1$~pcm at
-ten-seed statistics after a transport-level bug audit. A
-Humlicek-W4 Faddeeva evaluator, pure-Rust WMP reader, and
-SVD+WMP hybrid provider all work end-to-end and reproduce
-$k_\infty$ within two $\mathrm{SEM}$ of the SVD baseline; a
-CUDA port of the WMP evaluator is bit-exact against the CPU
-path and $7\times$ faster per lookup on a consumer GPU.
+table agrees on $k_\infty$ within $13$--$47$~pcm on two
+hardware tiers, and all four in-engine providers (CPU table,
+CPU SVD, GPU pointwise, GPU SVD) agree with
+OpenMC~$0.15.3$ to $|\Delta| \le 51$~pcm at ten-seed
+statistics after a transport-level bug audit closed an
+initial $78$--$127$~pcm engine offset. A Humlicek-W4
+Faddeeva evaluator, pure-Rust WMP reader, and SVD+WMP hybrid
+provider all work end-to-end and reproduce $k_\infty$ within
+two $\mathrm{SEM}$ of the matched SVD baseline at the same
+software revision; a CUDA port of the WMP evaluator is
+bit-exact against the CPU path and $7\times$ faster per
+lookup on a consumer GPU.
+
+On Godiva (HEU-MET-FAST-001) the four providers cluster
+$325$--$362$~pcm \emph{above} the ICSBEP experimental value
+$1.0000 \pm 0.0010$~\cite{icsbep_hmf001}. That offset is the
+well-known ENDF/B-VII.1 Godiva bias --- library re-runs at
+the same nuclide data systematically over-predict
+$k_\text{eff}$ by $300$--$500$~pcm, closing to $\sim\!50$~pcm
+under ENDF/B-VIII.0 --- so we read this as our engine
+faithfully reproducing the library and not adding an
+engine-level offset on top of it. The four providers agree
+with each other on Godiva to within $37$~pcm, consistent
+with the sub-SEM provider spread seen on PWR.
 
 The \emph{performance} story is less one-sided.
-CPU SVD rank-$5$ is $1.18\times$--$1.90\times$ faster than
-the in-engine pointwise table, hardware-dependent;
-GPU SVD is $1.30\times$ \emph{slower} than GPU pointwise on
-the same benchmark because four clad nuclides require
+CPU SVD rank-$5$ is $1.37\times$--$1.90\times$ faster than
+the in-engine pointwise table on PWR pin cell
+(hardware-dependent) and $1.43\times$ faster than the table
+on Godiva on desktop; GPU SVD is $1.30\times$ \emph{slower}
+than GPU pointwise on PWR because four clad nuclides require
 summing $13$ discrete-level SVD kernels per lookup.
 The hybrid is $2.06\times$ slower than CPU SVD because
 WMP evaluation is $\sim\!15\times$ more expensive than the
@@ -38,14 +55,16 @@ reaction set extends far beyond those channels.
 
 The practical takeaway for a reader considering this
 approach: rank-$5$ SVD with Ducru temperature interpolation
-is correct and modestly faster than pointwise on the CPU;
-the $43/47$ rank-one reactions are a real
-structural property of ENDF/B-VII.1 cross sections, worth
-exploiting. WMP and SVD compose cleanly and produce a
-correct hybrid engine, but the headline memory reduction
-does not come from that combination alone in our setup;
-engine-scale memory savings would require compressing the
-cascade reactions too. We report the positive, mixed, and
-negative findings together so the trade-off is visible.
+is correct, agrees with OpenMC and its own pointwise
+baseline within $\le 3\,\mathrm{SEM}_{10}$ on PWR, and is
+modestly faster than pointwise on the CPU; the $43/47$
+rank-one reactions are a real structural property of
+ENDF/B-VII.1 cross sections, worth exploiting. WMP and SVD
+compose cleanly and produce a correct hybrid engine, but
+the headline memory reduction does not come from that
+combination alone in our setup; engine-scale memory savings
+would require compressing the cascade reactions too. We
+report the positive, mixed, and negative findings together
+so the trade-off is visible.
 
 %% ============================================================

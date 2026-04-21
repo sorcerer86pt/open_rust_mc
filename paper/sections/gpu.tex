@@ -9,7 +9,7 @@ from the basis.
 
 \paragraph{GPU pointwise beats GPU SVD on PWR.}
 On desktop GPU pointwise is $1.30\times$ faster than GPU SVD
-($6\,111$ vs $7\,946$~ns/p, Table~\ref{tab:keff_pwr_desktop}).
+($5\,967$ vs $7\,754$~ns/p, Table~\ref{tab:keff_pwr_desktop}).
 The cause is specific to this geometry: four clad nuclides
 (Zr-$90$, Zr-$91$, Zr-$92$, Zr-$94$) do not carry an MT$=4$
 total-inelastic block in the ENDF/B-VII.1 HDF5; their total
@@ -23,11 +23,15 @@ measured, GPU SVD on PWR pin cell is \emph{not} a win over
 GPU pointwise.
 
 \paragraph{Fidelity parity at desktop statistics.}
-GPU pointwise $k_\infty = 1.32692 \pm 0.00041$ and GPU SVD
-$k_\infty = 1.32650 \pm 0.00042$ (pre-correction sampler).
-The two GPU paths agree to $42$~pcm,
-$\approx\!1.4\,\mathrm{SEM}_\text{combined}$. With the
-corrected sampler from Sec.~\ref{sec:offset} we expect both
-to move closer to OpenMC; that re-run is pending.
+Post-correction GPU rows: GPU pointwise $k_\infty =
+1.32821 \pm 0.00033$ and GPU SVD $k_\infty = 1.32762 \pm
+0.00034$. The two GPU paths agree to $59$~pcm
+($\approx 1.3\,\mathrm{SEM}_\text{combined}$), the two CPU
+paths agree to $13$~pcm, and all four providers agree on
+$k_\infty$ within $|\Delta_\text{OpenMC}| \le 51$~pcm with
+the corrected stochastic-bin sampler. The GPU pointwise
+row is the high point of the spread ($+51$~pcm vs OpenMC)
+and remains within $3\,\mathrm{SEM}_{10}$; the other three
+sit in the $-8$ to $-25$~pcm band.
 
 %% ============================================================

@@ -133,36 +133,51 @@ $36.7$   & $5357.922$ & $5357.903$ & $3.6 \cdot 10^{-6}$ \\
 
 \paragraph{End-to-end $k_\infty$ and throughput.}
 Five seeds, $100$ batches ($20$ inactive), $20\,000$
-particles per batch on the desktop Ryzen~$9800$X3D. The five
-in-engine SVD + hybrid rows use the pre-correction sampler
-(the sampling fixes of Sec.~\ref{sec:offset} landed after the
-hybrid benchmark was complete; re-running is pending).
+particles per batch on the desktop Ryzen~$9800$X3D. The
+hybrid row uses the pre-correction sampler (the sampling
+fixes of Sec.~\ref{sec:offset} landed after the hybrid
+benchmark was complete and a re-run has not been performed);
+for the correctness comparison we pair it against the matched
+pre-correction CPU SVD rank-$5$ baseline from the same
+software revision. The post-correction CPU SVD
+rank-$5$ value ($1.32745 \pm 0.00057$,
+Table~\ref{tab:keff_pwr_desktop}) is reported for reference.
 
 \begin{table}[htb]
 \centering
 \caption{End-to-end hybrid SVD+WMP benchmark on PWR pin
-cell, desktop Ryzen~$9800$X3D.}
+cell, desktop Ryzen~$9800$X3D. Both rows use the
+pre-correction sampler so that the hybrid-vs-SVD delta is
+measured at matched physics.}
 \label{tab:hybrid_endtoend}
 \begin{tabular}{@{}lrrrrrr@{}}
 \toprule
 mode & rank & $k_\infty$ & $\sigma_\text{seed}$ &
 $\Delta$ CPU-SVD (pcm) & ns/p & seeds \\
 \midrule
-CPU SVD (pre-correction ref.) & $5$ & $1.32643$ & $0.00065$ & $+0$ (ref) & $16\,052$ & $10$ \\
-\textbf{Hybrid SVD+WMP}       & $5$ & $\mathbf{1.32557}$ &
+CPU SVD (pre-correction, matched)       & $5$ & $1.32643$ & $0.00065$ & $+0$ (ref) & $16\,052$ & $10$ \\
+\textbf{Hybrid SVD+WMP (pre-correction)} & $5$ & $\mathbf{1.32557}$ &
  $\mathbf{0.00070}$ & $\mathbf{-86}$ & $\mathbf{33\,051}$ & $5$ \\
+\midrule
+CPU SVD (post-correction, reference)    & $5$ & $1.32745$ & $0.00057$ & ---        & $15\,511$ & $10$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The hybrid $k_\infty$ is within $86$~pcm of CPU SVD rank-$5$
+The hybrid $k_\infty$ is within $86$~pcm of the matched
+pre-correction CPU SVD rank-$5$
 ($\approx 2.3\,\mathrm{SEM}_\text{combined}$): WMP represents
 the resonance cross section by a rational pole fit rather
 than a piecewise-linear-in-log-log sampling of the same
 evaluated-nuclear-data curve, so small systematic
 disagreements in the RRR accumulate into a
 $\sim\!86$~pcm shift. Provider parity to within two
-$\mathrm{SEM}$ is the correctness statement here.
+$\mathrm{SEM}$ at matched physics is the correctness
+statement here. Against the post-correction CPU SVD
+baseline the raw offset grows to $-188$~pcm, but that
+number mixes the hybrid-vs-SVD representation gap with the
+angular/fission-energy sampler change; we do not read it as
+a representation claim.
 
 Throughput: the hybrid runs at $33\,051$~ns/p, $2.06\times$
 slower than CPU SVD rank-$5$. A single WMP lookup on this
@@ -176,13 +191,15 @@ it costs throughput.
 \label{sec:hybrid_mem_engine}
 
 \texttt{HybridSvdWmpXsProvider::memory\_report} introspects
-the loaded kernels at run time and reports two numbers: the
-current in-solver memory, and a projection in which the
-elastic, fission, and capture SVD kernels are hypothetically
-rebuilt on the energy points outside each nuclide's WMP
-window (a rebuild we have not implemented because the shared
-energy grid across reactions complicates it). For the
-nine-nuclide PWR set at rank-$5$:
+the loaded kernels at run time. We report four variants for
+the nine-nuclide PWR set at rank-$5$: the pointwise-table
+baseline, pure SVD rank-$5$ (all reactions compressed), the
+hybrid current state (SVD basis plus WMP payload), and a
+smooth-only projection in which the elastic, fission, and
+capture SVD kernels are hypothetically rebuilt on the energy
+points outside each nuclide's WMP window (a rebuild we have
+not implemented because the shared energy grid across
+reactions complicates it).
 
 \begin{center}
 \begin{tabular}{@{}lrr@{}}
@@ -190,11 +207,45 @@ nine-nuclide PWR set at rank-$5$:
  & bytes (MB) & vs pointwise \\
 \midrule
 Pointwise-table baseline (Sec.~\ref{sec:pwr}) & $101.5$ & $1.0\times$ \\
-Current hybrid in-solver (full SVD basis + WMP payload) & $519.0$ & $5.1\times$ \emph{larger} \\
+Pure SVD rank-$5$ (all reactions) & $\sim\!517.9$ & $5.1\times$ \emph{larger} \\
+Current hybrid in-solver (SVD basis + WMP payload) & $519.0$ & $5.1\times$ \emph{larger} \\
 Smooth-only projection (EFC SVD restricted + WMP) & $487.6$ & $4.8\times$ \emph{larger} \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\paragraph{Where the bytes actually live.} The dominant
+contribution in every SVD-based variant is the discrete
+inelastic-level cascade: $41$ MT$=51$--$91$ levels per
+uranium nuclide, $10$--$13$ per zircaloy isotope, each
+carried as its own rank-$5$ SVD kernel. On the GPU that
+cascade alone measures $251.3$~MB --- by itself
+$2.5\times$ the entire pointwise-table engine. The
+smooth-channel SVD bases (elastic, fission, capture, total
+inelastic, $(n,2n)$, $(n,3n)$) together measure
+$64.6$~MB; the WMP payload is $1.23$~MB. So switching the
+resonance representation to WMP costs essentially zero
+memory, and the hybrid-vs-pure-SVD difference is a $6\%$
+rounding error. The engine-scale penalty against the
+pointwise table is not caused by WMP and is not relieved by
+it; it is caused by storing the discrete-level cascade as
+per-level rank-$5$ bases rather than per-level scalar
+arrays.
+
+\paragraph{Where the representation-byte ratio still applies.}
+Equation~\ref{eq:svd_pt_ratio} from
+Sec.~\ref{sec:svd_tradeoff} says the SVD-vs-pointwise memory
+ratio is $k/T$ for a single reaction. The engine-scale
+penalty reported above is not a counter-example: our
+pointwise-table baseline is built at a single effective
+temperature per material region (one temperature per
+nuclide-in-material). In a multi-temperature library
+($T = 6$ in the HDF5 files shipped for depletion
+feedback), the pointwise baseline would grow to
+$\sim\!600$~MB on the same nuclide set while pure SVD and
+hybrid stay at $\sim\!519$~MB; the ordering would then
+invert. The engine-scale loss we report is therefore a
+loss at $T = 1$, not a universal property.
 
 \begin{figure}[htb]
 \centering

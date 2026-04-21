@@ -128,15 +128,16 @@ def plot_per_lookup():
 
 def plot_throughput_pwr():
     # (mode, laptop_ns, desktop_ns)
-    # Laptop desktop from the paper's PWR tables.
-    # Desktop CPU-SVD corrected = 39978 (sampling-corrected, 10 seeds)
-    # Desktop CPU-SVD uncorrected = 16052 (10 seeds, pre-correction)
-    # Show both with an annotation.
+    # Laptop = pre-correction five-seed paper numbers (Table keff_pwr).
+    # Desktop = post-correction ten-seed rerun (20042026_1836 log,
+    # 150 batches / 20 inactive / 50k particles / 10 seeds).
+    # Hybrid row is pre-correction (benchmark predates sampler fix);
+    # displayed for completeness.
     rows = [
-        ("CPU table",            54430, 19015),
-        ("CPU SVD r=5",          28651, 16052),
-        ("GPU pointwise",        38104, 6111),
-        ("GPU SVD r=5",          50738, 7946),
+        ("CPU table",            54430, 21316),
+        ("CPU SVD r=5",          28651, 15511),
+        ("GPU pointwise",        38104, 5967),
+        ("GPU SVD r=5",          50738, 7754),
         ("Hybrid SVD+WMP",       None,  33051),
     ]
     labels   = [r[0] for r in rows]
@@ -183,38 +184,44 @@ def plot_throughput_pwr():
 # ── Throughput, Godiva, desktop rank sweep ────────────────────────────
 
 def plot_throughput_godiva():
-    ranks = ["table", "r=2", "r=3", "r=4", "r=5", "r=6", "GPU pw", "GPU r=5"]
-    ns    = [1214, 1289, 1316, 1369, 1426, 1558, 278.5, 357.0]
-    kinf  = [1.00579, 1.00477, 1.00547, 1.00523, 1.00507, 1.00524,
-             1.00590, 1.00536]
-    sigma = [0.00046, 0.00055, 0.00031, 0.00055, 0.00065, 0.00071,
-             0.00037, 0.00046]
+    # Post-correction four-provider desktop benchmark
+    # (20042026_1836 log, 150/20/50k, 10 seeds).
+    # ICSBEP HEU-MET-FAST-001 reference k_eff = 1.0000 +/- 0.0010.
+    labels = ["CPU table", "CPU SVD r=5", "GPU pointwise", "GPU SVD r=5"]
+    ns     = [1207, 846, 302, 378]
+    kinf   = [1.00330, 1.00325, 1.00339, 1.00362]
+    sigma  = [0.00048, 0.00055, 0.00065, 0.00053]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.5, 4.3))
 
-    colors = ["#3478c7"] * 6 + ["#c75434"] * 2
-    x = np.arange(len(ranks))
+    colors = ["#3478c7", "#3478c7", "#c75434", "#c75434"]
+    x = np.arange(len(labels))
     bars = ax1.bar(x, ns, color=colors, edgecolor="black", lw=0.6)
     for b, v in zip(bars, ns):
-        ax1.text(b.get_x() + b.get_width() / 2, v + 40, f"{v:.0f}",
-                 ha="center", fontsize=7.5)
+        ax1.text(b.get_x() + b.get_width() / 2, v + 25, f"{v:.0f}",
+                 ha="center", fontsize=8.5)
     ax1.set_xticks(x)
-    ax1.set_xticklabels(ranks, fontsize=9)
+    ax1.set_xticklabels(labels, fontsize=9)
     ax1.set_ylabel("ns / particle")
-    ax1.set_title("Godiva throughput, desktop\n(blue = CPU, red = GPU)")
+    ax1.set_title("Godiva throughput, desktop (post-correction)\n"
+                  "(blue = CPU, red = GPU)")
     ax1.grid(True, axis="y", ls=":", lw=0.5, alpha=0.5)
 
     # k_eff
     ax2.errorbar(x, kinf, yerr=sigma, fmt="o", color="#2b2b2b",
-                 ms=6, lw=1.4, capsize=3)
-    ax2.axhline(1.00579, color="#3478c7", ls="--", lw=1.0, alpha=0.6,
-                label="CPU table reference")
+                 ms=7, lw=1.5, capsize=3)
+    ax2.axhspan(1.0000 - 0.0010, 1.0000 + 0.0010,
+                color="#7fbf7f", alpha=0.25,
+                label="ICSBEP experiment 1.0000 ± 0.0010")
+    ax2.axhline(1.00330, color="#3478c7", ls=":", lw=1.0, alpha=0.8,
+                label="CPU-table engine baseline 1.00330")
     ax2.set_xticks(x)
-    ax2.set_xticklabels(ranks, fontsize=9)
+    ax2.set_xticklabels(labels, fontsize=9)
     ax2.set_ylabel(r"$k_\text{eff}$")
-    ax2.set_title("Godiva $k_\\mathrm{eff}$, desktop (σ_\\mathrm{seed} bars)")
+    ax2.set_title("Godiva $k_\\mathrm{eff}$, desktop post-correction "
+                  "($\\sigma_\\mathrm{seed}$ bars)")
     ax2.grid(True, ls=":", lw=0.5, alpha=0.5)
-    ax2.legend(loc="lower left", fontsize=8)
+    ax2.legend(loc="lower right", fontsize=8)
 
     plt.tight_layout()
     out_path = os.path.join(OUT, "throughput_godiva.png")

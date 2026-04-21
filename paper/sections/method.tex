@@ -64,6 +64,102 @@ w_j(T) = \sqrt{T_j T / (T_j + T)^2}
 Exact at library temperatures; $\sim\!0.1\%$ error on
 Doppler-broadened cross sections over $300$--$3000$~K.
 
+\subsection{Memory trade-off of truncated SVD}
+\label{sec:svd_tradeoff}
+
+Truncated SVD is not a free memory win, and the comparison
+against a pointwise table depends on how many temperatures
+the library stores. A single-temperature pointwise table
+stores one value per energy point per reaction. An SVD basis
+at rank $k$ stores $k$ values per energy point per reaction
+regardless of the number of library temperatures it was
+trained on. Writing $T$ for the stored temperature count:
+
+\begin{equation}
+\frac{\text{SVD bytes}}{\text{pointwise bytes}}
+= \frac{N_E \cdot k}{N_E \cdot T}
+= \frac{k}{T}.
+\label{eq:svd_pt_ratio}
+\end{equation}
+
+So:
+\begin{itemize}
+\item At $k = 1$, SVD is the same size as a
+  single-temperature pointwise table but represents all $T$
+  temperatures; SVD wins on memory against any pointwise
+  table with $T \geq 1$ stored temperatures, and does
+  strictly better as $T$ grows.
+\item At $k \geq 2$, SVD only beats pointwise when the
+  library carries $T > k$ temperatures. Break-even sits
+  around $T = 2$--$3$. For a single-temperature toy
+  problem SVD is strictly larger.
+\item Production libraries typically carry $T \in [6, 15]$
+  temperatures (depletion feedback, fuel-temperature
+  reactivity), so the rank-$5$ SVD used in this paper
+  ($k/T = 5/6 = 0.83$ to $5/15 = 0.33$) is a modest to
+  strong memory win in the regime that matters, and a loss
+  in the regime that does not.
+\end{itemize}
+
+The cost side of that trade-off is not zero:
+
+\begin{itemize}
+\item \textbf{Compute per lookup.} Pointwise is a hashed
+  index plus one log-log interpolation. SVD is a rank-$k$
+  FMA sequence plus a Ducru temperature step
+  (Sec.~\ref{sec:ducru}). At $k = 5$ on desktop, SVD is
+  $43$~ns/lookup against $91$~ns for the table
+  (Sec.~\ref{sec:xs_pareto}) --- but this advantage depends
+  entirely on the basis fitting in L2/L3 cache. A
+  higher-rank basis or a larger nuclide set could tip this
+  back toward pointwise.
+\item \textbf{Reconstruction error.} Pointwise is exact at
+  grid points and piecewise-linear-in-log between them; SVD
+  is an approximation everywhere. RMSE on $\log_{10}\sigma$
+  is $6\cdot 10^{-4}$ at $k = 5$ and reaches machine
+  precision at $k = 6$ (Sec.~\ref{sec:xs_pareto}). Lower
+  rank means smaller memory and faster lookup at the cost
+  of a tunable amount of cross-section error, which
+  propagates into $k_\text{eff}$ as pcm-scale bias.
+\item \textbf{One-time decomposition cost.} SVD requires an
+  offline factorisation per nuclide per reaction (seconds at
+  load time). Pointwise is a direct HDF5 read. Not a
+  practical issue but not free either.
+\item \textbf{Temperature-interpolation quality.} Both
+  representations interpolate between library temperatures
+  at runtime. Neither performs on-the-fly Doppler
+  broadening from first principles --- WMP is the only
+  method of the three in this paper that does. SVD with
+  Ducru kernels gives $\sim\!0.1\%$ error on broadened
+  cross sections over $300$--$3000$~K, which is tight but
+  not analytical.
+\item \textbf{Rank dispersion across reactions.} Most
+  reactions are rank-one to machine precision ($43$ of
+  $47$ non-redundant $^{235}$U channels,
+  Sec.~\ref{sec:spectrum}); a minority, chiefly those with
+  dense-peak resonance structure in the RRR, need $k \geq
+  5$. Using a uniform rank across all reactions wastes
+  bytes on the easy channels; per-reaction rank would
+  recover those but complicates the dispatch.
+\item \textbf{No safe extrapolation outside library
+  temperatures.} The Ducru basis is a projection onto the
+  training-temperature set. Extrapolating to $T$ outside
+  $[T_\text{min}^\text{lib}, T_\text{max}^\text{lib}]$ is
+  unsafe in the same way pointwise interpolation is
+  unsafe outside its range. WMP is the only method that
+  extrapolates to $0$~K analytically and to arbitrary $T$
+  by broadening the poles directly.
+\end{itemize}
+
+The short summary is that rank-$k$ SVD buys compact storage
+inside the library's temperature range and cache-friendly
+lookup at modest rank, in exchange for a tunable
+reconstruction error, a cache-residence requirement, and no
+analytical behaviour outside the training temperatures. The
+$132\times$ and $1.06\times$ memory numbers in
+Sec.~\ref{sec:hybrid} are both compatible with this picture;
+they measure different slices of it.
+
 \subsection{Hybrid SVD+WMP dispatch}
 
 Where $\log \sigma$ is intrinsically high rank
