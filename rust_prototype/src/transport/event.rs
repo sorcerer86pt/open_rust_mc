@@ -16,6 +16,8 @@
 
 use std::io::Write;
 
+use rayon::prelude::*;
+
 use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
 use crate::geometry::{self, Vec3};
@@ -116,6 +118,253 @@ pub struct EventBatchResult {
     pub collisions: u32,
 }
 
+/// Per-particle result of one event step. Produced by the parallel
+/// map inside `transport_batch_event` and applied back to `ParticleBank`
+/// by a serial reduce. Carries the particle's new state plus any
+/// counter deltas and fission sites generated this step.
+struct ParticleStepOutcome {
+    pos: Vec3,
+    dir: Vec3,
+    energy: f64,
+    cell_idx: usize,
+    alive: bool,
+    n_collisions: u32,
+    rng_state: u64,
+    rng_stream: u64,
+    leakage: u32,
+    absorptions: u32,
+    fissions: u32,
+    collisions: u32,
+    fission_sites: Vec<FissionSite>,
+}
+
+/// Step one particle through one event cycle. Pure function over
+/// immutable borrows of the bank and environment; returns a fresh
+/// outcome describing the particle's new state.
+#[allow(clippy::too_many_arguments)]
+fn step_particle<XS: XsProvider>(
+    pi: usize,
+    bank: &ParticleBank,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Material],
+    xs_provider: &XS,
+) -> ParticleStepOutcome {
+    let mut out = ParticleStepOutcome {
+        pos: bank.pos[pi],
+        dir: bank.dir[pi],
+        energy: bank.energy[pi],
+        cell_idx: bank.cell_idx[pi],
+        alive: bank.alive[pi],
+        n_collisions: bank.n_collisions[pi],
+        rng_state: bank.rng_state[pi],
+        rng_stream: bank.rng_stream[pi],
+        leakage: 0,
+        absorptions: 0,
+        fissions: 0,
+        collisions: 0,
+        fission_sites: Vec::new(),
+    };
+
+    if !out.alive {
+        return out;
+    }
+    if out.n_collisions >= 1000 {
+        out.alive = false;
+        out.leakage = 1;
+        return out;
+    }
+
+    let mut rng = Rng::from_state(out.rng_state, out.rng_stream);
+
+    let cell = &cells[out.cell_idx];
+    let mat_idx = match cell.fill {
+        CellFill::Material(m) => m as usize,
+        CellFill::Void => {
+            let trace = geometry::ray::trace_step(out.pos, out.dir, out.cell_idx, surfaces, cells);
+            match trace {
+                Some(hit) => {
+                    let nudge = (hit.distance * 1e-8).max(1e-8);
+                    out.pos = out.pos + out.dir * (hit.distance + nudge);
+                    match surfaces[hit.surface_idx].boundary_condition() {
+                        BoundaryCondition::Vacuum => {
+                            out.alive = false;
+                            out.leakage = 1;
+                        }
+                        BoundaryCondition::Reflective => {
+                            let n = surfaces[hit.surface_idx].normal_at(out.pos);
+                            out.dir = out.dir - n * (2.0 * out.dir.dot(n));
+                        }
+                        BoundaryCondition::Transmission => {
+                            if let Some(next) = hit.next_cell_idx {
+                                out.cell_idx = next;
+                            } else {
+                                out.alive = false;
+                                out.leakage = 1;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    out.alive = false;
+                    out.leakage = 1;
+                }
+            }
+            out.rng_state = rng.state();
+            out.rng_stream = rng.stream();
+            return out;
+        }
+        CellFill::Universe(_) => {
+            out.alive = false;
+            out.leakage = 1;
+            return out;
+        }
+    };
+
+    if mat_idx >= materials.len() {
+        out.alive = false;
+        out.leakage = 1;
+        return out;
+    }
+
+    let material = &materials[mat_idx];
+
+    let urr_xi = rng.uniform();
+    let n_nuclides = material.nuclides.len();
+    let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+    let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+
+    for (i, nuc) in material.nuclides.iter().enumerate() {
+        let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, out.energy);
+        xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, out.energy, urr_xi);
+
+        if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
+            && out.energy < tsl.energy_max
+        {
+            let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+            let thermal_total = tsl.total_xs(out.energy, t_idx);
+            let delta = thermal_total - xs.elastic;
+            xs.total += delta;
+            xs.elastic = 0.0;
+        }
+
+        micro_totals[i] = xs.total;
+        micro_xs[i] = xs;
+    }
+
+    let macro_total = material.macro_total(&micro_totals[..n_nuclides]);
+    if macro_total <= 0.0 {
+        out.alive = false;
+        out.leakage = 1;
+        out.rng_state = rng.state();
+        out.rng_stream = rng.stream();
+        return out;
+    }
+
+    let dist_collision = rng.exponential(macro_total);
+    let trace = geometry::ray::trace_step(out.pos, out.dir, out.cell_idx, surfaces, cells);
+
+    match trace {
+        Some(hit) if hit.distance < dist_collision => {
+            let nudge = (hit.distance * 1e-8).max(1e-8);
+            out.pos = out.pos + out.dir * (hit.distance + nudge);
+            match surfaces[hit.surface_idx].boundary_condition() {
+                BoundaryCondition::Vacuum => {
+                    out.alive = false;
+                    out.leakage = 1;
+                }
+                BoundaryCondition::Reflective => {
+                    let normal = surfaces[hit.surface_idx].normal_at(out.pos);
+                    out.dir = out.dir - normal * (2.0 * out.dir.dot(normal));
+                }
+                BoundaryCondition::Transmission => {
+                    if let Some(next) = hit.next_cell_idx {
+                        out.cell_idx = next;
+                    } else {
+                        out.alive = false;
+                        out.leakage = 1;
+                    }
+                }
+            }
+        }
+        _ => {
+            out.pos = out.pos + out.dir * dist_collision;
+            out.collisions = 1;
+            out.n_collisions += 1;
+
+            let nuc_idx =
+                material.sample_nuclide(&micro_totals[..n_nuclides], macro_total, rng.uniform());
+            let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+
+            let thermal_active = xs_provider
+                .thermal_scattering(xs_kernel_idx)
+                .is_some_and(|tsl| out.energy < tsl.energy_max);
+
+            let outcome = if thermal_active {
+                let tsl = xs_provider
+                    .thermal_scattering(xs_kernel_idx)
+                    .expect("thermal");
+                let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                let thermal_xs = tsl.total_xs(out.energy, t_idx);
+                let xi = rng.uniform() * micro_xs[nuc_idx].total;
+
+                if xi < thermal_xs {
+                    let (e_out, mu) = tsl.sample(out.energy, t_idx, &mut rng);
+                    out.energy = e_out;
+                    rotate_direction(&mut out.dir, mu, &mut rng);
+                    None
+                } else {
+                    let mut particle =
+                        make_temp_particle(out.pos, out.dir, out.energy, out.cell_idx);
+                    let o = process_standard_collision(
+                        &mut particle,
+                        &micro_xs[nuc_idx],
+                        xs_kernel_idx,
+                        xs_provider,
+                        cell.temperature,
+                        &mut rng,
+                    );
+                    out.energy = particle.energy;
+                    out.dir = particle.dir;
+                    Some(o)
+                }
+            } else {
+                let mut particle = make_temp_particle(out.pos, out.dir, out.energy, out.cell_idx);
+                let o = process_standard_collision(
+                    &mut particle,
+                    &micro_xs[nuc_idx],
+                    xs_kernel_idx,
+                    xs_provider,
+                    cell.temperature,
+                    &mut rng,
+                );
+                out.energy = particle.energy;
+                out.dir = particle.dir;
+                Some(o)
+            };
+
+            if let Some(o) = outcome {
+                match o {
+                    CollisionOutcome::Scatter => {}
+                    CollisionOutcome::Absorption => {
+                        out.alive = false;
+                        out.absorptions = 1;
+                    }
+                    CollisionOutcome::Fission { sites } => {
+                        out.alive = false;
+                        out.fissions = 1;
+                        out.fission_sites = sites;
+                    }
+                }
+            }
+        }
+    }
+
+    out.rng_state = rng.state();
+    out.rng_stream = rng.stream();
+    out
+}
+
 /// Run one batch of event-based transport.
 ///
 /// Processes all particles through repeated event cycles until all die or leak.
@@ -143,234 +392,37 @@ pub fn transport_batch_event<XS: XsProvider>(
     while bank.alive_count() > 0 && event_count < max_events {
         event_count += 1;
 
-        // ── EVENT 1: Sort by energy (critical for cache/GPU) ──
+        // ── EVENT 1: Sort by energy (scaffold — not yet exploited by
+        // batched XS lookup; retained to keep the event-loop shape
+        // future-proof for GPU/SIMD batching work). ──
         bank.sort_by_energy();
 
-        // ── EVENT 2-5: Process all particles ──
-        // For now, process serially per particle for correctness.
-        // GPU acceleration: move XS lookup to GPU kernel.
+        // ── EVENT 2-5: process all particles in parallel, then
+        // serial-apply the updates. Each `step_particle` call is
+        // independent (reads an immutable snapshot of the bank),
+        // so rayon's work-stealing scheduler parallelises freely.
         let n = bank.len();
-        for pi in 0..n {
-            if !bank.alive[pi] {
-                continue;
+        let outcomes: Vec<ParticleStepOutcome> = (0..n)
+            .into_par_iter()
+            .map(|pi| step_particle(pi, &bank, surfaces, cells, materials, xs_provider))
+            .collect();
+
+        for (pi, o) in outcomes.into_iter().enumerate() {
+            bank.pos[pi] = o.pos;
+            bank.dir[pi] = o.dir;
+            bank.energy[pi] = o.energy;
+            bank.cell_idx[pi] = o.cell_idx;
+            bank.alive[pi] = o.alive;
+            bank.n_collisions[pi] = o.n_collisions;
+            bank.rng_state[pi] = o.rng_state;
+            bank.rng_stream[pi] = o.rng_stream;
+            result.leakage += o.leakage;
+            result.absorptions += o.absorptions;
+            result.fissions += o.fissions;
+            result.collisions += o.collisions;
+            if !o.fission_sites.is_empty() {
+                result.fission_sites.extend(o.fission_sites);
             }
-            if bank.n_collisions[pi] >= 1000 {
-                bank.alive[pi] = false;
-                result.leakage += 1;
-                continue;
-            }
-
-            let mut rng = Rng::from_state(bank.rng_state[pi], bank.rng_stream[pi]);
-
-            // Get cell and material
-            let cell = &cells[bank.cell_idx[pi]];
-            let mat_idx = match cell.fill {
-                CellFill::Material(m) => m as usize,
-                CellFill::Void => {
-                    // Free-stream through void
-                    let trace = geometry::ray::trace_step(
-                        bank.pos[pi],
-                        bank.dir[pi],
-                        bank.cell_idx[pi],
-                        surfaces,
-                        cells,
-                    );
-                    match trace {
-                        Some(hit) => {
-                            let nudge = (hit.distance * 1e-8).max(1e-8);
-                            bank.pos[pi] = bank.pos[pi] + bank.dir[pi] * (hit.distance + nudge);
-                            let bc = surfaces[hit.surface_idx].boundary_condition();
-                            match bc {
-                                BoundaryCondition::Vacuum => {
-                                    bank.alive[pi] = false;
-                                    result.leakage += 1;
-                                }
-                                BoundaryCondition::Reflective => {
-                                    let n = surfaces[hit.surface_idx].normal_at(bank.pos[pi]);
-                                    bank.dir[pi] = bank.dir[pi] - n * (2.0 * bank.dir[pi].dot(n));
-                                }
-                                BoundaryCondition::Transmission => {
-                                    if let Some(next) = hit.next_cell_idx {
-                                        bank.cell_idx[pi] = next;
-                                    } else {
-                                        bank.alive[pi] = false;
-                                        result.leakage += 1;
-                                    }
-                                }
-                            }
-                        }
-                        None => {
-                            bank.alive[pi] = false;
-                            result.leakage += 1;
-                        }
-                    }
-                    bank.rng_state[pi] = rng.state();
-                    bank.rng_stream[pi] = rng.stream();
-                    continue;
-                }
-                CellFill::Universe(_) => {
-                    bank.alive[pi] = false;
-                    result.leakage += 1;
-                    continue;
-                }
-            };
-
-            if mat_idx >= materials.len() {
-                bank.alive[pi] = false;
-                result.leakage += 1;
-                continue;
-            }
-
-            let material = &materials[mat_idx];
-
-            // ── XS lookup (sorted particles → coalesced access) ──
-            let urr_xi = rng.uniform();
-            let n_nuclides = material.nuclides.len();
-            let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
-            let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
-
-            for (i, nuc) in material.nuclides.iter().enumerate() {
-                let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, bank.energy[pi]);
-                xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, bank.energy[pi], urr_xi);
-
-                // S(α,β) thermal scattering adjustment
-                if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
-                    && bank.energy[pi] < tsl.energy_max
-                {
-                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                    let thermal_total = tsl.total_xs(bank.energy[pi], t_idx);
-                    let delta = thermal_total - xs.elastic;
-                    xs.total += delta;
-                    xs.elastic = 0.0;
-                }
-
-                micro_totals[i] = xs.total;
-                micro_xs[i] = xs;
-            }
-
-            let macro_total = material.macro_total(&micro_totals[..n_nuclides]);
-            if macro_total <= 0.0 {
-                bank.alive[pi] = false;
-                result.leakage += 1;
-                bank.rng_state[pi] = rng.state();
-                bank.rng_stream[pi] = rng.stream();
-                continue;
-            }
-
-            // ── Sample collision distance ──
-            let dist_collision = rng.exponential(macro_total);
-
-            // ── Trace to nearest surface ──
-            let trace = geometry::ray::trace_step(
-                bank.pos[pi],
-                bank.dir[pi],
-                bank.cell_idx[pi],
-                surfaces,
-                cells,
-            );
-
-            match trace {
-                Some(hit) if hit.distance < dist_collision => {
-                    // Surface crossing
-                    let nudge = (hit.distance * 1e-8).max(1e-8);
-                    bank.pos[pi] = bank.pos[pi] + bank.dir[pi] * (hit.distance + nudge);
-
-                    let bc = surfaces[hit.surface_idx].boundary_condition();
-                    match bc {
-                        BoundaryCondition::Vacuum => {
-                            bank.alive[pi] = false;
-                            result.leakage += 1;
-                        }
-                        BoundaryCondition::Reflective => {
-                            let normal = surfaces[hit.surface_idx].normal_at(bank.pos[pi]);
-                            bank.dir[pi] = bank.dir[pi] - normal * (2.0 * bank.dir[pi].dot(normal));
-                        }
-                        BoundaryCondition::Transmission => {
-                            if let Some(next) = hit.next_cell_idx {
-                                bank.cell_idx[pi] = next;
-                            } else {
-                                bank.alive[pi] = false;
-                                result.leakage += 1;
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    // Collision
-                    bank.pos[pi] = bank.pos[pi] + bank.dir[pi] * dist_collision;
-                    result.collisions += 1;
-                    bank.n_collisions[pi] += 1;
-
-                    let nuc_idx = material.sample_nuclide(
-                        &micro_totals[..n_nuclides],
-                        macro_total,
-                        rng.uniform(),
-                    );
-                    let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
-
-                    // Check for thermal scattering
-                    let thermal_active = xs_provider
-                        .thermal_scattering(xs_kernel_idx)
-                        .is_some_and(|tsl| bank.energy[pi] < tsl.energy_max);
-
-                    if thermal_active {
-                        let tsl = xs_provider
-                            .thermal_scattering(xs_kernel_idx)
-                            .expect("thermal");
-                        let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                        let thermal_xs = tsl.total_xs(bank.energy[pi], t_idx);
-                        let xi = rng.uniform() * micro_xs[nuc_idx].total;
-
-                        if xi < thermal_xs {
-                            // Thermal scattering
-                            let (e_out, mu) = tsl.sample(bank.energy[pi], t_idx, &mut rng);
-                            bank.energy[pi] = e_out;
-                            rotate_direction(&mut bank.dir[pi], mu, &mut rng);
-                        } else {
-                            // Non-thermal collision
-                            let mut particle = make_temp_particle(
-                                bank.pos[pi],
-                                bank.dir[pi],
-                                bank.energy[pi],
-                                bank.cell_idx[pi],
-                            );
-                            let outcome = process_standard_collision(
-                                &mut particle,
-                                &micro_xs[nuc_idx],
-                                xs_kernel_idx,
-                                xs_provider,
-                                cell.temperature,
-                                &mut rng,
-                            );
-                            bank.energy[pi] = particle.energy;
-                            bank.dir[pi] = particle.dir;
-                            handle_outcome(outcome, pi, &mut bank, &mut result);
-                        }
-                    } else {
-                        // Standard collision
-                        let mut particle = make_temp_particle(
-                            bank.pos[pi],
-                            bank.dir[pi],
-                            bank.energy[pi],
-                            bank.cell_idx[pi],
-                        );
-                        let outcome = process_standard_collision(
-                            &mut particle,
-                            &micro_xs[nuc_idx],
-                            xs_kernel_idx,
-                            xs_provider,
-                            cell.temperature,
-                            &mut rng,
-                        );
-                        bank.energy[pi] = particle.energy;
-                        bank.dir[pi] = particle.dir;
-                        handle_outcome(outcome, pi, &mut bank, &mut result);
-                    }
-                }
-            }
-
-            bank.rng_state[pi] = rng.state();
-            bank.rng_stream[pi] = rng.stream();
         }
     }
 
@@ -442,26 +494,6 @@ fn process_standard_collision<XS: XsProvider>(
         temperature,
         rng,
     )
-}
-
-fn handle_outcome(
-    outcome: CollisionOutcome,
-    pi: usize,
-    bank: &mut ParticleBank,
-    result: &mut EventBatchResult,
-) {
-    match outcome {
-        CollisionOutcome::Scatter => {}
-        CollisionOutcome::Absorption => {
-            bank.alive[pi] = false;
-            result.absorptions += 1;
-        }
-        CollisionOutcome::Fission { sites } => {
-            bank.alive[pi] = false;
-            result.fissions += 1;
-            result.fission_sites.extend(sites);
-        }
-    }
 }
 
 /// Run k-eigenvalue power iteration using the event-based transport loop.
