@@ -206,3 +206,100 @@ impl PointwiseTable {
         self.energies.is_empty()
     }
 }
+
+// ── Stochastic temperature interpolation ───────────────────────────────
+//
+// Pseudo-interpolation test (PHYSOR-style): when the operating temperature
+// T is between two library endpoints T_lo and T_hi, OpenMC samples one of
+// the two tables per lookup with probability p_lo = (T_hi-T)/(T_hi-T_lo).
+// This forces random memory loads into two XS arrays per collision rather
+// than streaming one resident table — a realistic cache-pressure scenario.
+
+thread_local! {
+    /// Per-thread splitmix64 state for cheap binary xi draws in XS lookup.
+    /// Separate from the particle RNG to avoid perturbing Monte Carlo
+    /// reproducibility; this only controls which library temperature is
+    /// touched, and the XS values are continuous in T so the statistical
+    /// effect averages to the exact linear interpolant.
+    static STOCH_STATE: std::cell::Cell<u64> = const { std::cell::Cell::new(0x9E37_79B9_7F4A_7C15) };
+}
+
+#[inline]
+fn draw_xi() -> f64 {
+    STOCH_STATE.with(|c| {
+        let mut z = c.get().wrapping_add(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        c.set(z);
+        (z >> 11) as f64 * (1.0 / 9_007_199_254_740_992.0)
+    })
+}
+
+/// A pointwise table that may be backed by two library temperatures,
+/// with a stochastic per-lookup pick between them.
+///
+/// For on-library temperatures, use [`StochTempTable::single`]; no picking
+/// happens and performance matches `PointwiseTable`. For off-library
+/// temperatures, use [`StochTempTable::stochastic`]: each lookup draws a
+/// uniform xi and returns `lo` with probability `(T_hi - T)/(T_hi - T_lo)`.
+pub struct StochTempTable {
+    lo: PointwiseTable,
+    hi: Option<PointwiseTable>,
+    p_lo: f64,
+}
+
+impl StochTempTable {
+    /// Wrap a single table (on-library temperature — no stochastic pick).
+    pub fn single(table: PointwiseTable) -> Self {
+        Self {
+            lo: table,
+            hi: None,
+            p_lo: 1.0,
+        }
+    }
+
+    /// Build a two-temperature stochastic table. `target_t` should lie in
+    /// `[t_lo, t_hi]`; `p_lo` is clamped to [0, 1].
+    pub fn stochastic(lo: PointwiseTable, hi: PointwiseTable, target_t: f64, t_lo: f64, t_hi: f64) -> Self {
+        let p_lo = if (t_hi - t_lo).abs() < 1e-6 {
+            1.0
+        } else {
+            ((t_hi - target_t) / (t_hi - t_lo)).clamp(0.0, 1.0)
+        };
+        Self { lo, hi: Some(hi), p_lo }
+    }
+
+    /// True if this table has two library endpoints (cache-pressure mode).
+    pub fn is_stochastic(&self) -> bool {
+        self.hi.is_some()
+    }
+
+    /// Memory footprint of XS data (both endpoints if stochastic), bytes.
+    pub fn memory_bytes(&self) -> usize {
+        self.lo.memory_bytes() + self.hi.as_ref().map_or(0, PointwiseTable::memory_bytes)
+    }
+
+    /// Lower-bracket grid index (matches `PointwiseTable::bracket_idx`).
+    /// Both endpoints share the same energy grid, so `lo` is authoritative.
+    #[inline]
+    pub fn bracket_idx(&self, energy: f64) -> usize {
+        self.lo.bracket_idx(energy)
+    }
+
+    /// Stochastic lookup at a pre-computed grid index.
+    #[inline]
+    pub fn lookup_at_idx(&self, energy: f64, idx: usize) -> f64 {
+        match &self.hi {
+            Some(hi) if draw_xi() > self.p_lo => hi.lookup_at_idx(energy, idx),
+            _ => self.lo.lookup_at_idx(energy, idx),
+        }
+    }
+
+    /// Stochastic lookup with internal bracket search.
+    #[inline]
+    pub fn lookup(&self, energy: f64) -> f64 {
+        let idx = self.bracket_idx(energy);
+        self.lookup_at_idx(energy, idx)
+    }
+}

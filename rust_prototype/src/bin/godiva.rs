@@ -58,8 +58,27 @@ struct Args {
     particles: u32,
 
     /// Temperature index to use (0-based, from sorted temperatures).
+    /// Ignored when `--target-temp` is specified.
     #[arg(short, long, default_value_t = 1)]
     temp_idx: usize,
+
+    /// Operating temperature in Kelvin. When this lies between two
+    /// library endpoints (e.g., 600 K between 294 K and 900 K), the
+    /// table provider loads both bracketing temperatures and draws one
+    /// per lookup (OpenMC-style pseudo-interpolation), forcing random
+    /// cache loads into two XS arrays per collision. The SVD provider
+    /// uses Ducru kernel reconstruction for continuous T interpolation.
+    /// If unset, falls back to `--temp-idx` (single-library behaviour).
+    #[arg(long)]
+    target_temp: Option<f64>,
+
+    /// Override the SVD rank used for discrete inelastic levels
+    /// (MT=51-91). Reviewer note: levels have almost no temperature
+    /// dependence so rank=1 should suffice. Default: same as --rank.
+    /// Only applied when routing through the at-temp loader (either
+    /// `--target-temp` or `--discrete-rank` is specified).
+    #[arg(long)]
+    discrete_rank: Option<usize>,
 
     /// Cross-section lookup mode: svd, table, or both (honesty test).
     #[arg(short, long, value_enum, default_value_t = XsMode::Svd)]
@@ -265,13 +284,50 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 urr_tables: None,
             });
         } else {
-            kernels.push(xs_provider::load_nuclide(
-                &path,
-                args.rank,
-                args.temp_idx,
-                awr,
-                nu_bar,
-            ));
+            // Route through the at-temp loader whenever target_temp or
+            // discrete_rank is set. Otherwise fall back to the single-T
+            // legacy loader for bit-for-bit backwards compatibility.
+            match (args.target_temp, args.discrete_rank) {
+                (Some(t), _) => kernels.push(xs_provider::load_nuclide_at_temp(
+                    &path,
+                    args.rank,
+                    t,
+                    awr,
+                    nu_bar,
+                    args.discrete_rank,
+                )),
+                (None, Some(_)) => {
+                    // Need a target temperature; resolve temp_idx to the
+                    // corresponding library value by opening the reader.
+                    match open_rust_mc::hdf5_reader::NuclideFileReader::open(&path) {
+                        Ok(r) => {
+                            let t = r
+                                .temperatures
+                                .get(args.temp_idx)
+                                .copied()
+                                .unwrap_or(294.0);
+                            kernels.push(xs_provider::load_nuclide_at_temp(
+                                &path,
+                                args.rank,
+                                t,
+                                awr,
+                                nu_bar,
+                                args.discrete_rank,
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!("  WARNING: cannot open {}: {e}", path.display());
+                        }
+                    }
+                }
+                (None, None) => kernels.push(xs_provider::load_nuclide(
+                    &path,
+                    args.rank,
+                    args.temp_idx,
+                    awr,
+                    nu_bar,
+                )),
+            }
         }
     }
     let xs_mem: usize = kernels.iter().map(|k| k.svd_memory_bytes()).sum();
@@ -317,12 +373,17 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
                 urr_tables: None,
             });
         } else {
-            tables.push(xs_provider::load_nuclide_table(
-                &path,
-                args.temp_idx,
-                awr,
-                nu_bar,
-            ));
+            match args.target_temp {
+                Some(t) => tables.push(xs_provider::load_nuclide_table_at_temp(
+                    &path, t, awr, nu_bar,
+                )),
+                None => tables.push(xs_provider::load_nuclide_table(
+                    &path,
+                    args.temp_idx,
+                    awr,
+                    nu_bar,
+                )),
+            }
         }
     }
     let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
@@ -407,6 +468,10 @@ fn main() {
     println!("Mode:         {:?}", args.mode);
     if matches!(args.mode, XsMode::Svd | XsMode::Both) {
         println!("SVD rank:     {}", args.rank);
+    }
+    match args.target_temp {
+        Some(t) => println!("Target T:     {t:.1} K (stochastic T-interp on table)"),
+        None => println!("Target T:     library index {}", args.temp_idx),
     }
     println!(
         "Batches:      {} ({} inactive + {} active)",
