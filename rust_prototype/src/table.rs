@@ -129,6 +129,66 @@ impl PointwiseTable {
         xs_lo * f64::exp2(f * ratio.log2())
     }
 
+    /// Lower-bracket grid index for `energy`: largest `idx` where
+    /// `energies[idx] <= energy`, or `0` / `n-1` for out-of-range.
+    ///
+    /// Exposes the search so a caller that holds several tables on the
+    /// same `Arc<[f64]>` grid can search once and then call
+    /// `lookup_at_idx` on each. Matches the search performed internally
+    /// by `lookup` exactly.
+    #[inline]
+    pub fn bracket_idx(&self, energy: f64) -> usize {
+        let n = self.energies.len();
+        if n == 0 {
+            return 0;
+        }
+        match self
+            .energies
+            .binary_search_by(|e| e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less))
+        {
+            Ok(i) => i,
+            Err(0) => 0,
+            Err(i) if i >= n => n - 1,
+            Err(i) => i - 1,
+        }
+    }
+
+    /// Lookup at a pre-computed grid index — skips the energy search.
+    ///
+    /// Caller must provide `idx` from the same shared energy grid (lower
+    /// bracket: largest `idx` with `energies[idx] <= energy`) and the
+    /// energy itself for the interpolation. Produces exactly the same
+    /// value as `lookup(energy)` when `idx` is correct; no precision
+    /// difference. Use this when the caller has already done a single
+    /// search across multiple reactions on the shared grid.
+    #[inline]
+    pub fn lookup_at_idx(&self, energy: f64, idx: usize) -> f64 {
+        let n = self.energies.len();
+        if n == 0 {
+            return 0.0;
+        }
+        if energy <= self.energies[0] {
+            return self.xs[0];
+        }
+        if idx + 1 >= n {
+            return self.xs[n - 1];
+        }
+
+        let e_lo = self.energies[idx];
+        let e_hi = self.energies[idx + 1];
+        let xs_lo = self.xs[idx];
+        let xs_hi = self.xs[idx + 1];
+
+        if xs_lo <= 0.0 || xs_hi <= 0.0 {
+            let frac = (energy - e_lo) / (e_hi - e_lo);
+            return xs_lo + frac * (xs_hi - xs_lo);
+        }
+
+        let f = (energy / e_lo).ln() / (e_hi / e_lo).ln();
+        let ratio = xs_hi / xs_lo;
+        xs_lo * f64::exp2(f * ratio.log2())
+    }
+
     /// Batch lookup for benchmarking: look up many random energies.
     pub fn batch_lookup(&self, energies: &[f64], out: &mut [f64]) {
         for (e, o) in energies.iter().zip(out.iter_mut()) {

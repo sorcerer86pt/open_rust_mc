@@ -276,8 +276,12 @@ impl XsProvider for SvdXsProvider {
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
 
         let total = match &nuc.total_table {
+            // The total_table lives on the same shared energy grid that we
+            // already searched for the SVD reactions — reuse `idx` instead
+            // of doing a second binary/hash search here. `lookup_at_idx`
+            // produces bit-identical output to `lookup(energy)`.
             Some(t) => {
-                let tot = t.lookup(energy);
+                let tot = t.lookup_at_idx(energy, idx);
                 capture = (tot - elastic - inelastic - n2n - n3n - fission).max(0.0);
                 tot
             }
@@ -778,26 +782,55 @@ impl XsProvider for TableXsProvider {
     fn lookup(&self, nuclide_idx: usize, energy: f64) -> MicroXs {
         let nuc = &self.nuclides[nuclide_idx];
 
-        let elastic = nuc.elastic.as_ref().map_or(0.0, |t| t.lookup(energy));
+        // Every PointwiseTable in this nuclide was built with the same
+        // shared_grid Arc, so one bracket search serves all reactions.
+        // Falls back to per-call search only if every table is None.
+        let any_table = nuc
+            .total_table
+            .as_ref()
+            .or(nuc.elastic.as_ref())
+            .or(nuc.fission.as_ref())
+            .or(nuc.capture.as_ref())
+            .or(nuc.inelastic.as_ref())
+            .or(nuc.n2n.as_ref())
+            .or(nuc.n3n.as_ref());
+        let idx = any_table.map_or(0, |t| t.bracket_idx(energy));
+
+        let elastic = nuc
+            .elastic
+            .as_ref()
+            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
         let inelastic = match &nuc.inelastic {
-            Some(t) => t.lookup(energy),
+            Some(t) => t.lookup_at_idx(energy, idx),
             None if !nuc.discrete_levels.is_empty() => nuc
                 .discrete_levels
                 .iter()
                 .filter(|lvl| energy >= lvl.info.threshold)
                 .filter_map(|lvl| lvl.table.as_ref())
-                .map(|t| t.lookup(energy).max(0.0))
+                .map(|t| t.lookup_at_idx(energy, idx).max(0.0))
                 .sum::<f64>(),
             None => 0.0,
         };
-        let n2n = nuc.n2n.as_ref().map_or(0.0, |t| t.lookup(energy));
-        let n3n = nuc.n3n.as_ref().map_or(0.0, |t| t.lookup(energy));
-        let fission = nuc.fission.as_ref().map_or(0.0, |t| t.lookup(energy));
-        let mut capture = nuc.capture.as_ref().map_or(0.0, |t| t.lookup(energy));
+        let n2n = nuc
+            .n2n
+            .as_ref()
+            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+        let n3n = nuc
+            .n3n
+            .as_ref()
+            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+        let fission = nuc
+            .fission
+            .as_ref()
+            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
+        let mut capture = nuc
+            .capture
+            .as_ref()
+            .map_or(0.0, |t| t.lookup_at_idx(energy, idx));
 
         let total = match &nuc.total_table {
             Some(tt) => {
-                let tot = tt.lookup(energy);
+                let tot = tt.lookup_at_idx(energy, idx);
                 capture = (tot - elastic - inelastic - n2n - n3n - fission).max(0.0);
                 tot
             }

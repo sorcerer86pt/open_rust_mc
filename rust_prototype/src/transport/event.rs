@@ -14,14 +14,16 @@
 //!   - Ridley 2024 (MIT PhD): GPU-oriented algorithms for CE MC transport
 //!   - Hamilton & Evans 2019: event-based outperforms history-based on GPU
 
+use std::io::Write;
+
 use crate::geometry::cell::{Cell, CellFill};
 use crate::geometry::surface::{BoundaryCondition, Surface};
 use crate::geometry::{self, Vec3};
 use crate::physics::collision::{self, CollisionOutcome, InelasticData, MicroXs};
 use crate::transport::material::Material;
-use crate::transport::particle::FissionSite;
+use crate::transport::particle::{FissionBank, FissionSite};
 use crate::transport::rng::Rng;
-use crate::transport::simulate::XsProvider;
+use crate::transport::simulate::{self, BatchResult, SimConfig, XsProvider};
 
 /// Maximum nuclides per material (stack-allocated XS buffers).
 const MAX_NUCLIDES: usize = 16;
@@ -460,4 +462,86 @@ fn handle_outcome(
             result.fission_sites.extend(sites);
         }
     }
+}
+
+/// Run k-eigenvalue power iteration using the event-based transport loop.
+///
+/// Mirrors `simulate::run_eigenvalue` but calls `transport_batch_event`
+/// per batch. The batch kernel is currently serial (no rayon) — this
+/// driver is the honest head-to-head baseline for the history-based
+/// parallel driver. `thermal_scatters` and `surface_crossings` are not
+/// tracked by the event kernel and are reported as 0 in `BatchResult`.
+pub fn run_eigenvalue_event<XS: XsProvider>(
+    config: &SimConfig,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Material],
+    xs_provider: &XS,
+) -> (Vec<BatchResult>, f64) {
+    let n = config.particles_per_batch as usize;
+    let seed = config.seed;
+    let mut source_bank = simulate::initial_source(n, surfaces, cells, seed);
+
+    let mut results = Vec::with_capacity(config.batches as usize);
+    let mut k_sum = 0.0;
+    let mut k_count = 0_u32;
+
+    for batch in 1..=config.batches {
+        let batch_seed = batch as u64 + seed * 100_000;
+        let batch_result = transport_batch_event(
+            &source_bank,
+            batch_seed,
+            surfaces,
+            cells,
+            materials,
+            xs_provider,
+        );
+
+        let k_batch = batch_result.fission_sites.len() as f64 / n as f64;
+        let is_active = batch > config.inactive;
+        if is_active {
+            k_sum += k_batch;
+            k_count += 1;
+        }
+
+        let active_str = if is_active { " *" } else { "" };
+        println!(
+            "  Batch {batch:>4}: k={k_batch:.5}  coll={collisions}  \
+             fiss={fissions}  leak={leakage}  abs={absorptions}{active_str}",
+            collisions = batch_result.collisions,
+            fissions = batch_result.fissions,
+            leakage = batch_result.leakage,
+            absorptions = batch_result.absorptions,
+        );
+        let _ = std::io::stdout().flush();
+
+        results.push(BatchResult {
+            batch,
+            k_eff: k_batch,
+            leakage: batch_result.leakage,
+            absorptions: batch_result.absorptions,
+            fissions: batch_result.fissions,
+            collisions: batch_result.collisions,
+            thermal_scatters: 0,
+            surface_crossings: 0,
+            shannon_entropy: 0.0,
+            active: is_active,
+        });
+
+        // Rebuild a normalized fission bank for the next generation.
+        let mut fission_bank = FissionBank::new();
+        fission_bank.sites.extend(batch_result.fission_sites);
+        source_bank = simulate::normalize_fission_bank(
+            &fission_bank,
+            n,
+            batch + seed as u32 * 100_000,
+        );
+    }
+
+    let k_final = if k_count > 0 {
+        k_sum / k_count as f64
+    } else {
+        0.0
+    };
+    (results, k_final)
 }

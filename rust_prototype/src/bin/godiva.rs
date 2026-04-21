@@ -32,6 +32,15 @@ enum XsMode {
     Both,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+enum TransportMode {
+    /// History-based transport, rayon-parallel across particles.
+    History,
+    /// Event-based transport (sort-by-energy, serial within batch).
+    /// Honest baseline for the event kernel in `transport/event.rs`.
+    Event,
+}
+
 #[derive(Parser)]
 #[command(
     name = "godiva",
@@ -77,6 +86,13 @@ struct Args {
     /// (bounded by the policy's [20, 200] min/max inactive).
     #[arg(long, default_value_t = false)]
     auto_inactive: bool,
+
+    /// Transport algorithm: history (rayon-parallel) or event (serial,
+    /// energy-sorted). Event mode is a single-thread baseline; use it
+    /// to measure the cache-locality benefit of sort-by-energy without
+    /// the confounding effect of thread-level parallelism.
+    #[arg(long, value_enum, default_value_t = TransportMode::History)]
+    transport: TransportMode,
 }
 
 const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
@@ -195,8 +211,14 @@ fn run_multi_seed<XS: XsProvider>(
         }
 
         let t1 = Instant::now();
-        let (results, _) =
-            simulate::run_eigenvalue(&config, surfaces, cells, materials, xs_provider);
+        let (results, _) = match args.transport {
+            TransportMode::History => {
+                simulate::run_eigenvalue(&config, surfaces, cells, materials, xs_provider)
+            }
+            TransportMode::Event => open_rust_mc::transport::event::run_eigenvalue_event(
+                &config, surfaces, cells, materials, xs_provider,
+            ),
+        };
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let active: Vec<f64> = results

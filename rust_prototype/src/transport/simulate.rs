@@ -1143,7 +1143,12 @@ pub fn run_eigenvalue<XS: XsProvider>(
 /// only those that land inside a cell containing material. For Godiva, this
 /// is the single fuel sphere. For PWR pin cell, this is the cylindrical
 /// fuel region (rejects corners of the bounding box that fall in gap/clad/water).
-fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> Vec<FissionSite> {
+pub(crate) fn initial_source(
+    n: usize,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    seed: u64,
+) -> Vec<FissionSite> {
     let mut rng = Rng::new(seed * 100_000, 0);
     let mut sites = Vec::with_capacity(n);
 
@@ -1181,7 +1186,11 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> 
 }
 
 /// Normalize fission bank to N particles for the next generation.
-fn normalize_fission_bank(bank: &FissionBank, n: usize, batch: u32) -> Vec<FissionSite> {
+pub(crate) fn normalize_fission_bank(
+    bank: &FissionBank,
+    n: usize,
+    batch: u32,
+) -> Vec<FissionSite> {
     if bank.is_empty() {
         return (0..n)
             .map(|_| FissionSite {
