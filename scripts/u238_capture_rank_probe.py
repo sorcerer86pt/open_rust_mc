@@ -193,6 +193,139 @@ def ducru_3temp_qp_weights(temps_full: list[float], t_target: float
     return idx, w
 
 
+def ducru_3temp_kernel_qp_weights(
+    temps_full: list[float],
+    t_target: float,
+    xs_cols: list[np.ndarray],
+    rank: int | None = None,
+    U: np.ndarray | None = None,
+    S: np.ndarray | None = None,
+    Vt: np.ndarray | None = None,
+) -> tuple[list[int], np.ndarray]:
+    """Ducru §4 kernel-Gram QP on the 3-temp subset.
+
+    Solve the constrained QP
+        min_w   (w - w_raw)^T G (w - w_raw)
+        s.t.    1^T w = 1,   w >= 0
+    where:
+      * `w_raw` is the raw partition-of-unity-normalized Ducru (2017)
+        Eq. 31 weight on the nearest-three library temperatures, the
+        L2-optimal unconstrained reference in the kernel norm;
+      * `G = X^T X` with `X[:, j] = log10 sigma(E_test, T_j)` is the
+        empirical kernel-Gram matrix, treating the library cross
+        sections at the chosen test energies as a finite-dimensional
+        surrogate for the Doppler-kernel inner product.
+
+    The QP has 3 variables, 1 equality constraint, 3 inequality
+    constraints: at most 7 active-set candidates (3 vertices, 3 edges,
+    1 interior). We enumerate them all and pick the minimum — no
+    external QP solver needed.
+
+    ``xs_cols`` is the list of per-library log10(sigma) arrays on the
+    reference energy grid, in the same order as ``temps_full``. The
+    selection of test energies is the full reference grid; the Gram
+    matrix dominates at the resonance peaks and that is exactly where
+    the kernel projection needs to do work.
+    """
+    order = sorted(range(len(temps_full)),
+                   key=lambda i: abs(temps_full[i] - t_target))
+    idx = sorted(order[:3])
+    sub = np.array([temps_full[i] for i in idx], dtype=float)
+    w_raw_signed = ducru_weights_n(sub, t_target)
+    s = w_raw_signed.sum()
+    w_raw = (w_raw_signed / s) if abs(s) > 1e-12 else np.full(3, 1.0 / 3.0)
+
+    # Build the kernel-Gram matrix. If the SVD basis is supplied and a
+    # rank is given, project each library column onto the first `rank`
+    # singular modes before building G --- this makes the QP
+    # rank-consistent with the actual reconstruction the engine will
+    # do. Otherwise use the full log-sigma columns directly.
+    if (
+        rank is not None and U is not None and S is not None and Vt is not None
+    ):
+        # Rank-`rank` truncated reconstruction of each library column.
+        trunc_cols = [
+            U[:, :rank] @ (S[:rank] * Vt[:rank, i]) for i in idx
+        ]
+        X = np.column_stack(trunc_cols)
+    else:
+        X = np.column_stack([xs_cols[i] for i in idx])
+    G = X.T @ X                                     # (3, 3)
+
+    def obj(w: np.ndarray) -> float:
+        d = w - w_raw
+        return float(d @ G @ d)
+
+    candidates: list[np.ndarray] = []
+
+    # Vertices of the simplex: w = e_k
+    for k in range(3):
+        w = np.zeros(3)
+        w[k] = 1.0
+        candidates.append(w)
+
+    # Edges: w_k = 0 for one k; remaining two weights live on a
+    # 1-simplex {w_i + w_j = 1, both >= 0}. Parameterise w_i = t,
+    # w_j = 1 - t, then the objective is a 1-D quadratic in t whose
+    # minimizer lies at t* = -b/(2a) if a > 0, clipped to [0, 1].
+    for k in range(3):
+        ij = [x for x in range(3) if x != k]
+        i, j = ij[0], ij[1]
+        # w(t) - w_raw = (t - w_raw[i]) e_i + (1 - t - w_raw[j]) e_j + (- w_raw[k]) e_k
+        # Let a = G[i,i] - 2 G[i,j] + G[j,j]
+        # Let b = 2 (G[i,i] (-w_raw[i]) + G[i,j] ((1 - w_raw[j]) - (-w_raw[i]))
+        #         - G[j,j] (1 - w_raw[j]) - G[i,k] w_raw[k] + G[j,k] w_raw[k])
+        # Rather than derive by hand, minimise numerically over the
+        # [0, 1] interval --- this keeps the code short and avoids
+        # algebra bugs.
+        def obj_t(t, i=i, j=j, k=k):
+            w = np.zeros(3)
+            w[i], w[j] = t, 1.0 - t
+            return obj(w)
+        ts = np.linspace(0.0, 1.0, 101)
+        vals = np.array([obj_t(t) for t in ts])
+        t_coarse = ts[int(np.argmin(vals))]
+        # Refine with a parabolic fit near t_coarse
+        eps = 0.01
+        a, b, c = max(t_coarse - eps, 0.0), t_coarse, min(t_coarse + eps, 1.0)
+        fa, fb, fc = obj_t(a), obj_t(b), obj_t(c)
+        denom = (fa - 2 * fb + fc)
+        t_star = t_coarse
+        if abs(denom) > 1e-18:
+            t_star = b - 0.5 * (c - a) * (fc - fa) / (2 * (fa - 2 * fb + fc))
+            t_star = float(np.clip(t_star, 0.0, 1.0))
+        w = np.zeros(3)
+        w[i], w[j] = t_star, 1.0 - t_star
+        candidates.append(w)
+
+    # Interior: equality-constrained QP solved by KKT. With the
+    # Lagrangian L = (w - w_raw)^T G (w - w_raw) + lambda * (1^T w - 1)
+    # the stationarity condition gives
+    #     w = w_raw - (lambda / 2) * G^{-1} 1
+    # and the primal feasibility 1^T w = 1 pins
+    #     lambda / 2 = (1^T w_raw - 1) / (1^T G^{-1} 1).
+    # If the resulting w is non-negative it is a candidate; otherwise
+    # the optimum lies on an edge or vertex already enumerated above.
+    try:
+        g_inv_1 = np.linalg.solve(G, np.ones(3))
+        denom = float(np.ones(3) @ g_inv_1)
+        if abs(denom) > 1e-18:
+            lam_half = (w_raw.sum() - 1.0) / denom
+            w_int = w_raw - lam_half * g_inv_1
+            if np.all(w_int >= -1e-10):
+                candidates.append(np.clip(w_int, 0.0, None))
+    except np.linalg.LinAlgError:
+        pass
+
+    best = min(candidates, key=obj)
+    # Final guard: numerical noise can leave ||w||_1 slightly off unity.
+    best = np.clip(best, 0.0, None)
+    total = best.sum()
+    if total > 0:
+        best = best / total
+    return idx, best
+
+
 def rel_l2(a: np.ndarray, b: np.ndarray, mask: np.ndarray | None = None) -> float:
     """Relative L2 error, optionally over a masked energy range."""
     if mask is not None:
@@ -237,6 +370,13 @@ def main() -> None:
     train_temps_k = [float(t.rstrip("K")) for t in TRAIN_TEMPS]
     idx3, w3 = ducru_3temp_unity_weights(train_temps_k, HOLDOUT_K)
     idx3qp, w3qp = ducru_3temp_qp_weights(train_temps_k, HOLDOUT_K)
+    # Kernel-Gram QP: build per-library log10-sigma columns on the ref grid.
+    log_xs_by_temp: list[np.ndarray] = [
+        np.log10(np.maximum(xs_on_ref[t], CLAMP)) for t in TRAIN_TEMPS
+    ]
+    idx3kqp, w3kqp = ducru_3temp_kernel_qp_weights(
+        train_temps_k, HOLDOUT_K, log_xs_by_temp
+    )
     print(
         f"  weights: sqrt(T) alpha = {alpha:.4f}  "
         f"ducru_raw2 = ({w_lo_raw:.4f}, {w_hi_raw:.4f}) sum={w_lo_raw+w_hi_raw:.4f}  "
@@ -248,6 +388,10 @@ def main() -> None:
     print(
         f"  ducru_qp3    = {{{', '.join(f'{TRAIN_TEMPS[i]}:{w3qp[k]:+.4f}' for k, i in enumerate(idx3qp))}}}  "
         f"(simplex projection — non-negative + unity)"
+    )
+    print(
+        f"  ducru_kqp3   = {{{', '.join(f'{TRAIN_TEMPS[i]}:{w3kqp[k]:+.4f}' for k, i in enumerate(idx3kqp))}}}  "
+        f"(kernel-Gram QP — Ducru 2017 §4)"
     )
 
     # Region masks for reporting: resonance region (6-300 eV) vs smooth elsewhere.
@@ -310,6 +454,11 @@ def main() -> None:
     for k, i in enumerate(idx3qp):
         raw_ducru_qp += w3qp[k] * xs_on_ref[TRAIN_TEMPS[i]]
     record("raw ducru-qp (3T)", "-", raw_ducru_qp)
+    # Ducru §4 kernel-Gram QP.
+    raw_ducru_kqp = np.zeros_like(raw_sqrt)
+    for k, i in enumerate(idx3kqp):
+        raw_ducru_kqp += w3kqp[k] * xs_on_ref[TRAIN_TEMPS[i]]
+    record("raw ducru-kqp (3T)", "-", raw_ducru_kqp)
 
     # SVD-based reconstructions across ranks, both weighting schemes.
     for k in range(1, len(S) + 1):
@@ -341,6 +490,27 @@ def main() -> None:
             coeffs_qp += w3qp[m] * Vt[:k, i]
         hat_qp = np.power(10.0, Uk @ (Sk * coeffs_qp))
         record("SVD + ducru-qp (3T)", k, hat_qp)
+
+        # Kernel-Gram QP on V^T — full-rank Gram version.
+        coeffs_kqp = np.zeros(k)
+        for m, i in enumerate(idx3kqp):
+            coeffs_kqp += w3kqp[m] * Vt[:k, i]
+        hat_kqp = np.power(10.0, Uk @ (Sk * coeffs_kqp))
+        record("SVD + ducru-kqp (3T,full G)", k, hat_kqp)
+
+        # Rank-aware kernel-Gram QP: project each library column onto
+        # the first `k` singular modes before building G, so the QP
+        # optimizes the reconstruction error the engine will actually
+        # produce at that truncation rank.
+        _, w3kqpk = ducru_3temp_kernel_qp_weights(
+            train_temps_k, HOLDOUT_K, log_xs_by_temp,
+            rank=k, U=U, S=S, Vt=Vt,
+        )
+        coeffs_kqpk = np.zeros(k)
+        for m, i in enumerate(idx3kqp):
+            coeffs_kqpk += w3kqpk[m] * Vt[:k, i]
+        hat_kqpk = np.power(10.0, Uk @ (Sk * coeffs_kqpk))
+        record("SVD + ducru-kqp (3T,rank G)", k, hat_kqpk)
 
     lines.append(f"\n  peak-ratio column measured at E = {peak_E:.3f} eV "
                  f"(truth = {peak_truth:.1f} barns)")

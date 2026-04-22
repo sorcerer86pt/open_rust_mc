@@ -108,11 +108,28 @@ reactions and the weakly-$T$-dependent discrete levels
 are real structural properties of ENDF/B-VII.1 cross
 sections, worth exploiting; the raw Ducru weights are
 \emph{not} a partition of unity and must be normalized
-before being applied to a $\log\sigma$ SVD. A fully
-constrained kernel-Gram QP from~\cite{ducru2017}~§4 would
-plausibly tighten the $213$~pcm off-library residual
-further and is the single highest-value piece of future
-work on this line. We report the positive, mixed, and
-negative findings together so the trade-off is visible.
+before being applied to a $\log\sigma$ SVD.
+
+We implemented and measured the kernel-Gram QP from
+\cite{ducru2017}~§4 that we initially flagged as future
+work (Sec.~\ref{sec:off_library_qp}) and found a structural
+subtlety worth reporting: at low rank it beats the signed
+unity scheme (U-$238$ MT$=102$ $6.67$~eV peak ratio
+$1.000$ at rank~$3$ vs $0.994$ for signed unity), but at our
+production rank~$5$ it is \emph{worse} ($0.983$ vs $0.990$
+on the same peak). The QP's constrained optimum lies on the
+boundary of the probability simplex --- one weight clips to
+zero, collapsing the $3$-point problem back to a $2$-point
+one --- and at higher rank the signed unity scheme's
+negative weight on the far-away library column is actively
+useful as a shape-cancellation term. Non-negativity is the
+wrong constraint once basis-truncation error stops
+dominating. This is the single highest-leverage piece of
+follow-up work we did not publish in the original version
+of this paper; the result is that signed $3$-point unity
+\emph{is} the right production default at rank~$5$, not
+merely a convenient approximation to the QP ideal. We
+report the positive, mixed, and negative findings together
+so the trade-off is visible.
 
 %% ============================================================

@@ -7,25 +7,36 @@ U-238 capture MT=102: off-library 900 K held out
       raw ducru-unity (2T)     -   1.838e-02   1.838e-02   1.838e-02      1.0089
       raw ducru-unity (3T)     -   8.319e-03   8.320e-03   8.317e-03      0.9891
          raw ducru-qp (3T)     -   4.784e-02   4.785e-02   4.783e-02      1.0544
+        raw ducru-kqp (3T)     -   1.937e-02   1.937e-02   1.937e-02      0.9935
       SVD + sqrt(T)-linear     1   6.054e-01   6.055e-01   6.059e-01      0.4584
     SVD + ducru-unity (2T)     1   6.247e-01   6.247e-01   6.251e-01      0.4337
     SVD + ducru-unity (3T)     1   6.472e-01   6.473e-01   6.477e-01      0.4048
        SVD + ducru-qp (3T)     1   5.547e-01   5.547e-01   5.550e-01      0.5248
+  SVD + ducru-kqp (3T,full G)     1   6.458e-01   6.459e-01   6.463e-01      0.4066
+  SVD + ducru-kqp (3T,rank G)     1   6.472e-01   6.473e-01   6.477e-01      0.4048
       SVD + sqrt(T)-linear     2   1.135e-01   1.135e-01   1.136e-01      1.1483
     SVD + ducru-unity (2T)     2   1.071e-01   1.071e-01   1.072e-01      1.1324
     SVD + ducru-unity (3T)     2   1.386e-01   1.386e-01   1.387e-01      1.1478
        SVD + ducru-qp (3T)     2   1.337e-01   1.337e-01   1.337e-01      1.1881
+  SVD + ducru-kqp (3T,full G)     2   1.015e-01   1.015e-01   1.016e-01      1.1142
+  SVD + ducru-kqp (3T,rank G)     2   9.952e-02   9.952e-02   9.961e-02      1.1055
       SVD + sqrt(T)-linear     3   2.498e-02   2.498e-02   2.497e-02      1.0210
     SVD + ducru-unity (2T)     3   1.483e-02   1.483e-02   1.481e-02      1.0112
     SVD + ducru-unity (3T)     3   1.053e-02   1.053e-02   1.051e-02      0.9938
        SVD + ducru-qp (3T)     3   5.015e-02   5.016e-02   5.015e-02      1.0451
+  SVD + ducru-kqp (3T,full G)     3   5.991e-03   5.987e-03   5.947e-03      1.0001
+  SVD + ducru-kqp (3T,rank G)     3   5.901e-03   5.897e-03   5.854e-03      0.9988
       SVD + sqrt(T)-linear     4   2.729e-02   2.729e-02   2.728e-02      1.0103
     SVD + ducru-unity (2T)     4   2.120e-02   2.120e-02   2.119e-02      0.9977
     SVD + ducru-unity (3T)     4   9.471e-03   9.472e-03   9.460e-03      0.9880
        SVD + ducru-qp (3T)     4   5.002e-02   5.002e-02   5.001e-02      1.0418
+  SVD + ducru-kqp (3T,full G)     4   2.054e-02   2.054e-02   2.054e-02      0.9833
+  SVD + ducru-kqp (3T,rank G)     4   2.057e-02   2.057e-02   2.056e-02      0.9832
       SVD + sqrt(T)-linear     5   2.717e-02   2.717e-02   2.716e-02      1.0108
     SVD + ducru-unity (2T)     5   2.111e-02   2.111e-02   2.110e-02      0.9979
     SVD + ducru-unity (3T)     5   8.410e-03   8.410e-03   8.400e-03      0.9904
        SVD + ducru-qp (3T)     5   5.007e-02   5.008e-02   5.006e-02      1.0431
+  SVD + ducru-kqp (3T,full G)     5   2.063e-02   2.063e-02   2.062e-02      0.9831
+  SVD + ducru-kqp (3T,rank G)     5   2.063e-02   2.063e-02   2.062e-02      0.9831
 
   peak-ratio column measured at E = 6.673 eV (truth = 4482.8 barns)

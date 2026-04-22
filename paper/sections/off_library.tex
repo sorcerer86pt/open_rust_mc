@@ -305,27 +305,78 @@ The simplex-projected QP is \emph{worse} than either signed
 scheme. The reason is that the simplex projection is
 Euclidean-optimal in \emph{weight} space; the Ducru raw
 weights are Euclidean-optimal in the \emph{Doppler-kernel}
-norm (see~\cite{ducru2017}~§3). Clipping the $-0.12$ weight
-on the $294$~K column discards a kernel-informed
-shape-matching contribution that the far-away $294$~K
-library provides to the reconstruction of the resonance
-shoulders at $900$~K; renormalizing the remaining two
-weights to unity forces their magnitudes past the point
-where the signed scheme naturally placed them. The result
-is a worse peak and a worse shoulder simultaneously.
+norm (see~\cite{ducru2017}~§3).
 
-This is not a negative result about Ducru's QP; it is a
-negative result about \emph{this approximation} to it.
-The full QP from~\cite{ducru2017}~§4 uses the Doppler-kernel
-Gram matrix in the objective and is a harder solve (a
-dense $|\mathcal{S}| \times |\mathcal{S}|$ QP per nuclide
-per target temperature, cached at load time). We
-measured that a naive simplex-projection shortcut does
-not recover it, and fell back to the signed $3$-point
-unity scheme. Implementing the full kernel-Gram QP would
-plausibly improve the $213$~pcm PWR residual further;
-we tag this as future work and keep the signed scheme as
-the production default.
+\paragraph{Kernel-Gram QP (Ducru 2017~§4).}
+We then implemented the actual constrained optimization from
+§4 of the same paper: minimize
+$(\mathbf{w} - \mathbf{w}_\text{raw})^\top \mathbf{G}\,
+(\mathbf{w} - \mathbf{w}_\text{raw})$ subject to
+$\mathbf{1}^\top \mathbf{w} = 1$ and $\mathbf{w} \geq 0$,
+where $\mathbf{G}$ is the empirical kernel-Gram matrix
+$\mathbf{X}^\top \mathbf{X}$ formed from the log-$\sigma$
+columns of the three bracketing library temperatures. Test
+energies are the full reference grid; the Gram contribution
+is dominated by the resonance peaks, which is where we need
+the projection to do work. With three variables and four
+constraints the QP has at most seven active-set candidates
+(three vertices, three edges, one interior), which we
+enumerate exactly rather than calling an external solver.
+An optional rank-aware variant projects each library column
+onto the first $k$ singular modes before building $\mathbf{G}$,
+so the QP optimizes the reconstruction error at the same
+truncation rank the engine will actually produce. Both
+variants yielded near-identical weights on U-$238$ MT$=102$.
+
+The rank dependence of the result is the interesting finding.
+On the same held-out $900$~K test:
+
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+ & rank 3 & rank 5 & rank 5 \\
+Weighting & L2 / peak & L2 / peak & weights \\
+\midrule
+$3$-pt unity Ducru (signed) &
+ $1.05\%$ / $0.994$ &
+ $\mathbf{0.84\%}$ / $\mathbf{0.990}$ &
+ $\{-0.12, 0.62, 0.50\}$ \\
+$3$-pt simplex QP (non-neg) &
+ $5.02\%$ / $1.045$ &
+ $5.01\%$ / $1.043$ &
+ $\{0.00, 0.56, 0.44\}$ \\
+$3$-pt kernel-Gram QP (non-neg) &
+ $\mathbf{0.60\%}$ / $\mathbf{1.000}$ &
+ $2.06\%$ / $0.983$ &
+ $\{0.00, 0.36, 0.64\}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The kernel-Gram QP is the \emph{best} scheme at rank~3 — the
+$6.67$~eV peak reconstructs to within $0.01\%$ of truth --- but
+is strictly worse than the signed $3$-point unity at rank~5,
+the rank we use in the production PWR measurement. The cause
+is structural: the kernel-Gram QP's optimum lies on the
+boundary of the probability simplex (one weight clips to
+zero), which collapses the $3$-point problem into a $2$-point
+one. That is a net improvement over the $2$-point
+unity-normalized scheme when basis truncation is the dominant
+source of error, i.e.\ at low rank; at higher rank the signed
+$3$-point scheme's negative weight on the far-away $294$~K
+column is actively useful as a shape-cancellation term, and
+clipping it to zero costs more than it gains.
+
+The practical read is that non-negativity of the interpolation
+weights is \emph{not} a universal goodness property. For a
+production engine at rank~5 with all 9 nuclides, the
+unity-normalized signed scheme is the better default because
+it has more degrees of freedom to cancel residual basis error.
+At low rank, or on a single nuclide where the $6.67$~eV peak
+dominates $k_\infty$, the kernel-Gram QP is the better choice.
+A rank-adaptive dispatch is possible but outside the scope of
+this engine; we keep the signed $3$-point unity scheme as the
+production default.
 
 \subsection{Verdict script and reproducibility}
 
