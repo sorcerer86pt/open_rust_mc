@@ -576,6 +576,16 @@ impl NuclideFileReader {
         read_fission_edist_from_file(&self.file, &self.nuclide_name)
     }
 
+    /// Read the outgoing-energy distribution for any reaction MT that
+    /// stores `product_0/distribution_0/energy/{energy, distribution}`
+    /// in the ContinuousTabular (ENDF Law 4) layout. Used for MT=91
+    /// (continuum inelastic), MT=16 (n,2n), MT=17 (n,3n). The returned
+    /// distribution is in whatever frame the reaction declares via its
+    /// `center_of_mass` attribute; the caller must handle the frame.
+    pub fn reaction_energy_dist(&self, mt: u32) -> Option<EnergyDistribution> {
+        read_reaction_edist_from_file(&self.file, &self.nuclide_name, mt)
+    }
+
     /// Read URR probability tables.
     pub fn urr_tables(&self, temp_label: &str) -> Option<UrrProbabilityTables> {
         read_urr_from_file(&self.file, &self.nuclide_name, temp_label)
@@ -1971,6 +1981,98 @@ fn read_angular_dist_from_file(
 }
 
 /// Read fission energy distribution from an already-open file.
+/// Generic loader for a reaction's outgoing-energy distribution.
+///
+/// Returns the tabulated (E_out, PDF, CDF) distribution at each incident
+/// energy for `reaction_{mt:03}/product_0/distribution_0/energy/`.
+/// Works for any reaction that stores a ContinuousTabular (ENDF Law 4)
+/// distribution — continuum inelastic (MT=91), (n,2n) (MT=16), (n,3n)
+/// (MT=17). Returns `None` for reactions where the product group is
+/// absent, stores a different distribution law, or has no tabulated
+/// outgoing-energy data.
+fn read_reaction_edist_from_file(
+    file: &hdf5_pure::File,
+    nuclide_name: &str,
+    mt: u32,
+) -> Option<EnergyDistribution> {
+    let root = file.root();
+    let nuc = root.group(nuclide_name).ok()?;
+    let rxn_name = format!("reaction_{mt:03}");
+    let rxn = nuc.group("reactions").ok()?.group(&rxn_name).ok()?;
+    // For non-fission reactions `product_0` is the emitted neutron and
+    // has no prompt/delayed distinction; no filtering needed.
+    let product = rxn.group("product_0").ok()?;
+    let dist0 = product.group("distribution_0").ok()?;
+    // Two layouts in OpenMC HDF5:
+    //   a) nested (fission, reaction_018/product_0/distribution_0/energy
+    //      is a group with `energy` + `distribution` datasets).
+    //   b) flat (non-fission, MT=91/16/17: distribution_0 directly
+    //      contains `energy` and `distribution` datasets).
+    // `hdf5_pure::Group::group("X")` returns Ok even when X is a
+    // dataset, so probe via `datasets()` to pick the right branch.
+    let d0_datasets: Vec<String> = dist0.datasets().unwrap_or_default();
+    let is_flat = d0_datasets.iter().any(|n| n == "energy")
+        && d0_datasets.iter().any(|n| n == "distribution");
+    let (energies, dist_ds) = if is_flat {
+        let energies = dist0.dataset("energy").ok()?.read_f64().ok()?;
+        let dist_ds = dist0.dataset("distribution").ok()?;
+        (energies, dist_ds)
+    } else {
+        let edist_grp = dist0.group("energy").ok()?;
+        let energies = edist_grp.dataset("energy").ok()?.read_f64().ok()?;
+        let dist_ds = edist_grp.dataset("distribution").ok()?;
+        (energies, dist_ds)
+    };
+    if energies.is_empty() {
+        return None;
+    }
+    let dist_shape = dist_ds.shape().ok()?;
+    let dist_raw = dist_ds.read_f64().ok()?;
+    // OpenMC layout: rows are [E_out, PDF, CDF, ...] — we use the first
+    // three. Additional rows (e.g. angular moments for Law 61) are
+    // ignored; we isotropise in CM.
+    if dist_shape.len() != 2 || dist_shape[0] < 3 {
+        return None;
+    }
+    let n_total = dist_shape[1] as usize;
+    let n_rows = dist_shape[0] as usize;
+    let dist_attrs = dist_ds.attrs().unwrap_or_default();
+    let offsets: Vec<usize> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+            arr.iter().map(|&v| v as usize).collect()
+        } else {
+            let per_e = n_total / energies.len();
+            (0..energies.len()).map(|i| i * per_e).collect()
+        };
+    let e_out_values = &dist_raw[..n_total];
+    let pdf_values = &dist_raw[n_total..2 * n_total];
+    let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+    let _ = n_rows; // silenced: only rows 0..3 are used
+    let n_energies = energies.len();
+    let mut distributions = Vec::with_capacity(n_energies);
+    for i in 0..n_energies {
+        let start = offsets.get(i).copied().unwrap_or(0);
+        let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+        if start >= end || start >= n_total {
+            distributions.push(TabularEnergyDist {
+                e_out: vec![1e5, 2e6],
+                pdf: vec![1.0, 1.0],
+                cdf: vec![0.0, 1.0],
+            });
+        } else {
+            distributions.push(TabularEnergyDist {
+                e_out: e_out_values[start..end].to_vec(),
+                pdf: pdf_values[start..end].to_vec(),
+                cdf: cdf_values[start..end].to_vec(),
+            });
+        }
+    }
+    Some(EnergyDistribution {
+        energies,
+        distributions,
+    })
+}
+
 fn read_fission_edist_from_file(
     file: &hdf5_pure::File,
     nuclide_name: &str,

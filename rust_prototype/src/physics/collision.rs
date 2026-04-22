@@ -88,6 +88,7 @@ pub fn process_collision(
     inelastic_data: Option<&InelasticData<'_>>,
     elastic_angle: Option<&AngularDistribution>,
     fission_edist: Option<&EnergyDistribution>,
+    continuum_edist: Option<&EnergyDistribution>,
     temperature: f64,
     rng: &mut Rng,
 ) -> CollisionOutcome {
@@ -115,8 +116,13 @@ pub fn process_collision(
     // Inelastic scattering
     cum += xs.inelastic;
     if xi < cum {
-        let (q_value, level_idx) =
-            sample_inelastic_level(particle.energy, xs.awr, inelastic_data, rng);
+        let (q_value, level_idx) = sample_inelastic_level(
+            particle.energy,
+            xs.awr,
+            inelastic_data,
+            continuum_edist,
+            rng,
+        );
         // Discrete level (not continuum / fallback) may carry its own
         // CM-frame angular distribution; else scatter isotropically.
         let angle = level_idx.and_then(|i| {
@@ -220,12 +226,15 @@ pub fn process_collision(
 /// Sample which discrete inelastic level is excited and return its Q-value.
 ///
 /// If discrete level data is available, sample proportionally to each level's
-/// cross-section. If the selected level is continuum (MT=91), sample from an
-/// evaporation spectrum instead (handled by returning a special large-negative Q).
+/// cross-section. If the selected level is continuum (MT=91) and a tabulated
+/// ENDF outgoing-energy distribution is available (`continuum_edist`), sample
+/// the outgoing energy from it (OpenMC convention). Otherwise fall back to
+/// the evaporation approximation.
 fn sample_inelastic_level(
     energy: f64,
     awr: f64,
     inelastic_data: Option<&InelasticData<'_>>,
+    continuum_edist: Option<&EnergyDistribution>,
     rng: &mut Rng,
 ) -> (f64, Option<usize>) {
     let data = match inelastic_data {
@@ -255,13 +264,23 @@ fn sample_inelastic_level(
         if xi < cum {
             let level = &data.levels[idx];
             if level.mt == 91 && data.has_continuum {
-                // Continuum inelastic: compute effective Q from evaporation model
-                let a_param = awr / 8.0; // level density parameter (MeV^-1)
+                // Continuum inelastic. Preferred path: sample the outgoing
+                // energy directly from the ENDF MT=91 tabulated
+                // distribution (center_of_mass frame, eV). Fall back to
+                // an evaporation approximation with a ~A/8 MeV^-1 level-
+                // density parameter when the distribution isn't
+                // available.
                 let e_cm_mev = energy * awr / ((awr + 1.0) * 1.0e6);
-                let e_excitation = e_cm_mev.max(0.1);
-                let temp_mev = (e_excitation / a_param).sqrt();
-                let e_out_mev = -temp_mev * (rng.uniform() * rng.uniform()).ln();
-                let e_out_mev = e_out_mev.min(e_cm_mev * 0.9);
+                let e_out_mev = if let Some(dist) = continuum_edist {
+                    let e_out_ev = dist.sample(energy, rng);
+                    (e_out_ev / 1.0e6).min(e_cm_mev * 0.99).max(1e-5)
+                } else {
+                    let a_param = awr / 8.0;
+                    let e_excitation = e_cm_mev.max(0.1);
+                    let temp_mev = (e_excitation / a_param).sqrt();
+                    let e_out_mev = -temp_mev * (rng.uniform() * rng.uniform()).ln();
+                    e_out_mev.min(e_cm_mev * 0.9)
+                };
                 let q_eff = -(e_cm_mev - e_out_mev) * 1.0e6;
                 // Continuum: no discrete angular distribution — isotropic.
                 return (q_eff, None);
@@ -359,7 +378,7 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
     }
@@ -379,7 +398,7 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
     }
@@ -399,7 +418,7 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, None, 0.0, &mut rng);
         match outcome {
             CollisionOutcome::Fission { sites } => {
                 assert!(!sites.is_empty());
@@ -454,7 +473,7 @@ mod tests {
         };
 
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy
@@ -524,7 +543,7 @@ mod tests {
                 1.0e6,
                 0,
             );
-            let outcome = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
+            let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, 0.0, &mut rng);
             assert!(matches!(outcome, CollisionOutcome::Scatter));
             sum_x += p.dir.x;
         }
@@ -572,7 +591,7 @@ mod tests {
                 1.0e6,
                 0,
             );
-            let _ = process_collision(&mut p, &xs, Some(&data), None, None, 0.0, &mut rng);
+            let _ = process_collision(&mut p, &xs, Some(&data), None, None, None, 0.0, &mut rng);
             sum_x += p.dir.x;
         }
         let mean_x = sum_x / trials as f64;

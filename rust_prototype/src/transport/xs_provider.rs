@@ -58,6 +58,16 @@ pub struct NuclideKernels {
     pub elastic_angle: Option<AngularDistribution>,
     /// Fission energy distribution for prompt neutrons.
     pub fission_energy_dist: Option<EnergyDistribution>,
+    /// ENDF MT=91 continuum inelastic outgoing-energy distribution.
+    /// When present, replaces the evaporation-spectrum approximation in
+    /// the continuum branch of `sample_inelastic_level`.
+    pub inelastic_continuum_edist: Option<EnergyDistribution>,
+    /// ENDF MT=16 (n,2n) outgoing-energy distribution. Used for both
+    /// the continuing primary and the emitted secondary in
+    /// `process_collision`; replaces the evaporation approximation.
+    pub n2n_edist: Option<EnergyDistribution>,
+    /// ENDF MT=17 (n,3n) outgoing-energy distribution.
+    pub n3n_edist: Option<EnergyDistribution>,
     /// URR probability tables.
     pub urr_tables: Option<UrrProbabilityTables>,
 }
@@ -332,6 +342,13 @@ impl XsProvider for SvdXsProvider {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
     }
 
+    fn inelastic_continuum_edist(
+        &self,
+        nuclide_idx: usize,
+    ) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].inelastic_continuum_edist.as_ref()
+    }
+
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
     }
@@ -480,6 +497,9 @@ pub fn load_nuclide(
                 has_continuum_inelastic: false,
                 elastic_angle: None,
                 fission_energy_dist: None,
+                inelastic_continuum_edist: None,
+                n2n_edist: None,
+                n3n_edist: None,
                 urr_tables: None,
             };
         }
@@ -534,6 +554,9 @@ pub fn load_nuclide(
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
+    let inelastic_continuum_edist = reader.reaction_energy_dist(91);
+    let n2n_edist = reader.reaction_energy_dist(16);
+    let n3n_edist = reader.reaction_energy_dist(17);
     if let Some(ref d) = fission_energy_dist {
         println!("    Fission spectrum: {} energies", d.energies.len());
     }
@@ -658,6 +681,9 @@ pub fn load_nuclide(
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,
+        inelastic_continuum_edist,
+        n2n_edist,
+        n3n_edist,
         urr_tables,
     }
 }
@@ -692,6 +718,9 @@ pub struct NuclideTableData {
     pub has_continuum_inelastic: bool,
     pub elastic_angle: Option<AngularDistribution>,
     pub fission_energy_dist: Option<EnergyDistribution>,
+    pub inelastic_continuum_edist: Option<EnergyDistribution>,
+    pub n2n_edist: Option<EnergyDistribution>,
+    pub n3n_edist: Option<EnergyDistribution>,
     pub urr_tables: Option<UrrProbabilityTables>,
 }
 
@@ -892,6 +921,13 @@ impl XsProvider for TableXsProvider {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
     }
 
+    fn inelastic_continuum_edist(
+        &self,
+        nuclide_idx: usize,
+    ) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].inelastic_continuum_edist.as_ref()
+    }
+
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
     }
@@ -1014,6 +1050,9 @@ pub fn load_nuclide_table(
                 has_continuum_inelastic: false,
                 elastic_angle: None,
                 fission_energy_dist: None,
+                inelastic_continuum_edist: None,
+                n2n_edist: None,
+                n3n_edist: None,
                 urr_tables: None,
             };
         }
@@ -1060,6 +1099,9 @@ pub fn load_nuclide_table(
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
+    let inelastic_continuum_edist = reader.reaction_energy_dist(91);
+    let n2n_edist = reader.reaction_energy_dist(16);
+    let n3n_edist = reader.reaction_energy_dist(17);
     if let Some(ref d) = fission_energy_dist {
         println!("    Fission spectrum: {} energies", d.energies.len());
     }
@@ -1138,6 +1180,9 @@ pub fn load_nuclide_table(
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,
+        inelastic_continuum_edist,
+        n2n_edist,
+        n3n_edist,
         urr_tables,
     }
 }
@@ -1185,6 +1230,9 @@ pub fn load_nuclide_table_at_temp(
                 has_continuum_inelastic: false,
                 elastic_angle: None,
                 fission_energy_dist: None,
+                inelastic_continuum_edist: None,
+                n2n_edist: None,
+                n3n_edist: None,
                 urr_tables: None,
             };
         }
@@ -1251,6 +1299,9 @@ pub fn load_nuclide_table_at_temp(
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
+    let inelastic_continuum_edist = reader.reaction_energy_dist(91);
+    let n2n_edist = reader.reaction_energy_dist(16);
+    let n3n_edist = reader.reaction_energy_dist(17);
     let elastic_angle = reader.angular_distribution(2);
 
     let urr_temp = reader
@@ -1321,6 +1372,9 @@ pub fn load_nuclide_table_at_temp(
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,
+        inelastic_continuum_edist,
+        n2n_edist,
+        n3n_edist,
         urr_tables,
     }
 }
@@ -1372,6 +1426,9 @@ pub fn load_nuclide_at_temp(
                 has_continuum_inelastic: false,
                 elastic_angle: None,
                 fission_energy_dist: None,
+                inelastic_continuum_edist: None,
+                n2n_edist: None,
+                n3n_edist: None,
                 urr_tables: None,
             };
         }
@@ -1422,6 +1479,9 @@ pub fn load_nuclide_at_temp(
     }
 
     let fission_energy_dist = reader.fission_energy_dist();
+    let inelastic_continuum_edist = reader.reaction_energy_dist(91);
+    let n2n_edist = reader.reaction_energy_dist(16);
+    let n3n_edist = reader.reaction_energy_dist(17);
     let elastic_angle = reader.angular_distribution(2);
 
     let urr_temp = reader
@@ -1506,6 +1566,9 @@ pub fn load_nuclide_at_temp(
         has_continuum_inelastic: has_continuum,
         elastic_angle,
         fission_energy_dist,
+        inelastic_continuum_edist,
+        n2n_edist,
+        n3n_edist,
         urr_tables,
     }
 }

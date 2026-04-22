@@ -214,6 +214,10 @@ impl XsProvider for HybridSvdWmpXsProvider {
         self.inner.fission_energy_dist(nuclide_idx)
     }
 
+    fn inelastic_continuum_edist(&self, nuclide_idx: usize) -> Option<&EnergyDistribution> {
+        self.inner.inelastic_continuum_edist(nuclide_idx)
+    }
+
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         // If we're inside WMP range, URR is not physically applicable
         // (the resonances are already explicit via poles). Skip it.
@@ -402,6 +406,10 @@ impl XsProvider for HybridTableWmpXsProvider {
 
     fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&EnergyDistribution> {
         self.inner.fission_energy_dist(nuclide_idx)
+    }
+
+    fn inelastic_continuum_edist(&self, nuclide_idx: usize) -> Option<&EnergyDistribution> {
+        self.inner.inelastic_continuum_edist(nuclide_idx)
     }
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {

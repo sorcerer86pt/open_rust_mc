@@ -299,6 +299,9 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 has_continuum_inelastic: false,
                 elastic_angle: None,
                 fission_energy_dist: None,
+                inelastic_continuum_edist: None,
+                n2n_edist: None,
+                n3n_edist: None,
                 urr_tables: None,
             });
         } else {
@@ -384,6 +387,9 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
                 has_continuum_inelastic: false,
                 elastic_angle: None,
                 fission_energy_dist: None,
+                inelastic_continuum_edist: None,
+                n2n_edist: None,
+                n3n_edist: None,
                 urr_tables: None,
             });
         } else {
