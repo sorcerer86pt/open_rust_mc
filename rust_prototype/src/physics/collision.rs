@@ -46,6 +46,16 @@ pub struct InelasticData<'a> {
     pub level_angles: &'a [Option<AngularDistribution>],
 }
 
+/// A neutron emitted into the current generation (not banked for the
+/// next generation's fission source). Used for the non-fission
+/// multiplicative channels (n,2n) and (n,3n).
+#[derive(Debug, Clone)]
+pub struct SecondaryNeutron {
+    pub pos: crate::geometry::Vec3,
+    pub dir: crate::geometry::Vec3,
+    pub energy: f64,
+}
+
 /// Outcome of processing a collision.
 #[derive(Debug)]
 pub enum CollisionOutcome {
@@ -53,8 +63,16 @@ pub enum CollisionOutcome {
     Scatter,
     /// Particle absorbed (capture or other absorption).
     Absorption,
-    /// Particle caused fission — absorbed, fission sites banked.
+    /// Particle caused fission — absorbed, fission sites banked for
+    /// the NEXT generation's source.
     Fission { sites: Vec<FissionSite> },
+    /// Non-fission multiplicative reaction: (n,2n) or (n,3n). The
+    /// primary continues (energy/direction already updated in-place);
+    /// `secondaries` are additional neutrons at the collision site that
+    /// must transport in the CURRENT generation. They do NOT seed the
+    /// next generation's fission bank. This mirrors OpenMC / MCNP
+    /// convention: only true fission neutrons count toward k_eff.
+    Multiplicity { secondaries: Vec<SecondaryNeutron> },
 }
 
 /// Process a collision for a particle.
@@ -119,58 +137,57 @@ pub fn process_collision(
         return CollisionOutcome::Scatter;
     }
 
-    // (n,2n) reaction
+    // (n,2n) — two neutrons emerge from a compound nucleus. Both are
+    // sampled from the evaporation spectrum, isotropic in the LAB
+    // frame (standard compound-nucleus approximation for (n,xn)).
+    // The primary continues as one of the two; the other is emitted
+    // as a CURRENT-generation secondary that the transport loop will
+    // pick up from `secondaries`. Neither neutron seeds the next
+    // generation's fission bank — that's reserved for MT=18 fission.
     cum += xs.n2n;
     if xi < cum {
-        let e2 = sample_evaporation_energy(particle.energy, rng);
-        let site = FissionSite {
+        let e_primary = sample_evaporation_energy(particle.energy, rng);
+        let e_secondary = sample_evaporation_energy(particle.energy, rng);
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_primary;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        let (us, vs, ws) = rng.isotropic_direction();
+        let secondary = SecondaryNeutron {
             pos: particle.pos,
-            energy: e2,
-            weight: particle.weight,
+            dir: crate::geometry::Vec3::new(us, vs, ws),
+            energy: e_secondary,
         };
-        // Primary neutron continues with reduced energy
-        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
-            particle.energy,
-            particle.dir,
-            xs.awr,
-            -particle.energy * 0.1, // approximate Q for (n,2n)
-            None,
-            rng,
-        );
-        particle.energy = new_energy;
-        particle.dir = new_dir;
-        return CollisionOutcome::Fission { sites: vec![site] };
+        return CollisionOutcome::Multiplicity {
+            secondaries: vec![secondary],
+        };
     }
 
-    // (n,3n) reaction
+    // (n,3n) — three neutrons emerge. Primary continues, two
+    // secondaries transport in current generation. Same evaporation /
+    // isotropic approximation as (n,2n).
     cum += xs.n3n;
     if xi < cum {
-        let e2 = sample_evaporation_energy(particle.energy, rng);
-        let e3 = sample_evaporation_energy(particle.energy, rng);
-        let sites = vec![
-            FissionSite {
+        let e_primary = sample_evaporation_energy(particle.energy, rng);
+        let e_s1 = sample_evaporation_energy(particle.energy, rng);
+        let e_s2 = sample_evaporation_energy(particle.energy, rng);
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_primary;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        let (u1, v1, w1) = rng.isotropic_direction();
+        let (u2, v2, w2) = rng.isotropic_direction();
+        let secondaries = vec![
+            SecondaryNeutron {
                 pos: particle.pos,
-                energy: e2,
-                weight: particle.weight,
+                dir: crate::geometry::Vec3::new(u1, v1, w1),
+                energy: e_s1,
             },
-            FissionSite {
+            SecondaryNeutron {
                 pos: particle.pos,
-                energy: e3,
-                weight: particle.weight,
+                dir: crate::geometry::Vec3::new(u2, v2, w2),
+                energy: e_s2,
             },
         ];
-        // Primary neutron continues with reduced energy
-        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
-            particle.energy,
-            particle.dir,
-            xs.awr,
-            -particle.energy * 0.2, // approximate Q for (n,3n)
-            None,
-            rng,
-        );
-        particle.energy = new_energy;
-        particle.dir = new_dir;
-        return CollisionOutcome::Fission { sites };
+        return CollisionOutcome::Multiplicity { secondaries };
     }
 
     // Fission

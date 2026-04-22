@@ -410,12 +410,20 @@ fn transport_particle<XS: XsProvider>(
     let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
     let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
 
+    // Current-generation secondary neutrons emitted by (n,2n)/(n,3n).
+    // Drained in an outer loop: after the primary finishes transport,
+    // pop the next pending secondary and transport it before moving on.
+    let mut pending: Vec<Particle> = Vec::new();
+
     // OpenMC uses max_particle_events = 1,000,000 (any step: collision, surface, reflection).
     // For thermal systems, neutrons may undergo thousands of scattering events to thermalize.
+    // Budget is shared across the primary and all multiplicity secondaries
+    // so that pathological (n,xn) cascades cannot exceed the per-source bound.
     let max_events = 1_000_000_u32;
-    let mut void_crossings = 0_u32;
     let mut total_events = 0_u32;
 
+    'history: loop {
+    let mut void_crossings = 0_u32;
     while particle.is_alive() && total_events < max_events {
         total_events += 1;
         let cell = &cells[particle.cell_idx];
@@ -639,6 +647,16 @@ fn transport_particle<XS: XsProvider>(
                                 result.fissions += 1;
                                 result.fission_sites.extend(sites);
                             }
+                            CollisionOutcome::Multiplicity { secondaries } => {
+                                for s in secondaries {
+                                    pending.push(Particle::new(
+                                        s.pos,
+                                        s.dir,
+                                        s.energy,
+                                        particle.cell_idx,
+                                    ));
+                                }
+                            }
                         }
                     }
                 } else {
@@ -681,10 +699,32 @@ fn transport_particle<XS: XsProvider>(
                             result.fissions += 1;
                             result.fission_sites.extend(sites);
                         }
+                        CollisionOutcome::Multiplicity { secondaries } => {
+                            for s in secondaries {
+                                pending.push(Particle::new(
+                                    s.pos,
+                                    s.dir,
+                                    s.energy,
+                                    particle.cell_idx,
+                                ));
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+
+    // Current particle finished. If any (n,xn) secondaries are pending,
+    // transport the next one in the same history. Otherwise the source
+    // particle is done.
+    match pending.pop() {
+        Some(p) => {
+            particle = p;
+            continue 'history;
+        }
+        None => break 'history,
+    }
     }
 
     result
@@ -763,9 +803,12 @@ fn transport_particle_delta<XS: XsProvider>(
     let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
     let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
 
+    let mut pending: Vec<Particle> = Vec::new();
+
     let max_steps = 10_000;
     let mut steps = 0;
 
+    'history: loop {
     while particle.is_alive() && steps < max_steps {
         steps += 1;
         let sigma_maj = majorant.lookup(particle.energy);
@@ -965,7 +1008,26 @@ fn transport_particle_delta<XS: XsProvider>(
                 result.fissions += 1;
                 result.fission_sites.extend(sites);
             }
+            CollisionOutcome::Multiplicity { secondaries } => {
+                for s in secondaries {
+                    pending.push(Particle::new(
+                        s.pos,
+                        s.dir,
+                        s.energy,
+                        particle.cell_idx,
+                    ));
+                }
+            }
         }
+    }
+
+    match pending.pop() {
+        Some(p) => {
+            particle = p;
+            continue 'history;
+        }
+        None => break 'history,
+    }
     }
 
     result
