@@ -267,6 +267,16 @@ pub trait XsProvider: Send + Sync {
         None
     }
 
+    /// ENDF MT=16 (n,2n) outgoing-energy distribution.
+    fn n2n_edist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
+        None
+    }
+
+    /// ENDF MT=17 (n,3n) outgoing-energy distribution.
+    fn n3n_edist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
+        None
+    }
+
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
 
     /// Get thermal scattering data for a nuclide, if available.
@@ -687,6 +697,8 @@ fn transport_particle<XS: XsProvider>(
                     let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
                     let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
                     let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
+                    let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
+                    let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
 
                     let outcome = collision::process_collision(
                         &mut particle,
@@ -695,6 +707,8 @@ fn transport_particle<XS: XsProvider>(
                         elastic_angle,
                         fission_edist,
                         continuum_edist,
+                        n2n_edist,
+                        n3n_edist,
                         cell.temperature,
                         &mut rng,
                     );
@@ -768,6 +782,8 @@ fn process_non_thermal_collision<XS: XsProvider>(
     let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
     let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
     let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
+    let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
+    let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
 
     collision::process_collision(
         particle,
@@ -776,6 +792,8 @@ fn process_non_thermal_collision<XS: XsProvider>(
         elastic_angle,
         fission_edist,
         continuum_edist,
+        n2n_edist,
+        n3n_edist,
         temperature,
         rng,
     )
@@ -1000,6 +1018,8 @@ fn transport_particle_delta<XS: XsProvider>(
         let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
         let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
         let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
+        let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
+        let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
 
         let outcome = collision::process_collision(
             &mut particle,
@@ -1008,6 +1028,8 @@ fn transport_particle_delta<XS: XsProvider>(
             elastic_angle,
             fission_edist,
             continuum_edist,
+            n2n_edist,
+            n3n_edist,
             cell.temperature,
             &mut rng,
         );

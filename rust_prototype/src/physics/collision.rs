@@ -89,6 +89,8 @@ pub fn process_collision(
     elastic_angle: Option<&AngularDistribution>,
     fission_edist: Option<&EnergyDistribution>,
     continuum_edist: Option<&EnergyDistribution>,
+    n2n_edist: Option<&EnergyDistribution>,
+    n3n_edist: Option<&EnergyDistribution>,
     temperature: f64,
     rng: &mut Rng,
 ) -> CollisionOutcome {
@@ -143,17 +145,26 @@ pub fn process_collision(
         return CollisionOutcome::Scatter;
     }
 
-    // (n,2n) — two neutrons emerge from a compound nucleus. Both are
-    // sampled from the evaporation spectrum, isotropic in the LAB
-    // frame (standard compound-nucleus approximation for (n,xn)).
+    // (n,2n) — two neutrons emerge from a compound nucleus. Each
+    // outgoing energy is sampled from the ENDF MT=16 tabulated
+    // distribution when available, evaporation otherwise. Angles are
+    // isotropic in the lab frame (Kalbach-Mann `r` is essentially
+    // zero for uranium at Godiva-relevant incident energies, so the
+    // isotropic LAB approximation matches the underlying physics).
     // The primary continues as one of the two; the other is emitted
     // as a CURRENT-generation secondary that the transport loop will
     // pick up from `secondaries`. Neither neutron seeds the next
     // generation's fission bank — that's reserved for MT=18 fission.
     cum += xs.n2n;
     if xi < cum {
-        let e_primary = sample_evaporation_energy(particle.energy, rng);
-        let e_secondary = sample_evaporation_energy(particle.energy, rng);
+        let sample_e = |rng: &mut Rng| -> f64 {
+            match n2n_edist {
+                Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+                None => sample_evaporation_energy(particle.energy, rng),
+            }
+        };
+        let e_primary = sample_e(rng);
+        let e_secondary = sample_e(rng);
         let (u, v, w) = rng.isotropic_direction();
         particle.energy = e_primary;
         particle.dir = crate::geometry::Vec3::new(u, v, w);
@@ -169,13 +180,19 @@ pub fn process_collision(
     }
 
     // (n,3n) — three neutrons emerge. Primary continues, two
-    // secondaries transport in current generation. Same evaporation /
-    // isotropic approximation as (n,2n).
+    // secondaries transport in current generation. Same ENDF
+    // MT=17 / evaporation fallback convention as (n,2n).
     cum += xs.n3n;
     if xi < cum {
-        let e_primary = sample_evaporation_energy(particle.energy, rng);
-        let e_s1 = sample_evaporation_energy(particle.energy, rng);
-        let e_s2 = sample_evaporation_energy(particle.energy, rng);
+        let sample_e = |rng: &mut Rng| -> f64 {
+            match n3n_edist {
+                Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+                None => sample_evaporation_energy(particle.energy, rng),
+            }
+        };
+        let e_primary = sample_e(rng);
+        let e_s1 = sample_e(rng);
+        let e_s2 = sample_e(rng);
         let (u, v, w) = rng.isotropic_direction();
         particle.energy = e_primary;
         particle.dir = crate::geometry::Vec3::new(u, v, w);
@@ -378,7 +395,7 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
     }
@@ -398,7 +415,7 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
     }
@@ -418,7 +435,7 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng);
         match outcome {
             CollisionOutcome::Fission { sites } => {
                 assert!(!sites.is_empty());
@@ -473,7 +490,7 @@ mod tests {
         };
 
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, None, None, 0.0, &mut rng);
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy
@@ -543,7 +560,7 @@ mod tests {
                 1.0e6,
                 0,
             );
-            let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, 0.0, &mut rng);
+            let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, None, None, 0.0, &mut rng);
             assert!(matches!(outcome, CollisionOutcome::Scatter));
             sum_x += p.dir.x;
         }
@@ -591,7 +608,7 @@ mod tests {
                 1.0e6,
                 0,
             );
-            let _ = process_collision(&mut p, &xs, Some(&data), None, None, None, 0.0, &mut rng);
+            let _ = process_collision(&mut p, &xs, Some(&data), None, None, None, None, None, 0.0, &mut rng);
             sum_x += p.dir.x;
         }
         let mean_x = sum_x / trials as f64;

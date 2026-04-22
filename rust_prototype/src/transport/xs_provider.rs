@@ -191,6 +191,12 @@ impl NuclideKernels {
     /// When `multiply_smooth=true`, the URR factors multiply the smooth XS values.
     /// A random number `xi` selects the probability band for consistent sampling.
     pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
+        // Ablation knob: `OPEN_RUST_MC_NO_URR=1` disables URR sampling so
+        // Godiva/PWR offsets can be attributed to URR vs other engine
+        // effects. Cheap env check; only used for diagnostic runs.
+        if std::env::var_os("OPEN_RUST_MC_NO_URR").is_some() {
+            return;
+        }
         let urr = match &self.urr_tables {
             Some(u) if u.in_range(energy) => u,
             _ => return,
@@ -347,6 +353,14 @@ impl XsProvider for SvdXsProvider {
         nuclide_idx: usize,
     ) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].inelastic_continuum_edist.as_ref()
+    }
+
+    fn n2n_edist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].n2n_edist.as_ref()
+    }
+
+    fn n3n_edist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].n3n_edist.as_ref()
     }
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
@@ -752,6 +766,9 @@ impl NuclideTableData {
     }
 
     pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
+        if std::env::var_os("OPEN_RUST_MC_NO_URR").is_some() {
+            return;
+        }
         let urr = match &self.urr_tables {
             Some(u) if u.in_range(energy) => u,
             _ => return,
@@ -926,6 +943,14 @@ impl XsProvider for TableXsProvider {
         nuclide_idx: usize,
     ) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].inelastic_continuum_edist.as_ref()
+    }
+
+    fn n2n_edist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].n2n_edist.as_ref()
+    }
+
+    fn n3n_edist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
+        self.nuclides[nuclide_idx].n3n_edist.as_ref()
     }
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
