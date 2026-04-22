@@ -251,6 +251,10 @@ def maybe_rebuild() -> None:
 
 
 def run(args: argparse.Namespace) -> tuple[dict[str, ProviderResult], str]:
+    """Launch pwr_pincell, stream its stdout live to terminal and (if
+    requested) to ``args.log`` so a kill at any point leaves partial
+    progress on disk. Returns (parsed_results, full_captured_output).
+    """
     binp = locate_bin()
     cmd = [
         str(binp),
@@ -266,12 +270,51 @@ def run(args: argparse.Namespace) -> tuple[dict[str, ProviderResult], str]:
     if args.offset is not None:
         cmd += ["--target-temp-offset", str(args.offset)]
     print(f"running: {' '.join(cmd)}", flush=True)
-    cp = subprocess.run(cmd, capture_output=True, text=True)
-    if cp.returncode != 0:
-        print(cp.stdout)
-        print(cp.stderr, file=sys.stderr)
-        sys.exit(cp.returncode)
-    return parse_output(cp.stdout), cp.stdout
+
+    log_fh = args.log.open("w", encoding="utf-8", buffering=1) if args.log else None
+    buf: list[str] = []
+
+    # Line-buffered (bufsize=1) text-mode pipe so each pwr_pincell line
+    # arrives here as the child writes it. stderr merged into stdout so
+    # warnings/progress interleave in the natural order. Inspired by:
+    # https://stackoverflow.com/q/31992237
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        bufsize=1,
+        text=True,
+    )
+    assert proc.stdout is not None
+    try:
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            buf.append(line)
+            if log_fh is not None:
+                log_fh.write(line)
+                log_fh.flush()
+        rc = proc.wait()
+    except KeyboardInterrupt:
+        # Pass SIGINT (Ctrl-C on Unix; Ctrl-BREAK semantics on Windows)
+        # to the child so it can exit cleanly, then re-raise. Partial
+        # output on disk is preserved by the `finally` below.
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        raise
+    finally:
+        if log_fh is not None:
+            log_fh.close()
+
+    output = "".join(buf)
+    if rc != 0:
+        print(f"pwr_pincell exited with code {rc}", file=sys.stderr)
+        sys.exit(rc)
+    return parse_output(output), output
 
 
 # ── Reporting ─────────────────────────────────────────────────────────
@@ -345,7 +388,8 @@ def main() -> int:
     ap.add_argument("--json", type=Path, default=None,
                     help="also write machine-readable JSON verdict to PATH")
     ap.add_argument("--log", type=Path, default=None,
-                    help="also write raw pwr_pincell stdout to PATH")
+                    help="stream raw pwr_pincell stdout line-by-line to "
+                         "PATH (survives a kill or Ctrl-C mid-run)")
     args = ap.parse_args()
 
     if args.rebuild:
@@ -353,8 +397,8 @@ def main() -> int:
 
     results, raw = run(args)
 
-    if args.log is not None:
-        args.log.write_text(raw, encoding="utf-8")
+    # `args.log` has been streamed live inside `run()` — no post-hoc
+    # write needed here.
 
     # Compute grades
     gap_svd = abs(results["SVD"].k_inf - results["WMP"].k_inf) * 1e5
