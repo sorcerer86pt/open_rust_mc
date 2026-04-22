@@ -38,3 +38,11 @@ cuda_bench/*.lib
 # OS
 .DS_Store
 Thumbs.db
+
+# Top-level benchmark-run dumps — use scripts/pwr_verdict.py and
+# outputs/ for persistent artefacts; dated one-shot logs at the
+# repo root are local-only by convention.
+/benchmark_*.txt
+/paper_results_*.txt
+/results_*.txt
+/resume.md
