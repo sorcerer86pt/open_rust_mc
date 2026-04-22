@@ -111,10 +111,17 @@ Delta from experiment = **16 pcm** (< 0.2 sigma). 150 batches, 20k particles.
 
 ## What Needs Fixing (Physics Gaps vs OpenMC)
 
-### Priority 1 — Validate PWR pin cell with S(α,β)
-- Run `pwr_pincell --mode both` with S(α,β) data, compare SVD vs Table
-- Compare k_inf with OpenMC (which uses same S(α,β) data)
-- Quantify S(α,β) impact: run with and without thermal scattering
+### Priority 1 — Validate PWR pin cell with S(α,β) — DONE 2026-04-22
+- Rust Table vs OpenMC 0.15.3: **12 pcm** (within 1σ)
+- Rust SVD k=5 vs OpenMC: **−67 pcm** (within combined σ)
+- Rust SVD vs Rust Table: 59 pcm (compression cost)
+- S(α,β) impact on k_inf: ~300 pcm (disables → k_inf up)
+- Geometry/stats: 3.1% UO₂, 1.26 cm pitch, 100b × 20k × 3 seeds
+- Artifacts: `outputs/pwr_sab_on.txt`, `pwr_sab_off.txt`,
+  `openmc_pwr_ref.json`; writeup in `resume.md`
+- Caveats documented: SVD at rank 5 is 5× larger and 0.95× as
+  fast as Table for this all-reactions 9-nuclide problem; memory
+  win is rank ≤ 1 or hybrid SVD+WMP, not all-reactions rank-5.
 
 ### Priority 2 — Event-based GPU transport
 - Current: history-based (one particle birth-to-death per thread)

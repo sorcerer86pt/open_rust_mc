@@ -44,8 +44,12 @@ simplex-projected QP variant of Ducru (clip negative
 weights, renormalize) degrades U-$238$ capture
 reconstruction from $0.84\%$ to $5\%$ L2 error because
 the projection is optimal in weight space rather than in
-the Doppler-kernel norm. The full Ducru QP~\cite{ducru2017}
-remains future work.
+the Doppler-kernel norm. The kernel-Gram QP
+(Ducru~\cite{ducru2017}~§4) \emph{is} implemented and wins
+at rank~$3$ ($0.60\%$ L2) but loses at our production
+rank~$5$ ($2.06\%$), so signed $3$-point unity remains the
+default; an analytic Doppler-kernel Gram QP is the
+outstanding follow-up.
 \end{abstract}
 
 \noindent\textbf{Keywords:} Monte Carlo, cross-section
