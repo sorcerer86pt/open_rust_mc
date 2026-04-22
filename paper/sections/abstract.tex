@@ -1,156 +1,57 @@
 \title{SVD-Compressed Cross Sections in Monte
 Carlo Neutron Transport\\
-\large An implementation-led benchmark with positive, mixed,
-and negative results; with a partition-of-unity fix for
-off-library temperature interpolation}
+\large An implementation-led benchmark with a
+partition-of-unity fix for off-library temperature
+interpolation}
 
 \author{F.~Rodrigues}
 \date{\today}
 \maketitle
 
 \begin{abstract}
-Continuous-energy Monte Carlo transport codes spend a large
-fraction of wall-clock time looking up microscopic cross
-sections in pointwise tables indexed by energy and temperature.
-We set out to test whether a truncated singular value
-decomposition (SVD) of $\log_{10} \sigma(E, T)$ is a
-defensible alternative to the pointwise table, and whether a
-hybrid that couples SVD with Windowed Multipole (WMP) over the
-resolved resonance region offers a compelling
-memory--throughput profile. We built a pure-Rust transport
-engine that implements a pointwise-table provider, an SVD
-provider, an ACE+WMP provider that mirrors the
-industry low-memory baseline, and a WMP+SVD hybrid provider
-behind a common interface, validated the engine against
-OpenMC~$0.15.3$ (closing an initial $78$--$127$~pcm offset to
-$|\Delta| \le 51$~pcm across all four CPU/GPU providers after
-tracing three transport-level bugs), and measured the
-representations head-to-head on a $9$-nuclide thermal PWR
-pin cell and on the Godiva (HEU-MET-FAST-001) fast benchmark
-\emph{at both on-library and off-library operating temperatures}.
-The findings are a mixture of positive, mixed, and negative,
-and we report them plainly.
-
-\textbf{Positive.}
-(i)~The singular spectrum of ENDF/B-VII.1 $\log\sigma$
-matrices decays rapidly. $43$ of $47$ non-redundant $^{235}$U
-reaction channels are rank-one to machine precision.
-Rank-$6$ reconstructs the full energy grid at machine precision
-at $44$~ns per lookup against $91$~ns for a binary-search
-pointwise table (kernel-level $2.0\times$).
-(ii)~In-engine, SVD rank-$5$ agrees with the same engine's
-pointwise table to $13$--$47$~pcm on PWR pin cell $k_\infty$
-across two hardware tiers; all four in-engine providers
-(CPU table/SVD, GPU pointwise/SVD) agree with OpenMC to
-$|\Delta| \le 51$~pcm at large-L3 ten-seed statistics. On
-Godiva the four providers cluster $325$--$362$~pcm above the
-ICSBEP experimental value, which is the known ENDF/B-VII.1
-Godiva bias; the engine reproduces the library-level bias
-and does not add to it.
-(iii)~End-to-end CPU SVD rank-$5$ runs
-$1.37\times$--$1.90\times$ faster than the in-engine
-pointwise table on PWR pin cell, hardware-dependent; on
-Godiva CPU SVD is $1.43\times$ faster than the table on the
-large-L3 system.
-(iv)~\emph{Off-library result, headline.}
-At a realistic operating temperature $+150$~K above every
-nuclide's library column (fuel $900\!\to\!1050$~K,
-moderator $600\!\to\!750$~K), with OpenMC-style stochastic
-$T$-interpolation enabled on the pointwise and hybrid paths,
-SVD with partition-of-unity $3$-point Ducru weights
-(Sec.~\ref{sec:ducru_puoi}) reproduces $k_\infty$ within
-$213$~pcm of the ACE+WMP industry baseline ($\sim\!3.6\sigma$
-at ten-seed, $50\,000$-particle statistics) while consuming
-$22\%$ less memory and running at speed parity
-(within $0.07\%$). This closes a $2094$~pcm kernel-
-approximation bias measured with a naive $2$-point Ducru
-variant by a factor of $\approx\!10\times$
-(Sec.~\ref{sec:off_library}).
-
-\textbf{Mixed.}
-(v)~The trade-off on GPU is opposite. GPU pointwise is
-$1.30\times$ \emph{faster} than GPU SVD rank-$5$ on PWR pin
-cell because four clad nuclides lack an MT$=4$ block and
-their total inelastic must be synthesised from $13$
-discrete-level SVD kernels per lookup. SVD is a CPU win on
-this geometry and a GPU draw-to-loss.
-(vi)~The hybrid SVD+WMP provider reproduces $k_\infty$ to
-$86$~pcm of its own SVD baseline, but runs $2.06\times$
-slower than CPU SVD because the Humlicek W4 Faddeeva
-evaluation is $\sim\!15\times$ more expensive per lookup than
-the SVD FMA. WMP buys memory (see next point) at the cost of
-throughput.
-(vii)~Per-reaction rank tuning is a modest but non-trivial
-memory win. Reducing the $41$ discrete inelastic levels
-(MT$=51$--$91$) from the global rank-$5$ to rank-$1$
-(reviewer suggestion at PHYSOR workshop; a level's shape is
-weakly $T$-dependent so one basis vector suffices) removes
-$\approx\!70\%$ of the engine's SVD working set on Godiva
-with no measurable $k_\text{eff}$ shift. The same mechanism
-is what enables the off-library SVD memory win above.
-
-\textbf{Negative.}
-(viii)~The WMP representation packs the resolved-resonance
-data of our nine nuclides into $1.37$~MB against $177.7$~MB
-for a hypothetical four-channel ($\sigma_\text{el},
-\sigma_\text{t}, \sigma_\text{f}, \sigma_\text{cap}$),
-six-temperature pointwise table on the same nuclide set
-($132.9\times$). That is a density ratio between two data
-layouts, not the memory reduction an actual Monte Carlo
-engine sees. Our engine carries SVD kernels for the discrete
-inelastic levels ($41$ per U nuclide, $10$--$13$ per Zr),
-for total inelastic, for $(n,2n)$ and $(n,3n)$, and for the
-URR residue total; none of these are covered by the public
-MIT WMP library. The measured in-engine reduction from
-hybrid over full-SVD is $1.06\times$; in absolute terms the
-hybrid engine carries $5\times$ \emph{more} memory than the
-pointwise-table baseline. The two numbers are both real;
-they measure different things, and the engine-scale one is
-the one that matters for a reader who plans to build a
-transport solver.
-(ix)~A straight port of Ducru's kernel reconstruction to
-off-library $T$ interpolation is not a drop-in. The raw
-$2017$ Eq.~$31$ weights~\cite{ducru2017} are L2-optimal in
-the Doppler-kernel norm but are \emph{not} a partition of
-unity ($\sum_j w_j \neq 1$ in general), which imprints a
-log-space gain error on resonance peak heights when applied
-to V$^\top$ columns of a $\log\sigma$ SVD. A naive $2$-point
-bracketing variant leaves a $\sim\!2100$~pcm bias on PWR
-$k_\infty$ at off-library $T$ (Sec.~\ref{sec:off_library_2t}).
-A simplex-projected QP variant (clip negative weights,
-renormalize to $\sum w = 1$) is \emph{worse}, not better,
-because it is L2-optimal in weight space rather than in
-kernel space; measured on U-$238$~MT$=102$ it raises the
-held-out error from $1.5\%$ to $5\%$. The partition-of-unity
-$3$-point Ducru that delivered the (iv) headline is the
-narrowest honest fix; a fully kernel-consistent QP~\cite{ducru2017}
+We test whether a truncated SVD of $\log_{10}\sigma(E,T)$
+is a defensible alternative to pointwise cross-section
+tables, and whether a partition-of-unity variant of Ducru's
+kernel reconstruction~\cite{ducru2017} closes the
+accuracy gap at realistic off-library operating
+temperatures. A pure-Rust transport engine implements four
+providers --- pointwise table, SVD, ACE+WMP, and SVD+WMP
+hybrid --- behind a common interface, validated against
+OpenMC~$0.15.3$ to $|\Delta k|\le51$~pcm on a $9$-nuclide
+PWR pin cell and on the Godiva fast benchmark. $43$ of
+$47$ non-redundant $^{235}$U reaction channels are rank-one
+to machine precision, and rank-$5$ SVD with discrete-level
+rank-$1$ recovers engine-wide $k_\text{eff}$ within
+$\sim\!50$~pcm of the in-engine pointwise baseline on both
+benchmarks at $1.37\times$--$1.90\times$ the CPU throughput.
+At a realistic off-library operating point
+($+150$~K above every nuclide's library column, fuel
+$900\!\to\!1050$~K, moderator $600\!\to\!750$~K), a
+partition-of-unity $3$-point Ducru scheme reproduces
+$k_\infty$ within $213$~pcm ($\sim\!3.6\sigma$) of the
+ACE+WMP industry baseline while using $22\%$ less memory
+and matching its transport speed --- a $10\times$ reduction
+over a naive $2$-point bracketing variant that leaves a
+$2094$~pcm kernel-approximation bias. The $132.9\times$
+representation-byte compression ratio of the literature is
+a layout comparison, not the $1.06\times$ engine-scale
+reduction we measure; we make that distinction explicit.
+We flag three honest failures: GPU SVD is $1.3\times$
+\emph{slower} than GPU pointwise on PWR due to clad
+level-sum cost; the WMP+SVD hybrid is $2\times$ slower
+than CPU SVD due to Faddeeva evaluation cost; and a
+simplex-projected QP variant of Ducru (clip negative
+weights, renormalize) degrades U-$238$ capture
+reconstruction from $0.84\%$ to $5\%$ L2 error because
+the projection is optimal in weight space rather than in
+the Doppler-kernel norm. The full Ducru QP~\cite{ducru2017}
 remains future work.
-
-\textbf{Scope.}
-Measurements are for a nine-nuclide thermal pin cell and a
-three-nuclide fast sphere, on two consumer systems with
-different CPU L3 size and GPU class. Full-core behaviour
-($\gtrsim\!200$ nuclides, minor actinides, fission products,
-multiple S($\alpha$,$\beta$) libraries) is not evaluated here,
-and the compression gap on engine-level memory would widen or
-shrink with the reaction-channel mix there. Off-library
-temperature measurements use a global $+150$~K operating
-offset; coupled fuel-temperature/moderator-temperature
-feedback loops are not modelled.  We report the measurements
-we made and flag what they do not cover.
-
-The $132.9\times$ representation-byte ratio and the
-$1.06\times$ engine-level reduction are both measured,
-both reproducible, and measure different things; we make
-that distinction explicit throughout the paper so a reader
-who plans to build a transport engine on top of this work
-can calibrate expectations.
 \end{abstract}
 
 \noindent\textbf{Keywords:} Monte Carlo, cross-section
-compression, singular value decomposition, windowed multipole,
-Doppler broadening, partition-of-unity interpolation,
-nuclear data, GPU transport, benchmark, trade-offs.
+compression, singular value decomposition, windowed
+multipole, Doppler broadening, partition-of-unity
+interpolation, nuclear data, GPU transport.
 
 \tableofcontents
 
