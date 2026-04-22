@@ -76,16 +76,16 @@ jobs:
       - name: Install LaTeX
         run: |
           sudo apt-get update
-          sudo apt-get install -y texlive-latex-base texlive-latex-extra texlive-fonts-recommended texlive-science
+          sudo apt-get install -y \
+            texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
+            texlive-science texlive-bibtex-extra biber latexmk
 
       - name: Compile paper
         working-directory: paper
-        run: |
-          pdflatex -interaction=nonstopmode svd_cross_section_compression.tex
-          pdflatex -interaction=nonstopmode svd_cross_section_compression.tex
+        run: latexmk -pdf -interaction=nonstopmode -halt-on-error main.tex
 
       - name: Upload PDF
         uses: actions/upload-artifact@v4
         with:
           name: paper
-          path: paper/svd_cross_section_compression.pdf
+          path: paper/main.pdf

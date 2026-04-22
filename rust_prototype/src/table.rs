@@ -261,13 +261,23 @@ impl StochTempTable {
 
     /// Build a two-temperature stochastic table. `target_t` should lie in
     /// `[t_lo, t_hi]`; `p_lo` is clamped to [0, 1].
-    pub fn stochastic(lo: PointwiseTable, hi: PointwiseTable, target_t: f64, t_lo: f64, t_hi: f64) -> Self {
+    pub fn stochastic(
+        lo: PointwiseTable,
+        hi: PointwiseTable,
+        target_t: f64,
+        t_lo: f64,
+        t_hi: f64,
+    ) -> Self {
         let p_lo = if (t_hi - t_lo).abs() < 1e-6 {
             1.0
         } else {
             ((t_hi - target_t) / (t_hi - t_lo)).clamp(0.0, 1.0)
         };
-        Self { lo, hi: Some(hi), p_lo }
+        Self {
+            lo,
+            hi: Some(hi),
+            p_lo,
+        }
     }
 
     /// True if this table has two library endpoints (cache-pressure mode).

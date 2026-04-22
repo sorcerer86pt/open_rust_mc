@@ -481,8 +481,12 @@ fn load_thermal(data_dir: &std::path::Path) -> Vec<Option<Arc<ThermalScatteringD
 /// per-group knob is set, falls back to the global `--target-temp-offset`.
 /// Returns `None` when no offset applies (use legacy single-T loader).
 fn resolve_offset_for(nuc_idx: usize, args: &Args) -> Option<f64> {
-    let is_fuel = matches!(nuc_idx, 0 | 1 | 2);
-    let specific = if is_fuel { args.fuel_offset } else { args.mod_offset };
+    let is_fuel = matches!(nuc_idx, 0..=2);
+    let specific = if is_fuel {
+        args.fuel_offset
+    } else {
+        args.mod_offset
+    };
     specific.or(args.target_temp_offset)
 }
 
@@ -648,8 +652,7 @@ fn load_wmp_hybrid(args: &Args) -> (HybridTableWmpXsProvider, usize, f64) {
     let (table_provider, table_mem, _) = load_table(args);
 
     let wmp_dir = args.data_dir.join("..").join("wmp");
-    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> =
-        Vec::with_capacity(WMP_SPECS.len());
+    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> = Vec::with_capacity(WMP_SPECS.len());
     let mut covered = 0usize;
     for &(wmp_file, t_kelvin) in WMP_SPECS {
         let path = wmp_dir.join(wmp_file);
@@ -678,10 +681,7 @@ fn load_wmp_hybrid(args: &Args) -> (HybridTableWmpXsProvider, usize, f64) {
     let report = provider.memory_report();
     let xs_mem = report.smooth_only_total();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!(
-        "  WMP covers {covered}/{} nuclides",
-        WMP_SPECS.len()
-    );
+    println!("  WMP covers {covered}/{} nuclides", WMP_SPECS.len());
     println!(
         "  Loaded in {load_ms:.0} ms  |  XS memory (smooth-only): {:.1} KB  [in-solver table total: {:.1} KB]",
         xs_mem as f64 / 1024.0,
@@ -720,7 +720,10 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
         } else {
             match resolve_offset_for(nuc_idx, args) {
                 None => tables.push(xs_provider::load_nuclide_table(
-                    &path, nuc_temp_idx, awr, nu_bar,
+                    &path,
+                    nuc_temp_idx,
+                    awr,
+                    nu_bar,
                 )),
                 Some(offset) => {
                     let base_t = open_rust_mc::hdf5_reader::NuclideFileReader::open(&path)
@@ -948,14 +951,7 @@ fn main() {
         XsMode::Wmp => {
             let (provider, xs_mem, load_ms) = load_wmp_hybrid(&args);
             let r = run_multi_seed(
-                "ACE+WMP",
-                &args,
-                &surfaces,
-                &cells,
-                &materials,
-                &provider,
-                xs_mem,
-                load_ms,
+                "ACE+WMP", &args, &surfaces, &cells, &materials, &provider, xs_mem, load_ms,
             );
             println!("\n{}", "=".repeat(60));
             println!("RESULTS — PWR Pin Cell (ACE+WMP baseline)");
@@ -991,14 +987,7 @@ fn main() {
 
             let (wmp_prov, wmp_mem, wmp_load) = load_wmp_hybrid(&args);
             let wmp = run_multi_seed(
-                "ACE+WMP",
-                &args,
-                &surfaces,
-                &cells,
-                &materials,
-                &wmp_prov,
-                wmp_mem,
-                wmp_load,
+                "ACE+WMP", &args, &surfaces, &cells, &materials, &wmp_prov, wmp_mem, wmp_load,
             );
 
             println!("\n{}", "=".repeat(60));

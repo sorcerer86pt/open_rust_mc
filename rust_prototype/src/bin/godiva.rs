@@ -319,11 +319,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                     // corresponding library value by opening the reader.
                     match open_rust_mc::hdf5_reader::NuclideFileReader::open(&path) {
                         Ok(r) => {
-                            let t = r
-                                .temperatures
-                                .get(args.temp_idx)
-                                .copied()
-                                .unwrap_or(294.0);
+                            let t = r.temperatures.get(args.temp_idx).copied().unwrap_or(294.0);
                             kernels.push(xs_provider::load_nuclide_at_temp(
                                 &path,
                                 args.rank,
@@ -431,8 +427,7 @@ fn load_wmp_hybrid(args: &Args) -> (HybridTableWmpXsProvider, usize, f64) {
     let (table_provider, table_mem, _) = load_table(args);
 
     let wmp_dir = args.data_dir.join("..").join("wmp");
-    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> =
-        Vec::with_capacity(WMP_SPECS.len());
+    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> = Vec::with_capacity(WMP_SPECS.len());
     let mut covered = 0usize;
     for &(wmp_file, t_kelvin) in WMP_SPECS {
         let path = wmp_dir.join(wmp_file);
@@ -465,10 +460,7 @@ fn load_wmp_hybrid(args: &Args) -> (HybridTableWmpXsProvider, usize, f64) {
     // the industry baseline the reviewer asked about.
     let xs_mem = report.smooth_only_total();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!(
-        "  WMP covers {covered}/{} nuclides",
-        WMP_SPECS.len()
-    );
+    println!("  WMP covers {covered}/{} nuclides", WMP_SPECS.len());
     println!(
         "  Loaded in {load_ms:.0} ms  |  XS memory (smooth-only): {:.1} KB  [current in-solver: {:.1} KB]",
         xs_mem as f64 / 1024.0,

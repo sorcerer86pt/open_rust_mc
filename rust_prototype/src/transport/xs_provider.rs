@@ -935,17 +935,13 @@ fn build_stoch_table_from_reader(
     }
 
     let (i_lo, i_hi) = bracket_temp_indices(&data.temperatures, target_temp);
-    let pt_lo = PointwiseTable::from_shared_grid(
-        Arc::clone(shared_grid),
-        data.xs_per_temp[i_lo].clone(),
-    );
+    let pt_lo =
+        PointwiseTable::from_shared_grid(Arc::clone(shared_grid), data.xs_per_temp[i_lo].clone());
     if i_lo == i_hi {
         return Some(StochTempTable::single(pt_lo));
     }
-    let pt_hi = PointwiseTable::from_shared_grid(
-        Arc::clone(shared_grid),
-        data.xs_per_temp[i_hi].clone(),
-    );
+    let pt_hi =
+        PointwiseTable::from_shared_grid(Arc::clone(shared_grid), data.xs_per_temp[i_hi].clone());
     Some(StochTempTable::stochastic(
         pt_lo,
         pt_hi,
@@ -1286,7 +1282,10 @@ pub fn load_nuclide_table_at_temp(
         }
     } else {
         reader.compute_total_xs(aux_temp_idx).map(|xs| {
-            StochTempTable::single(PointwiseTable::from_shared_grid(Arc::clone(&shared_grid), xs))
+            StochTempTable::single(PointwiseTable::from_shared_grid(
+                Arc::clone(&shared_grid),
+                xs,
+            ))
         })
     };
 
@@ -1441,9 +1440,9 @@ pub fn load_nuclide_at_temp(
     } else {
         reader.compute_total_xs(aux_temp_idx)
     };
-    let total_table = total_xs_vec.as_ref().map(|xs| {
-        PointwiseTable::from_shared_grid(Arc::clone(&shared_grid), xs.clone())
-    });
+    let total_table = total_xs_vec
+        .as_ref()
+        .map(|xs| PointwiseTable::from_shared_grid(Arc::clone(&shared_grid), xs.clone()));
 
     let elastic = build_kernel_at_temp(&reader, 2, svd_rank, target_temp, &shared_grid);
     let inelastic = build_kernel_at_temp(&reader, 4, svd_rank, target_temp, &shared_grid);
@@ -1593,12 +1592,12 @@ fn ducru_unity_2temp(target: f64, t_lo: f64, t_hi: f64) -> (f64, f64) {
     if (target - t_hi).abs() < 1e-6 {
         return (0.0, 1.0);
     }
-    let w_lo = (t_lo * target).sqrt() / (t_lo + target)
-        * (target - t_hi) / (target + t_hi)
-        * (t_lo + t_hi) / (t_lo - t_hi);
-    let w_hi = (t_hi * target).sqrt() / (t_hi + target)
-        * (target - t_lo) / (target + t_lo)
-        * (t_hi + t_lo) / (t_hi - t_lo);
+    let w_lo = (t_lo * target).sqrt() / (t_lo + target) * (target - t_hi) / (target + t_hi)
+        * (t_lo + t_hi)
+        / (t_lo - t_hi);
+    let w_hi = (t_hi * target).sqrt() / (t_hi + target) * (target - t_lo) / (target + t_lo)
+        * (t_hi + t_lo)
+        / (t_hi - t_lo);
     let s = w_lo + w_hi;
     if s.abs() < 1e-12 {
         // Degenerate case (near endpoint collision) — fall back to equal split.
@@ -1711,11 +1710,9 @@ fn build_kernel_at_temp(
             // not enforce w ≥ 0 — QP-constrained reconstruction is the
             // next fix for physically monotonic interpolation.
             let chosen = nearest_k_temps(&reader.temperatures, target_temp, 3);
-            let sub_temps: Vec<f64> =
-                chosen.iter().map(|&i| reader.temperatures[i]).collect();
+            let sub_temps: Vec<f64> = chosen.iter().map(|&i| reader.temperatures[i]).collect();
             let weights = ducru_unity_weights(&sub_temps, target_temp);
-            let per_temp: Vec<Vec<f64>> =
-                chosen.iter().map(|&i| kernel.temp_coeffs(i)).collect();
+            let per_temp: Vec<Vec<f64>> = chosen.iter().map(|&i| kernel.temp_coeffs(i)).collect();
             let kdim = per_temp[0].len();
             let mut out = vec![0.0_f64; kdim];
             for (m, c) in per_temp.iter().enumerate() {
