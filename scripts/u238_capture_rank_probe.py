@@ -100,6 +100,99 @@ def ducru_unity_weights(t_target: float, t_lo: float, t_hi: float) -> tuple[floa
     return (w_lo / s, w_hi / s)
 
 
+def ducru_weights_n(temps: np.ndarray, t_target: float) -> np.ndarray:
+    """Ducru (2017) Eq. 31 weights on an N-temperature subset. Unstable
+    for N >= 4 due to the product-of-ratios structure; safe for N <= 3
+    and used by 3-temp Ducru via the nearest-3 library selection.
+    """
+    n = len(temps)
+    # One-hot at exact matches
+    for i, tj in enumerate(temps):
+        if abs(tj - t_target) < 1e-6:
+            w = np.zeros(n)
+            w[i] = 1.0
+            return w
+    w = np.zeros(n)
+    for j in range(n):
+        tj = temps[j]
+        leading = np.sqrt(tj * t_target) / (tj + t_target)
+        prod = 1.0
+        for i in range(n):
+            if i == j:
+                continue
+            ti = temps[i]
+            if abs(tj - ti) < 1e-10:
+                continue
+            prod *= ((t_target - ti) / (t_target + ti)) * ((tj + ti) / (tj - ti))
+        w[j] = leading * prod
+    return w
+
+
+def ducru_3temp_unity_weights(temps_full: list[float], t_target: float
+                              ) -> tuple[list[int], np.ndarray]:
+    """Select the 3 library temps nearest to `t_target`, compute raw
+    Ducru weights on that subset, unity-normalize. Returns (indices
+    into temps_full, weights).
+    """
+    # Nearest 3 by absolute distance.
+    order = sorted(range(len(temps_full)),
+                   key=lambda i: abs(temps_full[i] - t_target))
+    idx = sorted(order[:3])
+    sub = np.array([temps_full[i] for i in idx], dtype=float)
+    w_raw = ducru_weights_n(sub, t_target)
+    s = w_raw.sum()
+    w = w_raw / s if abs(s) > 1e-12 else np.full(3, 1.0 / 3.0)
+    return idx, w
+
+
+def project_onto_simplex(v: np.ndarray) -> np.ndarray:
+    """Euclidean projection of `v` onto the probability simplex
+    {w >= 0, sum(w) = 1}. Closed-form O(n log n) algorithm from
+    Duchi, Shalev-Shwartz, Singer & Chandra (ICML 2008).
+
+    For 3 weights this is the QP solution to:
+        minimize  (1/2) ||w - v||^2
+        s.t.      sum(w) = 1,  w_k >= 0
+
+    Applied on top of raw Ducru weights it gives a partition-of-unity,
+    non-negative variant. This is a projected-gradient approximation
+    to Ducru's kernel-space QP (2017 §4), cheap to compute and correct
+    on the key constraints; the exact kernel QP requires the Doppler-
+    kernel Gram matrix and costs more for only a marginal refinement.
+    """
+    v = np.asarray(v, dtype=float)
+    n = v.size
+    u = np.sort(v)[::-1]
+    cssv = np.cumsum(u) - 1.0
+    rho_idx = np.arange(1, n + 1)
+    cond = u - cssv / rho_idx > 0
+    if not cond.any():
+        return np.full(n, 1.0 / n)
+    rho = int(np.max(np.where(cond)))
+    theta = cssv[rho] / (rho + 1)
+    return np.maximum(v - theta, 0.0)
+
+
+def ducru_3temp_qp_weights(temps_full: list[float], t_target: float
+                           ) -> tuple[list[int], np.ndarray]:
+    """Same subset selection as `ducru_3temp_unity_weights`, but instead
+    of unity-renormalizing the raw Ducru weights it projects them onto
+    the probability simplex. Weights that were negative after the raw
+    Ducru formula are clipped to 0, and the remaining mass is shifted
+    onto the positive entries so the result is both non-negative and
+    partition-of-unity.
+    """
+    order = sorted(range(len(temps_full)),
+                   key=lambda i: abs(temps_full[i] - t_target))
+    idx = sorted(order[:3])
+    sub = np.array([temps_full[i] for i in idx], dtype=float)
+    w_raw = ducru_weights_n(sub, t_target)
+    s = w_raw.sum()
+    v = w_raw / s if abs(s) > 1e-12 else np.full(3, 1.0 / 3.0)
+    w = project_onto_simplex(v)
+    return idx, w
+
+
 def rel_l2(a: np.ndarray, b: np.ndarray, mask: np.ndarray | None = None) -> float:
     """Relative L2 error, optionally over a masked energy range."""
     if mask is not None:
@@ -140,10 +233,21 @@ def main() -> None:
     # Bracketing training-column indices.
     i_lo = TRAIN_TEMPS.index(BRACKET[0])
     i_hi = TRAIN_TEMPS.index(BRACKET[1])
+    # 3-temp Ducru: nearest 3 training temps to the target.
+    train_temps_k = [float(t.rstrip("K")) for t in TRAIN_TEMPS]
+    idx3, w3 = ducru_3temp_unity_weights(train_temps_k, HOLDOUT_K)
+    idx3qp, w3qp = ducru_3temp_qp_weights(train_temps_k, HOLDOUT_K)
     print(
         f"  weights: sqrt(T) alpha = {alpha:.4f}  "
-        f"ducru_raw = ({w_lo_raw:.4f}, {w_hi_raw:.4f}) sum={w_lo_raw+w_hi_raw:.4f}  "
-        f"ducru_unity = ({w_lo_du:.4f}, {w_hi_du:.4f})"
+        f"ducru_raw2 = ({w_lo_raw:.4f}, {w_hi_raw:.4f}) sum={w_lo_raw+w_hi_raw:.4f}  "
+        f"ducru_unity2 = ({w_lo_du:.4f}, {w_hi_du:.4f})"
+    )
+    print(
+        f"  ducru_unity3 = {{{', '.join(f'{TRAIN_TEMPS[i]}:{w3[k]:+.4f}' for k, i in enumerate(idx3))}}}"
+    )
+    print(
+        f"  ducru_qp3    = {{{', '.join(f'{TRAIN_TEMPS[i]}:{w3qp[k]:+.4f}' for k, i in enumerate(idx3qp))}}}  "
+        f"(simplex projection — non-negative + unity)"
     )
 
     # Region masks for reporting: resonance region (6-300 eV) vs smooth elsewhere.
@@ -195,7 +299,17 @@ def main() -> None:
     record("raw sqrt(T)-linear", "-", raw_sqrt)
     raw_ducru = (w_lo_du * xs_on_ref[BRACKET[0]]
                  + w_hi_du * xs_on_ref[BRACKET[1]])
-    record("raw ducru-unity", "-", raw_ducru)
+    record("raw ducru-unity (2T)", "-", raw_ducru)
+    # 3-temp raw Ducru (nearest 3 training temps).
+    raw_ducru3 = np.zeros_like(raw_sqrt)
+    for k, i in enumerate(idx3):
+        raw_ducru3 += w3[k] * xs_on_ref[TRAIN_TEMPS[i]]
+    record("raw ducru-unity (3T)", "-", raw_ducru3)
+    # QP-constrained (simplex-projected) 3-temp Ducru.
+    raw_ducru_qp = np.zeros_like(raw_sqrt)
+    for k, i in enumerate(idx3qp):
+        raw_ducru_qp += w3qp[k] * xs_on_ref[TRAIN_TEMPS[i]]
+    record("raw ducru-qp (3T)", "-", raw_ducru_qp)
 
     # SVD-based reconstructions across ranks, both weighting schemes.
     for k in range(1, len(S) + 1):
@@ -209,10 +323,24 @@ def main() -> None:
         hat_sqrt = np.power(10.0, Uk @ (Sk * coeffs_sqrt))
         record("SVD + sqrt(T)-linear", k, hat_sqrt)
 
-        # Normalized Ducru on V^T (new).
+        # 2-temp unity Ducru on V^T.
         coeffs_du = w_lo_du * vt_lo + w_hi_du * vt_hi
         hat_du = np.power(10.0, Uk @ (Sk * coeffs_du))
-        record("SVD + ducru-unity", k, hat_du)
+        record("SVD + ducru-unity (2T)", k, hat_du)
+
+        # 3-temp unity Ducru on V^T.
+        coeffs_du3 = np.zeros(k)
+        for m, i in enumerate(idx3):
+            coeffs_du3 += w3[m] * Vt[:k, i]
+        hat_du3 = np.power(10.0, Uk @ (Sk * coeffs_du3))
+        record("SVD + ducru-unity (3T)", k, hat_du3)
+
+        # 3-temp QP Ducru (simplex-projected) on V^T.
+        coeffs_qp = np.zeros(k)
+        for m, i in enumerate(idx3qp):
+            coeffs_qp += w3qp[m] * Vt[:k, i]
+        hat_qp = np.power(10.0, Uk @ (Sk * coeffs_qp))
+        record("SVD + ducru-qp (3T)", k, hat_qp)
 
     lines.append(f"\n  peak-ratio column measured at E = {peak_E:.3f} eV "
                  f"(truth = {peak_truth:.1f} barns)")
@@ -248,20 +376,30 @@ def main() -> None:
     vt_lo = Vt[:3, i_lo]
     vt_hi = Vt[:3, i_hi]
     hat_sqrt = np.power(10.0, Uk @ (Sk * ((1.0 - alpha) * vt_lo + alpha * vt_hi)))
-    hat_du = np.power(10.0, Uk @ (Sk * (w_lo_du * vt_lo + w_hi_du * vt_hi)))
+    hat_du2 = np.power(10.0, Uk @ (Sk * (w_lo_du * vt_lo + w_hi_du * vt_hi)))
+    coeffs_du3 = np.zeros(3)
+    for m, i in enumerate(idx3):
+        coeffs_du3 += w3[m] * Vt[:3, i]
+    hat_du3 = np.power(10.0, Uk @ (Sk * coeffs_du3))
     err_raw_sqrt = (raw_sqrt - true_900) / true_900
-    err_raw_du = (raw_ducru - true_900) / true_900
+    err_raw_du2 = (raw_ducru - true_900) / true_900
+    err_raw_du3 = (raw_ducru3 - true_900) / true_900
     err_svd_sqrt = (hat_sqrt - true_900) / true_900
-    err_svd_du = (hat_du - true_900) / true_900
+    err_svd_du2 = (hat_du2 - true_900) / true_900
+    err_svd_du3 = (hat_du3 - true_900) / true_900
     axres.axhline(0.0, color="black", linewidth=0.6)
     axres.plot(e_ref[zoom], err_raw_sqrt[zoom] * 100, ":",
                color="#d62728", linewidth=0.9, label="raw sqrt(T)-linear")
-    axres.plot(e_ref[zoom], err_raw_du[zoom] * 100, ":",
-               color="#2ca02c", linewidth=0.9, label="raw ducru-unity")
+    axres.plot(e_ref[zoom], err_raw_du2[zoom] * 100, ":",
+               color="#2ca02c", linewidth=0.9, label="raw ducru-unity 2T")
+    axres.plot(e_ref[zoom], err_raw_du3[zoom] * 100, ":",
+               color="#9467bd", linewidth=0.9, label="raw ducru-unity 3T")
     axres.plot(e_ref[zoom], err_svd_sqrt[zoom] * 100, "--",
                color="#d62728", linewidth=1.2, label="rank 3, sqrt(T)-linear")
-    axres.plot(e_ref[zoom], err_svd_du[zoom] * 100, "--",
-               color="#2ca02c", linewidth=1.2, label="rank 3, ducru-unity")
+    axres.plot(e_ref[zoom], err_svd_du2[zoom] * 100, "--",
+               color="#2ca02c", linewidth=1.2, label="rank 3, ducru-unity 2T")
+    axres.plot(e_ref[zoom], err_svd_du3[zoom] * 100, "--",
+               color="#9467bd", linewidth=1.4, label="rank 3, ducru-unity 3T")
     axres.axvline(peak_E, color="black", linestyle=":", alpha=0.3)
     axres.set_xscale("log")
     axres.set_ylim(-6, 6)
