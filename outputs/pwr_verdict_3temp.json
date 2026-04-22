@@ -1,0 +1,67 @@
+{
+  "args": {
+    "offset": 150.0,
+    "rank": 5,
+    "batches": 120,
+    "inactive": 30,
+    "particles": 50000,
+    "seeds": 10,
+    "rebuild": false,
+    "json": "outputs\\pwr_verdict_3temp.json",
+    "log": "outputs\\pwr_verdict_3temp.log"
+  },
+  "results": {
+    "SVD": {
+      "name": "SVD",
+      "k_inf": 1.32593,
+      "k_std": 0.00059,
+      "ns_per_p": 27297.68,
+      "mem_kb": 156152.0
+    },
+    "Table": {
+      "name": "Table",
+      "k_inf": 1.32304,
+      "k_std": 0.0005,
+      "ns_per_p": 26451.29,
+      "mem_kb": 206128.2
+    },
+    "WMP": {
+      "name": "ACE+WMP",
+      "k_inf": 1.32806,
+      "k_std": 0.00045,
+      "ns_per_p": 27278.95,
+      "mem_kb": 199730.5
+    }
+  },
+  "grades": [
+    {
+      "metric": "k_inf SVD vs ACE+WMP",
+      "value": 212.99999999999653,
+      "unit": "pcm",
+      "grade": "GREEN",
+      "note": "publishable as small systematic"
+    },
+    {
+      "metric": "k_inf Table vs ACE+WMP",
+      "value": 502.00000000000244,
+      "unit": "pcm",
+      "grade": "YELLOW",
+      "note": "table interp has small drift"
+    },
+    {
+      "metric": "memory SVD/WMP",
+      "value": 0.7818134936827374,
+      "unit": "x",
+      "grade": "GREEN",
+      "note": "SVD 22% smaller than WMP"
+    },
+    {
+      "metric": "speed (WMP/SVD ns_per_p)",
+      "value": 0.99931386110468,
+      "unit": "x",
+      "grade": "YELLOW",
+      "note": "SVD within 10% of WMP"
+    }
+  ],
+  "verdict": "YELLOW"
+}
