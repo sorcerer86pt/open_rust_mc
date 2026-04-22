@@ -472,19 +472,16 @@ mod tests {
         use crate::hdf5_reader::{AngularDistribution, TabularMuDist};
         // Single-energy tab: essentially a delta at mu_cm = +1 (linear CDF
         // from 0.9 .. 1.0 over [0.9, 1.0], zero below).
-        let d = TabularMuDist {
+        let mk = || TabularMuDist {
             mu: vec![-1.0, 0.9, 1.0],
+            // Histogram with zero weight in [-1, 0.9] and full weight in [0.9, 1.0].
+            pdf: vec![0.0, 5.0, 5.0],
             cdf: vec![0.0, 0.0, 1.0],
+            histogram: true,
         };
         AngularDistribution {
             energies: vec![1.0, 2.0e7],
-            distributions: vec![
-                TabularMuDist {
-                    mu: d.mu.clone(),
-                    cdf: d.cdf.clone(),
-                },
-                d,
-            ],
+            distributions: vec![mk(), mk()],
             center_of_mass: true,
         }
     }

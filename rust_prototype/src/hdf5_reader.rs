@@ -644,11 +644,27 @@ pub struct AngularDistribution {
 }
 
 /// Tabular mu distribution at a single energy — for inverse CDF sampling.
+///
+/// ENDF/B-VII.1 stores angular distributions as (mu, pdf, cdf) triples with
+/// an `interpolation` attribute indicating how the PDF varies between
+/// tabulated points (1 = histogram / constant PDF per bin → linear CDF,
+/// 2 = linear-linear / PDF linearly interpolated → **quadratic** CDF).
+/// For uranium elastic scattering in the forward-peaked fast range, every
+/// energy uses `interpolation=2`. Treating those as histogram (linear CDF
+/// inversion) systematically under-samples the forward peak and shifts
+/// leakage-dominated benchmarks (e.g. Godiva) by hundreds of pcm.
 pub struct TabularMuDist {
     /// Cosine values, sorted ascending.
     pub mu: Vec<f64>,
+    /// PDF values at each mu breakpoint.
+    pub pdf: Vec<f64>,
     /// Cumulative distribution function values, sorted ascending [0, 1].
     pub cdf: Vec<f64>,
+    /// If true, PDF is constant within each bin (histogram interpolation,
+    /// OpenMC `interpolation=1`) and we invert a linear CDF. If false,
+    /// PDF is linearly interpolated (OpenMC `interpolation=2`) and we solve
+    /// a quadratic for the inverse CDF.
+    pub histogram: bool,
 }
 
 impl AngularDistribution {
@@ -718,13 +734,21 @@ impl TabularMuDist {
     }
 
     /// Sample mu using inverse CDF with a pre-drawn random number.
+    ///
+    /// For histogram interpolation the PDF is constant within each bin so
+    /// the CDF is linear and a single linear inversion gives mu directly.
+    /// For linear-linear interpolation the PDF is linearly interpolated
+    /// between (mu_lo, pdf_lo) and (mu_hi, pdf_hi); integrating, the CDF
+    /// inside the bin is quadratic in (mu - mu_lo) and we invert it with
+    /// the standard quadratic formula, taking the physical root in
+    /// [0, mu_hi - mu_lo]. This matches OpenMC's Tabular::sample in
+    /// src/distribution.cpp.
     fn sample_with_xi(&self, xi: f64) -> f64 {
         let n = self.cdf.len();
         if n < 2 {
-            return 2.0 * xi - 1.0; // uniform fallback
+            return 2.0 * xi - 1.0;
         }
 
-        // Binary search on CDF
         let idx = match self
             .cdf
             .binary_search_by(|c| c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less))
@@ -744,15 +768,56 @@ impl TabularMuDist {
         let cdf_hi = self.cdf[idx + 1];
         let mu_lo = self.mu[idx];
         let mu_hi = self.mu[idx + 1];
+        let dmu = mu_hi - mu_lo;
 
-        if (cdf_hi - cdf_lo).abs() < 1e-15 {
-            return mu_lo;
+        if (cdf_hi - cdf_lo).abs() < 1e-15 || dmu.abs() < 1e-15 {
+            return mu_lo.clamp(-1.0, 1.0);
         }
 
-        // Linear interpolation within the CDF bracket
-        let frac = (xi - cdf_lo) / (cdf_hi - cdf_lo);
-        let mu = mu_lo + frac * (mu_hi - mu_lo);
-        mu.clamp(-1.0, 1.0)
+        if self.histogram {
+            // Constant PDF in bin → linear CDF → single step.
+            let frac = (xi - cdf_lo) / (cdf_hi - cdf_lo);
+            return (mu_lo + frac * dmu).clamp(-1.0, 1.0);
+        }
+
+        // Linear-linear: PDF(mu) = pdf_lo + (pdf_hi - pdf_lo)/dmu * (mu - mu_lo).
+        // CDF(mu) = cdf_lo + pdf_lo * (mu - mu_lo)
+        //         + 0.5 * (pdf_hi - pdf_lo)/dmu * (mu - mu_lo)^2
+        // Setting CDF(mu) = xi and solving for x = mu - mu_lo:
+        //   a x^2 + b x + c = 0, with a = (pdf_hi - pdf_lo)/(2 dmu),
+        //   b = pdf_lo, c = cdf_lo - xi.
+        let pdf_lo = if idx < self.pdf.len() { self.pdf[idx] } else { 0.0 };
+        let pdf_hi = if idx + 1 < self.pdf.len() {
+            self.pdf[idx + 1]
+        } else {
+            pdf_lo
+        };
+        let a = (pdf_hi - pdf_lo) / (2.0 * dmu);
+        let b = pdf_lo;
+        let c = cdf_lo - xi;
+
+        let x = if a.abs() < 1e-14 {
+            // Degenerate: PDF is constant in this bin. Fall back to linear.
+            if b.abs() < 1e-30 {
+                // No PDF info → uniform in bin.
+                (xi - cdf_lo) / (cdf_hi - cdf_lo) * dmu
+            } else {
+                -c / b
+            }
+        } else {
+            // Discriminant clamped to zero to avoid spurious NaNs from
+            // sub-ULP negative values when xi is essentially cdf_lo.
+            let disc = (b * b - 4.0 * a * c).max(0.0);
+            let sqrt_disc = disc.sqrt();
+            // The physical root is the one in [0, dmu]. With a > 0 and
+            // c <= 0 the "+" root is always the right one; with a < 0
+            // (PDF decreasing) it's also the "+" root. Using "+" works
+            // for both signs because we picked b = pdf_lo ≥ 0.
+            (-b + sqrt_disc) / (2.0 * a)
+        };
+
+        let x = x.clamp(0.0, dmu);
+        (mu_lo + x).clamp(-1.0, 1.0)
     }
 }
 
@@ -1677,11 +1742,26 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
             (0..n_energies).map(|i| i * per_e).collect()
         };
 
+    // Per-energy interpolation type: OpenMC writes an `interpolation`
+    // attribute on the mu dataset. Value `1` means histogram (constant PDF
+    // in each mu bin, linear CDF); `2` means linear-linear (PDF linearly
+    // interpolated in each bin, quadratic CDF). Missing/unknown → default
+    // to linear-linear, which is the convention for ENDF/B-VII.1 uranium
+    // elastic scattering at all tabulated energies.
+    let interp_flags: Vec<u8> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("interpolation") {
+            arr.iter().map(|&v| v as u8).collect()
+        } else if let Some(hdf5_pure::AttrValue::I64(v)) = mu_attrs.get("interpolation") {
+            vec![*v as u8]
+        } else {
+            vec![2u8; n_energies]
+        };
+
     // Parse per-energy distributions
     // mu_raw is stored as [3, N_total] in row-major: first N_total values are row 0 (mu),
     // next N_total are row 1 (pdf), next N_total are row 2 (cdf)
     let mu_values = &mu_raw[..n_total];
-    let _pdf_values = &mu_raw[n_total..2 * n_total];
+    let pdf_values = &mu_raw[n_total..2 * n_total];
     let cdf_values = &mu_raw[2 * n_total..3 * n_total];
 
     let mut distributions = Vec::with_capacity(n_energies);
@@ -1689,21 +1769,27 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
         let start = offsets.get(i).copied().unwrap_or(0);
         let end = offsets.get(i + 1).copied().unwrap_or(n_total);
         let end = end.min(n_total);
+        let histogram = interp_flags.get(i).copied().unwrap_or(2) == 1;
 
         if start >= end || start >= n_total {
             // Empty distribution — isotropic
             distributions.push(TabularMuDist {
                 mu: vec![-1.0, 1.0],
+                pdf: vec![0.5, 0.5],
                 cdf: vec![0.0, 1.0],
+                histogram: true,
             });
             continue;
         }
 
         let mu_slice = mu_values[start..end].to_vec();
+        let pdf_slice = pdf_values[start..end].to_vec();
         let cdf_slice = cdf_values[start..end].to_vec();
         distributions.push(TabularMuDist {
             mu: mu_slice,
+            pdf: pdf_slice,
             cdf: cdf_slice,
+            histogram,
         });
     }
 
@@ -1847,21 +1933,33 @@ fn read_angular_dist_from_file(
             let per_e = n_total / n_energies;
             (0..n_energies).map(|i| i * per_e).collect()
         };
+    let interp_flags: Vec<u8> =
+        if let Some(hdf5_pure::AttrValue::I64Array(arr)) = mu_attrs.get("interpolation") {
+            arr.iter().map(|&v| v as u8).collect()
+        } else {
+            vec![2u8; n_energies]
+        };
     let mu_values = &mu_raw[..n_total];
+    let pdf_values = &mu_raw[n_total..2 * n_total];
     let cdf_values = &mu_raw[2 * n_total..3 * n_total];
     let mut distributions = Vec::with_capacity(n_energies);
     for i in 0..n_energies {
         let start = offsets.get(i).copied().unwrap_or(0);
         let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+        let histogram = interp_flags.get(i).copied().unwrap_or(2) == 1;
         if start >= end || start >= n_total {
             distributions.push(TabularMuDist {
                 mu: vec![-1.0, 1.0],
+                pdf: vec![0.5, 0.5],
                 cdf: vec![0.0, 1.0],
+                histogram: true,
             });
         } else {
             distributions.push(TabularMuDist {
                 mu: mu_values[start..end].to_vec(),
+                pdf: pdf_values[start..end].to_vec(),
                 cdf: cdf_values[start..end].to_vec(),
+                histogram,
             });
         }
     }
@@ -2504,9 +2602,28 @@ mod sampling_tests {
         low_bin_mu_cdf: &[(f64, f64)],
         high_bin_mu_cdf: &[(f64, f64)],
     ) -> AngularDistribution {
-        let split = |pts: &[(f64, f64)]| TabularMuDist {
-            mu: pts.iter().map(|p| p.0).collect(),
-            cdf: pts.iter().map(|p| p.1).collect(),
+        let split = |pts: &[(f64, f64)]| {
+            // Tests construct (mu, cdf) pairs; use histogram interpolation
+            // so the CDF inversion matches the pre-existing linear-CDF
+            // expectations that these tests assert against.
+            let mu: Vec<f64> = pts.iter().map(|p| p.0).collect();
+            let cdf: Vec<f64> = pts.iter().map(|p| p.1).collect();
+            // Derive PDF consistent with histogram interpretation.
+            let mut pdf = vec![0.0; mu.len()];
+            for i in 0..mu.len().saturating_sub(1) {
+                let dmu = (mu[i + 1] - mu[i]).max(1e-30);
+                let dcdf = cdf[i + 1] - cdf[i];
+                pdf[i] = dcdf / dmu;
+            }
+            if let Some(last) = pdf.last_mut().copied() {
+                *pdf.last_mut().unwrap() = last;
+            }
+            TabularMuDist {
+                mu,
+                pdf,
+                cdf,
+                histogram: true,
+            }
         };
         AngularDistribution {
             energies: energies.to_vec(),
