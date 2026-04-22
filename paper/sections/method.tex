@@ -50,19 +50,124 @@ $\mathrm{exp}_2$.
 \subsection{Temperature interpolation}
 \label{sec:ducru}
 
-Library temperatures are typically $\{294, 600, 900, 1200,
-2500\}$~K. For target $T \not\in \{T_j\}$ the coefficient
-vector follows the Ducru kernel method~\cite{ducru2017}:
+Library temperatures are typically $\{0, 250, 294, 600, 900,
+1200, 2500\}$~K in the ENDF/B-VII.1 HDF5 distribution. For
+target $T \not\in \{T_j\}$ the coefficient vector follows
+the Ducru kernel method~\cite{ducru2017}:
 \begin{equation}
-c_\ell(T) = \sum_{j} w_j(T)\, V_{j\ell},
+c_\ell(T) = \sum_{j \in \mathcal{S}} w_j(T)\, V_{j\ell},
 \qquad
-w_j(T) = \sqrt{T_j T / (T_j + T)^2}
-\prod_{i \neq j}
-\frac{T - T_i}{T + T_i} \cdot \frac{T_j + T_i}{T_j - T_i}.
+w_j(T) = \frac{\sqrt{T_j T}}{T_j + T}
+\prod_{i \in \mathcal{S}, i \neq j}
+\frac{T - T_i}{T + T_i} \cdot \frac{T_j + T_i}{T_j - T_i},
 \label{eq:ducru}
 \end{equation}
-Exact at library temperatures; $\sim\!0.1\%$ error on
-Doppler-broadened cross sections over $300$--$3000$~K.
+where $\mathcal{S}$ is a subset of library temperatures used
+for the interpolation. Eq.~\ref{eq:ducru} is exact at library
+temperatures ($w$ collapses to a one-hot selector when
+$T = T_j$), $\sim\!0.1\%$ error on Doppler-broadened cross
+sections over $300$--$3000$~K, and L2-optimal for the free
+Doppler kernel on $\mathcal{S}$.
+
+\subsubsection*{Choosing the interpolation subset}
+
+Using $|\mathcal{S}| = N$ (all library temperatures) is
+numerically unstable for $N \gtrsim 4$ because the
+product-of-ratios term in $w_j$ develops near-singular
+factors when non-adjacent $T_i$'s bracket $T$ with large
+stride. In our measurements with $N = 7$ the $2500$~K column
+pulls the product toward values $\sim\!10^{2}$, the resulting
+weights routinely swing by a factor of $10$--$100$ across
+neighbouring target temperatures, and the log-space
+reconstruction sees non-physical oscillations that scale
+linearly with the condition number.
+
+We use the three library temperatures nearest to $T$.
+Three is the smallest subset that captures a quadratic
+correction to the Faddeeva kernel (two-point misses it; see
+Sec.~\ref{sec:off_library}); it is also small enough that
+the product term has only two factors per weight and the
+formula is well-conditioned at every operating temperature
+we tested in the interval $[250, 2500]$~K. Section~\ref{sec:ducru_puoi}
+describes how we make the subset weights a partition of
+unity; this is essential for resonance-dominated systems
+and is the single change that moves the off-library PWR
+result from RED to GREEN on the verdict semaphore.
+
+\subsection{Partition-of-unity Ducru for off-library $T$}
+\label{sec:ducru_puoi}
+
+When Eq.~\ref{eq:ducru} is applied to $V^\top$ columns of a
+$\log_{10}\sigma$ SVD, the reconstructed
+$\log_{10}\tilde\sigma(E_i, T)$ is a linear combination of
+the per-library-$T$ log cross sections with coefficients
+$w_j(T)$. On the \emph{linear} cross section this is a
+weighted geometric mean:
+\begin{equation}
+\tilde\sigma(E, T)
+= \prod_{j \in \mathcal{S}}
+   \sigma(E, T_j)^{w_j(T)}.
+\label{eq:geom_mean}
+\end{equation}
+If $\sum_j w_j \neq 1$, the right-hand side of
+Eq.~\ref{eq:geom_mean} is scaled uniformly by
+$\exp[(\sum_j w_j - 1) \cdot \overline{\log\sigma}]$ where
+the overbar denotes a weighted average of
+$\log_{10}\sigma(E, T_j)$. For smooth channels this is a
+barely-visible gain error (far away from resonance peaks,
+the average $\log\sigma$ is small and the multiplicative
+shift is close to unity). On narrow resonance peaks it is
+catastrophic: at the U-$238$ $6.67$~eV resonance with a
+peak cross section of $\sim\!4500$~b, a $5\%$ gain error
+moves the peak by $\sim\!225$~b, which on a PWR pin cell
+translates to $\sim\!2000$~pcm on $k_\infty$
+(Sec.~\ref{sec:off_library}).
+
+Raw Ducru does \emph{not} have $\sum_j w_j = 1$ in general.
+Eq.~\ref{eq:ducru}'s weights are designed to reconstruct
+$\sigma(E, T)$ in the free-Doppler-kernel L2 norm
+(see~\cite{ducru2017}, §3); partition of unity is not one
+of the optimization's constraints. Measured on our
+$N = 3$ bracketing subset at $T = 750$~K with library
+$(600, 900, 1200)$~K the raw weights
+$(0.21, 0.30, -0.01)$ sum to $0.50$. At $T = 1050$~K with
+library $(900, 1200, 2500)$~K they sum to $0.51$. At
+endpoints they collapse to $(1,0,0)$ / $(0,1,0)$ so the
+total is $1$; \emph{between} endpoints the sum drifts by
+up to $\approx\!0.5$.
+
+We restore partition of unity by a single division:
+\begin{equation}
+\tilde w_j(T) = \frac{w_j(T)}{\sum_{k \in \mathcal{S}} w_k(T)},
+\qquad
+\sum_{j \in \mathcal{S}} \tilde w_j(T) = 1.
+\label{eq:ducru_unity}
+\end{equation}
+This is the scheme used throughout the rest of the paper
+for off-library $T$. It preserves the Faddeeva-derived
+\emph{ratio} $w_j / w_k$ (the physically informative piece
+of Eq.~\ref{eq:ducru}), absorbs the scalar magnitude error
+into a pure rescaling, and leaves Eq.~\ref{eq:ducru_unity}
+exact at library endpoints because the one-hot pattern
+survives normalization. Sec.~\ref{sec:off_library} measures
+the $k_\infty$ consequence on PWR and Godiva.
+
+\subsubsection*{What $\tilde w_j$ is \emph{not}}
+
+It is not the Ducru QP from~\cite{ducru2017} §4. The QP
+enforces $\sum_j w_j = 1$ \emph{and} $w_j \geq 0$
+\emph{and} optimizes the L2 fit in the Doppler-kernel
+norm. Eq.~\ref{eq:ducru_unity} enforces only the first
+constraint and does so as a rescaling rather than a
+projection, so the result is still signed
+($\tilde w_j$ can be negative). On U-$238$~MT$=102$ held
+out at $900$~K we measured the non-negative simplex
+projection~\cite{duchi2008simplex} of the raw Ducru
+weights; the clip-and-renormalize is worse than the signed
+scheme, not better, raising the L2 reconstruction error
+from $1.5\%$ to $5\%$ (Sec.~\ref{sec:off_library_qp}). The
+fully constrained kernel-QP remains future work; for the
+systems we benchmarked, Eq.~\ref{eq:ducru_unity} suffices.
 
 \subsection{Memory trade-off of truncated SVD}
 \label{sec:svd_tradeoff}

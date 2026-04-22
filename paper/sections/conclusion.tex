@@ -29,7 +29,42 @@ engine-level offset on top of it. The four providers agree
 with each other on Godiva to within $37$~pcm, consistent
 with the sub-SEM provider spread seen on PWR.
 
-The \emph{performance} story is less one-sided.
+At a realistic \emph{off-library} operating temperature,
+the story is more interesting. With a uniform $+150$~K
+offset applied to every nuclide (fuel $900\!\to\!1050$~K,
+moderator $600\!\to\!750$~K), OpenMC-style stochastic
+$T$-picking enabled on the pointwise and hybrid paths, and
+a $3$-point unity Ducru weight scheme on the SVD path
+(Sec.~\ref{sec:ducru_puoi}), SVD reproduces $k_\infty$
+within $213$~pcm of ACE+WMP at ten-seed $50\,000$-particle
+$120$-batch statistics --- a small ($\sim\!3.6\sigma$) but
+real systematic, inside the publishable band. SVD is
+$22\%$ smaller than WMP in memory and matches its speed
+within $0.07\%$. This is the result the paper exists to
+report: at a realistic operating temperature a compressed
+SVD representation of ENDF/B-VII.1 cross sections beats
+the industry ACE+WMP baseline on memory, ties it on speed,
+and trails it by a characterisable small systematic on
+$k_\infty$ (Sec.~\ref{sec:off_library_3t}).
+
+Getting there was non-trivial. A naive $2$-point unity Ducru
+leaves a $2094$~pcm kernel-approximation bias at the same
+operating conditions (Sec.~\ref{sec:off_library_2t}); a
+simplex-projected QP that clips the signed Ducru weights
+to non-negativity is \emph{worse} ($5\%$ L2 error on
+U-$238$ capture versus $0.84\%$ for the signed $3$-point
+scheme) because the simplex projection is Euclidean-optimal
+in weight space whereas the raw Ducru weights are
+Euclidean-optimal in the Doppler-kernel norm
+(Sec.~\ref{sec:off_library_qp}). We also found and fixed a
+channel-consistency bug in our stochastic $T$-pick: drawing
+a fresh $\xi$ per partial channel produced non-monotonic
+$k_\infty$-versus-$T$ behaviour that on-library measurements
+cannot detect (Sec.~\ref{sec:off_library_bug}). The
+PHYSOR-style off-library test surfaced it as a byproduct of
+stressing the representation.
+
+The \emph{performance} story on-library is less one-sided.
 CPU SVD rank-$5$ is $1.37\times$--$1.90\times$ faster than
 the in-engine pointwise table on PWR pin cell
 (hardware-dependent) and $1.43\times$ faster than the table
@@ -48,23 +83,36 @@ reduction we measured is $1.06\times$, and the hybrid
 engine is absolutely $4.8$--$5.1\times$ larger than the
 pointwise-table baseline. The discrete-level SVD kernels,
 which WMP does not cover, dominate the engine's working
-set. WMP is a memory-efficient representation of the
-resolved-resonance channels it covers; it is not a memory
-saving at the scale of a running transport engine whose
-reaction set extends far beyond those channels.
+set. Reducing those kernels from rank $5$ to rank $1$ ---
+the reviewer's suggestion and a free change because levels
+are weakly $T$-dependent (Sec.~\ref{sec:discrete_rank}) ---
+closes $\approx\!70\%$ of the engine's SVD working set on
+Godiva with no measurable $k_\text{eff}$ shift. This is
+what enables the off-library $22\%$ memory win against
+ACE+WMP referenced above: with discrete-level rank $1$
+applied, the SVD engine is absolutely smaller than the
+two-endpoint stochastic-$T$ pointwise table even before
+the WMP comparison.
 
 The practical takeaway for a reader considering this
-approach: rank-$5$ SVD with Ducru temperature interpolation
-is correct, agrees with OpenMC and its own pointwise
-baseline within $\le 3\,\mathrm{SEM}_{10}$ on PWR, and is
-modestly faster than pointwise on the CPU; the $43/47$
-rank-one reactions are a real structural property of
-ENDF/B-VII.1 cross sections, worth exploiting. WMP and SVD
-compose cleanly and produce a correct hybrid engine, but
-the headline memory reduction does not come from that
-combination alone in our setup; engine-scale memory savings
-would require compressing the cascade reactions too. We
-report the positive, mixed, and negative findings together
-so the trade-off is visible.
+approach: rank-$5$ SVD with $3$-point unity Ducru
+temperature interpolation and discrete-level rank-$1$ is
+correct, agrees with OpenMC and its own pointwise baseline
+within $\le 3\,\mathrm{SEM}_{10}$ on PWR at on-library $T$,
+and agrees with ACE+WMP within $\sim\!3.6\,\mathrm{SEM}_{10}$
+on PWR at off-library $T$. On memory it wins modestly
+on-library and by $22\%$ off-library; on speed it is
+$1.4\times$--$1.9\times$ faster than pointwise on CPU and
+at parity with ACE+WMP off-library. The $43/47$ rank-one
+reactions and the weakly-$T$-dependent discrete levels
+are real structural properties of ENDF/B-VII.1 cross
+sections, worth exploiting; the raw Ducru weights are
+\emph{not} a partition of unity and must be normalized
+before being applied to a $\log\sigma$ SVD. A fully
+constrained kernel-Gram QP from~\cite{ducru2017}~§4 would
+plausibly tighten the $213$~pcm off-library residual
+further and is the single highest-value piece of future
+work on this line. We report the positive, mixed, and
+negative findings together so the trade-off is visible.
 
 %% ============================================================
