@@ -38,6 +38,7 @@
 pub mod compton;
 pub mod data;
 pub mod hdf5_reader;
+pub mod photoelectric;
 
 pub use data::{
     AnomalousFactors, Bremsstrahlung, ComptonProfiles, PhotonElement, ScatteringFactor, Subshell,
