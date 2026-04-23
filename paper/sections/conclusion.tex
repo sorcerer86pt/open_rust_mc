@@ -2,7 +2,13 @@
 
 Truncated SVD of the $\log_{10}$-transformed cross-section
 matrix is a defensible drop-in \emph{representation} for
-the pointwise table. On a nine-nuclide thermal PWR pin cell,
+the pointwise table. On the Godiva HEU-MET-FAST-$001$
+physical benchmark, our rank-$5$ SVD provider reproduces
+the measured critical $k_\text{eff} = 1.0000 \pm 100$~pcm
+($1\sigma$)~\cite{icsbep_hmf001} to $+79 \pm 38$~pcm ---
+inside the experimental uncertainty band. On a nine-nuclide
+thermal PWR pin cell (no physical benchmark exists;
+OpenMC~$0.15.3$ is the independent code-to-code reference)
 the same engine running rank-$5$ SVD vs its own pointwise
 table agrees on $k_\infty$ within $13$--$47$~pcm on two
 hardware tiers, and all four in-engine providers (CPU table,
@@ -17,17 +23,27 @@ software revision; a CUDA port of the WMP evaluator is
 bit-exact against the CPU path and $7\times$ faster per
 lookup on a consumer GPU.
 
-On Godiva (HEU-MET-FAST-001) the four providers cluster
-$325$--$362$~pcm \emph{above} the ICSBEP experimental value
-$1.0000 \pm 0.0010$~\cite{icsbep_hmf001}. That offset is the
-well-known ENDF/B-VII.1 Godiva bias --- library re-runs at
-the same nuclide data systematically over-predict
-$k_\text{eff}$ by $300$--$500$~pcm, closing to $\sim\!50$~pcm
-under ENDF/B-VIII.0 --- so we read this as our engine
-faithfully reproducing the library and not adding an
-engine-level offset on top of it. The four providers agree
-with each other on Godiva to within $37$~pcm, consistent
-with the sub-SEM provider spread seen on PWR.
+On Godiva (HEU-MET-FAST-$001$) the physical benchmark is
+the ICSBEP experimental critical mass
+$1.0000 \pm 100$~pcm ($1\sigma$)~\cite{icsbep_hmf001}. Our
+rank-$5$ SVD provider reproduces it to $+79 \pm 38$~pcm,
+inside the experimental uncertainty band. OpenMC~$0.15.3$
+on the same ENDF/B-VII.1 HDF5 files sits at $-99$~pcm,
+also inside the band; the two codes straddle experiment
+from opposite sides. Reaching that number required three
+transport sampling fixes --- (n,$2$n)/(n,$3$n) secondary
+banking, $\mu$-CDF inversion for linear-linear ENDF
+angular distributions, and evaporation-vs-tabulated
+continuum-inelastic MT$=91$ outgoing energy --- which
+together close $+325 \to +79$~pcm against ICSBEP
+(Sec.~\ref{sec:godiva_fixes}). Because OpenMC on the
+identical HDF5 sits inside $\sigma_\text{exp}$ from the
+opposite side, the offset is engine-level, not a library
+bias. The cross-code spread to OpenMC ($+178$~pcm at
+these statistics) is larger than either code's offset
+from the experiment; we report it as a cross-code
+diagnostic, not as a deviation from the physical
+benchmark.
 
 At a realistic \emph{off-library} operating temperature,
 the story is more interesting. With a uniform $+150$~K
@@ -97,8 +113,11 @@ the WMP comparison.
 The practical takeaway for a reader considering this
 approach: rank-$5$ SVD with $3$-point unity Ducru
 temperature interpolation and discrete-level rank-$1$ is
-correct, agrees with OpenMC and its own pointwise baseline
-within $\le 3\,\mathrm{SEM}_{10}$ on PWR at on-library $T$,
+correct, reproduces the ICSBEP Godiva experimental
+$k_\text{eff}$ within $+79 \pm 38$~pcm (inside the
+$100$~pcm experimental uncertainty), agrees with OpenMC
+and its own pointwise baseline within
+$\le 3\,\mathrm{SEM}_{10}$ on PWR at on-library $T$,
 and agrees with ACE+WMP within $\sim\!3.6\,\mathrm{SEM}_{10}$
 on PWR at off-library $T$. On memory it wins modestly
 on-library and by $22\%$ off-library; on speed it is

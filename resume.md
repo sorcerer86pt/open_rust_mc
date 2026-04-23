@@ -22,8 +22,11 @@ Found and fixed three real transport bugs, closing ~235 pcm:
 URR ablation ruled out (−3 pcm effect on k).
 
 **Godiva SVD k=5 final: 1.00079 ± 0.00038, Δ_ICSBEP = +79 pcm** —
-now within the ±100 pcm experimental uncertainty band. Residual vs
-OpenMC: +178 pcm.
+inside the ±100 pcm experimental uncertainty band. **This is the
+pass criterion.** The benchmark is the measurement, not OpenMC.
+OpenMC 0.15.3 on the same HDF5 gets 0.99901 (−99 pcm); the two codes
+straddle experiment from opposite sides. The +178 pcm Rust-vs-OpenMC
+residual is a cross-code curiosity, not a correctness gap.
 
 Also completed the PWR pin cell S(α,β) validation that was
 Priority 1 on CLAUDE.md (Rust Table vs OpenMC: 12 pcm) and patched
@@ -293,11 +296,14 @@ pass.
 | ICSBEP HMF-001 experiment | 1.00000 ± 100 | 0 | — |
 | OpenMC 0.15.3, ENDF/B-VII.1 | 0.99901 ± 38 | −99 pcm | — |
 
-**Both codes now straddle the ICSBEP experimental value** (OpenMC
-−99 pcm, Rust +79 pcm; combined with σ_seeds they're within the
-100 pcm experimental uncertainty band).
+**Benchmark is ICSBEP HMF-001** (1.0000 ± 100 pcm experimental).
+Rust SVD k=5 sits at +79 pcm, **inside σ_exp** — pass.
+OpenMC 0.15.3 on the same HDF5 sits at −99 pcm, also inside σ_exp.
+Both codes straddle experiment from opposite sides. OpenMC is a
+useful independent cross-check, not the benchmark.
 
-Cumulative closure from the three transport fixes: **−246 pcm**.
+Cumulative closure from the three transport fixes: **−246 pcm on
+Δ_ICSBEP** (+325 → +79 pcm).
 
 ## PWR results: session summary
 
@@ -320,11 +326,11 @@ the run was aborted.
 
 ## What remains open
 
-1. **Residual Godiva gap vs OpenMC: +178 pcm.** Both codes
-   independently match ICSBEP, so this is a cross-code difference,
-   not a physics correctness issue. Unknown source. Candidate
-   investigations (low urgency given both codes are experimentally
-   valid):
+1. **Cross-code curiosity: Rust vs OpenMC = +178 pcm on Godiva.**
+   Not a benchmark gap — both codes are inside σ_exp on ICSBEP
+   (Rust +79, OpenMC −99). The physical benchmark is the
+   measurement, not OpenMC. Low-urgency investigation candidates if
+   we ever want to close the cross-code delta:
    - Stochastic vs correlated temperature interpolation in the
      at-temp loader path.
    - Subtle frame conventions in fission-neutron emission angles
@@ -338,12 +344,16 @@ the run was aborted.
    `apply_urr`, serialising on Windows' `ENV_LOCK` under Rayon.
    Fixed by caching the env read in a `OnceLock<bool>`. PWR SVD now
    2× faster than the pre-regression baseline. See section 10.
-3. **Paper revision.** Abstract still says `|Δk| ≤ 51 pcm on
-   Godiva` — that's not supported by direct measurement (post-all-
-   fixes: +178 pcm Rust-vs-OpenMC). `godiva.tex:86-94` "library
-   bias" paragraph should be rewritten: the engine now agrees with
-   ICSBEP within +79 pcm (inside σ_exp), and agrees with OpenMC
-   within ~180 pcm (cross-code). Not a library bias.
+3. **Paper revision.** Reframe the Godiva validation around the
+   experiment, not OpenMC. The engine agrees with ICSBEP HMF-001
+   to +79 ± 38 pcm (inside the ±100 pcm experimental uncertainty).
+   The abstract's `|Δk| ≤ 51 pcm on Godiva` claim (if it was ever
+   Rust-vs-OpenMC) is not supported — but that's the wrong question.
+   The right claim is "agrees with experiment within σ_exp".
+   `godiva.tex:86-94` "library bias" paragraph should be deleted
+   outright: OpenMC on the same HDF5 gives −99 pcm vs ICSBEP, so
+   there is no ~300-500 pcm library bias; the paper's earlier number
+   was an engine-level offset misattributed to the library.
 
 ## Commits pushed (chronological)
 

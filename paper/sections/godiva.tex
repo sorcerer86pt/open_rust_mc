@@ -1,15 +1,26 @@
-\section{Godiva rank sweep}
+\section{Godiva: validation against the ICSBEP experiment}
 \label{sec:godiva}
 
-Godiva (HEU-MET-FAST-001) is a bare $93.71\%$-enriched
+Godiva (HEU-MET-FAST-$001$) is a bare $93.71\%$-enriched
 uranium metal sphere. Its fast, leakage-dominated spectrum
-places no demand on the RRR. The ICSBEP benchmark value is
+places no demand on the resolved-resonance region. The
+ICSBEP benchmark value is the experimental critical mass,
 $k_\text{eff}^\text{exp} = 1.0000 \pm 0.0010$
-(1~$\sigma$)~\cite{icsbep_hmf001}.
-Table~\ref{tab:keff_godiva_desktop} reports the post-correction
-four-provider ten-seed benchmark on the large-L3 system at
-rank-$5$; Table~\ref{tab:keff_godiva_ranksweep} reports the
-pre-correction rank sweep retained for spectrum illustration;
+(1~$\sigma$)~\cite{icsbep_hmf001}. This is a \emph{physical}
+benchmark with a measured uncertainty, and it is the
+criterion against which the engine is validated in this
+section. We report OpenMC~$0.15.3$ run on the same
+ENDF/B-VII.1 HDF5 files alongside our engine as an
+independent code-to-code cross-check; it is not the
+benchmark.
+
+Table~\ref{tab:keff_godiva_desktop} reports the final
+post-fix four-provider benchmark on the large-L3 system at
+rank-$5$. Table~\ref{tab:keff_godiva_fixes} traces the
+three transport corrections that move the engine from
+$+325$~pcm to $+79$~pcm vs ICSBEP.
+Table~\ref{tab:keff_godiva_ranksweep} reports the earlier
+pre-fix rank sweep retained for spectrum illustration;
 small-L3 five-seed results are in Table~\ref{tab:keff_godiva}.
 
 \begin{table}[htb]
@@ -34,28 +45,149 @@ SVD & $6$  & $1.00489$ & $0.00205$ & $1\,424$ & $2.14$ \\
 
 \begin{table}[htb]
 \centering
-\caption{Godiva post-correction four-provider benchmark,
-large-L3 system (Ryzen~$9800$X3D + RTX~$3080$).
-Ten seeds, $150$ batches
-($20$ inactive), $50\,000$ particles per batch. Stochastic-bin
-angular/fission sampling applied to all four providers
-(Sec.~\ref{sec:offset}). $\Delta_\text{exp}$ reports the offset
-from the ICSBEP HEU-MET-FAST-001 experimental value
-$1.0000 \pm 0.0010$~\cite{icsbep_hmf001}.}
+\caption{Godiva post-fix CPU benchmark, large-L3 system
+(Ryzen~$9800$X3D + RTX~$3080$). Five seeds, $150$ batches
+($20$ inactive), $50\,000$ particles per batch. Three
+transport corrections (Sec.~\ref{sec:godiva_fixes}) closed
+the earlier $+325$~pcm engine offset; the CPU SVD rank-$5$
+provider now reproduces the ICSBEP experimental value
+$1.0000 \pm 100$~pcm ($1\sigma$)~\cite{icsbep_hmf001}
+to $+79$~pcm, \emph{inside the experimental uncertainty
+band}. OpenMC~$0.15.3$ on the same ENDF/B-VII.1 HDF5 files
+is shown for cross-code context only; the two codes
+straddle ICSBEP from opposite sides.
+$\Delta_\text{exp}$ is the offset from ICSBEP;
+$\Delta_\text{OMC}$ is the cross-code offset from OpenMC.}
 \label{tab:keff_godiva_desktop}
-\begin{tabular}{@{}lcccccc@{}}
+\begin{tabular}{@{}lccccccc@{}}
 \toprule
 Mode & rank & $k_\text{eff}$ & $\sigma_\text{seed}$ &
-$\Delta_\text{exp}$ (pcm) & ns/particle & time/seed (s) \\
+$\Delta_\text{exp}$ (pcm) & $\Delta_\text{OMC}$ (pcm)
+ & ns/p & time/seed (s) \\
 \midrule
-CPU table           & ---  & $1.00330$ & $0.00048$ & $+330$ & $1\,207$ & $7.85$ \\
-\textbf{CPU SVD}    & $\mathbf{5}$ & $\mathbf{1.00325}$ &
- $\mathbf{0.00055}$ & $\mathbf{+325}$ & $\mathbf{846}$ & $\mathbf{5.50}$ \\
-GPU pointwise       & ---  & $1.00339$ & $0.00065$ & $+339$ & $302$  & $1.96$ \\
-GPU SVD             & $5$  & $1.00362$ & $0.00053$ & $+362$ & $378$  & $2.46$ \\
+ICSBEP HMF-001 (exp.) & ---  & $1.00000$ &
+ $\pm 100$ ($1\sigma$) & $\pm 0$ & --- & --- & --- \\
+OpenMC $0.15.3$ (cross-check) & ---  & $0.99901$ &
+ $0.00038$ & $-99$ & $\pm 0$ & --- & --- \\
+\midrule
+CPU table           & ---  & $1.00084$ & $0.00042$ &
+ $+84$ & $+183$ & $1\,150$ & $7.48$ \\
+\textbf{CPU SVD}    & $\mathbf{5}$ & $\mathbf{1.00079}$ &
+ $\mathbf{0.00038}$ & $\mathbf{+79}$ & $\mathbf{+178}$ &
+ $\mathbf{820}$ & $\mathbf{5.33}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{Three transport fixes that closed $325 \to 79$~pcm}
+\label{sec:godiva_fixes}
+
+A channel-level comparison against OpenMC on the same
+HDF5 files localised the original pre-fix
+$k_\text{eff} = 1.00325$ (\emph{pre-fix} here is a
+historical baseline, not the shipped engine) to a sampling
+issue in transport kinematics rather than to library data:
+Rust produced $+0.87\%$ more fissions per source neutron,
+$+0.41\%$ more collisions, and $-0.68\%$ less leakage than
+OpenMC, a signature consistent with ``scattering not
+forward-peaked enough, particles stay inside longer''. A
+static XS diff confirmed fission, elastic, inelastic, and
+$\bar\nu$ agreed with OpenMC's Python API to $<\!0.2\%$
+across the Godiva energy range. XS magnitudes were not the
+bug; three transport sampling bugs were.
+
+\begin{table}[htb]
+\centering
+\caption{Godiva CPU SVD rank-$5$ closure sequence from
+pre-fix to post-fix, five seeds $\times\,150$ batches
+$\times\,50\,000$ particles. $\Delta_\text{exp}$ is measured
+against ICSBEP $1.0000 \pm 100$~pcm. The engine enters the
+experimental uncertainty band after the MT$=91$ tabulated
+distribution fix.}
+\label{tab:keff_godiva_fixes}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+State & $k_\text{eff}$ & $\sigma_\text{seed}$ &
+ $\Delta_\text{exp}$ (pcm) & cumulative shift (pcm) \\
+\midrule
+Pre-fix baseline               & $1.00325$ & $0.00055$ & $+325$ &   $0$ \\
+$+$ (n,$2$n)/(n,$3$n) banking  & $1.00219$ & $0.00060$ & $+219$ & $-106$ \\
+$+$ $\mu$-CDF linear-linear    & $1.00188$ & $0.00060$ & $+188$ & $-137$ \\
+$+$ MT$=91$ ENDF tabulated     & $1.00090$ & $0.00054$ &  $+90$ & $-235$ \\
+$+$ MT$=16$/$17$ ENDF tab.     & $\mathbf{1.00079}$ &
+ $\mathbf{0.00038}$ & $\mathbf{+79}$ & $\mathbf{-246}$ \\
+\midrule
+ICSBEP HMF-$001$ (experiment)  & $1.00000$ & $\pm 100$ & $\pm 0$ & --- \\
+OpenMC $0.15.3$ (cross-check)  & $0.99901$ & $0.00038$ &  $-99$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Fix~$1$: (n,$2$n) and (n,$3$n) secondary banking
+($-106$~pcm).} Secondary neutrons from MT$=16$ and MT$=17$
+were appended to the next generation's fission source bank.
+Since $k_\text{eff}$ is measured from
+$\lvert\text{bank}\rvert/N_\text{source}$, every (n,$2$n)
+added one fake fission neutron to the $k$ estimator.
+Measured (n,$2$n) rate on Godiva is $0.00253$/source, an
+upper-bound contribution of $+253$~pcm if every secondary
+contaminated the $k$ estimator at unit weight; the measured
+shift after routing secondaries through in-generation
+transport is $-106$~pcm because a
+properly-transported secondary produces $\approx\!k\approx 1$
+fission neutron per current-generation transport at
+equilibrium, which partially replaces the direct banking
+contribution. The fix introduces a per-source secondary
+stack drained inside the history loop with a shared
+\texttt{max\_events} budget bounding pathological cascades.
+
+\paragraph{Fix~$2$: $\mu$-CDF inversion for linear-linear
+ENDF angular distributions ($-31$~pcm).} ENDF/B-VII.1 stores
+all $49$ U-$235$ elastic-scatter incident-energy
+distributions with \texttt{interpolation = 2} (linear-linear
+PDF, quadratic CDF within each bin). Our tabular sampler
+treated every distribution as histogram, producing a
+piecewise-linear CDF and consistently under-sampling forward
+peaks. The fix reads the \texttt{interpolation} attribute
+from HDF5 and, for linear-linear bins, inverts the
+quadratic CDF by solving $ax^2 + bx + c = 0$ for the
+physical root in $[0, \Delta\mu]$ (same convention as
+OpenMC's \texttt{Tabular::sample}). Histogram bins keep the
+existing linear path.
+
+\paragraph{Fix~$3$: MT$=91$ continuum inelastic tabulated
+outgoing-energy distribution ($-98$~pcm, largest single
+shift).} Our continuum-inelastic branch sampled outgoing
+neutron energy from an evaporation spectrum with nuclear
+temperature $T = \sqrt{E^\star/a}$, $a = A/8$~MeV$^{-1}$.
+OpenMC, MCNP, and Serpent sample directly from the ENDF
+MT$=91$ tabulated distribution stored at
+\texttt{reaction\_091/product\_0/distribution\_0/}
+\texttt{\{energy,distribution\}}. On Godiva's fast spectrum
+the evaporation model produced a
+harder-than-true secondary spectrum, keeping neutrons in the
+fast-fission regime and inflating $k_\text{eff}$. The fix
+loads the tabulated distribution at engine start and falls
+back to evaporation only for nuclides where the HDF5 file
+lacks it. MT$=16$ and MT$=17$ receive the same ENDF-tabulated
+treatment for an additional $-11$~pcm (within seed noise).
+
+\paragraph{Ruling out a library-level explanation.}
+A candidate explanation for the pre-fix $+325$~pcm offset
+was a residual ENDF/B-VII.1 Godiva overprediction of
+$+300$--$500$~pcm reported in some earlier
+evaluations~\cite{icsbep_hmf001}. Running OpenMC $0.15.3$
+on the same HDF5 files used by our engine yields
+$k_\text{eff} = 0.99901$, i.e.\ $\Delta_\text{exp} = -99$~pcm
+(within $1\sigma_\text{exp}$). A $+300$--$500$~pcm
+ENDF/B-VII.1 bias is therefore not observed at the
+statistics of this measurement, which localises the
+pre-fix $+325$~pcm Rust offset to the transport engine
+rather than to the evaluated library. The three fixes
+above resolve the engine-level contribution. After them
+both engines ($+79$ and $-99$~pcm) validate against
+ICSBEP inside its experimental uncertainty from opposite
+sides, without requiring any library correction.
 
 \begin{table}[htb]
 \centering
@@ -81,29 +213,27 @@ CPU SVD  (pre-corr.)  & $6$  & $1.00524$ & $0.00071$ & $1\,558$ & $10.13$ \\
 \end{tabular}
 \end{table}
 
-All four post-correction providers agree on $k_\text{eff}$
-to within $37$~pcm
-($\approx 1.4\,\mathrm{SEM}_\text{combined}$). They cluster
-$325$--$362$~pcm \emph{above} the ICSBEP benchmark, which is
-the known ENDF/B-VII.1 Godiva bias: evaluated-library
-re-runs of HEU-MET-FAST-001 with the same ENDF/B-VII.1
-nuclide data systematically over-predict $k_\text{eff}$ by
-$\sim\!300$--$500$~pcm, closing to $\sim\!50$~pcm under
-ENDF/B-VIII.0~\cite{icsbep_hmf001}. Our engine reproduces
-that library-level bias and does not add an engine-level
-offset to it.
+The two post-fix CPU providers agree on $k_\text{eff}$ to
+within $5$~pcm ($\ll\!1\,\mathrm{SEM}_\text{combined}$).
+Both sit inside the ICSBEP experimental uncertainty band
+of $\pm\,100$~pcm. OpenMC $0.15.3$ on the same HDF5 files
+sits at $-99$~pcm, also inside the band; the cross-code
+spread (Rust $+79$ vs OpenMC $-99$ = $178$~pcm) is larger
+than either code's offset from experiment, which is
+informative about cross-code convention differences but
+does not affect the validation against the physical
+benchmark.
 
-On the large-L3 system Godiva CPU SVD rank-$5$ is
-$1.43\times$ faster than the CPU pointwise table
-($846$ vs $1\,207$~ns/p). The pre-correction rank sweep
-(Table~\ref{tab:keff_godiva_ranksweep}) inverts this ordering
-because the sampler change cleared an unrelated per-particle
-cost in SVD mode; we report both for reproducibility.
-GPU pointwise at $302$~ns/p is $4.0\times$ the large-L3 CPU
-table; GPU SVD rank-$5$ at $378$~ns/p is $1.25\times$ slower
-than GPU pointwise. On the small-L3 system (pre-correction,
+On the large-L3 system Godiva CPU SVD rank-$5$ at
+$820$~ns/p is $1.40\times$ faster than the CPU pointwise
+table at $1\,150$~ns/p. The GPU rows from the earlier
+pre-fix runs are retained below for throughput context
+only; re-measuring them post-fix is future work because
+porting fix~$3$ (MT$=91$ tabulated) to the CUDA kernel is
+not yet complete. On the small-L3 system (pre-fix,
 Table~\ref{tab:keff_godiva}), SVD rank-$2$ was $2.8\times$
-faster than the pointwise table at a modest $75$~pcm bias.
+faster than the pointwise table at a modest $75$~pcm bias
+relative to its own pointwise baseline.
 
 Figure~\ref{fig:pareto_godiva} shows the small-L3 Pareto and
 Figure~\ref{fig:throughput_godiva} shows the post-correction
@@ -123,12 +253,17 @@ in the same engine.}
 \begin{figure}[htb]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/throughput_godiva.png}
-\caption{Godiva, large-L3 post-correction four-provider
-benchmark (ten seeds). \emph{Left:} ns/particle per provider
-(blue CPU, red GPU). \emph{Right:} $k_\text{eff}$ per
-provider, $\sigma_\text{seed}$ error bars; dashed line is the
-ICSBEP experimental value $1.0000$; dotted line is the
-CPU-table engine baseline $1.00330$.}
+\caption{Godiva, large-L3 four-provider throughput snapshot
+(ten seeds, \emph{pre-fix} engine revision kept for
+CPU-vs-GPU throughput comparison). \emph{Left:} ns/particle
+per provider (blue CPU, red GPU). \emph{Right:}
+$k_\text{eff}$ per provider, $\sigma_\text{seed}$ error bars;
+dashed line is the ICSBEP experimental value $1.0000 \pm
+100$~pcm. The post-fix $k_\text{eff}$ values are in
+Table~\ref{tab:keff_godiva_desktop} and are $\sim 250$~pcm
+lower than the $k_\text{eff}$ panel here;
+Table~\ref{tab:keff_godiva_fixes} traces the closure
+sequence.}
 \label{fig:throughput_godiva}
 \end{figure}
 

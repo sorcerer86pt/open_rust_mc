@@ -16,10 +16,20 @@ kernel reconstruction~\cite{ducru2017} closes the
 accuracy gap at realistic off-library operating
 temperatures. A pure-Rust transport engine implements four
 providers --- pointwise table, SVD, ACE+WMP, and SVD+WMP
-hybrid --- behind a common interface, validated against
-OpenMC~$0.15.3$ to $|\Delta k|\le51$~pcm on a $9$-nuclide
-PWR pin cell and on the Godiva fast benchmark. $43$ of
-$47$ non-redundant $^{235}$U reaction channels are rank-one
+hybrid --- behind a common interface. On the Godiva
+HEU-MET-FAST-$001$ fast critical
+benchmark~\cite{icsbep_hmf001} the engine's rank-$5$ SVD
+provider reproduces the measured $k_\text{eff} = 1.0000
+\pm 100$~pcm ($1\sigma$) to $\Delta_\text{exp} = +79
+\pm 38$~pcm, inside the experimental uncertainty band;
+OpenMC~$0.15.3$ on the same ENDF/B-VII.1 HDF5 files sits
+at $-99$~pcm, also inside the band, with the two codes
+straddling experiment from opposite sides. On a
+$9$-nuclide PWR pin cell (no physical benchmark exists;
+OpenMC $0.15.3$ is used as an independent code-to-code
+reference) all four providers agree with OpenMC to
+$|\Delta k|\le 51$~pcm. $43$ of $47$ non-redundant
+$^{235}$U reaction channels are rank-one
 to machine precision, and rank-$5$ SVD with discrete-level
 rank-$1$ recovers engine-wide $k_\text{eff}$ within
 $\sim\!50$~pcm of the in-engine pointwise baseline on both

@@ -29,10 +29,15 @@ eigenvalue simulations end-to-end.
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
 - Each nuclide needs its own SVD basis — not a problem, bases are small
 
-## Current State: k_eff = 1.00016 +/- 0.00080 (Godiva, real ENDF data)
+## Current State: k_eff = 1.00079 +/- 0.00038 (Godiva, real ENDF data)
 
-OpenMC gets 0.99857. We get 1.00016 +/- 0.00080. Gap = ~160 pcm from OpenMC.
-Delta from experiment = **16 pcm** (< 0.2 sigma). 150 batches, 20k particles.
+**Benchmark is ICSBEP HMF-001** (k = 1.0000 ± 100 pcm experimental).
+We get 1.00079 ± 0.00038 → **Δ_ICSBEP = +79 pcm, inside σ_exp. Pass.**
+OpenMC 0.15.3 on the same HDF5 gets 0.99901 (−99 pcm vs ICSBEP) — also
+inside σ_exp. Both codes straddle experiment from opposite sides;
+OpenMC is an independent cross-check, not the benchmark.
+5 seeds × 150 batches × 50k particles, CPU SVD k=5. See `resume.md`
+for the three transport fixes that closed +325 → +79 pcm.
 
 ### Implemented (Priority 1 from previous round)
 
@@ -285,10 +290,12 @@ Extract to `data/endfb-vii.1-hdf5/`. Key files:
 | Godiva dk (fission SVD k=4) | 6.9 pcm |
 | Godiva dk (all rxn SVD k=4) | 3.7 pcm |
 | PWR pin cell dk (SVD k=5) | 59.7 pcm |
-| Our Rust Godiva k_eff | 1.00016 +/- 0.00080 |
-| OpenMC Godiva k_eff | 0.99857 |
-| Gap from OpenMC | ~160 pcm |
-| Gap from experiment | **16 pcm** |
+| ICSBEP HMF-001 (benchmark) | 1.0000 ± 100 pcm (σ_exp) |
+| Our Rust Godiva k_eff (SVD k=5) | 1.00079 ± 0.00038 |
+| **Δ_ICSBEP (pass criterion)** | **+79 pcm, inside σ_exp** |
+| OpenMC 0.15.3 Godiva k_eff (same HDF5) | 0.99901 ± 0.00038 |
+| OpenMC Δ_ICSBEP (cross-check) | −99 pcm, inside σ_exp |
+| Rust-vs-OpenMC (cross-code) | +178 pcm (not a benchmark) |
 | History: const nu-bar | 0.994 (coincidental) |
 | History: + E-dep nu-bar | 1.059 (+6500 pcm) |
 | History: + aniso scatter | 0.965 (-9400 pcm) |

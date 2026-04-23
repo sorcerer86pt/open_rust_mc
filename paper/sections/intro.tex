@@ -80,8 +80,8 @@ retract the earlier memory headline.
   throughput on an RTX~$3080$
   (Sec.~\ref{sec:gpu_wmp}).
 \item A tracing and closure of the original $78$--$127$~pcm
-  engine offset from OpenMC~$0.15.3$ via three corrections
-  (XS-audit exonerating the total-XS assembly; a
+  PWR engine offset from OpenMC~$0.15.3$ via three
+  corrections (XS-audit exonerating the total-XS assembly; a
   $\bar\nu$ delayed-yield reader fix; correlated-CDF
   $\rightarrow$ stochastic-bin sampling for angular and
   fission distributions, ported to both CPU and GPU paths).
@@ -90,6 +90,22 @@ retract the earlier memory headline.
   $-25$, GPU pointwise $+51$, GPU SVD $-8$), with a
   Shannon-entropy source-convergence monitor added as
   runtime diagnostic (Sec.~\ref{sec:offset}).
+\item Validation against the ICSBEP Godiva
+  HEU-MET-FAST-$001$ \emph{physical} benchmark
+  $k_\text{eff}^\text{exp} = 1.0000 \pm 100$~pcm
+  ($1\sigma$)~\cite{icsbep_hmf001}. Three additional
+  transport fixes on the fast-spectrum path ---
+  (n,$2$n)/(n,$3$n) secondary-neutron banking, $\mu$-CDF
+  inversion for linear-linear ENDF angular distributions,
+  and ENDF-tabulated vs evaporation sampling for MT$=91$
+  continuum inelastic --- close a $+325 \to +79$~pcm
+  engine offset, after which our rank-$5$ SVD provider
+  reproduces the experimental value to
+  $\Delta_\text{exp} = +79 \pm 38$~pcm, inside the
+  experimental uncertainty band. OpenMC~$0.15.3$ on the
+  same ENDF/B-VII.1 HDF5 files sits at $-99$~pcm, also
+  inside the band; the two codes straddle the measurement
+  from opposite sides (Sec.~\ref{sec:godiva_fixes}).
 \item A clear separation of two memory measurements: the
   WMP representation-byte ratio against a hypothetical
   four-channel pointwise table is $132.9\times$ for our

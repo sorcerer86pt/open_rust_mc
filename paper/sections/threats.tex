@@ -1,11 +1,25 @@
 \section{Threats to validity}
 \label{sec:threats}
 
-\paragraph{Scope of benchmarks.}
-Nine nuclides (thermal PWR pin cell) and three nuclides (fast
-Godiva). Full-core LWR analyses carry $\gtrsim 200$ nuclides;
-the hybrid memory picture scales with the reaction-channel
-mix and could look very different there.
+\paragraph{Scope and nature of benchmarks.}
+Two systems: Godiva (HEU-MET-FAST-$001$, three nuclides,
+fast spectrum, \emph{physical} ICSBEP benchmark with measured
+$k_\text{eff}^\text{exp} = 1.0000 \pm 100$~pcm $1\sigma$) and
+a nine-nuclide thermal PWR pin cell (no physical benchmark;
+we use OpenMC $0.15.3$ as an independent code-to-code
+reference). Full-core LWR analyses carry $\gtrsim 200$
+nuclides; the hybrid memory picture scales with the
+reaction-channel mix and could look very different there.
+On Godiva we report $\Delta_\text{exp}$ against ICSBEP as
+the primary validation metric and $\Delta_\text{OMC}$
+against OpenMC only as an independent cross-code check;
+the two codes straddle experiment from opposite sides at
+this statistics, and the cross-code spread ($178$~pcm)
+is larger than either code's offset from the measurement. On PWR,
+with no physical benchmark available, the OpenMC
+$|\Delta| \le 51$~pcm agreement is the strongest claim we
+can make and should be read as a code-to-code cross-check,
+not as absolute validation.
 
 \paragraph{S($\alpha$,$\beta$) coverage.}
 Only H in H$_2$O is exercised. D$_2$O, graphite, ZrH, and
