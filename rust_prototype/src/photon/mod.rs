@@ -39,8 +39,10 @@ pub mod coherent;
 pub mod compton;
 pub mod data;
 pub mod hdf5_reader;
+pub mod material;
 pub mod pair;
 pub mod photoelectric;
+pub mod transport;
 
 pub use data::{
     AnomalousFactors, Bremsstrahlung, ComptonProfiles, PhotonElement, ScatteringFactor, Subshell,
