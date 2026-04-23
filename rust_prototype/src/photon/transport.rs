@@ -429,14 +429,18 @@ fn transport_one_csg(
                     Channel::Incoherent => {
                         let out = compton_scatter(elem, energy, rng);
                         result.energy_deposited += out.electron_kinetic;
-                        result.deposits.push((pos, out.electron_kinetic));
+                        let dep_pos =
+                            electron_deposit_pos(pos, dir, material, out.electron_kinetic);
+                        result.deposits.push((dep_pos, out.electron_kinetic));
                         energy = out.energy_out;
                         dir = deflect(dir, out.mu, rng);
                     }
                     Channel::Photoelectric => {
                         let out = photoelectric_absorb(elem, energy, DEFAULT_PHOTON_CUTOFF_EV, rng);
                         result.energy_deposited += out.local_deposition;
-                        result.deposits.push((pos, out.local_deposition));
+                        let dep_pos =
+                            electron_deposit_pos(pos, dir, material, out.local_deposition);
+                        result.deposits.push((dep_pos, out.local_deposition));
                         for ep in out.fluorescence_photons {
                             let (dx, dy, dz) = rng.isotropic_direction();
                             bank.push((pos, Vec3::new(dx, dy, dz), ep, cell_idx));
@@ -446,7 +450,13 @@ fn transport_one_csg(
                     Channel::PairProductionNuclear | Channel::PairProductionElectron => {
                         if let Some(out) = pair_produce(energy, rng) {
                             result.energy_deposited += out.local_deposition();
-                            result.deposits.push((pos, out.local_deposition()));
+                            // Pair kinetic energy is shared between e⁻ and
+                            // e⁺; average range displacement uses the
+                            // half-energy per particle rather than the
+                            // combined kinetic energy.
+                            let per_particle_ke = 0.5 * out.local_deposition();
+                            let dep_pos = electron_deposit_pos(pos, dir, material, per_particle_ke);
+                            result.deposits.push((dep_pos, out.local_deposition()));
                             let (dx, dy, dz) = rng.isotropic_direction();
                             let ann_dir = Vec3::new(dx, dy, dz);
                             bank.push((pos, ann_dir, ANNIHILATION_ENERGY_EV, cell_idx));
@@ -464,6 +474,33 @@ fn transport_one_csg(
     // Event budget exhausted — deposit remaining energy locally.
     result.energy_deposited += energy;
     result.deposits.push((pos, energy));
+}
+
+/// Compute where a recoil-electron's kinetic energy should be
+/// deposited, given the photon's pre-collision position and
+/// direction, the host material, and the electron kinetic energy.
+///
+/// Uses the CSDA midrange approximation: the electron travels
+/// `R_e(E) / 2` on average before depositing its energy. Electron
+/// direction is approximated by the incoming photon's direction
+/// (photons and their Compton/photoelectric/pair electrons share
+/// the forward lab-frame momentum on average at reactor energies).
+///
+/// Materials with `density_g_per_cm3 == 0` disable displacement and
+/// fall back to kerma (deposit at collision point) — the range
+/// evaluates to 0 in that case.
+fn electron_deposit_pos(
+    pos: Vec3,
+    dir: Vec3,
+    material: &PhotonMaterial,
+    electron_kinetic_ev: f64,
+) -> Vec3 {
+    let r_cm = material.electron_range_cm(electron_kinetic_ev);
+    if r_cm <= 0.0 {
+        pos
+    } else {
+        pos + dir * (r_cm * 0.5)
+    }
 }
 
 /// Apply the boundary condition at a surface hit. Returns `false` when

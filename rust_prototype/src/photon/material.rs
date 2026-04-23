@@ -32,19 +32,63 @@ pub enum Channel {
 /// consider `Arc<PhotonElement>` instead (not needed yet).
 pub struct PhotonMaterial {
     pub entries: Vec<(f64, PhotonElement)>,
+    /// Mass density (g/cm³) used to convert the Katz-Penfold CSDA
+    /// electron range from g/cm² to cm. Set via
+    /// [`PhotonMaterial::with_density`]. When zero (default) the
+    /// transport driver disables electron-range displacement and
+    /// falls back to kerma (deposit-at-collision).
+    pub density_g_per_cm3: f64,
 }
 
 impl PhotonMaterial {
     /// Construct a material from `(atoms_per_barn_cm, element)` pairs.
+    /// Density defaults to zero (kerma mode); use
+    /// [`PhotonMaterial::with_density`] to enable electron-range
+    /// displacement.
     pub fn new(entries: Vec<(f64, PhotonElement)>) -> Self {
-        Self { entries }
+        Self {
+            entries,
+            density_g_per_cm3: 0.0,
+        }
     }
 
-    /// Construct a single-element material at a given density.
+    /// Construct a single-element material at a given atom density.
     pub fn mono(atom_density: f64, element: PhotonElement) -> Self {
         Self {
             entries: vec![(atom_density, element)],
+            density_g_per_cm3: 0.0,
         }
+    }
+
+    /// Set the mass density (g/cm³) used for the Katz-Penfold CSDA
+    /// electron range. Chain after [`PhotonMaterial::new`] or
+    /// [`PhotonMaterial::mono`].
+    pub fn with_density(mut self, density_g_per_cm3: f64) -> Self {
+        self.density_g_per_cm3 = density_g_per_cm3;
+        self
+    }
+
+    /// Katz-Penfold CSDA electron range (cm) at kinetic energy
+    /// `e_kin_ev`. Returns 0 when density is unset — the caller
+    /// treats that as "kerma mode, no displacement".
+    ///
+    /// Reference: Katz & Penfold, Rev. Mod. Phys. 24, 28 (1952).
+    /// `R(E) [g/cm²] ≈ 0.412 · E^(1.265 − 0.0954 ln E)` below 2.5 MeV,
+    /// `R(E) [g/cm²] ≈ 0.530 · E − 0.106` above. Valid 10 keV-20 MeV.
+    /// Not material-specific (mass-range invariance); divide by ρ to
+    /// get cm.
+    pub fn electron_range_cm(&self, e_kin_ev: f64) -> f64 {
+        if self.density_g_per_cm3 <= 0.0 || e_kin_ev <= 1.0e4 {
+            return 0.0;
+        }
+        let e_mev = e_kin_ev * 1.0e-6;
+        let r_g_per_cm2 = if e_mev < 2.5 {
+            let exp = 1.265 - 0.0954 * e_mev.ln();
+            0.412 * e_mev.powf(exp)
+        } else {
+            0.530 * e_mev - 0.106
+        };
+        r_g_per_cm2 / self.density_g_per_cm3
     }
 
     /// Macroscopic channel cross section at energy `E` in cm⁻¹.

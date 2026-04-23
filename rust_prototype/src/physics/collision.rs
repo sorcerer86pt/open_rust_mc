@@ -59,8 +59,16 @@ pub struct SecondaryNeutron {
 /// Outcome of processing a collision.
 #[derive(Debug)]
 pub enum CollisionOutcome {
-    /// Particle scattered — new energy and direction set.
+    /// Particle scattered elastically — new energy and direction set.
     Scatter,
+    /// Particle scattered inelastically off a discrete level (MT=51..91)
+    /// or the continuum inelastic channel (MT=91 / MT=4 fallback).
+    /// `q_value_ev` is the ENDF Q-value of the level (negative; its
+    /// absolute value is the excitation energy the residual nucleus
+    /// carries away as a γ cascade). Callers that want to emit the
+    /// de-excitation γ bank a `PhotonSourceEvent` with
+    /// `energy = q_value_ev.abs()` at the collision site.
+    InelasticScatter { q_value_ev: f64 },
     /// Particle absorbed (capture or other absorption).
     Absorption,
     /// Particle caused fission — absorbed, fission sites banked for
@@ -143,7 +151,9 @@ pub fn process_collision(
         );
         particle.energy = new_energy;
         particle.dir = new_dir;
-        return CollisionOutcome::Scatter;
+        return CollisionOutcome::InelasticScatter {
+            q_value_ev: q_value,
+        };
     }
 
     // (n,2n) — two neutrons emerge from a compound nucleus. Each
@@ -509,7 +519,10 @@ mod tests {
             0.0,
             &mut rng,
         );
-        assert!(matches!(outcome, CollisionOutcome::Scatter));
+        assert!(matches!(
+            outcome,
+            CollisionOutcome::Scatter | CollisionOutcome::InelasticScatter { .. }
+        ));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy
     }
@@ -590,7 +603,10 @@ mod tests {
                 0.0,
                 &mut rng,
             );
-            assert!(matches!(outcome, CollisionOutcome::Scatter));
+            assert!(matches!(
+                outcome,
+                CollisionOutcome::Scatter | CollisionOutcome::InelasticScatter { .. }
+            ));
             sum_x += p.dir.x;
         }
         // Forward-peaked CM distribution → lab direction biased forward:
