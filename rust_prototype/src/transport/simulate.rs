@@ -279,6 +279,15 @@ pub trait XsProvider: Send + Sync {
 
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
 
+    /// Photon products for a nuclide, one entry per ENDF MT with a
+    /// `particle="photon"` product in the HDF5 file. Used by coupled
+    /// neutron-photon transport to sample `(multiplicity, E_γ)` at
+    /// each capture / fission / inelastic site. Default empty slice =
+    /// no photon production modelled.
+    fn photon_products(&self, _nuclide_idx: usize) -> &[(u32, crate::hdf5_reader::PhotonProduct)] {
+        &[]
+    }
+
     /// Get thermal scattering data for a nuclide, if available.
     ///
     /// Returns `Some` if the nuclide has associated S(α,β) thermal scattering data
@@ -328,6 +337,11 @@ pub struct BatchResult {
     /// this to build a photon source for coupled neutron-photon
     /// transport, or any other (n,γ)-rate-weighted tally.
     pub captures_by_cell: Vec<f64>,
+    /// Photon emission events tallied at capture / fission / inelastic
+    /// sites in this batch. Each event carries `(cell, pos, E_γ, MT)`
+    /// — the photon driver consumes this directly as a fixed source.
+    /// Empty when the XS provider has no photon-product data loaded.
+    pub photon_events: Vec<PhotonSourceEvent>,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -395,6 +409,29 @@ impl EntropyMesh {
     }
 }
 
+/// A single photon emission event tallied during neutron transport,
+/// suitable as a fixed source for a downstream photon driver.
+///
+/// Recorded at every collision that has a non-zero photon yield:
+/// radiative capture (MT=102), fission (MT=18), and inelastic
+/// scattering (MT=4 or MT=51..91). The event captures where the
+/// reaction happened and what outgoing photon energy was sampled;
+/// the photon phase then sources one history per event.
+#[derive(Debug, Clone, Copy)]
+pub struct PhotonSourceEvent {
+    /// Cell index containing the reaction site.
+    pub cell_idx: u32,
+    /// World-frame position of the reaction (cm).
+    pub pos: [f64; 3],
+    /// Emitted photon energy (eV).
+    pub energy: f64,
+    /// Reaction-class tag for diagnostic binning: 102 = capture,
+    /// 18 = fission, 4/51..91 = inelastic. Not used by the photon
+    /// driver but useful for "fraction of γ-heat from fission vs
+    /// capture" breakdowns.
+    pub mt: u32,
+}
+
 /// Per-particle transport result for parallel reduction.
 struct ParticleResult {
     fission_sites: Vec<FissionSite>,
@@ -410,6 +447,40 @@ struct ParticleResult {
     /// allocation cost is amortised by the parallel reduction and the
     /// fact that capture events are rare relative to scatter events.
     capture_cells: Vec<usize>,
+    /// Photon emission events sampled at each reaction site (capture,
+    /// fission, inelastic). Reduced into `BatchResult::photon_events`.
+    photon_events: Vec<PhotonSourceEvent>,
+}
+
+/// Sample photon products for a given reaction (MT) at the current
+/// collision site and append the resulting emission events to the
+/// per-particle photon tally. No-op when the XS provider has no
+/// photon-product data for this nuclide/MT — which is the default
+/// unless the user built the provider via `load_nuclide_table` or
+/// `load_nuclide_kernels` on a file carrying `particle="photon"`
+/// products.
+fn sample_photon_products<XS: XsProvider>(
+    xs_provider: &XS,
+    xs_kernel_idx: usize,
+    mt: u32,
+    particle: &Particle,
+    rng: &mut Rng,
+    out: &mut Vec<PhotonSourceEvent>,
+) {
+    for (mt_pp, pp) in xs_provider.photon_products(xs_kernel_idx) {
+        if *mt_pp != mt {
+            continue;
+        }
+        let energies = pp.sample(particle.energy, rng);
+        for e_gamma in energies {
+            out.push(PhotonSourceEvent {
+                cell_idx: particle.cell_idx as u32,
+                pos: [particle.pos.x, particle.pos.y, particle.pos.z],
+                energy: e_gamma,
+                mt: *mt_pp,
+            });
+        }
+    }
 }
 
 /// Transport a single particle to completion.
@@ -432,6 +503,7 @@ fn transport_particle<XS: XsProvider>(
         thermal_scatters: 0,
         surface_crossings: 0,
         capture_cells: Vec::new(),
+        photon_events: Vec::new(),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -680,10 +752,26 @@ fn transport_particle<XS: XsProvider>(
                                 CollisionOutcome::Absorption => {
                                     result.absorptions += 1;
                                     result.capture_cells.push(particle.cell_idx);
+                                    sample_photon_products(
+                                        xs_provider,
+                                        xs_kernel_idx,
+                                        102,
+                                        &particle,
+                                        &mut rng,
+                                        &mut result.photon_events,
+                                    );
                                 }
                                 CollisionOutcome::Fission { sites } => {
                                     result.fissions += 1;
                                     result.fission_sites.extend(sites);
+                                    sample_photon_products(
+                                        xs_provider,
+                                        xs_kernel_idx,
+                                        18,
+                                        &particle,
+                                        &mut rng,
+                                        &mut result.photon_events,
+                                    );
                                 }
                                 CollisionOutcome::Multiplicity { secondaries } => {
                                     for s in secondaries {
@@ -740,10 +828,26 @@ fn transport_particle<XS: XsProvider>(
                             CollisionOutcome::Absorption => {
                                 result.absorptions += 1;
                                 result.capture_cells.push(particle.cell_idx);
+                                sample_photon_products(
+                                    xs_provider,
+                                    xs_kernel_idx,
+                                    102,
+                                    &particle,
+                                    &mut rng,
+                                    &mut result.photon_events,
+                                );
                             }
                             CollisionOutcome::Fission { sites } => {
                                 result.fissions += 1;
                                 result.fission_sites.extend(sites);
+                                sample_photon_products(
+                                    xs_provider,
+                                    xs_kernel_idx,
+                                    18,
+                                    &particle,
+                                    &mut rng,
+                                    &mut result.photon_events,
+                                );
                             }
                             CollisionOutcome::Multiplicity { secondaries } => {
                                 for s in secondaries {
@@ -849,6 +953,7 @@ fn transport_particle_delta<XS: XsProvider>(
         thermal_scatters: 0,
         surface_crossings: 0,
         capture_cells: Vec::new(),
+        photon_events: Vec::new(),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -1064,10 +1169,26 @@ fn transport_particle_delta<XS: XsProvider>(
                 CollisionOutcome::Absorption => {
                     result.absorptions += 1;
                     result.capture_cells.push(particle.cell_idx);
+                    sample_photon_products(
+                        xs_provider,
+                        xs_kernel_idx,
+                        102,
+                        &particle,
+                        &mut rng,
+                        &mut result.photon_events,
+                    );
                 }
                 CollisionOutcome::Fission { sites } => {
                     result.fissions += 1;
                     result.fission_sites.extend(sites);
+                    sample_photon_products(
+                        xs_provider,
+                        xs_kernel_idx,
+                        18,
+                        &particle,
+                        &mut rng,
+                        &mut result.photon_events,
+                    );
                 }
                 CollisionOutcome::Multiplicity { secondaries } => {
                     for s in secondaries {
@@ -1179,6 +1300,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
         let mut thermal_scatters = 0_u32;
         let mut surface_crossings = 0_u32;
         let mut captures_by_cell = vec![0.0_f64; cells.len()];
+        let mut photon_events: Vec<PhotonSourceEvent> = Vec::new();
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1193,6 +1315,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
                     captures_by_cell[c] += 1.0;
                 }
             }
+            photon_events.extend(pr.photon_events);
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -1210,6 +1333,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
             shannon_entropy: entropy,
             active: false,
             captures_by_cell,
+            photon_events,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
