@@ -35,6 +35,7 @@
 //!   - Perkins et al., LLNL EADL/EEDL (UCRL-50400 vol. 30) — atomic
 //!     relaxation transition data lineage
 
+pub mod compton;
 pub mod data;
 pub mod hdf5_reader;
 
