@@ -2693,6 +2693,7 @@ fn interpolate_to_grid(x_src: &[f64], y_src: &[f64], x_dst: &[f64]) -> Vec<f64> 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod sampling_tests {
     //! Statistical tests for the OpenMC stochastic-bin samplers.
     //!

@@ -51,10 +51,10 @@ fn main() -> ExitCode {
 
     let mut n_hist = 200_000_usize;
     while let Some(a) = args.next() {
-        if a == "--n" {
-            if let Some(v) = args.next() {
-                n_hist = v.parse().unwrap_or(n_hist);
-            }
+        if a == "--n"
+            && let Some(v) = args.next()
+        {
+            n_hist = v.parse().unwrap_or(n_hist);
         }
     }
 

@@ -128,6 +128,13 @@ fn interp_linear(factor: &ScatteringFactor, x: f64) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::double_comparisons,
+    clippy::doc_lazy_continuation,
+    clippy::too_many_arguments
+)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

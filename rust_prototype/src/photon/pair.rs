@@ -112,6 +112,13 @@ fn sample_bethe_heitler_epsilon(rng: &mut Rng) -> f64 {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::double_comparisons,
+    clippy::doc_lazy_continuation,
+    clippy::too_many_arguments
+)]
 mod tests {
     use super::*;
 

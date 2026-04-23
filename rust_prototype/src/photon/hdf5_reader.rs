@@ -496,6 +496,7 @@ fn read_transitions(shell: &hdf5_pure::Group) -> Vec<[f64; 4]> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

@@ -82,6 +82,7 @@ pub enum CollisionOutcome {
 /// `elastic_angle` provides anisotropic scattering angular distribution.
 /// `fission_edist` provides the fission outgoing energy spectrum from HDF5.
 /// `temperature` is the cell temperature in Kelvin for free gas scattering.
+#[allow(clippy::too_many_arguments)]
 pub fn process_collision(
     particle: &mut Particle,
     xs: &MicroXs,

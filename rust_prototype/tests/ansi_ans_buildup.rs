@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::doc_overindented_list_items
+)]
 //! ANSI/ANS-6.6.1 number buildup factor validation.
 //!
 //! Setup: point isotropic source of monoenergetic photons at the

@@ -194,8 +194,10 @@ fn interpolate_subshell_xs(energy: &[f64], shell: &Subshell, n_master: usize, e_
     if e_query < energy[offset] {
         return 0.0;
     }
-    if e_query >= *energy.last().unwrap() {
-        return *shell.xs.last().unwrap();
+    if let (Some(&e_top), Some(&xs_top)) = (energy.last(), shell.xs.last())
+        && e_query >= e_top
+    {
+        return xs_top;
     }
     // Binary search on master grid.
     let i_hi = energy.partition_point(|e| *e < e_query);
@@ -256,6 +258,13 @@ pub fn interpolate_log_log(grid: &[f64], values: &[f64], query: f64) -> f64 {
 // --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::double_comparisons,
+    clippy::doc_lazy_continuation,
+    clippy::too_many_arguments
+)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

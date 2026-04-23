@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 //! Integration test for the Cs-137 pulse-height spectrum benchmark.
 //!
 //! Runs a quick (50 k history) Monte Carlo of 661.657 keV photons on a

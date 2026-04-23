@@ -124,7 +124,7 @@ pub fn compton_scatter_free(elem: &PhotonElement, energy_in: f64, rng: &mut Rng)
 ///    (inverse-CDF of a trapezoidally-integrated profile).
 /// 4. Random sign on `p_z`.
 /// 5. Solve the Doppler energy relation (eq. 2.50 of PENELOPE):
-///       `(p_z c / m_e c²) = [α(1−μ) α' − α + α'] / q`
+///    `(p_z c / m_e c²) = [α(1−μ) α' − α + α'] / q`
 ///    where `q = √(α² − 2 α α' μ + α'²)` and `α' = E'/m_e c²`.
 ///    Rearranged into a quadratic in `α'`.
 fn apply_doppler(
@@ -437,6 +437,13 @@ fn interp_linear(factor: &ScatteringFactor, x_query: f64) -> f64 {
 // --- Tests -----------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::double_comparisons,
+    clippy::doc_lazy_continuation,
+    clippy::too_many_arguments
+)]
 mod tests {
     use super::*;
     use std::path::PathBuf;

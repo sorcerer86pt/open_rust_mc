@@ -271,6 +271,7 @@ pub fn deflect(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
 ///
 /// A source outside the modelled geometry is returned immediately as
 /// fully escaped energy.
+#[allow(clippy::too_many_arguments)]
 pub fn transport_history_csg(
     source_pos: Vec3,
     source_dir: Vec3,
@@ -510,6 +511,13 @@ fn handle_boundary(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::double_comparisons,
+    clippy::doc_lazy_continuation,
+    clippy::too_many_arguments
+)]
 mod tests {
     use super::*;
     use crate::photon::data::PhotonElement;
