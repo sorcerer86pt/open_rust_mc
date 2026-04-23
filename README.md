@@ -1,9 +1,11 @@
 # open_rust_mc
 
-A pure-Rust continuous-energy Monte Carlo neutron transport engine.
-Reads OpenMC HDF5 nuclear data directly (no C dependency), runs
-k-eigenvalue simulations end-to-end on CPU (rayon) or CUDA GPU, and
-is validated against OpenMC on two reference benchmarks.
+A pure-Rust continuous-energy Monte Carlo neutron **and photon**
+transport engine. Reads OpenMC HDF5 nuclear data directly (no C
+dependency), runs k-eigenvalue simulations end-to-end on CPU (rayon)
+or CUDA GPU, and is validated against OpenMC on two reference
+benchmarks. A coupled neutron-photon pipeline drives a PWR pin cell
+γ-heating calculation directly off the ENDF/B-VII.1 HDF5 library.
 
 The engine is designed as a research vehicle for studying cross-section
 representation: it ships **four interchangeable cross-section providers**
@@ -53,7 +55,7 @@ CLI flags that drive this path:
 - `--fuel-offset`, `--mod-offset` — isolate fuel- vs moderator-side effects (PWR)
 - `--discrete-rank <N>` — override SVD rank for MT=51–91 (discrete levels are weakly T-dependent; rank 1 typically suffices)
 
-## Physics implemented
+## Neutron physics
 
 - k-eigenvalue power iteration with Shannon-entropy convergence diagnostic
 - Energy-dependent ν̄ (prompt + delayed) read from HDF5
@@ -65,6 +67,59 @@ CLI flags that drive this path:
 - (n,2n) MT=16, (n,3n) MT=17
 - Free-gas thermal scattering (Maxwell–Boltzmann target velocity sampling)
 - S(α,β) thermal scattering for H in H₂O (continuous + discrete inelastic, Bragg edges, Debye–Waller incoherent elastic)
+
+## Photon physics
+
+Full four-channel photon transport on per-element OpenMC HDF5 data
+(`photon/*.h5`):
+
+- **Compton** — free Klein–Nishina with `S(x, Z)/Z` bound-electron
+  rejection and Hartree–Fock Compton-profile Doppler broadening
+- **Photoelectric** absorption with full EADL atomic relaxation
+  cascade (fluorescence + Auger)
+- **Pair production** — Bethe–Heitler nuclear + electron-field +
+  in-flight positron annihilation
+- **Coherent** (Rayleigh) scattering via tabulated form factors
+
+Drivers:
+
+- `transport_history` — closure-based single-material driver (used
+  by the Cs-137 pulse-height and ANSI/ANS-6.6.1 buildup benchmarks)
+- `transport_history_csg` — CSG-aware driver with per-cell
+  `PhotonMaterial`, reusing the same `Surface`/`Cell`/`Region`
+  geometry + `ray::trace_step` the neutron loop uses
+
+Simplified electron transport: Katz–Penfold CSDA midrange deposit
+(`R_e(E) / 2` forward displacement) with per-material mass density
+and reflective-lattice folding. Removes most of the kerma bias for
+pin-cell heating (~5 % textbook error → <0.5 % in UO₂).
+
+## Coupled neutron-photon transport
+
+The neutron loop tallies a `PhotonSourceEvent { cell, pos, E_γ, MT }`
+at every capture (MT=102), fission (MT=18), (n,p) / (n,α) (MT=103 /
+107, threshold-gated), and inelastic (MT=4 via discrete-level
+Q-value) collision. γ multiplicities and outgoing energies come from
+the HDF5 `reactions/reaction_{mt}/product_{N}` tree with
+`particle="photon"` — the same `ContinuousTabular` reader path used
+for fission-neutron outgoing energies.
+
+The `pwr_gamma_heating` binary runs the pipeline end-to-end on a
+standard PWR pin cell (3.1 % UO₂ / Zr-4 / H₂O, 1.26 cm pitch,
+reflective lattice): a short neutron k-eigenvalue, aggregate the
+event bank across active batches, then transport 200 k photon
+histories and bin per-collision deposits by containing cell.
+
+Converged result (150 b × 50 k n + 200 k γ, ~2.5 min):
+
+| region | fraction |
+|--------|---------:|
+| fuel   | **84.4 %** |
+| gap    | 1.5 % (*CSDA midrange artefact*) |
+| clad   | 7.9 % |
+| water  | 5.9 % |
+| escape | 0.0 % |
+| sum    | 99.66 % (missing 0.34 % = EADL valence-binding) |
 
 ## CUDA backend
 
@@ -81,10 +136,22 @@ rust_prototype/
     physics/                  Collision processing, scattering kinematics
     transport/
       simulate.rs             Particle tracking + k-eigenvalue solver
+                               + PhotonSourceEvent tally
       xs_provider.rs          SVD + pointwise providers, Ducru interpolation
+                               + per-nuclide PhotonProduct loader
       hybrid_xs.rs            SVD+WMP and ACE+WMP hybrid providers
+    photon/                   Photon transport (4 kernels + CSG driver)
+      data.rs                 PhotonElement, subshells, form factors
+      hdf5_reader.rs          OpenMC photon HDF5 reader
+      coherent.rs             Rayleigh scattering
+      compton.rs              Klein-Nishina + S(x,Z)/Z + Doppler
+      photoelectric.rs        Photoelectric + EADL cascade
+      pair.rs                 Bethe-Heitler pair production
+      material.rs             PhotonMaterial + CSDA range (Katz-Penfold)
+      transport.rs            Closure-based + CSG photon drivers
     geometry/                 CSG surfaces, cells, BVH, lattices
-    hdf5_reader.rs            Pure-Rust HDF5 reader, single-pass caching
+    hdf5_reader.rs            Pure-Rust neutron HDF5 reader
+                               + read_photon_products for γ spectra
     thermal.rs                S(α,β) data structures + sampling
     kernel.rs                 CPU SVD reconstruction hot path
     table.rs                  Pointwise table, StochTempTable wrapper
@@ -93,9 +160,13 @@ rust_prototype/
   src/bin/
     godiva.rs                 Godiva benchmark binary
     pwr_pincell.rs            PWR pin cell benchmark binary
+    pwr_gamma_heating.rs      Coupled n-γ PWR pin γ-heating benchmark
+    cs137_pulse_height.rs     Cs-137 + NaI detector validation
+    photon_dump.rs            Photon HDF5 data inspection utility
     gpu_bench.rs              GPU reconstruction microbenchmark
     wmp_validate.rs           WMP evaluator cross-check vs Python reference
   tests/                      Integration tests
+                               (Cs-137, Hubbell Compton, ANSI/ANS-6.6.1)
 cuda_bench/                   Standalone CUDA SVD reconstruction kernel
 scripts/
   pwr_verdict.py              Semaphore-grade three-way verdict runner
@@ -127,6 +198,14 @@ cargo run --release --bin pwr_pincell -- $DATA --mode all --rank 5 \
 python scripts/pwr_verdict.py --offset 150 --seeds 10 --particles 50000 \
     --batches 120 --inactive 30 \
     --log outputs/pwr_verdict.log --json outputs/pwr_verdict.json
+
+# Coupled neutron-photon γ-heating (~2.5 min on desktop CPU)
+cargo run --release --bin pwr_gamma_heating -- \
+    $DATA --photon-data ../data/endfb-vii.1-hdf5/photon
+
+# Cs-137 pulse-height spectrum on 3"x3" NaI detector (photon validation)
+cargo run --release --bin cs137_pulse_height -- \
+    ../data/endfb-vii.1-hdf5/photon --n 200000
 
 # GPU (requires CUDA toolkit)
 cargo run --release --features cuda --bin gpu_bench -- $DATA \

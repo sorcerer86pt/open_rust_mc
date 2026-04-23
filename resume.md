@@ -1,403 +1,224 @@
-# Godiva engine-offset investigation + three transport bug fixes — 2026-04-22
+# Coupled neutron-photon transport + PWR γ-heating — 2026-04-23
 
 ## TL;DR
 
-Investigated the ~160 pcm "gap vs OpenMC on Godiva" in CLAUDE.md.
-Discovered (a) the gap was actually +424 pcm, not 160; (b) the
-paper's `godiva.tex:86-94` claim that this was "a known ENDF/B-VII.1
-library bias" is contradicted by direct measurement — OpenMC on the
-same HDF5 gives 0.99901, not +325 pcm above ICSBEP.
+Built end-to-end photon transport on top of the existing neutron
+engine, then coupled the two on a shared CSG geometry so the PWR pin
+cell can drop a real γ-heating map. Landed across **three merged PRs
+(#1, #2, #3)** on the `photon-transport` / `photon-spectra` /
+`inelastic-gammas` branches. Final state:
 
-Found and fixed three real transport bugs, closing ~235 pcm:
+- **Photon data layer** reads OpenMC per-element HDF5 files
+  (`photon/*.h5`) with every sampling auxiliary a physics-correct
+  kernel needs: `F(x,Z)`, `S(x,Z)`, Hartree-Fock Compton profiles,
+  EADL subshells, Bremsstrahlung DCS.
+- **Four photon kernels** — Compton (free KN + `S(x,Z)/Z` bound
+  rejection + Doppler broadening), photoelectric with full EADL
+  relaxation cascade, Bethe-Heitler pair production + in-flight
+  annihilation, and Rayleigh (coherent).
+- **Two transport drivers** — the original closure-based
+  `transport_history` for Cs-137 / buildup validation, plus the new
+  CSG-aware `transport_history_csg` that streams photons through the
+  same `Surface`/`Cell`/`Region` geometry the neutron loop uses, with
+  a per-cell `PhotonMaterial`.
+- **Coupled (n,γ) source** sampled directly from the HDF5 per-nuclide
+  cascade γ spectra (not a stub). The neutron loop tallies a
+  `PhotonSourceEvent` at every capture (MT=102), fission (MT=18),
+  (n,p) / (n,α) (MT=103/107, threshold-gated), and discrete-level
+  inelastic (MT=4 via |Q_level|) collision. The photon phase
+  consumes the event bank directly.
+- **Simplified electron transport** — CSDA midrange deposit via
+  Katz-Penfold ranges, with lattice reflection on the displaced
+  positions so electrons born near a reflective BC stay inside the
+  fundamental cell.
+- **`pwr_gamma_heating` binary** ties it all together: short neutron
+  eigenvalue → aggregate γ-source bank → photon phase → per-cell
+  deposition report.
 
-1. **(n,2n)/(n,3n) banking** (~100 pcm). Secondaries were banked as
-   fission sites for next-generation source; should transport in
-   current generation. Commit `ba9d672`.
-2. **μ-CDF inversion** (~30 pcm). Linear-linear PDFs were treated as
-   histogram, under-sampling forward peaks. Commit `e1b83fc`.
-3. **MT=91 continuum inelastic** (~100 pcm). Using evaporation
-   approximation instead of ENDF tabulated outgoing-energy
-   distribution. Commit `6cec8b0`.
+Converged run on the standard PWR pin (UO₂ 3.1 % / Zr-4 / H₂O,
+1.26 cm pitch, reflective lattice, 150 batches × 50 k neutrons +
+200 k γ, ~2.5 min on desktop CPU):
 
-URR ablation ruled out (−3 pcm effect on k).
+| region | fraction |
+|--------|---------:|
+| fuel   | **84.42 %** |
+| gap    | 1.46 % (*midrange artefact — see below*) |
+| clad   | 7.88 % |
+| water  | 5.90 % |
+| escape | 0.00 % (reflective lattice — sanity) |
+| sum    | 99.66 % (missing 0.34 % = EADL valence-binding loss) |
 
-**Godiva SVD k=5 final: 1.00079 ± 0.00038, Δ_ICSBEP = +79 pcm** —
-inside the ±100 pcm experimental uncertainty band. **This is the
-pass criterion.** The benchmark is the measurement, not OpenMC.
-OpenMC 0.15.3 on the same HDF5 gets 0.99901 (−99 pcm); the two codes
-straddle experiment from opposite sides. The +178 pcm Rust-vs-OpenMC
-residual is a cross-code curiosity, not a correctness gap.
+The 1.46 % in the He gap is a known simplification artefact: a
+fuel-surface-born electron with R_e/2 ≈ 0.02 cm lands inside the
+gap instead of continuing through it into the clad. Full
+track-integrated electron transport would re-attribute that slice
+to clad, giving ~84 / 0 / 9 / 6.
 
-Also completed the PWR pin cell S(α,β) validation that was
-Priority 1 on CLAUDE.md (Rust Table vs OpenMC: 12 pcm) and patched
-the paper's abstract to reconcile the QP status with the conclusion
-and add a "rank-1 is not a shipping configuration" clarifier.
+## What the benchmark measures (layman-friendly)
+
+A fresh UO₂ fuel rod in a reactor doesn't just release heat as
+kinetic energy of fission fragments and neutrons — about **8-10 % of
+its power comes out as high-energy γ-rays** (prompt fission γs
+~6 MeV, capture γs ~7 MeV, inelastic γs ~1 MeV). Those γs are
+volumetric; unlike the kinetic-energy pieces they don't all deposit
+where they're born.
+
+`pwr_gamma_heating` answers the question *"for every 100 units of γ
+energy born inside the fuel pin, where does each unit end up actually
+depositing?"* Reactor designers use this split to size cladding
+thermal margins, predict moderator γ-heating, and compute fuel
+temperature profiles.
+
+The pipeline is two-phase, on a shared CSG:
+
+1. **Neutron phase** — short k-eigenvalue on the pin. Every time a
+   neutron captures, fissions, or inelastically scatters, sample a
+   γ multiplicity from HDF5 yield tables and outgoing energies from
+   HDF5 `distribution_0/energy`. Store `(cell, pos, E_γ, MT)`.
+2. **Photon phase** — for each of 200 k photon histories, draw a
+   random source event from the bank, transport through the same
+   CSG with per-cell `PhotonMaterial` (cross sections + mass
+   density), bin the per-collision deposits into the containing
+   cell. Apply electron-range displacement on every Compton /
+   photoelectric / pair deposit.
 
 ## Session progression
 
-### 1. PWR S(α,β) validation (priority 1 from CLAUDE.md)
+### PR #1 — CSG driver + first coupled pipeline (`photon-transport`)
 
-3-seed × 100 × 20k run, Rust Table vs OpenMC:
-- Rust Table: 1.32771 ± 0.00113
-- Rust SVD k=5: 1.32692 ± 0.00085
-- OpenMC 0.15.3, ENDF/B-VII.1: 1.32759 ± 0.00026
-- Table-vs-OpenMC: **12 pcm** (within 1σ)
-- SVD-vs-OpenMC: **−67 pcm** (within combined σ)
-- S(α,β) impact: ~300 pcm (disables → k goes up)
+Lifted the photon driver from "single homogeneous
+material + closure-based `is_inside`" to a real CSG transport loop
+mirroring the neutron one. Per-cell `PhotonMaterial`, full
+Vacuum / Reflective / Transmission BC handling, void-cell streaming,
+banked secondaries.
 
-Memory caveat documented: SVD at rank 5 is **5× larger** than Table
-for all-reactions 9-nuclide PWR. The memory-win configs are rank ≤ 1
-or hybrid SVD+WMP.
+Added a per-cell `(n,γ)` capture tally to `BatchResult` so
+`pwr_gamma_heating` can source photons from the real spatial
+capture distribution rather than a uniform-in-fuel stub. Source
+energy was a notional two-line spectrum (70 % × 1 MeV + 30 % ×
+5 MeV) — good enough to prove the plumbing works.
 
-Artifacts: `outputs/pwr_sab_{on,off}.txt`, `outputs/openmc_pwr_ref.json`.
-Commit `70304f7` (CLAUDE.md + paper patches, no engine changes).
+### PR #2 — real HDF5 γ spectra (`photon-spectra`)
 
-### 2. Paper patches
+Replaced the stub source with the per-nuclide cascade spectra
+stored under `reactions/reaction_{mt}/product_{N}` in the OpenMC
+HDF5 layout. Reader, sampler, and XS-provider wiring mirror the
+existing fission-neutron outgoing-energy path — zero new physics,
+just re-aim the same ContinuousTabular reader at photon products.
 
-`paper/sections/abstract.tex`: reconciled the "Ducru QP remains
-future work" phrasing with `conclusion.tex:113` which already
-documents the empirical-Gram QP as implemented. Wins at rank 3,
-loses at rank 5, signed unity stays default, analytic Doppler-
-kernel Gram QP is the remaining follow-up.
+Third pass (v3 of the same PR) loaded **all** photon products per
+MT (O-16 has 4 products for MT=102, 6 for MT=107) and added
+MT=103 `(n,p)` + MT=107 `(n,α)`. Verified isotropic-angular was
+already exact for U-235/U-238 (ENDF stores photon angles as 2-point
+linear μ ∈ [−1, 1] = uniform).
 
-`paper/sections/spectrum.tex`: after the "43 of 47 U-235 channels
-are rank-one" statement, added one sentence clarifying that the
-four non-rank-1 channels (elastic, fission, n2n, capture) carry
-the physics that moves k_eff, so rank-1 is a structural
-observation about ENDF/B-VII.1, not a shipping configuration.
+### PR #3 — inelastic γs + simplified electron transport (`inelastic-gammas`)
 
-Paper rebuilds to 27 pages, zero LaTeX errors, no new warnings.
-Same commit `70304f7`.
+Final piece. Two changes:
 
-### 3. Godiva gap: investigation
+1. **Inelastic γ emission.** ENDF/B-VII.1 doesn't tabulate
+   `particle="photon"` products for discrete inelastic levels on
+   U-235 / U-238 (the de-excitation γ is implicit in the level's
+   Q-value). Added `CollisionOutcome::InelasticScatter { q_value_ev }`
+   so the three collision sites in `transport::simulate` can bank
+   a γ event with `energy = q_value_ev.abs()` and `mt = 4`.
+2. **CSDA midrange electron transport.** Each Compton /
+   photoelectric / pair recoil-electron deposit is displaced
+   forward by `R_e(E) / 2` along the incoming photon direction,
+   with `R_e` computed by Katz-Penfold `R[g/cm²] = 0.412 ·
+   E^(1.265 - 0.0954 ln E)` divided by per-material mass density.
+   `fold_into_lattice` in the binary reflects displaced positions
+   back into the fundamental cell via a triangle-wave on each axis.
 
-User asked to verify CLAUDE.md's "~160 pcm gap" and fix it.
+## Numerical results
 
-Ran OpenMC Godiva with the same ENDF/B-VII.1 HDF5 files the Rust
-engine uses (paper stats, 5 × 150 × 50k): **k_eff = 0.99901**,
-i.e. −99 pcm relative to ICSBEP 1.0000. This contradicts the
-paper's claim at `godiva.tex:86-94` that "ENDF/B-VII.1 over-
-predicts Godiva by ~300-500 pcm". That number is not real; it's
-an engine-level offset misattributed to the library.
+| metric | PR #1 (stub) | PR #2 (HDF5 spectra) | PR #3 (+inelastic +e-range) |
+|---|---:|---:|---:|
+| photon source events | 50 k sampled | 27.9 M | 29.9 M |
+| fuel fraction | 84.5 % | 84.8 % | **84.4 %** |
+| gap fraction | 0 % | 0 % | 1.5 % *(e-range artefact)* |
+| clad fraction | 9.7 % | 9.1 % | 7.9 % |
+| water fraction | 5.6 % | 5.8 % | 5.9 % |
+| escape | 0 | 0 | 0 |
+| sum | 99.76 % | 99.65 % | 99.66 % |
 
-Paper's post-correction Rust CPU SVD: 1.00325 → **+424 pcm vs
-OpenMC at matched stats**, not 160 as CLAUDE.md claimed.
+Neutron side stayed at k_∞ = 1.327 (correct for fresh 3.1 % UO₂
+infinite lattice) across all three runs — the γ-heating work didn't
+touch the neutron physics.
 
-### 4. Channel-level localisation
+The 27.9 M → 29.9 M jump in PR #3 is the +2.0 M inelastic-γ events
+now flowing.
 
-Added `scripts/openmc_godiva_tallies.py` to produce reaction-rate
-and leakage tallies per source particle. Rust vs OpenMC pre-fix:
+## Structural gap vs textbook (~93 / 3 / 2)
 
-| quantity | Rust | OpenMC | Δ |
-|---|---|---|---|
-| collisions/src | 2.66083 | 2.65003 | **+0.41 %** |
-| fissions/src | 0.38809 | 0.38473 | **+0.87 %** |
-| leakage/src | 0.56926 | 0.57315 | **−0.68 %** |
+We land at ~84 / 9 / 6 rather than the commonly-quoted
+~93 / 3 / 2 split. Possible contributors, ranked by suspected
+impact:
 
-Signature = "scatter not forward-peaked enough, particles stay
-inside longer, more collisions → more fissions, less leak". A
-sampling bug, not an XS bug.
+1. **Benchmark geometry / composition mismatch.** Published numbers
+   are usually VERA Problem 1 or similar; atom densities, gap
+   thickness, moderator density, and enrichment differ by a few %
+   from ours. An OpenMC cross-code comparison on the identical
+   geometry would quantify this (half-day item, not done).
+2. **Kerma-approximation delocalization.** Our CSDA midrange keeps
+   electrons in fuel for 1 MeV-class γs (R_e/2 ≈ 0.02 cm in UO₂)
+   but full condensed-history electron transport would recapture
+   the ~1.5 % of fuel-surface electrons currently attributed to the
+   gap.
+3. **Inelastic γ yield approximation.** We emit one γ at
+   `energy = |Q_level|` rather than sampling the actual cascade
+   multiplicity and individual photon energies. OpenMC does the
+   full cascade where the data supports it.
 
-Confirmed by static XS diff (xs_dump_godiva.rs vs OpenMC Python
-API): fission, elastic, inelastic, ν̄ all match <0.2 % for U-234/
-U-235/U-238 at 0.1–10 MeV. Capture and (n,2n) mismatches were
-localised to one energy point (5.583 MeV, right at (n,2n)
-threshold) where absolute XS is tiny. **XS magnitudes were not
-the bug.**
+Whether the gap is real or a benchmark-mismatch is unresolved
+pending the cross-code run.
 
-### 5. Fix #1: (n,2n)/(n,3n) banking
+## What's in `main` at this point
 
-`rust_prototype/src/physics/collision.rs:122-173` — the (n,2n) and
-(n,3n) branches returned `CollisionOutcome::Fission { sites }`.
-The caller extended `result.fission_sites`, which then became the
-NEXT generation's source bank. k_eff was measured from
-`fission_bank.len() / n_source`, so every (n,2n) added 1 fake
-fission neutron to the k estimator.
+- `src/photon/{data,hdf5_reader,coherent,compton,photoelectric,pair,material,transport}.rs`
+- `src/bin/{cs137_pulse_height,photon_dump,pwr_gamma_heating}.rs`
+- `src/transport/simulate.rs::{PhotonSourceEvent, BatchResult::photon_events, sample_photon_products, ABSORPTION_PHOTON_MTS, FISSION_PHOTON_MTS}`
+- `src/hdf5_reader.rs::{PhotonProduct, read_photon_products}`
+- `src/physics/collision.rs::CollisionOutcome::InelasticScatter`
+- Integration tests in `tests/`:
+  - `cs137_pulse_height_validation.rs`
+  - `hubbell_compton_differential.rs`
+  - `ansi_ans_buildup.rs`
 
-OpenMC-measured (n,2n) rate on Godiva = 0.00253 /source → **+253
-pcm of inflated k_eff** from banking alone.
+148 / 148 library tests green. `cargo fmt --check` + `clippy -D warnings`
+clean on all platforms (ubuntu + windows) in CI.
 
-Fix: new `CollisionOutcome::Multiplicity { secondaries }` variant;
-(n,2n) emits one continuing primary + one secondary, (n,3n) emits
-primary + two secondaries. All outgoing energies come from the
-evaporation spectrum (replacing the previous Q=-E*0.1/0.2
-kinematic approximation for the primary). Transport loop now
-wraps its inner while in `'history: loop { ... pending.pop() ...}`
-draining a per-source secondary stack; budget `max_events` is
-shared across primary + descendants to bound pathological
-cascades.
+## Next natural steps
 
-Measured Godiva shift (5 seeds × 150 × 50k): **−106 pcm** on SVD,
-**−83 pcm** on Table. Less than the naïve 253 pcm estimate because
-a properly-transported secondary produces ~k ≈ 1 fission neutron
-per current-generation transport at equilibrium, partially
-replacing the direct banking contribution.
+- **OpenMC cross-code run** on the exact same UO₂ / Zr / H₂O / 1.26 cm
+  pin (with `Settings.photon_transport=True`). Half-day item; the
+  only way to know if our ~84 / 9 / 6 split is the right answer for
+  this problem or if there's an actual physics fix to chase.
+- **Full electron transport.** 2-3 weeks of work to add a
+  condensed-history electron kernel with bremsstrahlung. Removes
+  the kerma-approximation bias (~5 % in shielding, <1 % in PWR
+  pin γ-heating because electron ranges are much smaller than the
+  fuel pellet). Out of scope for this round.
+- **Shielding benchmarks.** Kobayashi dog-leg and ANS-6.4.3 are
+  now one binary away (just need a different geometry). Photon
+  stack is already validated against Cs-137 pulse-height + Hubbell
+  Compton + ANSI/ANS-6.6.1 buildup. No new kernels required.
+- **SVD-compressed photon cross sections.** The novel angle: the
+  incoherent / photoelectric / pair XS curves are smooth log-log,
+  very likely rank ≤ 2. No published code compresses photon data
+  this way. A paper's worth.
 
-PWR-SVD moved −67 → +2 pcm vs OpenMC (improved).
+## Commit map
 
-Commit `ba9d672`. Why didn't this show up on PWR before? Because
-(n,2n)/(n,3n) rates on PWR are ~0.00003/src — the bug's k
-contribution there was <3 pcm, below the 12 pcm PWR gap.
-
-### 6. Fix #2: μ-CDF inversion for linear-linear ENDF
-
-`TabularMuDist` was storing (mu, cdf) and doing linear CDF
-interpolation between breakpoints. ENDF/B-VII.1 stores angular
-distributions with `interpolation=2` (linear-linear PDF → quadratic
-CDF within each bin). All 49 U-235 elastic incident energies use
-interp=2, so every linear inversion was under-sampling forward
-peaks.
-
-Fix: `TabularMuDist` gains `pdf: Vec<f64>` and `histogram: bool`.
-Loader reads the `interpolation` attribute from HDF5. Sampler
-solves `a x² + b x + c = 0` for the physical root in [0, Δμ]
-(same formula as OpenMC's `Tabular::sample` in
-`src/distribution.cpp`). Histogram bins degenerate to the existing
-linear path.
-
-Measured shift: Godiva SVD −31 pcm, PWR SVD −37 pcm. Smaller than
-expected because ENDF tables pack breakpoints densely near forward
-peaks, so the within-bin shape is a secondary effect to the cross-
-bin stochastic selection we already had.
-
-Commit `e1b83fc`.
-
-### 7. Fix #3: MT=91 continuum inelastic tabulated distribution
-
-`sample_inelastic_level` in collision.rs used an evaporation model
-for MT=91: `T = √(E*/a), a = A/8 MeV⁻¹`. OpenMC (and MCNP/Serpent)
-sample the outgoing energy directly from the ENDF MT=91 tabulated
-distribution stored at
-`reaction_091/product_0/distribution_0/{energy,distribution}`.
-
-On Godiva with its fast spectrum and heavy U-235/U-238 inelastic
-down-scattering, the evaporation approximation gives a harder-
-than-true secondary spectrum, keeping neutrons in the fast-fission
-regime longer and inflating k_eff.
-
-Engineering required three small pieces:
-1. Generic `read_reaction_edist_from_file(mt)` reader in hdf5_reader.rs
-   (variant of the fission loader, parameterised by MT).
-2. `NuclideKernels.inelastic_continuum_edist` / `n2n_edist` /
-   `n3n_edist` plus matching fields on `NuclideTableData` and the
-   hybrid providers.
-3. Trait method `inelastic_continuum_edist(nuclide_idx)` on
-   `XsProvider`, threaded through `process_collision` so the
-   continuum branch prefers the tabulated distribution and falls
-   back to evaporation when unavailable.
-
-**Critical loader bug caught during validation.** OpenMC stores the
-fission energy distribution under `distribution_0/energy/
-{energy,distribution}` (nested — `energy` is a group containing
-two datasets). MT=91 and friends store them flat at
-`distribution_0/{energy,distribution}` (direct datasets).
-`hdf5_pure::Group::group("X")` returns `Ok` even when X is actually
-a dataset, so my first version of the generic reader silently
-failed for MT=91 (took the nested path, couldn't find sub-datasets,
-returned None). Loader now probes via `.datasets()` to pick the
-right branch.
-
-After the loader was fixed: **Godiva SVD k_eff 1.00219 → 1.00090
-(−129 pcm at paper stats)**. Biggest single shift of the session.
-
-Commit `6cec8b0`.
-
-### 8. URR ablation (ruled out)
-
-Added `OPEN_RUST_MC_NO_URR=1` env flag that skips `apply_urr`.
-Paper stats comparison:
-
-- Godiva SVD URR on:  1.00090 ± 0.00054
-- Godiva SVD URR off: 1.00087 ± 0.00064
-- Shift: **−3 pcm** (within σ)
-
-URR is not a contributor to the residual Godiva gap. Expected
-given only ~15 % of Godiva neutrons fall in the URR range for
-U-235 (2.25–25 keV) and U-238 (20–149 keV), and the band factors
-cluster near unity in both cases.
-
-### 9. MT=16 / MT=17 tabulated distributions (mixed result)
-
-Extended the generic loader to MT=16 and MT=17, wired them through
-the `XsProvider` trait as `n2n_edist` and `n3n_edist`, used them
-in the `CollisionOutcome::Multiplicity` branches in place of
-evaporation.
-
-Kalbach-Mann r parameter is essentially zero for U-234/235/238 at
-Godiva-relevant incident energies (<5 MeV), so keeping angles
-isotropic in LAB is physically correct.
-
-Godiva SVD shift: 1.00090 → 1.00079 (**−11 pcm, within noise**).
-Expected: (n,2n)/(n,3n) rates on Godiva are tiny (~0.0025/src
-combined) so shape differences between evaporation and ENDF can't
-make a big k dent.
-
-**Known perf regression at this point**: PWR SVD transport ~4×
-slower after this commit. Cache-pressure hypothesis (MT=16/17
-distribution load evicting hot kernels) turned out to be wrong —
-see section 10 for the real root cause and fix.
-
-Commit `481134e`.
-
-### 10. Fix #4: cache `OPEN_RUST_MC_NO_URR` env read
-
-The PWR regression was not MT=16/17 cache pressure. Commit `481134e`
-bundled two changes and misattributed the slowdown to the visible
-one. The actual culprit was the URR ablation knob:
-
-```rust
-pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
-    if std::env::var_os("OPEN_RUST_MC_NO_URR").is_some() { return; }
-    …
-}
 ```
-
-`apply_urr` is called **per-nuclide per-collision** from the hot
-transport loop (`simulate.rs:530` and `:977`). On Windows,
-`std::env::var_os` acquires the process-wide `ENV_LOCK` mutex and
-issues `GetEnvironmentVariableW`. Under Rayon with every core
-hitting that lock on every collision, it serialised.
-
-Why Godiva escaped: 3 nuclides × ~20 collisions/history → low
-contention pressure. PWR hits it hard because of 9 nuclides ×
-thousands of collisions/history (thermal slowing-down).
-
-Fix: cache the env read in a `OnceLock<bool>` (`urr_disabled()`
-helper) and replace both call sites. One-file change in
-`rust_prototype/src/transport/xs_provider.rs`.
-
-PWR SVD (100 × 20k, seed 0, Ryzen 9800X3D):
-
-| state | ns/particle | vs regressed |
-|---|---|---|
-| pre-regression (mt91_working) | 52,345 | baseline |
-| post-`481134e` regressed | 419,604 | 0.12× |
-| **with env-cache fix** | **25,378** | **16.5×** |
-
-2× faster than even the pre-regression baseline — the env read
-was a latent cost that pre-existed but only mattered once PWR
-collision counts + parallel contention crossed a threshold.
-
-k_inf unchanged (1.32593 ± 0.00120). Godiva unchanged
-(1084 ns/particle, 3 nuclides, never bottlenecked). All 72 tests
-pass.
-
-## Godiva results: session summary
-
-5 seeds × 150 batches × 50 000 particles, CPU SVD k=5, Ryzen 9800X3D:
-
-| state | k_eff | Δ_ICSBEP | Δ_OpenMC |
-|---|---|---|---|
-| Paper pre-fix (10-seed) | 1.00325 | +325 pcm | +424 pcm |
-| After (n,2n) banking fix | 1.00219 | +219 pcm | +318 pcm |
-| After μ-CDF fix | 1.00188 | +188 pcm | +287 pcm |
-| After MT=91 tabulated | 1.00090 | **+90 pcm** | +189 pcm |
-| After MT=16/17 tabulated | **1.00079** | **+79 pcm** | **+178 pcm** |
-| ICSBEP HMF-001 experiment | 1.00000 ± 100 | 0 | — |
-| OpenMC 0.15.3, ENDF/B-VII.1 | 0.99901 ± 38 | −99 pcm | — |
-
-**Benchmark is ICSBEP HMF-001** (1.0000 ± 100 pcm experimental).
-Rust SVD k=5 sits at +79 pcm, **inside σ_exp** — pass.
-OpenMC 0.15.3 on the same HDF5 sits at −99 pcm, also inside σ_exp.
-Both codes straddle experiment from opposite sides. OpenMC is a
-useful independent cross-check, not the benchmark.
-
-Cumulative closure from the three transport fixes: **−246 pcm on
-Δ_ICSBEP** (+325 → +79 pcm).
-
-## PWR results: session summary
-
-3 seeds × 100 batches × 20 000 particles, paper baseline. Only
-the final post-all-fixes run was interrupted; snapshot from the
-MT=91-working state before n2n/n3n was added:
-
-| mode | k_inf | Δ vs OpenMC |
-|---|---|---|
-| OpenMC 0.15.3 (3-seed ref) | 1.32759 ± 0.00026 | — |
-| Rust Table (MT=91 on) | 1.32730 ± 0.00130 | **−29 pcm** |
-| Rust SVD k=5 (MT=91 on) | 1.32724 ± 0.00080 | **−35 pcm** |
-
-Both well within σ of OpenMC. **No regression from any of the
-three transport fixes** on PWR.
-
-Post-MT=16/17 PWR not re-measured due to the 4× perf regression;
-seed 0 was 1.32593 ± 0.00120 which is within 1 σ of OpenMC but
-the run was aborted.
-
-## What remains open
-
-1. **Cross-code curiosity: Rust vs OpenMC = +178 pcm on Godiva.**
-   Not a benchmark gap — both codes are inside σ_exp on ICSBEP
-   (Rust +79, OpenMC −99). The physical benchmark is the
-   measurement, not OpenMC. Low-urgency investigation candidates if
-   we ever want to close the cross-code delta:
-   - Stochastic vs correlated temperature interpolation in the
-     at-temp loader path.
-   - Subtle frame conventions in fission-neutron emission angles
-     (both codes emit isotropic LAB; any implicit CM conversion
-     difference?).
-   - Kalbach-Mann angular anisotropy for MT=91/16/17 above 5 MeV
-     (r → 0.4 at 10 MeV). Currently isotropic in both codes'
-     implementations; would need code inspection to confirm.
-2. **PWR 4× perf regression** — RESOLVED. Root cause was
-   `std::env::var_os` being called per-nuclide per-collision inside
-   `apply_urr`, serialising on Windows' `ENV_LOCK` under Rayon.
-   Fixed by caching the env read in a `OnceLock<bool>`. PWR SVD now
-   2× faster than the pre-regression baseline. See section 10.
-3. **Paper revision.** Reframe the Godiva validation around the
-   experiment, not OpenMC. The engine agrees with ICSBEP HMF-001
-   to +79 ± 38 pcm (inside the ±100 pcm experimental uncertainty).
-   The abstract's `|Δk| ≤ 51 pcm on Godiva` claim (if it was ever
-   Rust-vs-OpenMC) is not supported — but that's the wrong question.
-   The right claim is "agrees with experiment within σ_exp".
-   `godiva.tex:86-94` "library bias" paragraph should be deleted
-   outright: OpenMC on the same HDF5 gives −99 pcm vs ICSBEP, so
-   there is no ~300-500 pcm library bias; the paper's earlier number
-   was an engine-level offset misattributed to the library.
-
-## Commits pushed (chronological)
-
-- `70304f7` Paper: reconcile abstract QP status; add rank-1-not-
-  shippable clarifier. CLAUDE.md Priority 1 marked done.
-- `ba9d672` Fix (n,2n)/(n,3n) secondary banking — transport in
-  current generation.
-- `e1b83fc` Fix μ-CDF inversion for linear-linear ENDF angular
-  distributions.
-- `6cec8b0` MT=91 continuum inelastic: sample from ENDF tabulated
-  distribution.
-- `481134e` URR ablation flag + wire MT=16/17 ENDF distributions
-  into (n,2n)/(n,3n). Introduced the PWR perf regression (see next).
-- Cache `OPEN_RUST_MC_NO_URR` env read in `OnceLock<bool>` —
-  resolves the PWR 4× regression; now 2× faster than the
-  pre-regression baseline.
-
-All pushed to `origin/main`. All 72 library tests pass.
-
-## Artifacts generated this session
-
-Rust outputs:
-- `outputs/pwr_sab_{on,off}.txt` — S(α,β) ablation
-- `outputs/godiva_verify.txt` — initial gap measurement pre-fix
-- `outputs/godiva_postfix{,_highstats}.txt` — after (n,2n) fix
-- `outputs/godiva_mucdf_fix.txt` — after μ-CDF fix
-- `outputs/godiva_mt91_{fix,actual,paperstats,working}.txt` —
-  MT=91 work-in-progress iterations
-- `outputs/godiva_urr_{on,off}.txt` — URR ablation
-- `outputs/godiva_n2n_endf.txt` — final all-fixes paper stats
-- `outputs/pwr_{postfix,mucdf_fix,mt91_{actual,working},n2n_endf}.txt`
-  — PWR regression checks at each fix
-
-OpenMC references:
-- `outputs/openmc_pwr_ref.json` — 3-seed PWR reference
-- `outputs/openmc_godiva_{verify,paperstats,tallies}.json` —
-  Godiva references at various statistics
-- `outputs/xs_audit/{rust_godiva_table,openmc_godiva_ref}.csv` —
-  static XS comparison
-
-New scripts:
-- `scripts/openmc_godiva_tallies.py` — reaction-rate + leakage
-  tally runner
-- `scripts/xs_dump_godiva_openmc.py` — OpenMC reference dump at
-  matched energy grid
-- `rust_prototype/src/bin/xs_dump_godiva.rs` — Rust-side dump for
-  cross-code diff
+0341243  Merge PR #2  Coupled n-γ real HDF5 γ spectra
+588b534  Merge PR #1  Photon transport data + kernels + CSG + coupled source
+8739817  Merge PR #3  Inelastic γ + simplified electron transport
+fd2f19e      CSDA midrange + lattice fold
+43d9608      Inelastic γ at MT=51..91 sites
+18ceb97      All photon products per MT + MT=103/107
+02808e6      Real HDF5 γ spectra for capture + fission
+5fb8bc8      Coupled neutron-photon v1: real (n,γ) capture tally
+94d7439      pwr_gamma_heating binary (stub spectrum)
+958e148      transport_history_csg CSG driver
+```
