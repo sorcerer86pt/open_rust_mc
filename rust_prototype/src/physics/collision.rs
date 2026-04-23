@@ -82,6 +82,7 @@ pub enum CollisionOutcome {
 /// `elastic_angle` provides anisotropic scattering angular distribution.
 /// `fission_edist` provides the fission outgoing energy spectrum from HDF5.
 /// `temperature` is the cell temperature in Kelvin for free gas scattering.
+#[allow(clippy::too_many_arguments)]
 pub fn process_collision(
     particle: &mut Particle,
     xs: &MicroXs,
@@ -395,7 +396,9 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(
+            &mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng,
+        );
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
     }
@@ -415,7 +418,9 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(
+            &mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng,
+        );
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
     }
@@ -435,7 +440,9 @@ mod tests {
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(
+            &mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng,
+        );
         match outcome {
             CollisionOutcome::Fission { sites } => {
                 assert!(!sites.is_empty());
@@ -490,7 +497,18 @@ mod tests {
         };
 
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
-        let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, None, None, 0.0, &mut rng);
+        let outcome = process_collision(
+            &mut p,
+            &xs,
+            Some(&data),
+            None,
+            None,
+            None,
+            None,
+            None,
+            0.0,
+            &mut rng,
+        );
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
         assert!(p.energy < 1.0e6); // should have lost energy
@@ -560,7 +578,18 @@ mod tests {
                 1.0e6,
                 0,
             );
-            let outcome = process_collision(&mut p, &xs, Some(&data), None, None, None, None, None, 0.0, &mut rng);
+            let outcome = process_collision(
+                &mut p,
+                &xs,
+                Some(&data),
+                None,
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                &mut rng,
+            );
             assert!(matches!(outcome, CollisionOutcome::Scatter));
             sum_x += p.dir.x;
         }
@@ -608,7 +637,18 @@ mod tests {
                 1.0e6,
                 0,
             );
-            let _ = process_collision(&mut p, &xs, Some(&data), None, None, None, None, None, 0.0, &mut rng);
+            let _ = process_collision(
+                &mut p,
+                &xs,
+                Some(&data),
+                None,
+                None,
+                None,
+                None,
+                None,
+                0.0,
+                &mut rng,
+            );
             sum_x += p.dir.x;
         }
         let mean_x = sum_x / trials as f64;

@@ -18,6 +18,7 @@ pub mod hdf5_reader;
 pub mod kernel;
 pub mod loader;
 pub mod nuclide;
+pub mod photon;
 pub mod physics;
 pub mod table;
 pub mod thermal;

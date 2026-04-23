@@ -322,6 +322,12 @@ pub struct BatchResult {
     /// In fixed-inactive mode this is simply `batch > config.inactive`.
     /// In auto-inactive mode it reflects the entropy-plateau decision.
     pub active: bool,
+    /// Per-cell count of non-fission absorption events (radiative
+    /// capture and other `(n,X)` absorptions). Indexed by the cell's
+    /// position in the `cells` slice passed to `run_eigenvalue`. Use
+    /// this to build a photon source for coupled neutron-photon
+    /// transport, or any other (n,γ)-rate-weighted tally.
+    pub captures_by_cell: Vec<f64>,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -398,6 +404,12 @@ struct ParticleResult {
     surface_crossings: u32,
     fissions: u32,
     collisions: u32,
+    /// Cell indices where this particle was captured (n,γ-style
+    /// non-fission absorption). Typical history captures at most
+    /// once, so this vec is usually empty or a single element —
+    /// allocation cost is amortised by the parallel reduction and the
+    /// fact that capture events are rare relative to scatter events.
+    capture_cells: Vec<usize>,
 }
 
 /// Transport a single particle to completion.
@@ -419,6 +431,7 @@ fn transport_particle<XS: XsProvider>(
         collisions: 0,
         thermal_scatters: 0,
         surface_crossings: 0,
+        capture_cells: Vec::new(),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -440,225 +453,293 @@ fn transport_particle<XS: XsProvider>(
     let mut total_events = 0_u32;
 
     'history: loop {
-    let mut void_crossings = 0_u32;
-    while particle.is_alive() && total_events < max_events {
-        total_events += 1;
-        let cell = &cells[particle.cell_idx];
+        let mut void_crossings = 0_u32;
+        while particle.is_alive() && total_events < max_events {
+            total_events += 1;
+            let cell = &cells[particle.cell_idx];
 
-        let mat_idx = match cell.fill {
-            CellFill::Material(m) => m as usize,
-            CellFill::Void => {
-                // Void region — free-stream to next surface (no interactions).
-                // Safety limit prevents infinite loops in degenerate geometries.
-                void_crossings += 1;
-                if void_crossings > 100 {
-                    particle.kill();
-                    result.leakage += 1;
-                    break;
-                }
-                let trace = geometry::ray::trace_step(
-                    particle.pos,
-                    particle.dir,
-                    particle.cell_idx,
-                    surfaces,
-                    cells,
-                );
-                match trace {
-                    Some(hit) => {
-                        // Nudge proportional to distance — ensures clean surface crossing
-                        let nudge = (hit.distance * 1e-8).max(1e-8);
-                        let bc = surfaces[hit.surface_idx].boundary_condition();
-                        match bc {
-                            BoundaryCondition::Vacuum => {
-                                particle.advance(hit.distance);
-                                particle.kill();
-                                result.leakage += 1;
-                                break;
-                            }
-                            BoundaryCondition::Reflective => {
-                                particle.advance(hit.distance);
-                                let n = surfaces[hit.surface_idx].normal_at(particle.pos);
-                                let d = particle.dir;
-                                particle.dir = d - n * (2.0 * d.dot(n));
-                            }
-                            BoundaryCondition::Transmission => {
-                                particle.advance(hit.distance + nudge);
-                                if let Some(next) = hit.next_cell_idx {
-                                    particle.cell_idx = next;
-                                } else {
-                                    particle.kill();
-                                    result.leakage += 1;
-                                    break;
-                                }
-                            }
-                        }
-                        continue;
-                    }
-                    None => {
+            let mat_idx = match cell.fill {
+                CellFill::Material(m) => m as usize,
+                CellFill::Void => {
+                    // Void region — free-stream to next surface (no interactions).
+                    // Safety limit prevents infinite loops in degenerate geometries.
+                    void_crossings += 1;
+                    if void_crossings > 100 {
                         particle.kill();
                         result.leakage += 1;
                         break;
                     }
+                    let trace = geometry::ray::trace_step(
+                        particle.pos,
+                        particle.dir,
+                        particle.cell_idx,
+                        surfaces,
+                        cells,
+                    );
+                    match trace {
+                        Some(hit) => {
+                            // Nudge proportional to distance — ensures clean surface crossing
+                            let nudge = (hit.distance * 1e-8).max(1e-8);
+                            let bc = surfaces[hit.surface_idx].boundary_condition();
+                            match bc {
+                                BoundaryCondition::Vacuum => {
+                                    particle.advance(hit.distance);
+                                    particle.kill();
+                                    result.leakage += 1;
+                                    break;
+                                }
+                                BoundaryCondition::Reflective => {
+                                    particle.advance(hit.distance);
+                                    let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                                    let d = particle.dir;
+                                    particle.dir = d - n * (2.0 * d.dot(n));
+                                }
+                                BoundaryCondition::Transmission => {
+                                    particle.advance(hit.distance + nudge);
+                                    if let Some(next) = hit.next_cell_idx {
+                                        particle.cell_idx = next;
+                                    } else {
+                                        particle.kill();
+                                        result.leakage += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        None => {
+                            particle.kill();
+                            result.leakage += 1;
+                            break;
+                        }
+                    }
                 }
-            }
-            CellFill::Universe(_) => {
+                CellFill::Universe(_) => {
+                    particle.kill();
+                    result.leakage += 1;
+                    break;
+                }
+            };
+
+            if mat_idx >= materials.len() {
                 particle.kill();
                 result.leakage += 1;
                 break;
             }
-        };
 
-        if mat_idx >= materials.len() {
-            particle.kill();
-            result.leakage += 1;
-            break;
-        }
+            void_crossings = 0;
+            let material = &materials[mat_idx];
 
-        void_crossings = 0;
-        let material = &materials[mat_idx];
+            // Look up microscopic cross-sections with URR sampling.
+            // Stack-allocated buffers — no heap allocation per collision.
+            let urr_xi = rng.uniform();
+            let n_nuclides = material.nuclides.len();
+            let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+            let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+            // Track thermal scattering XS addition per nuclide
+            let mut thermal_xs_add = [0.0_f64; MAX_NUCLIDES];
+            for (i, nuc) in material.nuclides.iter().enumerate() {
+                let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+                xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
 
-        // Look up microscopic cross-sections with URR sampling.
-        // Stack-allocated buffers — no heap allocation per collision.
-        let urr_xi = rng.uniform();
-        let n_nuclides = material.nuclides.len();
-        let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
-        let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
-        // Track thermal scattering XS addition per nuclide
-        let mut thermal_xs_add = [0.0_f64; MAX_NUCLIDES];
-        for (i, nuc) in material.nuclides.iter().enumerate() {
-            let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
-            xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
-
-            // S(α,β) thermal scattering: replace free-atom elastic XS
-            // with thermal scattering XS below energy_max
-            if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
-                && particle.energy < tsl.energy_max
-                && particle.energy > 0.0
-            {
-                let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                let thermal_total = tsl.total_xs(particle.energy, t_idx).max(0.0);
-                if thermal_total > 0.0 {
-                    let delta = thermal_total - xs.elastic;
-                    xs.total += delta;
-                    thermal_xs_add[i] = thermal_total;
-                    xs.elastic = 0.0;
+                // S(α,β) thermal scattering: replace free-atom elastic XS
+                // with thermal scattering XS below energy_max
+                if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
+                    && particle.energy < tsl.energy_max
+                    && particle.energy > 0.0
+                {
+                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                    let thermal_total = tsl.total_xs(particle.energy, t_idx).max(0.0);
+                    if thermal_total > 0.0 {
+                        let delta = thermal_total - xs.elastic;
+                        xs.total += delta;
+                        thermal_xs_add[i] = thermal_total;
+                        xs.elastic = 0.0;
+                    }
                 }
+
+                micro_totals[i] = xs.total;
+                micro_xs[i] = xs;
+            }
+            let macro_total = material.macro_total(&micro_totals[..n_nuclides]);
+
+            if macro_total <= 0.0 {
+                particle.kill();
+                result.leakage += 1;
+                break;
             }
 
-            micro_totals[i] = xs.total;
-            micro_xs[i] = xs;
-        }
-        let macro_total = material.macro_total(&micro_totals[..n_nuclides]);
+            let dist_collision = rng.exponential(macro_total);
 
-        if macro_total <= 0.0 {
-            particle.kill();
-            result.leakage += 1;
-            break;
-        }
+            let trace = geometry::ray::trace_step(
+                particle.pos,
+                particle.dir,
+                particle.cell_idx,
+                surfaces,
+                cells,
+            );
 
-        let dist_collision = rng.exponential(macro_total);
-
-        let trace = geometry::ray::trace_step(
-            particle.pos,
-            particle.dir,
-            particle.cell_idx,
-            surfaces,
-            cells,
-        );
-
-        match trace {
-            Some(hit) if hit.distance < dist_collision => {
-                result.surface_crossings += 1;
-                let bc = surfaces[hit.surface_idx].boundary_condition();
-                match bc {
-                    BoundaryCondition::Vacuum => {
-                        particle.advance(hit.distance);
-                        particle.kill();
-                        result.leakage += 1;
-                    }
-                    BoundaryCondition::Reflective => {
-                        // Advance exactly to the surface (no overshoot), then reflect.
-                        // COINCIDENCE_TOL in Surface::distance() filters the t≈0
-                        // re-intersection, preventing infinite bounce loops.
-                        particle.advance(hit.distance);
-                        let n = surfaces[hit.surface_idx].normal_at(particle.pos);
-                        let d = particle.dir;
-                        particle.dir = d - n * (2.0 * d.dot(n));
-                    }
-                    BoundaryCondition::Transmission => {
-                        // Overshoot slightly to land clearly inside the next cell.
-                        particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
-                        if let Some(next) = hit.next_cell_idx {
-                            particle.cell_idx = next;
-                        } else {
+            match trace {
+                Some(hit) if hit.distance < dist_collision => {
+                    result.surface_crossings += 1;
+                    let bc = surfaces[hit.surface_idx].boundary_condition();
+                    match bc {
+                        BoundaryCondition::Vacuum => {
+                            particle.advance(hit.distance);
                             particle.kill();
                             result.leakage += 1;
                         }
+                        BoundaryCondition::Reflective => {
+                            // Advance exactly to the surface (no overshoot), then reflect.
+                            // COINCIDENCE_TOL in Surface::distance() filters the t≈0
+                            // re-intersection, preventing infinite bounce loops.
+                            particle.advance(hit.distance);
+                            let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                            let d = particle.dir;
+                            particle.dir = d - n * (2.0 * d.dot(n));
+                        }
+                        BoundaryCondition::Transmission => {
+                            // Overshoot slightly to land clearly inside the next cell.
+                            particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
+                            if let Some(next) = hit.next_cell_idx {
+                                particle.cell_idx = next;
+                            } else {
+                                particle.kill();
+                                result.leakage += 1;
+                            }
+                        }
                     }
                 }
-            }
-            _ => {
-                particle.advance(dist_collision);
-                result.collisions += 1;
+                _ => {
+                    particle.advance(dist_collision);
+                    result.collisions += 1;
 
-                let nuc_idx = material.sample_nuclide(
-                    &micro_totals[..n_nuclides],
-                    macro_total,
-                    rng.uniform(),
-                );
+                    let nuc_idx = material.sample_nuclide(
+                        &micro_totals[..n_nuclides],
+                        macro_total,
+                        rng.uniform(),
+                    );
 
-                let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+                    let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
 
-                // Check if this nuclide+energy qualifies for thermal scattering
-                let use_thermal = thermal_xs_add[nuc_idx] > 0.0;
-                if use_thermal {
-                    // Thermal scattering: sample from S(α,β)
-                    let tsl = xs_provider
-                        .thermal_scattering(xs_kernel_idx)
-                        .expect("thermal data");
-                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
-                    let xi_reaction = rng.uniform() * micro_xs[nuc_idx].total;
+                    // Check if this nuclide+energy qualifies for thermal scattering
+                    let use_thermal = thermal_xs_add[nuc_idx] > 0.0;
+                    if use_thermal {
+                        // Thermal scattering: sample from S(α,β)
+                        let tsl = xs_provider
+                            .thermal_scattering(xs_kernel_idx)
+                            .expect("thermal data");
+                        let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                        let xi_reaction = rng.uniform() * micro_xs[nuc_idx].total;
 
-                    if xi_reaction < thermal_xs_add[nuc_idx] {
-                        // Thermal scattering event
-                        result.thermal_scatters += 1;
-                        let (e_out, mu) = tsl.sample(particle.energy, t_idx, &mut rng);
-                        particle.energy = e_out;
-                        // Apply scattering angle
-                        let phi = 2.0 * std::f64::consts::PI * rng.uniform();
-                        let sin_mu = (1.0 - mu * mu).max(0.0).sqrt();
-                        let d = particle.dir;
-                        let w2 = d.z * d.z;
-                        if w2 < 0.999 {
-                            let inv_sq = 1.0 / (1.0 - w2).sqrt();
-                            particle.dir = Vec3::new(
-                                mu * d.x
-                                    + sin_mu * (d.x * d.z * phi.cos() - d.y * phi.sin()) * inv_sq,
-                                mu * d.y
-                                    + sin_mu * (d.y * d.z * phi.cos() + d.x * phi.sin()) * inv_sq,
-                                mu * d.z - sin_mu * (1.0 - w2).sqrt() * phi.cos(),
-                            );
+                        if xi_reaction < thermal_xs_add[nuc_idx] {
+                            // Thermal scattering event
+                            result.thermal_scatters += 1;
+                            let (e_out, mu) = tsl.sample(particle.energy, t_idx, &mut rng);
+                            particle.energy = e_out;
+                            // Apply scattering angle
+                            let phi = 2.0 * std::f64::consts::PI * rng.uniform();
+                            let sin_mu = (1.0 - mu * mu).max(0.0).sqrt();
+                            let d = particle.dir;
+                            let w2 = d.z * d.z;
+                            if w2 < 0.999 {
+                                let inv_sq = 1.0 / (1.0 - w2).sqrt();
+                                particle.dir = Vec3::new(
+                                    mu * d.x
+                                        + sin_mu
+                                            * (d.x * d.z * phi.cos() - d.y * phi.sin())
+                                            * inv_sq,
+                                    mu * d.y
+                                        + sin_mu
+                                            * (d.y * d.z * phi.cos() + d.x * phi.sin())
+                                            * inv_sq,
+                                    mu * d.z - sin_mu * (1.0 - w2).sqrt() * phi.cos(),
+                                );
+                            } else {
+                                let sign = if d.z > 0.0 { 1.0 } else { -1.0 };
+                                particle.dir = Vec3::new(
+                                    sin_mu * phi.cos(),
+                                    sin_mu * phi.sin() * sign,
+                                    mu * sign,
+                                );
+                            }
+                            // Continue — this was a scatter
                         } else {
-                            let sign = if d.z > 0.0 { 1.0 } else { -1.0 };
-                            particle.dir =
-                                Vec3::new(sin_mu * phi.cos(), sin_mu * phi.sin() * sign, mu * sign);
+                            // Non-thermal reaction (fission, capture, inelastic, etc.)
+                            // Process normally but with elastic = 0
+                            let outcome = process_non_thermal_collision(
+                                &mut particle,
+                                &micro_xs[nuc_idx],
+                                xs_kernel_idx,
+                                xs_provider,
+                                cell.temperature,
+                                &mut rng,
+                            );
+                            match outcome {
+                                CollisionOutcome::Scatter => {}
+                                CollisionOutcome::Absorption => {
+                                    result.absorptions += 1;
+                                    result.capture_cells.push(particle.cell_idx);
+                                }
+                                CollisionOutcome::Fission { sites } => {
+                                    result.fissions += 1;
+                                    result.fission_sites.extend(sites);
+                                }
+                                CollisionOutcome::Multiplicity { secondaries } => {
+                                    for s in secondaries {
+                                        pending.push(Particle::new(
+                                            s.pos,
+                                            s.dir,
+                                            s.energy,
+                                            particle.cell_idx,
+                                        ));
+                                    }
+                                }
+                            }
                         }
-                        // Continue — this was a scatter
                     } else {
-                        // Non-thermal reaction (fission, capture, inelastic, etc.)
-                        // Process normally but with elastic = 0
-                        let outcome = process_non_thermal_collision(
+                        // Standard collision processing (no thermal scattering)
+                        let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+                        let level_xs =
+                            xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+                        let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+
+                        let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
+                        let inelastic_data = if !level_info.is_empty() {
+                            Some(InelasticData {
+                                levels: &level_info,
+                                level_xs: &level_xs,
+                                has_continuum: has_cont,
+                                level_angles,
+                            })
+                        } else {
+                            None
+                        };
+
+                        let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+                        let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+                        let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
+                        let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
+                        let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
+
+                        let outcome = collision::process_collision(
                             &mut particle,
                             &micro_xs[nuc_idx],
-                            xs_kernel_idx,
-                            xs_provider,
+                            inelastic_data.as_ref(),
+                            elastic_angle,
+                            fission_edist,
+                            continuum_edist,
+                            n2n_edist,
+                            n3n_edist,
                             cell.temperature,
                             &mut rng,
                         );
+
                         match outcome {
                             CollisionOutcome::Scatter => {}
                             CollisionOutcome::Absorption => {
                                 result.absorptions += 1;
+                                result.capture_cells.push(particle.cell_idx);
                             }
                             CollisionOutcome::Fission { sites } => {
                                 result.fissions += 1;
@@ -676,78 +757,20 @@ fn transport_particle<XS: XsProvider>(
                             }
                         }
                     }
-                } else {
-                    // Standard collision processing (no thermal scattering)
-                    let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
-                    let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
-                    let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
-
-                    let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
-                    let inelastic_data = if !level_info.is_empty() {
-                        Some(InelasticData {
-                            levels: &level_info,
-                            level_xs: &level_xs,
-                            has_continuum: has_cont,
-                            level_angles,
-                        })
-                    } else {
-                        None
-                    };
-
-                    let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
-                    let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
-                    let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
-                    let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
-                    let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
-
-                    let outcome = collision::process_collision(
-                        &mut particle,
-                        &micro_xs[nuc_idx],
-                        inelastic_data.as_ref(),
-                        elastic_angle,
-                        fission_edist,
-                        continuum_edist,
-                        n2n_edist,
-                        n3n_edist,
-                        cell.temperature,
-                        &mut rng,
-                    );
-
-                    match outcome {
-                        CollisionOutcome::Scatter => {}
-                        CollisionOutcome::Absorption => {
-                            result.absorptions += 1;
-                        }
-                        CollisionOutcome::Fission { sites } => {
-                            result.fissions += 1;
-                            result.fission_sites.extend(sites);
-                        }
-                        CollisionOutcome::Multiplicity { secondaries } => {
-                            for s in secondaries {
-                                pending.push(Particle::new(
-                                    s.pos,
-                                    s.dir,
-                                    s.energy,
-                                    particle.cell_idx,
-                                ));
-                            }
-                        }
-                    }
                 }
             }
         }
-    }
 
-    // Current particle finished. If any (n,xn) secondaries are pending,
-    // transport the next one in the same history. Otherwise the source
-    // particle is done.
-    match pending.pop() {
-        Some(p) => {
-            particle = p;
-            continue 'history;
+        // Current particle finished. If any (n,xn) secondaries are pending,
+        // transport the next one in the same history. Otherwise the source
+        // particle is done.
+        match pending.pop() {
+            Some(p) => {
+                particle = p;
+                continue 'history;
+            }
+            None => break 'history,
         }
-        None => break 'history,
-    }
     }
 
     result
@@ -825,6 +848,7 @@ fn transport_particle_delta<XS: XsProvider>(
         collisions: 0,
         thermal_scatters: 0,
         surface_crossings: 0,
+        capture_cells: Vec::new(),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -838,231 +862,228 @@ fn transport_particle_delta<XS: XsProvider>(
     let mut steps = 0;
 
     'history: loop {
-    while particle.is_alive() && steps < max_steps {
-        steps += 1;
-        let sigma_maj = majorant.lookup(particle.energy);
+        while particle.is_alive() && steps < max_steps {
+            steps += 1;
+            let sigma_maj = majorant.lookup(particle.energy);
 
-        if sigma_maj <= 1e-20 {
-            particle.kill();
-            result.leakage += 1;
-            break;
-        }
+            if sigma_maj <= 1e-20 {
+                particle.kill();
+                result.leakage += 1;
+                break;
+            }
 
-        let d_collision = rng.exponential(sigma_maj);
+            let d_collision = rng.exponential(sigma_maj);
 
-        // Check for vacuum/reflective boundaries before advancing
-        let trace = geometry::ray::trace_step(
-            particle.pos,
-            particle.dir,
-            particle.cell_idx,
-            surfaces,
-            cells,
-        );
+            // Check for vacuum/reflective boundaries before advancing
+            let trace = geometry::ray::trace_step(
+                particle.pos,
+                particle.dir,
+                particle.cell_idx,
+                surfaces,
+                cells,
+            );
 
-        match trace {
-            Some(hit) if hit.distance < d_collision => {
-                let bc = surfaces[hit.surface_idx].boundary_condition();
-                match bc {
-                    BoundaryCondition::Vacuum => {
-                        particle.kill();
-                        result.leakage += 1;
-                        break;
-                    }
-                    BoundaryCondition::Reflective => {
-                        particle.advance(hit.distance);
-                        let n = surfaces[hit.surface_idx].normal_at(particle.pos);
-                        let d = particle.dir;
-                        particle.dir = d - n * (2.0 * d.dot(n));
-                        continue;
-                    }
-                    BoundaryCondition::Transmission => {
-                        // Delta tracking: skip transmission boundaries, just advance
-                        particle.advance(d_collision);
-                        // Find which cell we ended up in
-                        match geometry::ray::find_cell(particle.pos, surfaces, cells) {
-                            Some(idx) => particle.cell_idx = idx,
-                            None => {
-                                particle.kill();
-                                result.leakage += 1;
-                                break;
-                            }
+            match trace {
+                Some(hit) if hit.distance < d_collision => {
+                    let bc = surfaces[hit.surface_idx].boundary_condition();
+                    match bc {
+                        BoundaryCondition::Vacuum => {
+                            particle.kill();
+                            result.leakage += 1;
+                            break;
                         }
-                    }
-                }
-            }
-            _ => {
-                // No boundary before collision distance — advance freely
-                particle.advance(d_collision);
-                // Verify we're still in a valid cell
-                if let Some(idx) = geometry::ray::find_cell(particle.pos, surfaces, cells) {
-                    particle.cell_idx = idx;
-                } else {
-                    particle.kill();
-                    result.leakage += 1;
-                    break;
-                }
-            }
-        }
-
-        // Get current material — handle void by free-streaming
-        let cell = &cells[particle.cell_idx];
-        let mat_idx = match cell.fill {
-            CellFill::Material(m) => m as usize,
-            CellFill::Void => {
-                // Void region — free-stream to next surface
-                let trace = geometry::ray::trace_step(
-                    particle.pos,
-                    particle.dir,
-                    particle.cell_idx,
-                    surfaces,
-                    cells,
-                );
-                match trace {
-                    Some(hit) => {
-                        let bc = surfaces[hit.surface_idx].boundary_condition();
-                        match bc {
-                            BoundaryCondition::Vacuum => {
-                                particle.advance(hit.distance);
-                                particle.kill();
-                                result.leakage += 1;
-                                break;
-                            }
-                            BoundaryCondition::Reflective => {
-                                particle.advance(hit.distance);
-                                let n = surfaces[hit.surface_idx].normal_at(particle.pos);
-                                let d = particle.dir;
-                                particle.dir = d - n * (2.0 * d.dot(n));
-                            }
-                            BoundaryCondition::Transmission => {
-                                particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
-                                if let Some(next) = hit.next_cell_idx {
-                                    particle.cell_idx = next;
-                                } else {
+                        BoundaryCondition::Reflective => {
+                            particle.advance(hit.distance);
+                            let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                            let d = particle.dir;
+                            particle.dir = d - n * (2.0 * d.dot(n));
+                            continue;
+                        }
+                        BoundaryCondition::Transmission => {
+                            // Delta tracking: skip transmission boundaries, just advance
+                            particle.advance(d_collision);
+                            // Find which cell we ended up in
+                            match geometry::ray::find_cell(particle.pos, surfaces, cells) {
+                                Some(idx) => particle.cell_idx = idx,
+                                None => {
                                     particle.kill();
                                     result.leakage += 1;
                                     break;
                                 }
                             }
                         }
-                        continue;
                     }
-                    None => {
+                }
+                _ => {
+                    // No boundary before collision distance — advance freely
+                    particle.advance(d_collision);
+                    // Verify we're still in a valid cell
+                    if let Some(idx) = geometry::ray::find_cell(particle.pos, surfaces, cells) {
+                        particle.cell_idx = idx;
+                    } else {
                         particle.kill();
                         result.leakage += 1;
                         break;
                     }
                 }
             }
-            CellFill::Universe(_) => {
+
+            // Get current material — handle void by free-streaming
+            let cell = &cells[particle.cell_idx];
+            let mat_idx = match cell.fill {
+                CellFill::Material(m) => m as usize,
+                CellFill::Void => {
+                    // Void region — free-stream to next surface
+                    let trace = geometry::ray::trace_step(
+                        particle.pos,
+                        particle.dir,
+                        particle.cell_idx,
+                        surfaces,
+                        cells,
+                    );
+                    match trace {
+                        Some(hit) => {
+                            let bc = surfaces[hit.surface_idx].boundary_condition();
+                            match bc {
+                                BoundaryCondition::Vacuum => {
+                                    particle.advance(hit.distance);
+                                    particle.kill();
+                                    result.leakage += 1;
+                                    break;
+                                }
+                                BoundaryCondition::Reflective => {
+                                    particle.advance(hit.distance);
+                                    let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                                    let d = particle.dir;
+                                    particle.dir = d - n * (2.0 * d.dot(n));
+                                }
+                                BoundaryCondition::Transmission => {
+                                    particle
+                                        .advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
+                                    if let Some(next) = hit.next_cell_idx {
+                                        particle.cell_idx = next;
+                                    } else {
+                                        particle.kill();
+                                        result.leakage += 1;
+                                        break;
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                        None => {
+                            particle.kill();
+                            result.leakage += 1;
+                            break;
+                        }
+                    }
+                }
+                CellFill::Universe(_) => {
+                    particle.kill();
+                    result.leakage += 1;
+                    break;
+                }
+            };
+            if mat_idx >= materials.len() {
                 particle.kill();
                 result.leakage += 1;
                 break;
             }
-        };
-        if mat_idx >= materials.len() {
-            particle.kill();
-            result.leakage += 1;
-            break;
-        }
 
-        let material = &materials[mat_idx];
+            let material = &materials[mat_idx];
 
-        // Compute real Σ_t for acceptance test
-        let urr_xi = rng.uniform();
-        let n_nuclides = material.nuclides.len();
-        let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
-        let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
-        for (i, nuc) in material.nuclides.iter().enumerate() {
-            let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
-            xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
-            micro_totals[i] = xs.total;
-            micro_xs[i] = xs;
-        }
-        let sigma_real = material.macro_total(&micro_totals[..n_nuclides]);
-
-        // Acceptance test: real collision with probability Σ_t / Σ_maj
-        if rng.uniform() >= sigma_real / sigma_maj {
-            continue; // Virtual collision — keep tracking
-        }
-
-        // Real collision — process exactly as surface tracking
-        result.collisions += 1;
-
-        let macro_total = sigma_real;
-        if macro_total <= 0.0 {
-            particle.kill();
-            result.leakage += 1;
-            break;
-        }
-
-        let nuc_idx =
-            material.sample_nuclide(&micro_totals[..n_nuclides], macro_total, rng.uniform());
-
-        let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
-        let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
-        let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
-        let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
-        let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
-
-        let inelastic_data = if !level_info.is_empty() {
-            Some(InelasticData {
-                levels: &level_info,
-                level_xs: &level_xs,
-                has_continuum: has_cont,
-                level_angles,
-            })
-        } else {
-            None
-        };
-
-        let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
-        let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
-        let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
-        let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
-        let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
-
-        let outcome = collision::process_collision(
-            &mut particle,
-            &micro_xs[nuc_idx],
-            inelastic_data.as_ref(),
-            elastic_angle,
-            fission_edist,
-            continuum_edist,
-            n2n_edist,
-            n3n_edist,
-            cell.temperature,
-            &mut rng,
-        );
-
-        match outcome {
-            CollisionOutcome::Scatter => {}
-            CollisionOutcome::Absorption => {
-                result.absorptions += 1;
+            // Compute real Σ_t for acceptance test
+            let urr_xi = rng.uniform();
+            let n_nuclides = material.nuclides.len();
+            let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+            let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+            for (i, nuc) in material.nuclides.iter().enumerate() {
+                let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+                xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+                micro_totals[i] = xs.total;
+                micro_xs[i] = xs;
             }
-            CollisionOutcome::Fission { sites } => {
-                result.fissions += 1;
-                result.fission_sites.extend(sites);
+            let sigma_real = material.macro_total(&micro_totals[..n_nuclides]);
+
+            // Acceptance test: real collision with probability Σ_t / Σ_maj
+            if rng.uniform() >= sigma_real / sigma_maj {
+                continue; // Virtual collision — keep tracking
             }
-            CollisionOutcome::Multiplicity { secondaries } => {
-                for s in secondaries {
-                    pending.push(Particle::new(
-                        s.pos,
-                        s.dir,
-                        s.energy,
-                        particle.cell_idx,
-                    ));
+
+            // Real collision — process exactly as surface tracking
+            result.collisions += 1;
+
+            let macro_total = sigma_real;
+            if macro_total <= 0.0 {
+                particle.kill();
+                result.leakage += 1;
+                break;
+            }
+
+            let nuc_idx =
+                material.sample_nuclide(&micro_totals[..n_nuclides], macro_total, rng.uniform());
+
+            let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+            let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
+            let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
+            let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
+            let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
+
+            let inelastic_data = if !level_info.is_empty() {
+                Some(InelasticData {
+                    levels: &level_info,
+                    level_xs: &level_xs,
+                    has_continuum: has_cont,
+                    level_angles,
+                })
+            } else {
+                None
+            };
+
+            let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
+            let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
+            let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
+            let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
+            let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
+
+            let outcome = collision::process_collision(
+                &mut particle,
+                &micro_xs[nuc_idx],
+                inelastic_data.as_ref(),
+                elastic_angle,
+                fission_edist,
+                continuum_edist,
+                n2n_edist,
+                n3n_edist,
+                cell.temperature,
+                &mut rng,
+            );
+
+            match outcome {
+                CollisionOutcome::Scatter => {}
+                CollisionOutcome::Absorption => {
+                    result.absorptions += 1;
+                    result.capture_cells.push(particle.cell_idx);
+                }
+                CollisionOutcome::Fission { sites } => {
+                    result.fissions += 1;
+                    result.fission_sites.extend(sites);
+                }
+                CollisionOutcome::Multiplicity { secondaries } => {
+                    for s in secondaries {
+                        pending.push(Particle::new(s.pos, s.dir, s.energy, particle.cell_idx));
+                    }
                 }
             }
         }
-    }
 
-    match pending.pop() {
-        Some(p) => {
-            particle = p;
-            continue 'history;
+        match pending.pop() {
+            Some(p) => {
+                particle = p;
+                continue 'history;
+            }
+            None => break 'history,
         }
-        None => break 'history,
-    }
     }
 
     result
@@ -1157,6 +1178,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
         let mut collisions = 0_u32;
         let mut thermal_scatters = 0_u32;
         let mut surface_crossings = 0_u32;
+        let mut captures_by_cell = vec![0.0_f64; cells.len()];
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1166,6 +1188,11 @@ pub fn run_eigenvalue<XS: XsProvider>(
             collisions += pr.collisions;
             thermal_scatters += pr.thermal_scatters;
             surface_crossings += pr.surface_crossings;
+            for c in pr.capture_cells {
+                if c < captures_by_cell.len() {
+                    captures_by_cell[c] += 1.0;
+                }
+            }
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -1182,6 +1209,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
             surface_crossings,
             shannon_entropy: entropy,
             active: false,
+            captures_by_cell,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
