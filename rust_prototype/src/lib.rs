@@ -1,6 +1,6 @@
 //! open_rust_mc — Monte Carlo neutron transport engine.
 //!
-//! A pure-Rust reimagining of OpenMC with:
+//! A pure-Rust Monte Carlo Engine with:
 //!   - SVD-compressed cross-sections (cache-resident reconstruction)
 //!   - BVH-accelerated CSG geometry (enum dispatch, no vtables)
 //!   - SoA particle layout for SIMD vectorization
