@@ -153,7 +153,7 @@ fn apply_doppler(
     // the shell-selection weights.
     let mut weights = Vec::with_capacity(n_shells);
     let mut pz_max = Vec::with_capacity(n_shells);
-    let alpha_free = k_free * alpha; // α' for the free-electron case
+    let _alpha_free = k_free * alpha; // α' for the free-electron case (reference only)
     for i in 0..n_shells {
         let b_ev = cp.binding_energy[i];
         let binding_alpha = b_ev / M_E_C2_EV;
@@ -183,7 +183,13 @@ fn apply_doppler(
         let pmax_au = pmax_mec * INV_FINE_STRUCTURE_ALPHA;
         let pmax_clamped = pmax_au.clamp(0.0, *cp.pz.last().unwrap_or(&100.0));
         let cum_j = cumulative_profile(&cp.j[i], &cp.pz, pmax_clamped);
-        weights.push(cp.num_electrons[i] * cum_j);
+        // Shell-selection weight: n_i · P(|p_z| < p_z_max,i).
+        // With Biggs-Lighthill / OpenMC normalisation `∫₀^∞ J_i dp
+        // = n_i/2`, `P_i = (2/n_i) · cum_j`, so the product is
+        // `n_i · (2/n_i) · cum_j = 2 · cum_j`. The factor of 2 is a
+        // constant multiplier across shells and drops out of
+        // relative weighting; we use `cum_j` directly.
+        weights.push(cum_j);
         pz_max.push(pmax_clamped);
     }
     let total_weight: f64 = weights.iter().sum();
@@ -218,34 +224,54 @@ fn apply_doppler(
         let pz_mec = pz_signed_au * FINE_STRUCTURE_ALPHA;
 
         // Solve Doppler relation for α'.
-        // PENELOPE Eq. 2.50 rearranged into a quadratic. Let
-        //   t = p_z·c / (m_e c²)  (our pz_mec)
-        //   Γ ≡ 1 − t²
-        //   A = Γ − t² (1 − μ)² / Γ × ...
-        // simpler algebraic form (impulse approximation):
-        //   α' = α · (1 + t · μ + t² μ² − t²) / (1 + α(1 − μ) − t α(1 − μ) μ + ...)
-        // Use the explicit OpenMC formulation:
+        //
+        // Derivation (impulse approximation, PENELOPE §2.3.5 /
+        // Ribberfors 1975):
+        //   q² = α² + α'² − 2αα'μ            (momentum transfer squared)
+        //   t·q = α − α'·(1 + α(1−μ))         (projection of initial
+        //                                      electron momentum on the
+        //                                      scattering axis)
+        // with t = p_z·c / (m_e c²) and q positive. Eliminating q by
+        // squaring the second equation and substituting:
+        //
+        //   [t² − ε²]·α'² + 2α[ε − t²μ]·α' + α²[t² − 1] = 0,
+        //   ε ≡ 1 + α(1−μ)
+        //
+        // Squaring introduces a spurious second root. The "physical"
+        // root in principle follows from the sign of `t·q`, but the
+        // sign convention for `p_z` differs between published
+        // formulations (Ribberfors 1975 vs Brusa-Pratt-Salvat 1996
+        // vs OpenMC), and the spurious root generally lies far from
+        // the free-electron value while the physical root stays near
+        // `α_free = α/ε`. Since we randomize sign(p_z) in step 4,
+        // averaging is symmetric regardless of convention; we pick
+        // the root closer to `α_free` in absolute value to stay on
+        // the physical branch and discard the spurious one.
         let t = pz_mec;
-        let one_plus_alpha_1_mu = 1.0 + alpha * (1.0 - mu);
-        let a_coef = t * t - one_plus_alpha_1_mu * one_plus_alpha_1_mu;
-        let b_coef = 2.0 * alpha * (one_plus_alpha_1_mu - t * t * mu);
-        let c_coef = t * t * alpha * alpha - alpha * alpha;
-        // Quadratic a α'² + b α' + c = 0  ⇒  α' = (−b ± √(b² − 4ac)) / (2a)
+        let eps = 1.0 + alpha * (1.0 - mu);
+        let alpha_free_root = alpha / eps;
+        let a_coef = t * t - eps * eps;
+        let b_coef = 2.0 * alpha * (eps - t * t * mu);
+        let c_coef = alpha * alpha * (t * t - 1.0);
         let disc = b_coef * b_coef - 4.0 * a_coef * c_coef;
         if disc < 0.0 || a_coef == 0.0 {
             continue;
         }
         let sqrt_disc = disc.sqrt();
-        // Two roots; pick the one that yields α' > 0 and closest to
-        // α_free (physically continuous).
-        let root_p = (-b_coef + sqrt_disc) / (2.0 * a_coef);
-        let root_m = (-b_coef - sqrt_disc) / (2.0 * a_coef);
-        let alpha_out = if root_p > 0.0 && (root_p - alpha_free).abs() < (root_m - alpha_free).abs() {
-            root_p
-        } else if root_m > 0.0 {
-            root_m
-        } else {
-            continue;
+        let two_a = 2.0 * a_coef;
+        let root_p = (-b_coef + sqrt_disc) / two_a;
+        let root_m = (-b_coef - sqrt_disc) / two_a;
+        let alpha_out = match (root_p > 0.0, root_m > 0.0) {
+            (true, true) => {
+                if (root_p - alpha_free_root).abs() <= (root_m - alpha_free_root).abs() {
+                    root_p
+                } else {
+                    root_m
+                }
+            }
+            (true, false) => root_p,
+            (false, true) => root_m,
+            (false, false) => continue,
         };
 
         let e_out_ev = alpha_out * M_E_C2_EV;

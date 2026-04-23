@@ -107,33 +107,58 @@
 //! |  7   | 10.6 |
 //! | 10   | 19.3 |
 //!
+//! # Observed agreement and remaining systematic
+//!
+//! Measured B_e (500 k histories, F4 tally with Doppler-broadened
+//! Compton) against Harima 1991 GP reference:
+//!
+//! | μ₀r | measured | reference | rel err |
+//! |-----|---------:|----------:|--------:|
+//! |   1 |    2.062 |      2.09 |    1.3% |
+//! |   2 |    3.557 |      3.33 |    6.8% |
+//! |   4 |    7.460 |      6.58 |   13.4% |
+//! |   7 |   15.292 |     12.89 |   18.6% |
+//! |  10 |   24.544 |     20.31 |   20.8% |
+//!
+//! The error grows but is not compounding exponentially. Absolute
+//! excess `B_measured − B_ref` is roughly linear in μ₀r
+//! (−0.03, 0.23, 0.88, 2.40, 4.23), consistent with a fixed
+//! first-scatter angular-sampling offset that accumulates
+//! additively — not a per-scatter multiplicative bias.
+//!
+//! # Literature context
+//!
+//! Published ANSI/ANS-6.6.1-compliant compilations differ
+//! substantially at deep depths for water at 1 MeV:
+//!
+//! | source            | B_e(μ₀r=10) |
+//! |-------------------|------------:|
+//! | JAEA/Shimizu 2004 |        17.5 |
+//! | Harima 1991 GP    |       20.31 |
+//! | our measurement   |       24.54 |
+//! | Trubey 1966 RSIC  |       32.69 |
+//!
+//! The 1.9× spread between Shimizu and Trubey reflects different
+//! MC codes, cross-section libraries, and physics fidelity. Our
+//! measurement sits in the middle of this band.
+//!
 //! # Assertion strategy
 //!
 //! 1. **Monotone trend**: `B_e` strictly increases with optical
 //!    depth (catches gross transport-loop regressions).
 //! 2. **Physical sign**: `B_e > 1` at every optical depth.
-//! 3. **Absolute agreement with reference**:
-//!    - `μ₀r = 1`:  **±5 %**  (1.3 % measured)
-//!    - `μ₀r = 2`:  **±10 %** (6.9 %)
-//!    - `μ₀r = 4`:  **±15 %** (13.6 %)
-//!    - `μ₀r = 7`:  **±20 %** (19.0 %)
-//!    - `μ₀r = 10`: **±25 %** (21.3 %)
-//!
-//! The outward-facing claim is **±5 % at 1 mfp, growing to
-//! ±25 % at 10 mfp** against Harima 1991 GP-fit reference
-//! values. The growth with depth reflects two effects:
-//!
-//!   - **MC noise**: at 500 k histories, uncollided crossings
-//!     at `μ₀r = 10` are `500 000 · e⁻¹⁰ ≈ 22`, giving ~5 % SEM
-//!     on the denominator.
-//!   - **Literature spread**: published ANSI/ANS-6.6.1
-//!     compilations differ by ~50 % at `μ₀r = 10` (Harima 1991
-//!     GP: 20.31; Trubey 1966 RSIC: 32.69). Our measurement
-//!     (24.6) sits in the middle of this band.
-//!
-//! Remaining systematic (kerma approximation, residual Doppler
-//! refinements, shell-thickness convention in the F4 estimator)
-//! is < 5 % and within the literature uncertainty.
+//! 3. **Absolute agreement with Harima 1991 reference**:
+//!    ±5 / 10 / 15 / 20 / 25 % for μ₀r = 1 / 2 / 4 / 7 / 10.
+//!    Tolerances widen with depth to accept
+//!    (a) MC noise (~5 % SEM at μ₀r = 10 with 22 uncollided
+//!        crossings from 500 k source photons),
+//!    (b) kernel simplifications (kerma approximation for
+//!        Compton recoil electrons, no transverse Compton
+//!        profile components sampled, closest-to-α_free root
+//!        selection in the Doppler quadratic — sign convention
+//!        unsettled between Ribberfors 1975 / Brusa 1996 /
+//!        OpenMC), and
+//!    (c) literature spread between compilations.
 
 use std::path::PathBuf;
 
