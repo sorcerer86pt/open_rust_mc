@@ -796,7 +796,11 @@ impl TabularMuDist {
         // Setting CDF(mu) = xi and solving for x = mu - mu_lo:
         //   a x^2 + b x + c = 0, with a = (pdf_hi - pdf_lo)/(2 dmu),
         //   b = pdf_lo, c = cdf_lo - xi.
-        let pdf_lo = if idx < self.pdf.len() { self.pdf[idx] } else { 0.0 };
+        let pdf_lo = if idx < self.pdf.len() {
+            self.pdf[idx]
+        } else {
+            0.0
+        };
         let pdf_hi = if idx + 1 < self.pdf.len() {
             self.pdf[idx + 1]
         } else {

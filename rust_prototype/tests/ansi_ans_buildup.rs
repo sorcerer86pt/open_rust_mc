@@ -195,15 +195,13 @@
 use std::path::PathBuf;
 
 use open_rust_mc::geometry::Vec3;
+use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::photon::coherent::coherent_scatter;
 use open_rust_mc::photon::compton::compton_scatter;
 use open_rust_mc::photon::material::{Channel, PhotonMaterial};
-use open_rust_mc::photon::pair::{pair_produce, ANNIHILATION_ENERGY_EV};
-use open_rust_mc::photon::photoelectric::{
-    photoelectric_absorb, DEFAULT_PHOTON_CUTOFF_EV,
-};
+use open_rust_mc::photon::pair::{ANNIHILATION_ENERGY_EV, pair_produce};
+use open_rust_mc::photon::photoelectric::{DEFAULT_PHOTON_CUTOFF_EV, photoelectric_absorb};
 use open_rust_mc::photon::transport::deflect;
-use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::transport::rng::Rng;
 
 fn photon_path(name: &str) -> Option<PathBuf> {
@@ -230,40 +228,40 @@ fn water() -> Option<PhotonMaterial> {
 /// (https://physics.nist.gov/PhysRefData/XrayMassCoef/ComTab/water.html).
 /// Pairs are `(energy_eV, μ_en/ρ [cm²/g])`, ascending in energy.
 const WATER_MU_EN_RHO: &[(f64, f64)] = &[
-    (1.000e3,  4.065e3),
-    (1.500e3,  1.372e3),
-    (2.000e3,  6.152e2),
-    (3.000e3,  1.917e2),
-    (4.000e3,  8.191e1),
-    (5.000e3,  4.188e1),
-    (6.000e3,  2.405e1),
-    (8.000e3,  9.915e0),
-    (1.000e4,  4.944e0),
-    (1.500e4,  1.374e0),
-    (2.000e4,  5.503e-1),
-    (3.000e4,  1.557e-1),
-    (4.000e4,  6.947e-2),
-    (5.000e4,  4.223e-2),
-    (6.000e4,  3.190e-2),
-    (8.000e4,  2.597e-2),
-    (1.000e5,  2.550e-2),
-    (1.500e5,  2.764e-2),
-    (2.000e5,  2.966e-2),
-    (3.000e5,  3.192e-2),
-    (4.000e5,  3.279e-2),
-    (5.000e5,  3.299e-2),
-    (6.000e5,  3.284e-2),
-    (8.000e5,  3.206e-2),
-    (1.000e6,  3.103e-2),
-    (1.250e6,  2.965e-2),
-    (1.500e6,  2.833e-2),
-    (2.000e6,  2.608e-2),
-    (3.000e6,  2.276e-2),
-    (4.000e6,  2.075e-2),
-    (5.000e6,  1.941e-2),
-    (6.000e6,  1.846e-2),
-    (8.000e6,  1.723e-2),
-    (1.000e7,  1.647e-2),
+    (1.000e3, 4.065e3),
+    (1.500e3, 1.372e3),
+    (2.000e3, 6.152e2),
+    (3.000e3, 1.917e2),
+    (4.000e3, 8.191e1),
+    (5.000e3, 4.188e1),
+    (6.000e3, 2.405e1),
+    (8.000e3, 9.915e0),
+    (1.000e4, 4.944e0),
+    (1.500e4, 1.374e0),
+    (2.000e4, 5.503e-1),
+    (3.000e4, 1.557e-1),
+    (4.000e4, 6.947e-2),
+    (5.000e4, 4.223e-2),
+    (6.000e4, 3.190e-2),
+    (8.000e4, 2.597e-2),
+    (1.000e5, 2.550e-2),
+    (1.500e5, 2.764e-2),
+    (2.000e5, 2.966e-2),
+    (3.000e5, 3.192e-2),
+    (4.000e5, 3.279e-2),
+    (5.000e5, 3.299e-2),
+    (6.000e5, 3.284e-2),
+    (8.000e5, 3.206e-2),
+    (1.000e6, 3.103e-2),
+    (1.250e6, 2.965e-2),
+    (1.500e6, 2.833e-2),
+    (2.000e6, 2.608e-2),
+    (3.000e6, 2.276e-2),
+    (4.000e6, 2.075e-2),
+    (5.000e6, 1.941e-2),
+    (6.000e6, 1.846e-2),
+    (8.000e6, 1.723e-2),
+    (1.000e7, 1.647e-2),
 ];
 
 /// Log-log-linear interpolation of `μ_en/ρ` at photon energy
@@ -277,8 +275,7 @@ fn water_mu_en_rho(energy_ev: f64) -> f64 {
         return WATER_MU_EN_RHO[last].1;
     }
     // Binary search.
-    let idx = WATER_MU_EN_RHO
-        .partition_point(|&(e, _)| e < energy_ev);
+    let idx = WATER_MU_EN_RHO.partition_point(|&(e, _)| e < energy_ev);
     let (e_lo, y_lo) = WATER_MU_EN_RHO[idx - 1];
     let (e_hi, y_hi) = WATER_MU_EN_RHO[idx];
     let t = (energy_ev.ln() - e_lo.ln()) / (e_hi.ln() - e_lo.ln());
@@ -422,12 +419,7 @@ fn transport_with_crossings(
                     dir = deflect(dir, out.mu, rng);
                 }
                 Channel::Photoelectric => {
-                    let out = photoelectric_absorb(
-                        elem,
-                        e,
-                        DEFAULT_PHOTON_CUTOFF_EV,
-                        rng,
-                    );
+                    let out = photoelectric_absorb(elem, e, DEFAULT_PHOTON_CUTOFF_EV, rng);
                     for ep in out.fluorescence_photons {
                         let (dx, dy, dz) = rng.isotropic_direction();
                         bank.push((pos, Vec3::new(dx, dy, dz), ep));
@@ -463,8 +455,7 @@ fn water_number_buildup_at_1mev() {
     let optical_depths = [1.0_f64, 2.0, 4.0, 7.0, 10.0];
     let reference_be = [2.09_f64, 3.33, 6.58, 12.89, 20.31];
 
-    let sphere_radii: Vec<f64> =
-        optical_depths.iter().map(|mu_r| mu_r * mfp).collect();
+    let sphere_radii: Vec<f64> = optical_depths.iter().map(|mu_r| mu_r * mfp).collect();
 
     // F4 track-length-in-shell estimator. Thin shell: 1 % of each
     // sphere radius (i.e. half-thickness 0.5 % of r). Thin enough that
@@ -566,12 +557,7 @@ fn water_number_buildup_at_1mev() {
 
     // Monotone increase with depth.
     for w in b_e_measured.windows(2) {
-        assert!(
-            w[1] > w[0],
-            "buildup not monotone: {} -> {}",
-            w[0],
-            w[1]
-        );
+        assert!(w[1] > w[0], "buildup not monotone: {} -> {}", w[0], w[1]);
     }
 }
 
@@ -580,14 +566,11 @@ fn track_length_radial_shell_pass_through() {
     // Radial trajectory outward along +x, thin shell at r ∈ [0.9, 1.1].
     // Track length in shell = shell thickness = 0.2.
     let dir = Vec3::new(1.0, 0.0, 0.0);
-    let l = track_length_in_shell(
-        Vec3::new(-0.5, 0.0, 0.0),
-        dir,
-        5.0,
-        0.9,
-        1.1,
+    let l = track_length_in_shell(Vec3::new(-0.5, 0.0, 0.0), dir, 5.0, 0.9, 1.1);
+    assert!(
+        (l - 0.2).abs() < 1e-9,
+        "radial shell track = {l}, expected 0.2"
     );
-    assert!((l - 0.2).abs() < 1e-9, "radial shell track = {l}, expected 0.2");
 }
 
 #[test]
@@ -598,13 +581,7 @@ fn track_length_oblique_shell() {
     // the shell is two segments of length (√0.96 − √0.56) each,
     // total 2·(0.9798 − 0.7483) = 0.4629.
     let dir = Vec3::new(1.0, 0.0, 0.0);
-    let l = track_length_in_shell(
-        Vec3::new(-2.0, 0.5, 0.0),
-        dir,
-        5.0,
-        0.9,
-        1.1,
-    );
+    let l = track_length_in_shell(Vec3::new(-2.0, 0.5, 0.0), dir, 5.0, 0.9, 1.1);
     let expected = 2.0 * (0.96_f64.sqrt() - 0.56_f64.sqrt());
     assert!(
         (l - expected).abs() < 1e-9,
@@ -615,13 +592,7 @@ fn track_length_oblique_shell() {
 #[test]
 fn track_length_miss_shell() {
     let dir = Vec3::new(1.0, 0.0, 0.0);
-    let l = track_length_in_shell(
-        Vec3::new(-2.0, 3.0, 0.0),
-        dir,
-        5.0,
-        0.9,
-        1.1,
-    );
+    let l = track_length_in_shell(Vec3::new(-2.0, 3.0, 0.0), dir, 5.0, 0.9, 1.1);
     assert_eq!(l, 0.0);
 }
 
@@ -629,12 +600,6 @@ fn track_length_miss_shell() {
 fn track_length_stays_inside_inner_sphere() {
     // Segment entirely inside inner sphere → 0 track in shell.
     let dir = Vec3::new(1.0, 0.0, 0.0);
-    let l = track_length_in_shell(
-        Vec3::new(-0.5, 0.0, 0.0),
-        dir,
-        0.5,
-        0.9,
-        1.1,
-    );
+    let l = track_length_in_shell(Vec3::new(-0.5, 0.0, 0.0), dir, 0.5, 0.9, 1.1);
     assert_eq!(l, 0.0);
 }

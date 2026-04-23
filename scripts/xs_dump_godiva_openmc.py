@@ -7,7 +7,9 @@ Writes outputs/xs_audit/openmc_godiva_ref.csv
 Usage (WSL + openmc conda env):
     python scripts/xs_dump_godiva_openmc.py
 """
-import os, sys, csv
+import os
+import sys
+import csv
 import numpy as np
 import openmc.data
 

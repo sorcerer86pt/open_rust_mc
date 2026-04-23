@@ -162,10 +162,7 @@ mod tests {
             sum += sample_bethe_heitler_epsilon(&mut rng);
         }
         let mean = sum / n as f64;
-        assert!(
-            (mean - 0.5).abs() < 5e-3,
-            "<ε> = {mean}, expected 0.5"
-        );
+        assert!((mean - 0.5).abs() < 5e-3, "<ε> = {mean}, expected 0.5");
     }
 
     /// `ε ∈ [0, 1]` always.

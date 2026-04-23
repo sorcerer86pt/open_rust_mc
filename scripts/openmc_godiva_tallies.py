@@ -14,7 +14,9 @@ Output: JSON with ratios to Rust's aggregates.
 Usage (WSL):
     python scripts/openmc_godiva_tallies.py
 """
-import os, time, json, sys
+import os
+import time
+import json
 import numpy as np
 import openmc
 

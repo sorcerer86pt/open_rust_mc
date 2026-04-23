@@ -14,9 +14,9 @@
 use std::path::PathBuf;
 
 use open_rust_mc::geometry::Vec3;
+use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::photon::material::PhotonMaterial;
 use open_rust_mc::photon::transport::transport_history;
-use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::transport::rng::Rng;
 
 const CS137_ENERGY_EV: f64 = 661_657.0;
@@ -77,10 +77,7 @@ fn cs137_nai_spectral_features_land_where_expected() {
 
     let na = PhotonElement::from_hdf5(&na_path).expect("load Na");
     let i = PhotonElement::from_hdf5(&i_path).expect("load I");
-    let nai = PhotonMaterial::new(vec![
-        (NAI_MOLECULE_DENSITY, na),
-        (NAI_MOLECULE_DENSITY, i),
-    ]);
+    let nai = PhotonMaterial::new(vec![(NAI_MOLECULE_DENSITY, na), (NAI_MOLECULE_DENSITY, i)]);
 
     let thickness = 7.62_f64;
     let is_inside = |p: Vec3| p.z >= 0.0 && p.z <= thickness;

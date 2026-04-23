@@ -24,14 +24,14 @@
 //! - Pair-production positrons stop locally and annihilate at rest;
 //!   two 511 keV photons emitted back-to-back with an isotropic axis.
 
+use crate::geometry::cell::CellFill;
 use crate::geometry::surface::BoundaryCondition;
 use crate::geometry::{self, Cell, Surface, Vec3};
-use crate::geometry::cell::CellFill;
 use crate::photon::coherent::coherent_scatter;
 use crate::photon::compton::compton_scatter;
 use crate::photon::material::{Channel, PhotonMaterial};
-use crate::photon::pair::{pair_produce, ANNIHILATION_ENERGY_EV};
-use crate::photon::photoelectric::{photoelectric_absorb, DEFAULT_PHOTON_CUTOFF_EV};
+use crate::photon::pair::{ANNIHILATION_ENERGY_EV, pair_produce};
+use crate::photon::photoelectric::{DEFAULT_PHOTON_CUTOFF_EV, photoelectric_absorb};
 use crate::transport::rng::Rng;
 
 /// Outcome of one complete source-photon history (including all
@@ -91,7 +91,15 @@ pub fn transport_history<F: Fn(Vec3) -> bool>(
     });
 
     while let Some(start) = bank.pop() {
-        transport_one(start, material, &is_inside, energy_cutoff_ev, rng, &mut bank, &mut result);
+        transport_one(
+            start,
+            material,
+            &is_inside,
+            energy_cutoff_ev,
+            rng,
+            &mut bank,
+            &mut result,
+        );
     }
 
     result
@@ -227,11 +235,7 @@ pub fn deflect(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
     if sin_theta_dir < 1.0e-8 {
         // Dir is ± z; use simple form.
         let sgn = if w >= 0.0 { 1.0 } else { -1.0 };
-        Vec3::new(
-            sin_theta * cos_phi,
-            sin_theta * sin_phi,
-            sgn * mu,
-        )
+        Vec3::new(sin_theta * cos_phi, sin_theta * sin_phi, sgn * mu)
     } else {
         let inv = 1.0 / sin_theta_dir;
         Vec3::new(
@@ -375,7 +379,15 @@ fn transport_one_csg(
                 result.energy_escaped += energy;
                 return;
             };
-            if !handle_boundary(hit, surfaces, &mut pos, &mut dir, &mut cell_idx, &mut energy, result) {
+            if !handle_boundary(
+                hit,
+                surfaces,
+                &mut pos,
+                &mut dir,
+                &mut cell_idx,
+                &mut energy,
+                result,
+            ) {
                 return;
             }
             continue;
@@ -386,7 +398,15 @@ fn transport_one_csg(
 
         match trace {
             Some(hit) if hit.distance < dist_collision => {
-                if !handle_boundary(hit, surfaces, &mut pos, &mut dir, &mut cell_idx, &mut energy, result) {
+                if !handle_boundary(
+                    hit,
+                    surfaces,
+                    &mut pos,
+                    &mut dir,
+                    &mut cell_idx,
+                    &mut energy,
+                    result,
+                ) {
                     return;
                 }
             }
@@ -413,8 +433,7 @@ fn transport_one_csg(
                         dir = deflect(dir, out.mu, rng);
                     }
                     Channel::Photoelectric => {
-                        let out =
-                            photoelectric_absorb(elem, energy, DEFAULT_PHOTON_CUTOFF_EV, rng);
+                        let out = photoelectric_absorb(elem, energy, DEFAULT_PHOTON_CUTOFF_EV, rng);
                         result.energy_deposited += out.local_deposition;
                         result.deposits.push((pos, out.local_deposition));
                         for ep in out.fluorescence_photons {
@@ -793,9 +812,18 @@ mod tests {
         let lead_mat = PhotonMaterial::mono(3.296e-2, pb);
 
         let surfaces = vec![
-            Surface::PlaneZ { z0: 0.0, bc: BoundaryCondition::Vacuum },
-            Surface::PlaneZ { z0: 50.0, bc: BoundaryCondition::Transmission },
-            Surface::PlaneZ { z0: 60.0, bc: BoundaryCondition::Vacuum },
+            Surface::PlaneZ {
+                z0: 0.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneZ {
+                z0: 50.0,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::PlaneZ {
+                z0: 60.0,
+                bc: BoundaryCondition::Vacuum,
+            },
         ];
         let cells = vec![
             Cell::new(
@@ -833,8 +861,14 @@ mod tests {
 
         // Pure 60 cm water reference.
         let surfaces_w = vec![
-            Surface::PlaneZ { z0: 0.0, bc: BoundaryCondition::Vacuum },
-            Surface::PlaneZ { z0: 60.0, bc: BoundaryCondition::Vacuum },
+            Surface::PlaneZ {
+                z0: 0.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneZ {
+                z0: 60.0,
+                bc: BoundaryCondition::Vacuum,
+            },
         ];
         let cells_w = vec![
             Cell::new(
@@ -881,12 +915,30 @@ mod tests {
         };
         let half = 50.0;
         let surfaces = vec![
-            Surface::PlaneX { x0: -half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneX { x0: half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: -half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0: -half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0: half, bc: BoundaryCondition::Reflective },
+            Surface::PlaneX {
+                x0: -half,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneX {
+                x0: half,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: -half,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: half,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneZ {
+                z0: -half,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneZ {
+                z0: half,
+                bc: BoundaryCondition::Reflective,
+            },
         ];
         let cells = vec![Cell::new(
             CellId(0),

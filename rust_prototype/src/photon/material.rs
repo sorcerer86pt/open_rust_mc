@@ -42,7 +42,9 @@ impl PhotonMaterial {
 
     /// Construct a single-element material at a given density.
     pub fn mono(atom_density: f64, element: PhotonElement) -> Self {
-        Self { entries: vec![(atom_density, element)] }
+        Self {
+            entries: vec![(atom_density, element)],
+        }
     }
 
     /// Macroscopic channel cross section at energy `E` in cm⁻¹.
@@ -51,20 +53,18 @@ impl PhotonMaterial {
         for (n, elem) in &self.entries {
             let sigma_micro = match channel {
                 Channel::Coherent => interpolate_log_log(&elem.energy, &elem.coherent_xs, energy),
-                Channel::Incoherent => interpolate_log_log(&elem.energy, &elem.incoherent_xs, energy),
+                Channel::Incoherent => {
+                    interpolate_log_log(&elem.energy, &elem.incoherent_xs, energy)
+                }
                 Channel::Photoelectric => {
                     interpolate_log_log(&elem.energy, &elem.photoelectric_xs, energy)
                 }
-                Channel::PairProductionNuclear => interpolate_log_log(
-                    &elem.energy,
-                    &elem.pair_production_nuclear_xs,
-                    energy,
-                ),
-                Channel::PairProductionElectron => interpolate_log_log(
-                    &elem.energy,
-                    &elem.pair_production_electron_xs,
-                    energy,
-                ),
+                Channel::PairProductionNuclear => {
+                    interpolate_log_log(&elem.energy, &elem.pair_production_nuclear_xs, energy)
+                }
+                Channel::PairProductionElectron => {
+                    interpolate_log_log(&elem.energy, &elem.pair_production_electron_xs, energy)
+                }
             };
             sigma += n * sigma_micro;
         }
@@ -132,16 +132,12 @@ impl PhotonMaterial {
                     Channel::Photoelectric => {
                         interpolate_log_log(&elem.energy, &elem.photoelectric_xs, energy)
                     }
-                    Channel::PairProductionNuclear => interpolate_log_log(
-                        &elem.energy,
-                        &elem.pair_production_nuclear_xs,
-                        energy,
-                    ),
-                    Channel::PairProductionElectron => interpolate_log_log(
-                        &elem.energy,
-                        &elem.pair_production_electron_xs,
-                        energy,
-                    ),
+                    Channel::PairProductionNuclear => {
+                        interpolate_log_log(&elem.energy, &elem.pair_production_nuclear_xs, energy)
+                    }
+                    Channel::PairProductionElectron => {
+                        interpolate_log_log(&elem.energy, &elem.pair_production_electron_xs, energy)
+                    }
                 };
                 n * sigma
             })

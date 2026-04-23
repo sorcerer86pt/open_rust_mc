@@ -23,9 +23,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use open_rust_mc::geometry::Vec3;
+use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::photon::material::PhotonMaterial;
 use open_rust_mc::photon::transport::transport_history;
-use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::transport::rng::Rng;
 
 /// Cs-137 characteristic gamma-ray energy (eV).
@@ -73,10 +73,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    let nai = PhotonMaterial::new(vec![
-        (NAI_MOLECULE_DENSITY, na),
-        (NAI_MOLECULE_DENSITY, i),
-    ]);
+    let nai = PhotonMaterial::new(vec![(NAI_MOLECULE_DENSITY, na), (NAI_MOLECULE_DENSITY, i)]);
 
     // Detector geometry: slab 0 < z < 7.62 cm, infinite in x,y.
     let thickness_cm = 7.62;

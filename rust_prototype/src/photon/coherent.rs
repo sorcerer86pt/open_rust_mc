@@ -41,11 +41,7 @@ pub struct CoherentOutcome {
 /// Sample a coherent scattering event at incoming photon energy
 /// `energy_in` (eV). Returns only `μ` — the photon energy is
 /// unchanged by elastic scattering.
-pub fn coherent_scatter(
-    elem: &PhotonElement,
-    energy_in: f64,
-    rng: &mut Rng,
-) -> CoherentOutcome {
+pub fn coherent_scatter(elem: &PhotonElement, energy_in: f64, rng: &mut Rng) -> CoherentOutcome {
     // Kinematic limits on x = sin(θ/2)/λ.
     //   x_min = 0 at θ = 0  (forward, μ = 1)
     //   x_max = 1/λ = E/hc at θ = π  (backward, μ = -1)

@@ -53,11 +53,11 @@ use std::time::Instant;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
-use open_rust_mc::geometry::{ray, Aabb, Vec3};
+use open_rust_mc::geometry::{Aabb, Vec3, ray};
 use open_rust_mc::hdf5_reader;
+use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::photon::material::PhotonMaterial;
 use open_rust_mc::photon::transport::transport_history_csg;
-use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::thermal::ThermalScatteringData;
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::rng::Rng;
@@ -126,22 +126,36 @@ fn parse_args() -> Result<Args, String> {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--photon-data" => {
-                args.photon_data = PathBuf::from(it.next().ok_or("missing value for --photon-data")?);
+                args.photon_data =
+                    PathBuf::from(it.next().ok_or("missing value for --photon-data")?);
             }
             "--n-neutron-batches" => {
-                args.n_neutron_batches =
-                    it.next().ok_or("missing value")?.parse().map_err(|e| format!("{e}"))?;
+                args.n_neutron_batches = it
+                    .next()
+                    .ok_or("missing value")?
+                    .parse()
+                    .map_err(|e| format!("{e}"))?;
             }
             "--n-neutron-inactive" => {
-                args.n_neutron_inactive =
-                    it.next().ok_or("missing value")?.parse().map_err(|e| format!("{e}"))?;
+                args.n_neutron_inactive = it
+                    .next()
+                    .ok_or("missing value")?
+                    .parse()
+                    .map_err(|e| format!("{e}"))?;
             }
             "--n-neutron-particles" => {
-                args.n_neutron_particles =
-                    it.next().ok_or("missing value")?.parse().map_err(|e| format!("{e}"))?;
+                args.n_neutron_particles = it
+                    .next()
+                    .ok_or("missing value")?
+                    .parse()
+                    .map_err(|e| format!("{e}"))?;
             }
             "--n-photon" => {
-                args.n_photon = it.next().ok_or("missing value")?.parse().map_err(|e| format!("{e}"))?;
+                args.n_photon = it
+                    .next()
+                    .ok_or("missing value")?
+                    .parse()
+                    .map_err(|e| format!("{e}"))?;
             }
             other => return Err(format!("unknown arg: {other}")),
         }
@@ -217,7 +231,11 @@ fn main() -> ExitCode {
         } else {
             0.0
         };
-        println!("    cell {i} [{label:<5}]: {:>8.0} captures  ({:>6.3} %)", c, 100.0 * frac);
+        println!(
+            "    cell {i} [{label:<5}]: {:>8.0} captures  ({:>6.3} %)",
+            c,
+            100.0 * frac
+        );
     }
 
     if total_captures == 0.0 {
@@ -302,7 +320,10 @@ fn main() -> ExitCode {
 
     // ── Final report ───────────────────────────────────────────────
     println!("\n── Energy deposition by region ──");
-    println!("  {:<6} {:>16} {:>10}", "region", "deposited (eV)", "fraction");
+    println!(
+        "  {:<6} {:>16} {:>10}",
+        "region", "deposited (eV)", "fraction"
+    );
     let mut total_dep = 0.0;
     for (i, e) in deposited_per_cell.iter().enumerate() {
         total_dep += e;
@@ -323,7 +344,9 @@ fn main() -> ExitCode {
     }
     println!(
         "  {:<6} {:>16.3e} {:>9.3} %",
-        "escape", escaped_energy, 100.0 * escaped_energy / total_source_energy
+        "escape",
+        escaped_energy,
+        100.0 * escaped_energy / total_source_energy
     );
     let sum = total_dep + orphan_deposit + escaped_energy;
     println!(
@@ -359,15 +382,48 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
     let half = PITCH / 2.0;
     let z_half = half;
     let surfaces = vec![
-        Surface::CylinderZ { center_x: 0.0, center_y: 0.0, radius: FUEL_OR, bc: BoundaryCondition::Transmission },
-        Surface::CylinderZ { center_x: 0.0, center_y: 0.0, radius: CLAD_IR, bc: BoundaryCondition::Transmission },
-        Surface::CylinderZ { center_x: 0.0, center_y: 0.0, radius: CLAD_OR, bc: BoundaryCondition::Transmission },
-        Surface::PlaneX { x0: -half, bc: BoundaryCondition::Reflective },
-        Surface::PlaneX { x0: half, bc: BoundaryCondition::Reflective },
-        Surface::PlaneY { y0: -half, bc: BoundaryCondition::Reflective },
-        Surface::PlaneY { y0: half, bc: BoundaryCondition::Reflective },
-        Surface::PlaneZ { z0: -z_half, bc: BoundaryCondition::Reflective },
-        Surface::PlaneZ { z0: z_half, bc: BoundaryCondition::Reflective },
+        Surface::CylinderZ {
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: FUEL_OR,
+            bc: BoundaryCondition::Transmission,
+        },
+        Surface::CylinderZ {
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: CLAD_IR,
+            bc: BoundaryCondition::Transmission,
+        },
+        Surface::CylinderZ {
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: CLAD_OR,
+            bc: BoundaryCondition::Transmission,
+        },
+        Surface::PlaneX {
+            x0: -half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneX {
+            x0: half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneY {
+            y0: -half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneY {
+            y0: half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneZ {
+            z0: -z_half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneZ {
+            z0: z_half,
+            bc: BoundaryCondition::Reflective,
+        },
     ];
     let box_aabb = Aabb::new(
         Vec3::new(-half, -half, -z_half),
@@ -458,10 +514,18 @@ fn load_table_xs(data_dir: &Path) -> Result<TableXsProvider, String> {
         if !path.exists() {
             return Err(format!("missing neutron file: {}", path.display()));
         }
-        tables.push(xs_provider::load_nuclide_table(&path, nuc_temp_idx, awr, nu_bar));
+        tables.push(xs_provider::load_nuclide_table(
+            &path,
+            nuc_temp_idx,
+            awr,
+            nu_bar,
+        ));
     }
     let thermal = load_thermal(data_dir);
-    Ok(TableXsProvider { nuclides: tables, thermal })
+    Ok(TableXsProvider {
+        nuclides: tables,
+        thermal,
+    })
 }
 
 fn load_thermal(data_dir: &Path) -> Vec<Option<Arc<ThermalScatteringData>>> {
@@ -486,15 +550,9 @@ fn load_photon_materials(data_dir: &Path) -> Result<Vec<Option<PhotonMaterial>>,
     let zr = load("Zr.h5")?;
     let u = load("U.h5")?;
 
-    let uo2 = PhotonMaterial::new(vec![
-        (UO2_MOL_DENSITY, u),
-        (2.0 * UO2_MOL_DENSITY, o1),
-    ]);
+    let uo2 = PhotonMaterial::new(vec![(UO2_MOL_DENSITY, u), (2.0 * UO2_MOL_DENSITY, o1)]);
     let clad = PhotonMaterial::mono(ZR_ATOM_DENSITY, zr);
-    let h2o = PhotonMaterial::new(vec![
-        (2.0 * H2O_MOL_DENSITY, h),
-        (H2O_MOL_DENSITY, o2),
-    ]);
+    let h2o = PhotonMaterial::new(vec![(2.0 * H2O_MOL_DENSITY, h), (H2O_MOL_DENSITY, o2)]);
 
     Ok(vec![Some(uo2), Some(clad), Some(h2o)])
 }

@@ -185,12 +185,7 @@ fn sample_struck_subshell(
 /// Log-log linear interpolation of `sigma_pe,i(E)` using the tail-
 /// aligned subshell XS array. Returns 0 below the shell's binding
 /// tabulation, matching `Subshell::xs_at`.
-fn interpolate_subshell_xs(
-    energy: &[f64],
-    shell: &Subshell,
-    n_master: usize,
-    e_query: f64,
-) -> f64 {
+fn interpolate_subshell_xs(energy: &[f64], shell: &Subshell, n_master: usize, e_query: f64) -> f64 {
     if shell.xs.is_empty() {
         return 0.0;
     }
@@ -290,8 +285,7 @@ mod tests {
 
         for _ in 0..2_000 {
             let out = photoelectric_absorb(&pb, energy, DEFAULT_PHOTON_CUTOFF_EV, &mut rng);
-            let total: f64 = out.fluorescence_photons.iter().sum::<f64>()
-                + out.local_deposition;
+            let total: f64 = out.fluorescence_photons.iter().sum::<f64>() + out.local_deposition;
             // Accounting accuracy: valence binding energies not on the
             // PE subshell list can be lost to "unresolved" holes. For
             // Pb this is <100 eV vs 100 keV (~0.1 %). Tolerance 1 %.

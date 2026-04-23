@@ -365,7 +365,9 @@ impl XsProvider for SvdXsProvider {
         &self,
         nuclide_idx: usize,
     ) -> Option<&hdf5_reader::EnergyDistribution> {
-        self.nuclides[nuclide_idx].inelastic_continuum_edist.as_ref()
+        self.nuclides[nuclide_idx]
+            .inelastic_continuum_edist
+            .as_ref()
     }
 
     fn n2n_edist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
@@ -955,7 +957,9 @@ impl XsProvider for TableXsProvider {
         &self,
         nuclide_idx: usize,
     ) -> Option<&hdf5_reader::EnergyDistribution> {
-        self.nuclides[nuclide_idx].inelastic_continuum_edist.as_ref()
+        self.nuclides[nuclide_idx]
+            .inelastic_continuum_edist
+            .as_ref()
     }
 
     fn n2n_edist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {

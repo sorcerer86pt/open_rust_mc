@@ -24,8 +24,8 @@
 
 use std::path::PathBuf;
 
-use open_rust_mc::photon::compton::{compton_scatter, HC_EV_ANGSTROM, M_E_C2_EV};
 use open_rust_mc::photon::PhotonElement;
+use open_rust_mc::photon::compton::{HC_EV_ANGSTROM, M_E_C2_EV, compton_scatter};
 use open_rust_mc::transport::rng::Rng;
 
 fn photon_path(name: &str) -> Option<PathBuf> {

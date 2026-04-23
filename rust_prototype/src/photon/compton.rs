@@ -76,11 +76,7 @@ pub struct ComptonOutcome {
 /// Doppler-broadened about the free-electron Klein-Nishina value
 /// using the Hartree-Fock Compton profiles (Ribberfors 1975 impulse
 /// approximation, as in PENELOPE §2.3.5 and OpenMC).
-pub fn compton_scatter(
-    elem: &PhotonElement,
-    energy_in: f64,
-    rng: &mut Rng,
-) -> ComptonOutcome {
+pub fn compton_scatter(elem: &PhotonElement, energy_in: f64, rng: &mut Rng) -> ComptonOutcome {
     let alpha = energy_in / M_E_C2_EV;
     let (k_free, mu) = sample_kn_with_bound_rejection(alpha, energy_in, elem, rng);
     // Apply Doppler broadening on top of the free kinematics.
@@ -96,11 +92,7 @@ pub fn compton_scatter(
 /// outgoing energy is exactly `E · k_free`. Retained for unit-tests
 /// that compare against the analytic free-electron Klein-Nishina
 /// differential, where Doppler smearing would be a confounder.
-pub fn compton_scatter_free(
-    elem: &PhotonElement,
-    energy_in: f64,
-    rng: &mut Rng,
-) -> ComptonOutcome {
+pub fn compton_scatter_free(elem: &PhotonElement, energy_in: f64, rng: &mut Rng) -> ComptonOutcome {
     let alpha = energy_in / M_E_C2_EV;
     let (k, mu) = sample_kn_with_bound_rejection(alpha, energy_in, elem, rng);
     let energy_out = energy_in * k;
@@ -591,10 +583,7 @@ mod tests {
         let std = var.sqrt();
         // Expect RMS deviation of a few percent (typical Compton profile
         // widths ≈ 0.5–2 a.u. · α_fine ≈ 0.004–0.015 in m_e c units).
-        assert!(
-            std > 1e-3,
-            "Doppler spread too small (std k_dev = {std})"
-        );
+        assert!(std > 1e-3, "Doppler spread too small (std k_dev = {std})");
         assert!(
             std < 0.2,
             "Doppler spread unphysically large (std k_dev = {std})"
@@ -667,8 +656,8 @@ mod tests {
             eprintln!("skipping: Pb.h5 not present");
             return;
         };
-        let mut pb_free = PhotonElement::from_hdf5(&photon_path("Pb.h5").unwrap())
-            .expect("load Pb");
+        let mut pb_free =
+            PhotonElement::from_hdf5(&photon_path("Pb.h5").unwrap()).expect("load Pb");
         let z = pb_free.z as f64;
         pb_free
             .incoherent_scattering_factor

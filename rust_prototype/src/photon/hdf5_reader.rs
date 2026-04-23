@@ -88,17 +88,12 @@ impl PhotonElement {
         let incoherent_xs = read_xs(&element, "incoherent", n_e, path)?;
         let photoelectric_xs = read_xs(&element, "photoelectric", n_e, path)?;
         let pair_production_nuclear_xs = read_xs(&element, "pair_production_nuclear", n_e, path)?;
-        let pair_production_electron_xs =
-            read_xs(&element, "pair_production_electron", n_e, path)?;
+        let pair_production_electron_xs = read_xs(&element, "pair_production_electron", n_e, path)?;
 
         let coherent_form_factor =
             read_scattering_factor(&element, "coherent", "scattering_factor", path)?;
-        let coherent_integrated_form_factor = read_scattering_factor(
-            &element,
-            "coherent",
-            "integrated_scattering_factor",
-            path,
-        )?;
+        let coherent_integrated_form_factor =
+            read_scattering_factor(&element, "coherent", "integrated_scattering_factor", path)?;
         let coherent_anomalous = read_anomalous_factors(&element, path)?;
 
         let incoherent_scattering_factor =
@@ -316,10 +311,7 @@ fn read_tabulated_2xn(
     })
 }
 
-fn read_anomalous_factors(
-    element: &hdf5_pure::Group,
-    path: &Path,
-) -> Result<AnomalousFactors> {
+fn read_anomalous_factors(element: &hdf5_pure::Group, path: &Path) -> Result<AnomalousFactors> {
     let hdf5_err = |detail: String| SvdError::Hdf5 {
         path: path.display().to_string(),
         detail,
@@ -332,10 +324,7 @@ fn read_anomalous_factors(
     Ok(AnomalousFactors { real, imag })
 }
 
-fn read_compton_profiles(
-    element: &hdf5_pure::Group,
-    path: &Path,
-) -> Result<ComptonProfiles> {
+fn read_compton_profiles(element: &hdf5_pure::Group, path: &Path) -> Result<ComptonProfiles> {
     let hdf5_err = |detail: String| SvdError::Hdf5 {
         path: path.display().to_string(),
         detail,
@@ -398,10 +387,7 @@ fn read_compton_profiles(
     })
 }
 
-fn read_bremsstrahlung(
-    element: &hdf5_pure::Group,
-    path: &Path,
-) -> Result<Bremsstrahlung> {
+fn read_bremsstrahlung(element: &hdf5_pure::Group, path: &Path) -> Result<Bremsstrahlung> {
     let hdf5_err = |detail: String| SvdError::Hdf5 {
         path: path.display().to_string(),
         detail,
@@ -726,8 +712,11 @@ mod tests {
         assert_eq!(elem.compton_profiles.n_shells(), 3);
 
         // Carbon K, L1, L2, L3 in order.
-        let designators: Vec<&str> =
-            elem.subshells.iter().map(|s| s.designator.as_str()).collect();
+        let designators: Vec<&str> = elem
+            .subshells
+            .iter()
+            .map(|s| s.designator.as_str())
+            .collect();
         assert_eq!(designators, vec!["K", "L1", "L2", "L3"]);
 
         let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
@@ -875,8 +864,11 @@ mod tests {
         );
 
         // Pb has a rich M and N shell structure.
-        let designators: Vec<String> =
-            elem.subshells.iter().map(|s| s.designator.clone()).collect();
+        let designators: Vec<String> = elem
+            .subshells
+            .iter()
+            .map(|s| s.designator.clone())
+            .collect();
         assert!(designators.iter().any(|d| d.starts_with('M')));
         assert!(designators.iter().any(|d| d.starts_with('N')));
     }
@@ -959,11 +951,17 @@ mod tests {
         };
 
         fn empty_sf() -> ScatteringFactor {
-            ScatteringFactor { x: vec![], value: vec![] }
+            ScatteringFactor {
+                x: vec![],
+                value: vec![],
+            }
         }
 
         fn empty_tab() -> TabulatedFactor {
-            TabulatedFactor { grid: vec![], value: vec![] }
+            TabulatedFactor {
+                grid: vec![],
+                value: vec![],
+            }
         }
 
         fn fixture(xs: Vec<[f64; 5]>) -> PhotonElement {
@@ -1010,10 +1008,7 @@ mod tests {
 
         #[test]
         fn total_xs_is_sum_of_five_channels() {
-            let elem = fixture(vec![
-                [1.0, 2.0, 3.0, 4.0, 5.0],
-                [0.5, 0.5, 0.5, 0.5, 0.5],
-            ]);
+            let elem = fixture(vec![[1.0, 2.0, 3.0, 4.0, 5.0], [0.5, 0.5, 0.5, 0.5, 0.5]]);
             assert_eq!(elem.total_xs_at(0), 15.0);
             assert_eq!(elem.total_xs_at(1), 2.5);
         }
@@ -1076,13 +1071,9 @@ mod tests {
         fn non_hdf5_file_returns_err() {
             // Write a plain text file and try to parse it as HDF5.
             let dir = std::env::temp_dir();
-            let path = dir.join(format!(
-                "photon_bogus_{}.h5",
-                std::process::id()
-            ));
+            let path = dir.join(format!("photon_bogus_{}.h5", std::process::id()));
             {
-                let mut f =
-                    std::fs::File::create(&path).expect("create scratch file");
+                let mut f = std::fs::File::create(&path).expect("create scratch file");
                 f.write_all(b"this is not HDF5, it's plain text\n").unwrap();
             }
             let result = PhotonElement::from_hdf5(&path);
@@ -1257,12 +1248,24 @@ mod tests {
 
         // K=1, L1=2, L2=3, L3=4 are the first four.
         assert_eq!(elem.subshell_by_eadl_designator(1).unwrap().designator, "K");
-        assert_eq!(elem.subshell_by_eadl_designator(2).unwrap().designator, "L1");
-        assert_eq!(elem.subshell_by_eadl_designator(3).unwrap().designator, "L2");
-        assert_eq!(elem.subshell_by_eadl_designator(4).unwrap().designator, "L3");
+        assert_eq!(
+            elem.subshell_by_eadl_designator(2).unwrap().designator,
+            "L1"
+        );
+        assert_eq!(
+            elem.subshell_by_eadl_designator(3).unwrap().designator,
+            "L2"
+        );
+        assert_eq!(
+            elem.subshell_by_eadl_designator(4).unwrap().designator,
+            "L3"
+        );
 
         // Q1 is the 29th (last) subshell in U.
-        assert_eq!(elem.subshell_by_eadl_designator(29).unwrap().designator, "Q1");
+        assert_eq!(
+            elem.subshell_by_eadl_designator(29).unwrap().designator,
+            "Q1"
+        );
 
         // Beyond 29: outside U's PE tabulation, returns None.
         assert!(elem.subshell_by_eadl_designator(30).is_none());
