@@ -24,7 +24,9 @@
 //! - Pair-production positrons stop locally and annihilate at rest;
 //!   two 511 keV photons emitted back-to-back with an isotropic axis.
 
-use crate::geometry::Vec3;
+use crate::geometry::surface::BoundaryCondition;
+use crate::geometry::{self, Cell, Surface, Vec3};
+use crate::geometry::cell::CellFill;
 use crate::photon::coherent::coherent_scatter;
 use crate::photon::compton::compton_scatter;
 use crate::photon::material::{Channel, PhotonMaterial};
@@ -240,6 +242,254 @@ pub fn deflect(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
     }
 }
 
+// ── CSG-aware transport ───────────────────────────────────────────────────
+
+/// Drive a full photon history through a CSG geometry.
+///
+/// This is the multi-material counterpart to [`transport_history`]. The
+/// transport medium is described by:
+///   - `surfaces` — all quadric surfaces in the problem (indexed by
+///     `HalfSpace::surface_idx`), each carrying its own boundary
+///     condition (Vacuum, Reflective, Transmission),
+///   - `cells` — boolean half-space regions with a `CellFill`
+///     (material index, void, or nested universe),
+///   - `materials` — per-cell `PhotonMaterial`, indexed by the
+///     `CellFill::Material` id. An entry of `None` marks a material id
+///     that is void (handy for e.g. an explicitly named vacuum
+///     material rather than `CellFill::Void`).
+///
+/// Behaviour mirrors the neutron transport loop in
+/// `transport::simulate::transport_particle`:
+///   - sample a free flight in the current cell's macroscopic total,
+///   - trace to the next surface crossing; if closer than the sampled
+///     collision distance, handle the BC (leak / reflect / enter next
+///     cell); otherwise collide and sample a channel.
+///
+/// A source outside the modelled geometry is returned immediately as
+/// fully escaped energy.
+pub fn transport_history_csg(
+    source_pos: Vec3,
+    source_dir: Vec3,
+    source_energy: f64,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Option<PhotonMaterial>],
+    energy_cutoff_ev: f64,
+    rng: &mut Rng,
+) -> HistoryResult {
+    let mut result = HistoryResult {
+        energy_deposited: 0.0,
+        energy_escaped: 0.0,
+        n_collisions: 0,
+        deposits: Vec::new(),
+    };
+
+    // Find starting cell; if the source is outside the model the
+    // photon is born already leaked and its energy escapes.
+    let Some(start_cell) = geometry::ray::find_cell(source_pos, surfaces, cells) else {
+        result.energy_escaped += source_energy;
+        return result;
+    };
+
+    // (position, direction, energy, cell_idx). Secondaries are
+    // spawned at a collision site inside the current cell, so they
+    // inherit that cell; we re-resolve only when we cannot trust the
+    // inherited index (e.g. on the very first step).
+    let mut bank: Vec<(Vec3, Vec3, f64, usize)> =
+        vec![(source_pos, source_dir, source_energy, start_cell)];
+
+    while let Some((pos, dir, energy, cell_idx)) = bank.pop() {
+        transport_one_csg(
+            pos,
+            dir,
+            energy,
+            cell_idx,
+            surfaces,
+            cells,
+            materials,
+            energy_cutoff_ev,
+            rng,
+            &mut bank,
+            &mut result,
+        );
+    }
+
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transport_one_csg(
+    start_pos: Vec3,
+    start_dir: Vec3,
+    start_energy: f64,
+    start_cell: usize,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Option<PhotonMaterial>],
+    energy_cutoff_ev: f64,
+    rng: &mut Rng,
+    bank: &mut Vec<(Vec3, Vec3, f64, usize)>,
+    result: &mut HistoryResult,
+) {
+    let mut pos = start_pos;
+    let mut dir = start_dir;
+    let mut energy = start_energy;
+    let mut cell_idx = start_cell;
+
+    // Shared cap across collisions + surface crossings. A stuck photon
+    // (pathological geometry, grazing reflection loop) is terminated
+    // with its remaining energy deposited locally.
+    const MAX_EVENTS_PER_TRACK: u32 = 100_000;
+    let mut void_streaks = 0_u32;
+
+    for _ in 0..MAX_EVENTS_PER_TRACK {
+        if energy < energy_cutoff_ev {
+            result.energy_deposited += energy;
+            result.deposits.push((pos, energy));
+            return;
+        }
+
+        let material: Option<&PhotonMaterial> = match cells[cell_idx].fill {
+            CellFill::Material(m) => materials.get(m as usize).and_then(|o| o.as_ref()),
+            CellFill::Void => None,
+            CellFill::Universe(_) => {
+                // Nested universes not yet supported on the photon path.
+                result.energy_escaped += energy;
+                return;
+            }
+        };
+
+        // Distance to the next surface in the current cell, if any.
+        let trace = geometry::ray::trace_step(pos, dir, cell_idx, surfaces, cells);
+
+        let sigma_tot = material.map(|m| m.macro_total(energy)).unwrap_or(0.0);
+
+        // Void / zero-XS region: stream to the next surface.
+        if sigma_tot <= 0.0 {
+            void_streaks += 1;
+            if void_streaks > 100 {
+                result.energy_escaped += energy;
+                return;
+            }
+            let Some(hit) = trace else {
+                result.energy_escaped += energy;
+                return;
+            };
+            if !handle_boundary(hit, surfaces, &mut pos, &mut dir, &mut cell_idx, &mut energy, result) {
+                return;
+            }
+            continue;
+        }
+        void_streaks = 0;
+
+        let dist_collision = rng.exponential(sigma_tot);
+
+        match trace {
+            Some(hit) if hit.distance < dist_collision => {
+                if !handle_boundary(hit, surfaces, &mut pos, &mut dir, &mut cell_idx, &mut energy, result) {
+                    return;
+                }
+            }
+            _ => {
+                // Collision inside the cell.
+                pos = pos + dir * dist_collision;
+                let material = material.expect("sigma_tot > 0 implies material");
+                result.n_collisions += 1;
+
+                let channel = material.sample_channel(energy, rng.uniform());
+                let elem_idx = material.sample_element(channel, energy, rng.uniform());
+                let elem = &material.entries[elem_idx].1;
+
+                match channel {
+                    Channel::Coherent => {
+                        let out = coherent_scatter(elem, energy, rng);
+                        dir = deflect(dir, out.mu, rng);
+                    }
+                    Channel::Incoherent => {
+                        let out = compton_scatter(elem, energy, rng);
+                        result.energy_deposited += out.electron_kinetic;
+                        result.deposits.push((pos, out.electron_kinetic));
+                        energy = out.energy_out;
+                        dir = deflect(dir, out.mu, rng);
+                    }
+                    Channel::Photoelectric => {
+                        let out =
+                            photoelectric_absorb(elem, energy, DEFAULT_PHOTON_CUTOFF_EV, rng);
+                        result.energy_deposited += out.local_deposition;
+                        result.deposits.push((pos, out.local_deposition));
+                        for ep in out.fluorescence_photons {
+                            let (dx, dy, dz) = rng.isotropic_direction();
+                            bank.push((pos, Vec3::new(dx, dy, dz), ep, cell_idx));
+                        }
+                        return;
+                    }
+                    Channel::PairProductionNuclear | Channel::PairProductionElectron => {
+                        if let Some(out) = pair_produce(energy, rng) {
+                            result.energy_deposited += out.local_deposition();
+                            result.deposits.push((pos, out.local_deposition()));
+                            let (dx, dy, dz) = rng.isotropic_direction();
+                            let ann_dir = Vec3::new(dx, dy, dz);
+                            bank.push((pos, ann_dir, ANNIHILATION_ENERGY_EV, cell_idx));
+                            bank.push((pos, -ann_dir, ANNIHILATION_ENERGY_EV, cell_idx));
+                        } else {
+                            result.energy_deposited += energy;
+                            result.deposits.push((pos, energy));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    // Event budget exhausted — deposit remaining energy locally.
+    result.energy_deposited += energy;
+    result.deposits.push((pos, energy));
+}
+
+/// Apply the boundary condition at a surface hit. Returns `false` when
+/// the track terminates (leak or unresolved neighbour); `true` when the
+/// photon should continue (reflected or entered a new cell).
+#[inline]
+fn handle_boundary(
+    hit: crate::geometry::RayHit,
+    surfaces: &[Surface],
+    pos: &mut Vec3,
+    dir: &mut Vec3,
+    cell_idx: &mut usize,
+    energy: &mut f64,
+    result: &mut HistoryResult,
+) -> bool {
+    let bc = surfaces[hit.surface_idx].boundary_condition();
+    match bc {
+        BoundaryCondition::Vacuum => {
+            *pos = *pos + *dir * hit.distance;
+            result.energy_escaped += *energy;
+            false
+        }
+        BoundaryCondition::Reflective => {
+            *pos = *pos + *dir * hit.distance;
+            let n = surfaces[hit.surface_idx].normal_at(*pos);
+            let d = *dir;
+            *dir = d - n * (2.0 * d.dot(n));
+            true
+        }
+        BoundaryCondition::Transmission => {
+            let nudge = (hit.distance * 1e-8).max(1e-8);
+            *pos = *pos + *dir * (hit.distance + nudge);
+            match hit.next_cell_idx {
+                Some(next) => {
+                    *cell_idx = next;
+                    true
+                }
+                None => {
+                    result.energy_escaped += *energy;
+                    false
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,5 +661,292 @@ mod tests {
             "thick slab absorbed only {:.3} of source energy",
             avg_dep / source_e
         );
+    }
+
+    // ── CSG driver tests ──────────────────────────────────────────────
+
+    use crate::geometry::cell::{self, CellFill, CellId};
+    use crate::geometry::surface::BoundaryCondition;
+    use crate::geometry::{Cell, Surface};
+
+    /// Build a 1 m water slab (0 ≤ z ≤ 100 cm) in CSG form with two
+    /// transmission planes bounded laterally by vacuum (no x/y bounds
+    /// — the planes z=0 and z=100 are vacuum, everything else in the
+    /// surrounding cell is void that streams to infinity). Returns
+    /// `(surfaces, cells, materials)` ready for `transport_history_csg`.
+    fn water_slab_csg(
+        water: PhotonMaterial,
+        thickness_cm: f64,
+    ) -> (Vec<Surface>, Vec<Cell>, Vec<Option<PhotonMaterial>>) {
+        let surfaces = vec![
+            Surface::PlaneZ {
+                z0: 0.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneZ {
+                z0: thickness_cm,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            // Slab: 0 < z < thickness
+            Cell::new(
+                CellId(0),
+                cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
+                CellFill::Material(0),
+            ),
+            // Outside below z=0
+            Cell::new(CellId(1), cell::inside(0), CellFill::Void),
+            // Outside above z=thickness
+            Cell::new(CellId(2), cell::outside(1), CellFill::Void),
+        ];
+        let materials = vec![Some(water)];
+        (surfaces, cells, materials)
+    }
+
+    /// Thick CSG water slab should absorb roughly the same fraction
+    /// as the closure-based driver (same geometry, same physics). The
+    /// tolerance covers different random-number consumption patterns.
+    #[test]
+    fn csg_slab_matches_closure_slab_water() {
+        let Some(water_a) = water() else {
+            eprintln!("skipping");
+            return;
+        };
+        let Some(water_b) = water() else {
+            eprintln!("skipping");
+            return;
+        };
+
+        let source_e = 1.0e5;
+        let thickness = 100.0;
+        let n = 400;
+
+        // CSG version
+        let (surfaces, cells, materials) = water_slab_csg(water_a, thickness);
+        let mut rng_csg = Rng::new(123, 1);
+        let mut dep_csg = 0.0;
+        for _ in 0..n {
+            let r = transport_history_csg(
+                Vec3::new(0.0, 0.0, 1e-6),
+                Vec3::new(0.0, 0.0, 1.0),
+                source_e,
+                &surfaces,
+                &cells,
+                &materials,
+                1_000.0,
+                &mut rng_csg,
+            );
+            dep_csg += r.energy_deposited;
+        }
+
+        // Closure-based version (same slab)
+        let mut rng_cl = Rng::new(123, 1);
+        let mut dep_cl = 0.0;
+        for _ in 0..n {
+            let r = transport_history(
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                source_e,
+                &water_b,
+                |p| p.z >= 0.0 && p.z <= thickness,
+                1_000.0,
+                &mut rng_cl,
+            );
+            dep_cl += r.energy_deposited;
+        }
+
+        let frac_csg = dep_csg / (n as f64 * source_e);
+        let frac_cl = dep_cl / (n as f64 * source_e);
+        // Both should be in the physically reasonable range.
+        assert!(
+            frac_csg > 0.6,
+            "CSG slab absorbed fraction {frac_csg} too low"
+        );
+        // And agree to ~5 % (finite-sample noise dominates).
+        assert!(
+            (frac_csg - frac_cl).abs() < 0.05,
+            "CSG frac {frac_csg} vs closure frac {frac_cl}"
+        );
+    }
+
+    /// Two back-to-back slabs (water in 0..50, lead in 50..60) —
+    /// lead is far more attenuating at 100 keV, so the total escape
+    /// past z=60 must be much lower than a pure-water slab of the
+    /// same total length. Exercises per-cell material lookup.
+    #[test]
+    fn csg_water_plus_lead_attenuates_more_than_water_only() {
+        let Some(water_a) = water() else {
+            eprintln!("skipping");
+            return;
+        };
+        let Some(pb) = load("Pb.h5") else {
+            eprintln!("skipping: Pb.h5");
+            return;
+        };
+        let Some(water_b) = water() else {
+            eprintln!("skipping");
+            return;
+        };
+
+        // Lead: 11.34 g/cm³, A = 207.2 → 3.296e-2 atoms/(barn·cm)
+        let lead_mat = PhotonMaterial::mono(3.296e-2, pb);
+
+        let surfaces = vec![
+            Surface::PlaneZ { z0: 0.0, bc: BoundaryCondition::Vacuum },
+            Surface::PlaneZ { z0: 50.0, bc: BoundaryCondition::Transmission },
+            Surface::PlaneZ { z0: 60.0, bc: BoundaryCondition::Vacuum },
+        ];
+        let cells = vec![
+            Cell::new(
+                CellId(0),
+                cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
+                CellFill::Material(0), // water
+            ),
+            Cell::new(
+                CellId(1),
+                cell::intersect_all(vec![cell::outside(1), cell::inside(2)]),
+                CellFill::Material(1), // lead
+            ),
+            Cell::new(CellId(2), cell::inside(0), CellFill::Void),
+            Cell::new(CellId(3), cell::outside(2), CellFill::Void),
+        ];
+        let materials = vec![Some(water_a), Some(lead_mat)];
+
+        let source_e = 1.0e5;
+        let n = 400;
+        let mut rng = Rng::new(7, 1);
+        let mut esc_mixed = 0.0;
+        for _ in 0..n {
+            let r = transport_history_csg(
+                Vec3::new(0.0, 0.0, 1e-6),
+                Vec3::new(0.0, 0.0, 1.0),
+                source_e,
+                &surfaces,
+                &cells,
+                &materials,
+                1_000.0,
+                &mut rng,
+            );
+            esc_mixed += r.energy_escaped;
+        }
+
+        // Pure 60 cm water reference.
+        let surfaces_w = vec![
+            Surface::PlaneZ { z0: 0.0, bc: BoundaryCondition::Vacuum },
+            Surface::PlaneZ { z0: 60.0, bc: BoundaryCondition::Vacuum },
+        ];
+        let cells_w = vec![
+            Cell::new(
+                CellId(0),
+                cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
+                CellFill::Material(0),
+            ),
+            Cell::new(CellId(1), cell::inside(0), CellFill::Void),
+            Cell::new(CellId(2), cell::outside(1), CellFill::Void),
+        ];
+        let materials_w = vec![Some(water_b)];
+
+        let mut rng_w = Rng::new(7, 1);
+        let mut esc_water = 0.0;
+        for _ in 0..n {
+            let r = transport_history_csg(
+                Vec3::new(0.0, 0.0, 1e-6),
+                Vec3::new(0.0, 0.0, 1.0),
+                source_e,
+                &surfaces_w,
+                &cells_w,
+                &materials_w,
+                1_000.0,
+                &mut rng_w,
+            );
+            esc_water += r.energy_escaped;
+        }
+
+        assert!(
+            esc_mixed < esc_water,
+            "water+lead escape {esc_mixed} not less than water-only {esc_water}"
+        );
+    }
+
+    /// A closed box with all Reflective boundaries is an infinite
+    /// medium in disguise: no energy can escape, so the full source
+    /// energy must be deposited (up to the binding-loss tolerance of
+    /// the relaxation cascade).
+    #[test]
+    fn csg_reflective_box_conserves_energy() {
+        let Some(water) = water() else {
+            eprintln!("skipping");
+            return;
+        };
+        let half = 50.0;
+        let surfaces = vec![
+            Surface::PlaneX { x0: -half, bc: BoundaryCondition::Reflective },
+            Surface::PlaneX { x0: half, bc: BoundaryCondition::Reflective },
+            Surface::PlaneY { y0: -half, bc: BoundaryCondition::Reflective },
+            Surface::PlaneY { y0: half, bc: BoundaryCondition::Reflective },
+            Surface::PlaneZ { z0: -half, bc: BoundaryCondition::Reflective },
+            Surface::PlaneZ { z0: half, bc: BoundaryCondition::Reflective },
+        ];
+        let cells = vec![Cell::new(
+            CellId(0),
+            cell::intersect_all(vec![
+                cell::outside(0),
+                cell::inside(1),
+                cell::outside(2),
+                cell::inside(3),
+                cell::outside(4),
+                cell::inside(5),
+            ]),
+            CellFill::Material(0),
+        )];
+        let materials = vec![Some(water)];
+
+        let mut rng = Rng::new(99, 1);
+        let source_e = 1.0e6;
+        for _ in 0..50 {
+            let r = transport_history_csg(
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                source_e,
+                &surfaces,
+                &cells,
+                &materials,
+                1_000.0,
+                &mut rng,
+            );
+            assert_eq!(r.energy_escaped, 0.0);
+            let rel_err = (r.energy_deposited - source_e).abs() / source_e;
+            assert!(
+                rel_err < 1.0e-2,
+                "reflective box violated conservation: deposited {} vs source {}",
+                r.energy_deposited,
+                source_e
+            );
+        }
+    }
+
+    /// A photon source outside the modelled geometry must be reported
+    /// as fully escaped with no interaction.
+    #[test]
+    fn csg_source_outside_geometry_escapes() {
+        let Some(water) = water() else {
+            eprintln!("skipping");
+            return;
+        };
+        let (surfaces, cells, materials) = water_slab_csg(water, 10.0);
+        let mut rng = Rng::new(1, 1);
+        let r = transport_history_csg(
+            Vec3::new(0.0, 0.0, -5.0), // below the slab; cell 1 is void → streams to -∞
+            Vec3::new(0.0, 0.0, -1.0),
+            1.0e6,
+            &surfaces,
+            &cells,
+            &materials,
+            1_000.0,
+            &mut rng,
+        );
+        assert_eq!(r.n_collisions, 0);
+        assert!((r.energy_escaped - 1.0e6).abs() < 1e-9);
     }
 }
