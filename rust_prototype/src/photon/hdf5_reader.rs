@@ -4,25 +4,37 @@
 //! "data_photon"`, `version = [3, 0]`):
 //!
 //! ```text
-//! /                                       attrs: filetype, version
-//! /<Sym>                                  attrs: Z
-//! /<Sym>/energy                           shared grid (eV), shape [N_E]
-//! /<Sym>/coherent/xs                      shape [N_E]
-//! /<Sym>/coherent/scattering_factor       shape [2, N_ff]  (x, F(x,Z))
-//! /<Sym>/incoherent/xs                    shape [N_E]
-//! /<Sym>/incoherent/scattering_factor     shape [2, N_sf]  (x, S(x,Z))
-//! /<Sym>/photoelectric/xs                 shape [N_E]
-//! /<Sym>/pair_production_nuclear/xs       shape [N_E]
-//! /<Sym>/pair_production_electron/xs      shape [N_E]
-//! /<Sym>/subshells                        attrs: designators
-//! /<Sym>/subshells/<Shell>                attrs: binding_energy, num_electrons
-//! /<Sym>/subshells/<Shell>/xs             shape [<= N_E] (aligned to tail)
-//! /<Sym>/subshells/<Shell>/transitions    shape [N_t, 4]   (optional)
+//! /                                              attrs: filetype, version
+//! /<Sym>                                         attrs: Z
+//! /<Sym>/energy                                  shared grid (eV), shape [N_E]
+//! /<Sym>/coherent/xs                             shape [N_E]
+//! /<Sym>/coherent/scattering_factor              shape [2, N_ff]  (x, F(x,Z))
+//! /<Sym>/coherent/integrated_scattering_factor   shape [2, N_ff]  (x², ∫₀ˣ² F² dx'²)
+//! /<Sym>/coherent/anomalous_real                 shape [2, N_r]   (E, f'(E))
+//! /<Sym>/coherent/anomalous_imag                 shape [2, N_i]   (E, f''(E))
+//! /<Sym>/incoherent/xs                           shape [N_E]
+//! /<Sym>/incoherent/scattering_factor            shape [2, N_sf]  (x, S(x,Z))
+//! /<Sym>/compton_profiles/binding_energy         shape [N_cp]
+//! /<Sym>/compton_profiles/num_electrons          shape [N_cp]
+//! /<Sym>/compton_profiles/pz                     shape [N_pz]     (|p_z| a.u., ≥ 0)
+//! /<Sym>/compton_profiles/J                      shape [N_cp, N_pz]  (J_i(|p_z|))
+//! /<Sym>/photoelectric/xs                        shape [N_E]       (sum of subshells)
+//! /<Sym>/pair_production_nuclear/xs              shape [N_E]
+//! /<Sym>/pair_production_electron/xs             shape [N_E]
+//! /<Sym>/subshells                               attrs: designators (required)
+//! /<Sym>/subshells/<Shell>                       attrs: binding_energy, num_electrons
+//! /<Sym>/subshells/<Shell>/xs                    shape [≤ N_E] (tail-aligned)
+//! /<Sym>/subshells/<Shell>/transitions           shape [N_t, 4] (may be empty for outer shells)
+//! /<Sym>/bremsstrahlung                          attrs: I (mean excitation eV)
+//! /<Sym>/bremsstrahlung/electron_energy          shape [200]
+//! /<Sym>/bremsstrahlung/photon_energy            shape [30]
+//! /<Sym>/bremsstrahlung/dcs                      shape [200, 30]
+//! /<Sym>/bremsstrahlung/ionization_energy        shape [N_osc]
+//! /<Sym>/bremsstrahlung/num_electrons            shape [N_osc]
 //! ```
 //!
-//! Coherent anomalous scattering factors, Compton profiles, and
-//! bremsstrahlung data are present in the file but not loaded in Phase 1;
-//! they are additive features for later physics work.
+//! Conventions confirmed against Carbon (`N_E = 1206`, `N_cp = 3`) and
+//! Uranium (`N_E = 3361`, `N_cp = 27`, `N_osc = 26`).
 
 use std::path::Path;
 
@@ -196,44 +208,58 @@ fn read_subshells(element: &hdf5_pure::Group, path: &Path) -> Result<Vec<Subshel
         detail,
     };
 
-    let subshells_group = match element.group("subshells") {
-        Ok(g) => g,
-        Err(_) => return Ok(Vec::new()),
-    };
+    let subshells_group = element
+        .group("subshells")
+        .map_err(|e| hdf5_err(format!("cannot open /subshells: {e}")))?;
 
-    // Prefer the `designators` attribute for ordering; fall back to groups().
+    // The `designators` attribute is required — it defines the physical
+    // K → L → M → ... order in which subshells appear. Falling back to
+    // `groups()` returns HDF5-internal order (often alphabetical), which
+    // breaks any convention that assumes outer shells are indexed later.
     let designators: Vec<String> = match subshells_group
         .attrs()
         .map_err(|e| hdf5_err(format!("cannot read subshells attrs: {e}")))?
         .get("designators")
     {
         Some(hdf5_pure::AttrValue::StringArray(arr)) => arr.clone(),
-        _ => subshells_group
-            .groups()
-            .map_err(|e| hdf5_err(format!("cannot list subshells: {e}")))?,
+        _ => {
+            return Err(hdf5_err(
+                "/subshells is missing required `designators` attribute".into(),
+            ));
+        }
     };
 
     let mut out = Vec::with_capacity(designators.len());
     for designator in designators {
-        let shell = match subshells_group.group(&designator) {
-            Ok(g) => g,
-            Err(_) => continue,
-        };
+        let shell = subshells_group
+            .group(&designator)
+            .map_err(|e| hdf5_err(format!("cannot open /subshells/{designator}: {e}")))?;
         let shell_attrs = shell
             .attrs()
             .map_err(|e| hdf5_err(format!("cannot read subshell {designator} attrs: {e}")))?;
         let binding_energy = match shell_attrs.get("binding_energy") {
             Some(hdf5_pure::AttrValue::F64(v)) => *v,
-            _ => 0.0,
+            _ => {
+                return Err(hdf5_err(format!(
+                    "/subshells/{designator} missing binding_energy attribute"
+                )));
+            }
         };
         let num_electrons = match shell_attrs.get("num_electrons") {
             Some(hdf5_pure::AttrValue::F64(v)) => *v,
-            _ => 0.0,
+            _ => {
+                return Err(hdf5_err(format!(
+                    "/subshells/{designator} missing num_electrons attribute"
+                )));
+            }
         };
         let xs = shell
             .dataset("xs")
-            .and_then(|ds| ds.read_f64())
-            .unwrap_or_default();
+            .map_err(|e| hdf5_err(format!("cannot open /subshells/{designator}/xs: {e}")))?
+            .read_f64()
+            .map_err(|e| hdf5_err(format!("cannot read /subshells/{designator}/xs: {e}")))?;
+
+        // Transitions are optional — outer shells carry none.
         let transitions = read_transitions(&shell);
 
         out.push(Subshell {
@@ -484,81 +510,105 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn carbon_path() -> Option<PathBuf> {
+    fn photon_path(filename: &str) -> Option<PathBuf> {
         // Walk up from CARGO_MANIFEST_DIR (rust_prototype/) to project root.
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let path = manifest
             .parent()?
-            .join("data/endfb-vii.1-hdf5/photon/C.h5");
+            .join("data/endfb-vii.1-hdf5/photon")
+            .join(filename);
         if path.exists() { Some(path) } else { None }
     }
 
-    #[test]
-    fn load_carbon_photon_data() {
-        let Some(path) = carbon_path() else {
-            eprintln!("skipping: data/endfb-vii.1-hdf5/photon/C.h5 not present");
-            return;
-        };
+    /// Element-agnostic structural and physical-consistency checks.
+    ///
+    /// `expected_z` is cross-checked against the HDF5 `Z` attribute.
+    /// Consistency checks verified here are properties every OpenMC
+    /// photon file must satisfy; they should pass for any element.
+    fn check_photon_element(elem: &PhotonElement, expected_z: u32, expected_symbol: &str) {
+        // --- Identity ------------------------------------------------------
+        assert_eq!(elem.z, expected_z);
+        assert_eq!(elem.symbol, expected_symbol);
 
-        let elem = PhotonElement::from_hdf5(&path).expect("load carbon photon data");
-        assert_eq!(elem.z, 6);
-        assert_eq!(elem.symbol, "C");
-        assert!(!elem.energy.is_empty());
-
+        // --- Grid shape and monotonicity ----------------------------------
         let n = elem.n_energy();
+        assert!(n > 0);
         assert_eq!(elem.coherent_xs.len(), n);
         assert_eq!(elem.incoherent_xs.len(), n);
         assert_eq!(elem.photoelectric_xs.len(), n);
         assert_eq!(elem.pair_production_nuclear_xs.len(), n);
         assert_eq!(elem.pair_production_electron_xs.len(), n);
-
-        // Energy grid is strictly increasing.
         for w in elem.energy.windows(2) {
             assert!(w[1] > w[0], "energy grid not strictly increasing");
         }
 
-        // Cross sections are non-negative.
+        // --- Cross-section non-negativity ---------------------------------
         for xs in &elem.coherent_xs {
+            assert!(*xs >= 0.0);
+        }
+        for xs in &elem.incoherent_xs {
             assert!(*xs >= 0.0);
         }
         for xs in &elem.photoelectric_xs {
             assert!(*xs >= 0.0);
         }
-
-        // Pair production has a threshold at 2 m_e c² ≈ 1.022 MeV.
-        let below = elem
-            .energy
-            .iter()
-            .position(|e| *e > 1.0e6)
-            .map(|i| elem.pair_production_nuclear_xs[i.saturating_sub(1)]);
-        if let Some(xs_below_threshold) = below {
-            assert_eq!(xs_below_threshold, 0.0, "pair production below 1 MeV");
+        for xs in &elem.pair_production_nuclear_xs {
+            assert!(*xs >= 0.0);
+        }
+        for xs in &elem.pair_production_electron_xs {
+            assert!(*xs >= 0.0);
         }
 
-        // Carbon has K, L1, L2, L3 shells.
-        assert!(elem.subshells.len() >= 4);
-        let designators: Vec<&str> =
-            elem.subshells.iter().map(|s| s.designator.as_str()).collect();
-        assert!(designators.contains(&"K"));
+        // --- Pair-production thresholds ----------------------------------
+        // Nuclear: 2 m_e c² ≈ 1.022 MeV. Triplet: 4 m_e c² ≈ 2.044 MeV.
+        const M_E_C2_EV: f64 = 510_998.95;
+        for (i, &e) in elem.energy.iter().enumerate() {
+            if e < 2.0 * M_E_C2_EV {
+                assert_eq!(
+                    elem.pair_production_nuclear_xs[i], 0.0,
+                    "nuclear pair production nonzero below threshold at E={e}"
+                );
+            }
+            if e < 4.0 * M_E_C2_EV {
+                assert_eq!(
+                    elem.pair_production_electron_xs[i], 0.0,
+                    "triplet pair production nonzero below threshold at E={e}"
+                );
+            }
+        }
 
-        // K-shell binding energy of carbon is 291 eV.
-        let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
+        // --- Scattering factor physical limits ---------------------------
+        // F(x = 0, Z) = Z (forward elastic scattering is coherent over Z electrons).
+        let f0 = elem.coherent_form_factor.value[0];
         assert!(
-            (k.binding_energy - 291.0).abs() < 1.0,
-            "K-shell binding energy = {} eV, expected ~291",
-            k.binding_energy
+            (f0 - expected_z as f64).abs() < 1e-6,
+            "F(0, Z) = {f0}, expected Z = {expected_z}"
         );
-        assert!((k.num_electrons - 2.0).abs() < 1e-6);
 
-        // Scattering factors monotonic in x.
-        for w in elem.coherent_form_factor.x.windows(2) {
+        // S(x → ∞, Z) → Z (all electrons behave as free at large momentum transfer).
+        let s_tail = *elem.incoherent_scattering_factor.value.last().unwrap();
+        assert!(
+            (s_tail - expected_z as f64).abs() < 0.05 * expected_z as f64,
+            "S(x_max, Z) = {s_tail}, expected ≈ Z = {expected_z}"
+        );
+
+        // F and S monotone in their respective directions.
+        let ff = &elem.coherent_form_factor;
+        assert_eq!(ff.x.len(), ff.value.len());
+        for w in ff.x.windows(2) {
             assert!(w[1] > w[0]);
         }
-        for w in elem.incoherent_scattering_factor.x.windows(2) {
+        // F(x, Z) decreases from Z at x=0 toward 0 at x → ∞.
+        assert!(
+            ff.value[0] >= *ff.value.last().unwrap(),
+            "form factor should decrease from x=0 to x=∞"
+        );
+        let sf = &elem.incoherent_scattering_factor;
+        for w in sf.x.windows(2) {
             assert!(w[1] > w[0]);
         }
 
-        // Integrated form factor is non-decreasing (it is a cumulative of F²).
+        // --- Integrated form factor is non-decreasing --------------------
         let iff = &elem.coherent_integrated_form_factor;
         assert_eq!(iff.x.len(), iff.value.len());
         for w in iff.value.windows(2) {
@@ -570,34 +620,66 @@ mod tests {
             );
         }
 
-        // Anomalous factors present and sized consistently.
+        // --- Anomalous factors sized consistently ------------------------
         let af = &elem.coherent_anomalous;
         assert_eq!(af.real.grid.len(), af.real.value.len());
         assert_eq!(af.imag.grid.len(), af.imag.value.len());
         assert!(!af.real.grid.is_empty());
+        assert!(!af.imag.grid.is_empty());
 
-        // Compton profiles present; Carbon has 3 shells in the Compton
-        // tabulation (per inspection: shape (3, 31)).
+        // --- Compton profiles: electron conservation ---------------------
         let cp = &elem.compton_profiles;
-        assert_eq!(cp.n_shells(), 3);
+        assert!(cp.n_shells() > 0);
         assert_eq!(cp.n_pz(), 31);
-        assert_eq!(cp.j.len(), 3);
+        assert_eq!(cp.j.len(), cp.n_shells());
         for row in &cp.j {
-            assert_eq!(row.len(), 31);
-        }
-        // pz grid ascends from 0.
-        assert!(cp.pz[0] == 0.0 || cp.pz[0].abs() < 1e-12);
-        for w in cp.pz.windows(2) {
-            assert!(w[1] > w[0]);
-        }
-        // Each profile J_i(p_z) is non-negative.
-        for row in &cp.j {
+            assert_eq!(row.len(), cp.n_pz());
             for v in row {
                 assert!(*v >= 0.0);
             }
         }
+        assert!(cp.pz[0].abs() < 1e-12, "pz grid should start at 0");
+        for w in cp.pz.windows(2) {
+            assert!(w[1] > w[0]);
+        }
+        let total_cp_occ: f64 = cp.num_electrons.iter().sum();
+        assert!(
+            (total_cp_occ - expected_z as f64).abs() < 1e-6,
+            "Compton profile total occupancy = {total_cp_occ}, expected Z = {expected_z}"
+        );
 
-        // Bremsstrahlung: 200 electron-energy × 30 photon-energy grid.
+        // --- Photoelectric subshells: electron conservation --------------
+        let total_pe_occ: f64 = elem.subshells.iter().map(|s| s.num_electrons).sum();
+        assert!(
+            (total_pe_occ - expected_z as f64).abs() < 1e-6,
+            "photoelectric subshell total occupancy = {total_pe_occ}, expected Z = {expected_z}"
+        );
+
+        // --- Cross-consistency: sum of subshell partial XS ≈ total PE XS ---
+        // The total photoelectric cross section is taken from the ENDF/B
+        // evaluation while the per-subshell cross sections come from the
+        // LLNL EADL/EPICS photoatomic library. The two evaluations agree
+        // well on the integrated XS but can disagree by up to ~1 % at
+        // individual energy points, especially near absorption edges
+        // where shell contributions switch on discontinuously. A 2 %
+        // relative tolerance (OR 0.1 barn absolute floor for very small
+        // total XS) validates that the tail-alignment convention and
+        // per-subshell reads are structurally correct without rejecting
+        // legitimate evaluation noise.
+        let probe_indices = [n / 4, n / 2, n - n / 4, n.saturating_sub(1)];
+        for &i in &probe_indices {
+            let from_subshells: f64 = elem.subshells.iter().map(|s| s.xs_at(n, i)).sum();
+            let total = elem.photoelectric_xs[i];
+            let tol = 0.02 * total.abs().max(0.1);
+            assert!(
+                (from_subshells - total).abs() <= tol,
+                "photoelectric consistency failed at energy[{i}] = {} eV: \
+                 Σ subshells = {from_subshells}, total = {total}, tol = {tol}",
+                elem.energy[i]
+            );
+        }
+
+        // --- Bremsstrahlung shape --------------------------------------
         let br = &elem.bremsstrahlung;
         assert_eq!(br.electron_energy.len(), 200);
         assert_eq!(br.photon_energy.len(), 30);
@@ -605,24 +687,99 @@ mod tests {
         for row in &br.dcs {
             assert_eq!(row.len(), 30);
         }
-        assert!(br.mean_excitation_energy > 0.0); // Carbon: I ≈ 81 eV
-        assert!((br.mean_excitation_energy - 81.0).abs() < 1.0);
+        assert!(br.mean_excitation_energy > 0.0);
         assert_eq!(br.ionization_energy.len(), br.num_electrons.len());
+        // Note: `num_electrons` in the Sternheimer-Berger block is not
+        // a pure electron count but a fit parameter for the
+        // density-effect correction; individual values can be negative
+        // and the sum need not equal Z (for U the sum is 86 vs Z = 92).
+        // We therefore only assert the data is present and sized
+        // consistently; semantic validation is the TTB kernel's job.
+        assert!(!br.num_electrons.is_empty());
 
-        // Subshell tail-alignment convention.
+        // --- Transitions: probabilities within each shell sum to ≤ 1 ----
+        for s in &elem.subshells {
+            let total_prob: f64 = s.transitions.iter().map(|t| t[3]).sum();
+            assert!(
+                total_prob <= 1.0 + 1e-6,
+                "subshell {} transition probabilities sum to {total_prob} > 1",
+                s.designator
+            );
+        }
+    }
+
+    #[test]
+    fn load_carbon_photon_data() {
+        let Some(path) = photon_path("C.h5") else {
+            eprintln!("skipping: data/endfb-vii.1-hdf5/photon/C.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load carbon photon data");
+        check_photon_element(&elem, 6, "C");
+
+        // Carbon-specific spot checks.
+        assert_eq!(elem.n_energy(), 1206);
+        assert_eq!(elem.compton_profiles.n_shells(), 3);
+
+        // Carbon K, L1, L2, L3 in order.
+        let designators: Vec<&str> =
+            elem.subshells.iter().map(|s| s.designator.as_str()).collect();
+        assert_eq!(designators, vec!["K", "L1", "L2", "L3"]);
+
         let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
+        assert!(
+            (k.binding_energy - 291.01).abs() < 0.01,
+            "C K-shell binding = {} eV, expected 291.01",
+            k.binding_energy
+        );
+        assert!((k.num_electrons - 2.0).abs() < 1e-9);
+
+        // ICRU-37 mean excitation energy for carbon.
+        assert!((elem.bremsstrahlung.mean_excitation_energy - 81.0).abs() < 1.0);
+
+        // Tail-alignment spot check on K-shell.
         let n = elem.n_energy();
         let offset = n - k.xs.len();
-        assert_eq!(
-            k.xs_at(n, offset),
-            k.xs[0],
-            "tail alignment off at offset"
-        );
-        assert_eq!(
-            k.xs_at(n, n - 1),
-            *k.xs.last().unwrap(),
-            "tail alignment off at last point"
-        );
+        assert_eq!(k.xs_at(n, offset), k.xs[0]);
+        assert_eq!(k.xs_at(n, n - 1), *k.xs.last().unwrap());
         assert_eq!(k.xs_at(n, offset.saturating_sub(1)), 0.0);
+    }
+
+    #[test]
+    fn load_uranium_photon_data() {
+        let Some(path) = photon_path("U.h5") else {
+            eprintln!("skipping: data/endfb-vii.1-hdf5/photon/U.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load uranium photon data");
+        check_photon_element(&elem, 92, "U");
+
+        // Uranium-specific spot checks.
+        assert_eq!(elem.n_energy(), 3361);
+        assert_eq!(elem.compton_profiles.n_shells(), 27);
+        assert_eq!(elem.subshells.len(), 29);
+
+        // K-shell binding from ENDF/B-VII.1 evaluation.
+        let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
+        assert!(
+            (k.binding_energy - 116_110.0).abs() < 10.0,
+            "U K-shell binding = {} eV, expected 116110",
+            k.binding_energy
+        );
+        assert!((k.num_electrons - 2.0).abs() < 1e-9);
+
+        // U has rich K-shell relaxation.
+        assert!(
+            k.transitions.len() > 100,
+            "U K-shell should have many transitions, got {}",
+            k.transitions.len()
+        );
+        // At least one transition is radiative (secondary = 0).
+        assert!(k.transitions.iter().any(|t| t[1] == 0.0));
+        // At least one is Auger (secondary != 0).
+        assert!(k.transitions.iter().any(|t| t[1] != 0.0));
+
+        // ICRU-37 mean excitation energy for uranium.
+        assert!((elem.bremsstrahlung.mean_excitation_energy - 890.0).abs() < 5.0);
     }
 }

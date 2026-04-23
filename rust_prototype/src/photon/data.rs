@@ -71,13 +71,24 @@ pub struct PhotonElement {
     pub bremsstrahlung: Bremsstrahlung,
 }
 
-/// A tabulated factor `y(x)` on a shared independent-variable grid.
+/// A tabulated factor `y(x)` on a shared momentum-transfer grid.
 ///
-/// Used for both `F(x, Z)` and `S(x, Z)`, which are stored as shape
-/// `(2, N)` in HDF5 with row 0 the independent variable and row 1 the
-/// factor value. We keep them split into two equal-length vectors.
+/// Used for `F(x, Z)` (coherent form factor), its cumulative
+/// `∫₀^{x²} F² dx'²`, and `S(x, Z)` (incoherent scattering function).
+/// All three are stored as shape `(2, N)` in HDF5 with row 0 the
+/// independent variable and row 1 the dependent value. We keep them
+/// split into two equal-length vectors for clarity.
+///
+/// The `x` grid follows OpenMC's tabulation convention
+/// (Hubbell et al. 1975): `x = sin(θ/2) / λ` in inverse Ångström
+/// where `λ = hc / E`. OpenMC extends the tabulated grid past any
+/// physically reachable `x` (up to ~10⁹ Å⁻¹) with zero-valued factors
+/// so that interpolation at any kinematic point is always in-range;
+/// the physical cutoff at a given photon energy is considerably lower
+/// (`x_max ≈ E [eV] / 12398.4 Å⁻¹`).
 pub struct ScatteringFactor {
-    /// Momentum-transfer variable `x` in inverse Ångström, ascending.
+    /// Momentum-transfer variable `x` in inverse Ångström, ascending
+    /// from 0.
     pub x: Vec<f64>,
     /// Factor value at each `x`.
     pub value: Vec<f64>,
@@ -111,23 +122,40 @@ pub struct AnomalousFactors {
 
 /// Shell-resolved Hartree-Fock Compton profiles.
 ///
-/// The outgoing photon energy in Compton scattering from a bound electron
-/// deviates from the free-electron Klein-Nishina value by
+/// The outgoing photon energy in Compton scattering from a bound
+/// electron deviates from the free-electron Klein-Nishina value by
 /// `p_z / (m_e c)`, the projection of the electron's pre-collision
-/// momentum on the scattering axis. `Jᵢ(p_z)` is the probability density
-/// of that projection for an electron in shell `i`, tabulated on the
-/// shared `pz` grid in atomic units (1 a.u. = α m_e c ≈ 1/137 m_e c).
+/// momentum along the scattering axis. `Jᵢ(p_z)` is the probability
+/// density of that projection for an electron in shell `i`. Tabulated
+/// on the shared `pz` grid in atomic units of momentum
+/// (1 a.u. = α m_e c ≈ m_e c / 137).
 ///
-/// At sampling time we select a "Compton shell" (whose subshell
-/// partitioning may not coincide with the photoelectric subshells) from
-/// `(binding_energy, num_electrons)`, then sample `p_z` from
-/// `Jᵢ(p_z) · 𝟙[|p_z| < p_z_max(i, E, θ)]`.
+/// **Symmetric storage.** OpenMC stores only non-negative `p_z` values
+/// because `Jᵢ` is even (closed-shell Hartree-Fock ground state): the
+/// full density is `Jᵢ(p_z) = Jᵢ(|p_z|)`. Sampling a signed `p_z` at
+/// runtime is a reflect-by-coin-flip after drawing from the stored
+/// non-negative half.
+///
+/// **Shell partitioning ≠ photoelectric subshells.** The Compton shell
+/// list generally has fewer entries than `PhotonElement::subshells`
+/// (27 vs 29 for Uranium, 3 vs 4 for Carbon) because the Hartree-Fock
+/// tabulation merges some outer shells. The Compton sampler selects a
+/// shell from `(binding_energy, num_electrons)` here, independent of
+/// the photoelectric subshell list.
+///
+/// **Sampling sketch** (to be implemented in the Compton kernel):
+/// 1. Select shell `i` by occupancy, weighted by whether the kinematic
+///    limit `p_z_max(i, E, θ)` is positive.
+/// 2. Sample `|p_z|` from `Jᵢ(|p_z|) · 𝟙[|p_z| < p_z_max]`.
+/// 3. Sign of `p_z` by fair coin.
+/// 4. Solve the Doppler-shifted `E'(p_z, θ)` quadratic.
 pub struct ComptonProfiles {
     /// Binding energy of each Compton shell in eV.
     pub binding_energy: Vec<f64>,
     /// Number of electrons in each Compton shell (may be fractional).
     pub num_electrons: Vec<f64>,
-    /// Shared momentum grid `p_z` in atomic units, ascending from 0.
+    /// Non-negative momentum grid `|p_z|` in atomic units, ascending
+    /// from 0.
     pub pz: Vec<f64>,
     /// Profiles: `j[i][k]` is `Jᵢ(pz[k])` in inverse atomic units.
     pub j: Vec<Vec<f64>>,
@@ -152,33 +180,54 @@ pub struct Subshell {
     /// `PhotonElement::energy[N_E - xs.len() + j]` (OpenMC convention).
     pub xs: Vec<f64>,
     /// EADL atomic relaxation transitions. Each row is
-    /// `[primary_subshell, secondary_subshell, transition_energy_eV,
-    /// transition_probability]`. `secondary = 0` flags a radiative
-    /// (fluorescence) transition; non-zero flags Auger / Coster-Kronig.
+    /// `[primary, secondary, energy_eV, probability]`:
+    ///
+    /// - `primary` (f64 cast of a subshell designator index):
+    ///   the shell that donated the electron filling the hole.
+    /// - `secondary`: 0 for radiative (fluorescence) transitions,
+    ///   non-zero designator index for non-radiative
+    ///   (Auger / Coster-Kronig) transitions — the shell from which
+    ///   the Auger electron is ejected.
+    /// - `energy_eV`: the directly-emitted particle's kinetic or
+    ///   photon energy, taken from the EADL evaluation (not derived
+    ///   from binding-energy differences at runtime).
+    /// - `probability`: branching probability for this transition.
+    ///
+    /// Transition probabilities within one subshell sum to ≤ 1; the
+    /// deficit is the probability the hole persists (no decay). Outer
+    /// shells typically carry no transitions.
     pub transitions: Vec<[f64; 4]>,
 }
 
 /// Seltzer-Berger bremsstrahlung differential cross section and
 /// Sternheimer-Berger mean-excitation-energy oscillator parameters.
 ///
-/// The DCS `dσ/dk` is tabulated on an (electron kinetic energy,
-/// scaled photon energy) grid. `dcs[i_e * n_k + i_k]` is the scaled
-/// differential at `(electron_energy[i_e], photon_energy[i_k])`;
-/// conventions and units match the OpenMC/ENDF representation
-/// (scaled by `k / Z²` into `mbarn · MeV / (MeV · electron)`).
+/// The DCS is tabulated on a two-dimensional (electron kinetic energy,
+/// scaled photon energy) grid. Shape: `[N_electron, N_photon]`. Exact
+/// scaling (whether the stored values are `dσ/dk`, `k·dσ/dk/Z²`, or
+/// some other SB convention) is the TTB kernel's responsibility to
+/// verify against Seltzer-Berger 1986 and OpenMC's
+/// `thick_target_bremsstrahlung` routine — the data-layer contract is
+/// only that `dcs[i_e][i_k]` maps to
+/// `(electron_energy[i_e], photon_energy[i_k])`.
 ///
-/// The oscillator strengths (`ionization_energy`, `num_electrons`) define
-/// the Sternheimer density-effect correction to the electron
-/// collisional stopping power via Berger-Seltzer parametrisation.
-/// `mean_excitation_energy` is the atomic I-value in eV.
+/// The Sternheimer oscillators (`ionization_energy`, `num_electrons`)
+/// define the atomic density-effect correction to the electron
+/// collisional stopping power via the Berger-Seltzer parametrisation.
+/// `mean_excitation_energy` is the atomic `I`-value in eV matching
+/// ICRU-37 / Seltzer-Berger tabulations (e.g. C: 81 eV, U: 890 eV).
 pub struct Bremsstrahlung {
-    /// Mean excitation energy (I-value) in eV from the HDF5 attribute.
+    /// Mean excitation energy (`I`-value) in eV from the HDF5 attribute.
     pub mean_excitation_energy: f64,
     /// Electron kinetic energy grid in eV, ascending.
     pub electron_energy: Vec<f64>,
-    /// Outgoing photon scaled energy grid `k = E_γ / T_e`, ascending in [0, 1].
+    /// Outgoing photon scaled energy grid `k = E_γ / T_e`, ascending in
+    /// `[0, 1]`.
     pub photon_energy: Vec<f64>,
-    /// Scaled DCS `k · dσ/dk / Z²` stored row-major: `dcs[i_e][i_k]`.
+    /// DCS table, row-major: `dcs[i_e][i_k]` at
+    /// `(electron_energy[i_e], photon_energy[i_k])`. Scaling convention
+    /// is Seltzer-Berger 1986; exact factors deferred to the TTB
+    /// kernel.
     pub dcs: Vec<Vec<f64>>,
     /// Binding energies of Sternheimer oscillators in eV.
     pub ionization_energy: Vec<f64>,
@@ -207,13 +256,30 @@ impl PhotonElement {
 }
 
 impl Subshell {
-    /// Given the master energy grid and an index `i_master` into it,
-    /// return the subshell partial cross section at that energy, or 0
-    /// if below the subshell's tabulation window (i.e. below binding).
+    /// Given the master energy grid of length `n_energy_master` and an
+    /// index `i_master` into it, return the subshell partial cross
+    /// section at that energy. Returns 0 if the master-grid index sits
+    /// below the subshell's tabulation window (i.e. below the shell's
+    /// binding energy).
     ///
     /// Uses the OpenMC tail-alignment convention
     /// `xs[j] = sigma_at(energy[N_E - xs.len() + j])`.
+    ///
+    /// # Panics
+    /// Debug-only: panics if `i_master >= n_energy_master` or if
+    /// `self.xs.len() > n_energy_master`. These are caller-side
+    /// programming errors (out-of-range master index, or calling on a
+    /// subshell that was loaded against a different master grid).
     pub fn xs_at(&self, n_energy_master: usize, i_master: usize) -> f64 {
+        debug_assert!(
+            i_master < n_energy_master,
+            "i_master {i_master} >= n_energy_master {n_energy_master}"
+        );
+        debug_assert!(
+            self.xs.len() <= n_energy_master,
+            "subshell xs.len() {} > master grid len {n_energy_master}",
+            self.xs.len()
+        );
         let offset = n_energy_master - self.xs.len();
         if i_master < offset {
             0.0
