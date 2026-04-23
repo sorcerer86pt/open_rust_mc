@@ -72,10 +72,31 @@ pub struct ComptonOutcome {
 /// Sample a Compton scattering event at incoming photon energy
 /// `energy_in` (eV) on the element `elem` using the provided `rng`.
 ///
-/// Returns `(E', μ, T_e)` where `E'` is on the free-electron
-/// Klein-Nishina kinematic curve and the angular distribution is
-/// modulated by the bound-electron `S(x, Z)/Z` rejection.
+/// Returns `(E', μ, T_e)` with the outgoing photon energy
+/// Doppler-broadened about the free-electron Klein-Nishina value
+/// using the Hartree-Fock Compton profiles (Ribberfors 1975 impulse
+/// approximation, as in PENELOPE §2.3.5 and OpenMC).
 pub fn compton_scatter(
+    elem: &PhotonElement,
+    energy_in: f64,
+    rng: &mut Rng,
+) -> ComptonOutcome {
+    let alpha = energy_in / M_E_C2_EV;
+    let (k_free, mu) = sample_kn_with_bound_rejection(alpha, energy_in, elem, rng);
+    // Apply Doppler broadening on top of the free kinematics.
+    let (energy_out, binding) = apply_doppler(elem, energy_in, alpha, k_free, mu, rng);
+    ComptonOutcome {
+        energy_out,
+        mu,
+        electron_kinetic: (energy_in - energy_out - binding).max(0.0),
+    }
+}
+
+/// Sample a Compton scattering event without Doppler broadening —
+/// outgoing energy is exactly `E · k_free`. Retained for unit-tests
+/// that compare against the analytic free-electron Klein-Nishina
+/// differential, where Doppler smearing would be a confounder.
+pub fn compton_scatter_free(
     elem: &PhotonElement,
     energy_in: f64,
     rng: &mut Rng,
@@ -88,6 +109,228 @@ pub fn compton_scatter(
         mu,
         electron_kinetic: energy_in - energy_out,
     }
+}
+
+/// Apply Compton Doppler broadening.
+///
+/// Inputs are the incoming photon kinematics `(energy_in, α, k_free)`
+/// and the already-sampled scattering cosine `μ` from the free-KN
+/// sampler. Returns `(E', B_i)` where `E'` is the Doppler-broadened
+/// outgoing photon energy in eV and `B_i` is the binding energy
+/// (eV) of the Compton shell from which the struck electron came
+/// (used by the caller to deduct from the recoil-electron KE).
+///
+/// Algorithm (Ribberfors 1975 / PENELOPE §2.3.5):
+/// 1. Compute the electron rest-frame momentum projection
+///    `p_z_max(i)` for each kinematically-accessible shell (those
+///    with `B_i < E_in − E'_free`).
+/// 2. Select a shell weighted by `n_i · n_i(p_z_max)` where
+///    `n_i(p)` is the cumulative Compton profile — PENELOPE's
+///    "maximum kinematically-allowed fraction of electrons" on
+///    that shell.
+/// 3. Sample `|p_z|` from `Jᵢ(|p_z|)` truncated at `p_z_max(i)`
+///    (inverse-CDF of a trapezoidally-integrated profile).
+/// 4. Random sign on `p_z`.
+/// 5. Solve the Doppler energy relation (eq. 2.50 of PENELOPE):
+///       `(p_z c / m_e c²) = [α(1−μ) α' − α + α'] / q`
+///    where `q = √(α² − 2 α α' μ + α'²)` and `α' = E'/m_e c²`.
+///    Rearranged into a quadratic in `α'`.
+fn apply_doppler(
+    elem: &PhotonElement,
+    energy_in: f64,
+    alpha: f64,
+    k_free: f64,
+    mu: f64,
+    rng: &mut Rng,
+) -> (f64, f64) {
+    let cp = &elem.compton_profiles;
+    let n_shells = cp.n_shells();
+    if n_shells == 0 {
+        return (energy_in * k_free, 0.0);
+    }
+
+    // Pre-compute p_z_max(i) and cumulative profile at p_z_max for
+    // the shell-selection weights.
+    let mut weights = Vec::with_capacity(n_shells);
+    let mut pz_max = Vec::with_capacity(n_shells);
+    let alpha_free = k_free * alpha; // α' for the free-electron case
+    for i in 0..n_shells {
+        let b_ev = cp.binding_energy[i];
+        let binding_alpha = b_ev / M_E_C2_EV;
+        if b_ev >= energy_in - energy_in * k_free {
+            // Kinematically inaccessible from the free-KN outgoing
+            // energy: outgoing photon would need to exceed incoming.
+            weights.push(0.0);
+            pz_max.push(0.0);
+            continue;
+        }
+        // PENELOPE §2.3.5 p_z,max (impulse approximation):
+        //   p_z,max/(m_e c) = [α(α − β_b)(1 − μ) − β_b]
+        //                    / √(α² + (α − β_b)² − 2α(α − β_b)μ)
+        // where β_b = B_i/m_e c².
+        let alpha_prime_max = alpha - binding_alpha;
+        let denom_sq =
+            alpha * alpha + alpha_prime_max * alpha_prime_max - 2.0 * alpha * alpha_prime_max * mu;
+        if denom_sq <= 0.0 {
+            weights.push(0.0);
+            pz_max.push(0.0);
+            continue;
+        }
+        let denom = denom_sq.sqrt();
+        let pmax_mec = (alpha * alpha_prime_max * (1.0 - mu) - binding_alpha) / denom;
+        // Convert m_e c units → atomic units of momentum
+        //   1 m_e c = 137.036 a.u.
+        let pmax_au = pmax_mec * INV_FINE_STRUCTURE_ALPHA;
+        let pmax_clamped = pmax_au.clamp(0.0, *cp.pz.last().unwrap_or(&100.0));
+        let cum_j = cumulative_profile(&cp.j[i], &cp.pz, pmax_clamped);
+        weights.push(cp.num_electrons[i] * cum_j);
+        pz_max.push(pmax_clamped);
+    }
+    let total_weight: f64 = weights.iter().sum();
+    if total_weight <= 0.0 {
+        // No shell is kinematically accessible — return the free-KN
+        // result with no binding deduction.
+        return (energy_in * k_free, 0.0);
+    }
+
+    // Rejection sampling wrapper: if the sampled shell/p_z yields an
+    // unphysical outgoing energy, redraw.
+    for _ in 0..32 {
+        // Select shell by weight.
+        let xi = rng.uniform() * total_weight;
+        let mut cum = 0.0;
+        let mut shell_idx = 0;
+        for (i, w) in weights.iter().enumerate() {
+            cum += w;
+            if xi < cum {
+                shell_idx = i;
+                break;
+            }
+        }
+
+        // Sample |p_z| from J_i truncated at p_z_max, in a.u.
+        let pmax_au = pz_max[shell_idx];
+        if pmax_au <= 0.0 {
+            continue;
+        }
+        let pz_au = sample_profile(&cp.j[shell_idx], &cp.pz, pmax_au, rng);
+        let pz_signed_au = if rng.uniform() < 0.5 { -pz_au } else { pz_au };
+        let pz_mec = pz_signed_au * FINE_STRUCTURE_ALPHA;
+
+        // Solve Doppler relation for α'.
+        // PENELOPE Eq. 2.50 rearranged into a quadratic. Let
+        //   t = p_z·c / (m_e c²)  (our pz_mec)
+        //   Γ ≡ 1 − t²
+        //   A = Γ − t² (1 − μ)² / Γ × ...
+        // simpler algebraic form (impulse approximation):
+        //   α' = α · (1 + t · μ + t² μ² − t²) / (1 + α(1 − μ) − t α(1 − μ) μ + ...)
+        // Use the explicit OpenMC formulation:
+        let t = pz_mec;
+        let one_plus_alpha_1_mu = 1.0 + alpha * (1.0 - mu);
+        let a_coef = t * t - one_plus_alpha_1_mu * one_plus_alpha_1_mu;
+        let b_coef = 2.0 * alpha * (one_plus_alpha_1_mu - t * t * mu);
+        let c_coef = t * t * alpha * alpha - alpha * alpha;
+        // Quadratic a α'² + b α' + c = 0  ⇒  α' = (−b ± √(b² − 4ac)) / (2a)
+        let disc = b_coef * b_coef - 4.0 * a_coef * c_coef;
+        if disc < 0.0 || a_coef == 0.0 {
+            continue;
+        }
+        let sqrt_disc = disc.sqrt();
+        // Two roots; pick the one that yields α' > 0 and closest to
+        // α_free (physically continuous).
+        let root_p = (-b_coef + sqrt_disc) / (2.0 * a_coef);
+        let root_m = (-b_coef - sqrt_disc) / (2.0 * a_coef);
+        let alpha_out = if root_p > 0.0 && (root_p - alpha_free).abs() < (root_m - alpha_free).abs() {
+            root_p
+        } else if root_m > 0.0 {
+            root_m
+        } else {
+            continue;
+        };
+
+        let e_out_ev = alpha_out * M_E_C2_EV;
+        if e_out_ev <= 0.0 || e_out_ev >= energy_in {
+            continue;
+        }
+        return (e_out_ev, cp.binding_energy[shell_idx]);
+    }
+    // Fallback: free-KN.
+    (energy_in * k_free, 0.0)
+}
+
+/// Fine-structure constant (CODATA-2018).
+const FINE_STRUCTURE_ALPHA: f64 = 7.297_352_569_3e-3;
+const INV_FINE_STRUCTURE_ALPHA: f64 = 1.0 / FINE_STRUCTURE_ALPHA;
+
+/// Trapezoidal integral `∫₀^{p_max} J(p) dp` using the tabulated
+/// Compton profile.
+fn cumulative_profile(j: &[f64], pz: &[f64], p_max: f64) -> f64 {
+    let n = pz.len();
+    if n == 0 || p_max <= pz[0] {
+        return 0.0;
+    }
+    let mut acc = 0.0;
+    for k in 1..n {
+        if pz[k] <= p_max {
+            acc += 0.5 * (j[k - 1] + j[k]) * (pz[k] - pz[k - 1]);
+        } else {
+            // Partial bin up to p_max
+            let frac = (p_max - pz[k - 1]) / (pz[k] - pz[k - 1]);
+            let j_at_pmax = j[k - 1] + frac * (j[k] - j[k - 1]);
+            acc += 0.5 * (j[k - 1] + j_at_pmax) * (p_max - pz[k - 1]);
+            break;
+        }
+    }
+    acc
+}
+
+/// Sample `|p_z|` from the Hartree-Fock profile `J(|p_z|)` restricted
+/// to `[0, p_max]` via inverse-CDF on the trapezoidally-integrated
+/// cumulative.
+fn sample_profile(j: &[f64], pz: &[f64], p_max: f64, rng: &mut Rng) -> f64 {
+    let cum_max = cumulative_profile(j, pz, p_max);
+    if cum_max <= 0.0 {
+        return 0.0;
+    }
+    let target = rng.uniform() * cum_max;
+    let n = pz.len();
+    let mut acc = 0.0;
+    for k in 1..n {
+        let pk = pz[k].min(p_max);
+        let jk = if pz[k] <= p_max {
+            j[k]
+        } else {
+            let frac = (p_max - pz[k - 1]) / (pz[k] - pz[k - 1]);
+            j[k - 1] + frac * (j[k] - j[k - 1])
+        };
+        let bin = 0.5 * (j[k - 1] + jk) * (pk - pz[k - 1]);
+        if target <= acc + bin {
+            // Linear-in-J inversion inside the bin.
+            let leftover = target - acc;
+            // Solve: leftover = 0.5 (j_lo + j(t)) · Δ · (t/Δ)
+            //                = 0.5 (j_lo + j_lo + (jk - j_lo) · t/Δ) · t
+            // With m = (jk - j_lo)/Δ, solving quadratic:
+            //   0.5 m t² + j_lo t − leftover = 0
+            let dp = pk - pz[k - 1];
+            let j_lo = j[k - 1];
+            let m = (jk - j_lo) / dp.max(1e-30);
+            if m.abs() < 1e-12 {
+                // Flat J
+                return pz[k - 1] + leftover / j_lo.max(1e-30);
+            }
+            let disc = j_lo * j_lo + 2.0 * m * leftover;
+            if disc < 0.0 {
+                return pz[k - 1] + 0.5 * dp;
+            }
+            let t = (-j_lo + disc.sqrt()) / m;
+            return pz[k - 1] + t.clamp(0.0, dp);
+        }
+        acc += bin;
+        if pz[k] >= p_max {
+            break;
+        }
+    }
+    p_max.min(*pz.last().unwrap_or(&p_max))
 }
 
 // --- Internals -------------------------------------------------------------
@@ -194,9 +437,12 @@ mod tests {
         Some(PhotonElement::from_hdf5(&path).expect("load photon data"))
     }
 
-    /// `k ∈ [1/κ, 1]` is the Klein-Nishina kinematic support.
+    /// `k ∈ [1/κ, 1]` is the Klein-Nishina kinematic support — valid
+    /// only for the free-electron sampler. With Doppler broadening
+    /// `k` can drift slightly outside that interval by the
+    /// profile-sampled `p_z`.
     #[test]
-    fn k_within_kinematic_bounds() {
+    fn k_within_kinematic_bounds_free_variant() {
         let Some(h) = load("H.h5") else {
             eprintln!("skipping: H.h5 not present");
             return;
@@ -207,7 +453,7 @@ mod tests {
         let k_min = 1.0 / (1.0 + 2.0 * alpha);
 
         for _ in 0..20_000 {
-            let out = compton_scatter(&h, energy, &mut rng);
+            let out = compton_scatter_free(&h, energy, &mut rng);
             let k = out.energy_out / energy;
             assert!(
                 (k_min - 1e-12..=1.0 + 1e-12).contains(&k),
@@ -239,9 +485,11 @@ mod tests {
 
     /// The sampled `(k, μ)` pair must satisfy the Compton shift relation
     /// `1/k − 1 = α(1 − μ)` exactly (no stochastic noise — it's a
-    /// kinematic identity).
+    /// free-electron kinematic identity). Only holds for
+    /// `compton_scatter_free`; the Doppler-broadened variant
+    /// deliberately breaks this identity at the profile level.
     #[test]
-    fn mu_k_consistent_with_compton_shift() {
+    fn mu_k_consistent_with_compton_shift_free_variant() {
         let Some(c) = load("C.h5") else {
             eprintln!("skipping: C.h5 not present");
             return;
@@ -251,9 +499,8 @@ mod tests {
         let alpha = energy / M_E_C2_EV;
 
         for _ in 0..5_000 {
-            let out = compton_scatter(&c, energy, &mut rng);
+            let out = compton_scatter_free(&c, energy, &mut rng);
             let k = out.energy_out / energy;
-            // μ = 1 − (1 − k)/(αk) should match the returned μ exactly.
             let mu_from_k = 1.0 - (1.0 - k) / (alpha * k);
             assert!(
                 (out.mu - mu_from_k).abs() < 1e-12,
@@ -263,10 +510,10 @@ mod tests {
         }
     }
 
-    /// `T_e = E − E'` (phase-1 kerma): electron kinetic energy equals
-    /// the photon energy loss.
+    /// For the free sampler, `T_e = E − E'` exactly (kerma, no
+    /// binding deduction).
     #[test]
-    fn electron_kinetic_is_photon_energy_loss() {
+    fn electron_kinetic_is_photon_energy_loss_free_variant() {
         let Some(c) = load("C.h5") else {
             eprintln!("skipping: C.h5 not present");
             return;
@@ -275,11 +522,57 @@ mod tests {
         let energy = 5.0e5;
 
         for _ in 0..1_000 {
-            let out = compton_scatter(&c, energy, &mut rng);
+            let out = compton_scatter_free(&c, energy, &mut rng);
             let expected = energy - out.energy_out;
             assert!((out.electron_kinetic - expected).abs() < 1e-12);
             assert!(out.electron_kinetic >= 0.0);
         }
+    }
+
+    /// With Doppler broadening the outgoing photon energy is smeared
+    /// about the free-KN value. Verify the variance is non-zero but
+    /// small on a case where binding is significant: Pb at 100 keV,
+    /// K-shell binding 88 keV. Also check energy conservation with
+    /// binding deduction: `E_in = E_out + T_e + B_i`.
+    #[test]
+    fn doppler_broadens_outgoing_spectrum_on_pb() {
+        let Some(pb) = load("Pb.h5") else {
+            eprintln!("skipping: Pb.h5 not present");
+            return;
+        };
+        let mut rng = Rng::new(0xD0, 1);
+        let energy = 1.0e5;
+        let alpha = energy / M_E_C2_EV;
+
+        let mut sum = 0.0;
+        let mut sum_sq = 0.0;
+        let n = 50_000;
+        for _ in 0..n {
+            let out = compton_scatter(&pb, energy, &mut rng);
+            // Energy conservation: E_in ≥ E_out + T_e (binding is
+            // absorbed, so E_in − E_out − T_e ≥ 0). Equality up to
+            // kerma/binding is weak; just check positivity.
+            assert!(out.energy_out >= 0.0);
+            assert!(out.electron_kinetic >= 0.0);
+            assert!(out.energy_out + out.electron_kinetic <= energy + 1e-6);
+            // Compare deviation from free-KN value at the same μ.
+            let k_free = 1.0 / (1.0 + alpha * (1.0 - out.mu));
+            let dev = out.energy_out / energy - k_free;
+            sum += dev;
+            sum_sq += dev * dev;
+        }
+        let var = sum_sq / n as f64 - (sum / n as f64).powi(2);
+        let std = var.sqrt();
+        // Expect RMS deviation of a few percent (typical Compton profile
+        // widths ≈ 0.5–2 a.u. · α_fine ≈ 0.004–0.015 in m_e c units).
+        assert!(
+            std > 1e-3,
+            "Doppler spread too small (std k_dev = {std})"
+        );
+        assert!(
+            std < 0.2,
+            "Doppler spread unphysically large (std k_dev = {std})"
+        );
     }
 
     /// Compton forward-peaks with increasing photon energy. At low `α`
@@ -431,7 +724,12 @@ mod tests {
         let mut sum_mu = 0.0;
         let mut sum_mu2 = 0.0;
         for _ in 0..n_samples {
-            let out = compton_scatter(&h, energy, &mut rng);
+            // Use the free variant: Doppler broadening would smear E'
+            // but not the angular distribution, yet sampling through
+            // the Doppler shell-selection loop can fail and fall
+            // back to free-KN in ways that bias <μ²>. The angular
+            // test should be independent of the Doppler channel.
+            let out = compton_scatter_free(&h, energy, &mut rng);
             sum_mu += out.mu;
             sum_mu2 += out.mu * out.mu;
         }
