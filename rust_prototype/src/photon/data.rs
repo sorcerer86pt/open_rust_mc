@@ -253,6 +253,29 @@ impl PhotonElement {
             + self.pair_production_nuclear_xs[i]
             + self.pair_production_electron_xs[i]
     }
+
+    /// Look up a photoelectric subshell by its EADL 1-based designator
+    /// (K=1, L1=2, L2=3, L3=4, M1=5, ..., M5=9, N1=10, ..., Q1=29).
+    ///
+    /// Returns `None` if the designator is 0 or exceeds the element's
+    /// tabulated subshell list. The latter happens for outer valence
+    /// shells that can donate electrons during relaxation but have no
+    /// tabulated partial photoelectric cross section — e.g. an EADL
+    /// transition with `primary = 37` in uranium references a shell
+    /// beyond the 29-entry Q1 terminus of `self.subshells`, and the
+    /// photoelectric cascade should treat the resulting hole as
+    /// locally-deposited energy.
+    ///
+    /// Relies on OpenMC's photon HDF5 storing subshells in K → L1 →
+    /// L2 → L3 → M1 → ... order, so the EADL designator equals the
+    /// 1-based position in `self.subshells`. The reader enforces this
+    /// order via the required `designators` attribute.
+    pub fn subshell_by_eadl_designator(&self, designator: u32) -> Option<&Subshell> {
+        if designator == 0 {
+            return None;
+        }
+        self.subshells.get(designator as usize - 1)
+    }
 }
 
 impl Subshell {

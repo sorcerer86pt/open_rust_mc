@@ -1238,6 +1238,72 @@ mod tests {
         }
     }
 
+    /// EADL designator → subshell lookup. For Uranium, the 29-entry
+    /// PE subshell list must expose K (1) through Q1 (29), and any
+    /// designator ≥ 30 must return None (those shells aren't in the
+    /// tabulated PE list even though EADL transitions can reference
+    /// them).
+    #[test]
+    fn uranium_subshell_by_eadl_designator() {
+        let Some(path) = photon_path("U.h5") else {
+            eprintln!("skipping: U.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load U");
+        assert_eq!(elem.subshells.len(), 29);
+
+        // Zero → None (invalid EADL designator).
+        assert!(elem.subshell_by_eadl_designator(0).is_none());
+
+        // K=1, L1=2, L2=3, L3=4 are the first four.
+        assert_eq!(elem.subshell_by_eadl_designator(1).unwrap().designator, "K");
+        assert_eq!(elem.subshell_by_eadl_designator(2).unwrap().designator, "L1");
+        assert_eq!(elem.subshell_by_eadl_designator(3).unwrap().designator, "L2");
+        assert_eq!(elem.subshell_by_eadl_designator(4).unwrap().designator, "L3");
+
+        // Q1 is the 29th (last) subshell in U.
+        assert_eq!(elem.subshell_by_eadl_designator(29).unwrap().designator, "Q1");
+
+        // Beyond 29: outside U's PE tabulation, returns None.
+        assert!(elem.subshell_by_eadl_designator(30).is_none());
+        assert!(elem.subshell_by_eadl_designator(37).is_none());
+        assert!(elem.subshell_by_eadl_designator(u32::MAX).is_none());
+    }
+
+    /// Every EADL transition in Uranium whose `primary` designator is
+    /// within the PE subshell list (≤ 29) must resolve to a Subshell.
+    /// Primaries that exceed 29 must not (and the cascade kernel will
+    /// handle them by local deposition).
+    #[test]
+    fn uranium_transition_primaries_resolve_or_are_out_of_list() {
+        let Some(path) = photon_path("U.h5") else {
+            eprintln!("skipping: U.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load U");
+        let n = elem.subshells.len() as u32;
+
+        for s in &elem.subshells {
+            for (i, t) in s.transitions.iter().enumerate() {
+                let primary = t[0].round() as u32;
+                let lookup = elem.subshell_by_eadl_designator(primary);
+                if primary > 0 && primary <= n {
+                    assert!(
+                        lookup.is_some(),
+                        "shell {} transition {i}: primary {primary} within [1, {n}] but lookup failed",
+                        s.designator
+                    );
+                } else {
+                    assert!(
+                        lookup.is_none(),
+                        "shell {} transition {i}: primary {primary} outside [1, {n}] but lookup succeeded",
+                        s.designator
+                    );
+                }
+            }
+        }
+    }
+
     /// For a closed-shell Hartree-Fock ground state J(p_z) is non-
     /// increasing in |p_z|. Verify on all U shells (monotonic test
     /// within the tabulated non-negative half).
