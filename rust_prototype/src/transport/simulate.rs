@@ -759,6 +759,14 @@ fn transport_particle<XS: XsProvider>(
                             );
                             match outcome {
                                 CollisionOutcome::Scatter => {}
+                                CollisionOutcome::InelasticScatter { q_value_ev } => {
+                                    result.photon_events.push(PhotonSourceEvent {
+                                        cell_idx: particle.cell_idx as u32,
+                                        pos: [particle.pos.x, particle.pos.y, particle.pos.z],
+                                        energy: q_value_ev.abs(),
+                                        mt: 4,
+                                    });
+                                }
                                 CollisionOutcome::Absorption => {
                                     result.absorptions += 1;
                                     result.capture_cells.push(particle.cell_idx);
@@ -835,6 +843,14 @@ fn transport_particle<XS: XsProvider>(
 
                         match outcome {
                             CollisionOutcome::Scatter => {}
+                            CollisionOutcome::InelasticScatter { q_value_ev } => {
+                                result.photon_events.push(PhotonSourceEvent {
+                                    cell_idx: particle.cell_idx as u32,
+                                    pos: [particle.pos.x, particle.pos.y, particle.pos.z],
+                                    energy: q_value_ev.abs(),
+                                    mt: 4,
+                                });
+                            }
                             CollisionOutcome::Absorption => {
                                 result.absorptions += 1;
                                 result.capture_cells.push(particle.cell_idx);
@@ -1176,6 +1192,14 @@ fn transport_particle_delta<XS: XsProvider>(
 
             match outcome {
                 CollisionOutcome::Scatter => {}
+                CollisionOutcome::InelasticScatter { q_value_ev } => {
+                    result.photon_events.push(PhotonSourceEvent {
+                        cell_idx: particle.cell_idx as u32,
+                        pos: [particle.pos.x, particle.pos.y, particle.pos.z],
+                        energy: q_value_ev.abs(),
+                        mt: 4,
+                    });
+                }
                 CollisionOutcome::Absorption => {
                     result.absorptions += 1;
                     result.capture_cells.push(particle.cell_idx);
