@@ -216,12 +216,16 @@ fn read_subshells(element: &hdf5_pure::Group, path: &Path) -> Result<Vec<Subshel
     // K → L → M → ... order in which subshells appear. Falling back to
     // `groups()` returns HDF5-internal order (often alphabetical), which
     // breaks any convention that assumes outer shells are indexed later.
+    //
+    // HDF5 can store a single-entry attribute as either `String` or a
+    // one-element `StringArray` depending on the writer; we accept both.
     let designators: Vec<String> = match subshells_group
         .attrs()
         .map_err(|e| hdf5_err(format!("cannot read subshells attrs: {e}")))?
         .get("designators")
     {
         Some(hdf5_pure::AttrValue::StringArray(arr)) => arr.clone(),
+        Some(hdf5_pure::AttrValue::String(s)) => vec![s.clone()],
         _ => {
             return Err(hdf5_err(
                 "/subshells is missing required `designators` attribute".into(),
@@ -781,5 +785,479 @@ mod tests {
 
         // ICRU-37 mean excitation energy for uranium.
         assert!((elem.bremsstrahlung.mean_excitation_energy - 890.0).abs() < 5.0);
+    }
+
+    // -------------------------------------------------------------------
+    // Broad-Z element coverage
+    //
+    // Each test runs the full element-agnostic consistency suite from
+    // `check_photon_element`. Picked to span the periodic table:
+    //   - H  (Z=1): minimal atom, single K shell
+    //   - Fe (Z=26): mid-Z, common structural nuclide
+    //   - Pb (Z=82): heavy shielding material
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn load_hydrogen_photon_data() {
+        let Some(path) = photon_path("H.h5") else {
+            eprintln!("skipping: data/endfb-vii.1-hdf5/photon/H.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load hydrogen photon data");
+        check_photon_element(&elem, 1, "H");
+
+        // H has exactly one subshell: K (1s, 1 electron).
+        assert_eq!(elem.subshells.len(), 1);
+        let k = &elem.subshells[0];
+        assert_eq!(k.designator, "K");
+        assert!((k.num_electrons - 1.0).abs() < 1e-9);
+        // H K-shell binding is 13.6 eV (Rydberg). Evaluated libraries
+        // allow small adjustments for chemical environment.
+        assert!(
+            (k.binding_energy - 13.6).abs() < 0.5,
+            "H K-shell binding = {} eV, expected ~13.6",
+            k.binding_energy
+        );
+
+        // A 1-electron atom has no relaxation pathway.
+        assert!(
+            k.transitions.is_empty(),
+            "H K-shell should have no transitions, got {}",
+            k.transitions.len()
+        );
+
+        // Compton profiles: 1 shell for 1 electron.
+        assert_eq!(elem.compton_profiles.n_shells(), 1);
+        assert!((elem.compton_profiles.num_electrons[0] - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_iron_photon_data() {
+        let Some(path) = photon_path("Fe.h5") else {
+            eprintln!("skipping: data/endfb-vii.1-hdf5/photon/Fe.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load iron photon data");
+        check_photon_element(&elem, 26, "Fe");
+
+        // Iron has K, L1-3, M1-5 filled (9 subshells populated + M4-M5 last).
+        assert!(elem.subshells.len() >= 9);
+        let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
+        // ENDF/B-VII.1 evaluated Fe K-shell binding ≈ 7083 eV (the NIST
+        // X-ray absorption edge value of 7112 eV is for the solid-state
+        // Fe K-edge and differs by several tens of eV from the isolated
+        // neutral-atom binding the evaluated file stores).
+        assert!(
+            (k.binding_energy - 7083.0).abs() < 30.0,
+            "Fe K-shell binding = {} eV, expected ~7083 (ENDF/B-VII.1)",
+            k.binding_energy
+        );
+    }
+
+    #[test]
+    fn load_lead_photon_data() {
+        let Some(path) = photon_path("Pb.h5") else {
+            eprintln!("skipping: data/endfb-vii.1-hdf5/photon/Pb.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load lead photon data");
+        check_photon_element(&elem, 82, "Pb");
+
+        // ENDF/B-VII.1 evaluated Pb K-shell binding ≈ 88290 eV (the NIST
+        // X-ray K-edge of 88005 eV is the solid-state value; evaluated
+        // photoatomic libraries store the isolated neutral-atom binding
+        // which differs by a few hundred eV).
+        let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
+        assert!(
+            (k.binding_energy - 88_290.0).abs() < 500.0,
+            "Pb K-shell binding = {} eV, expected ~88290 (ENDF/B-VII.1)",
+            k.binding_energy
+        );
+
+        // Pb has a rich M and N shell structure.
+        let designators: Vec<String> =
+            elem.subshells.iter().map(|s| s.designator.clone()).collect();
+        assert!(designators.iter().any(|d| d.starts_with('M')));
+        assert!(designators.iter().any(|d| d.starts_with('N')));
+    }
+
+    // -------------------------------------------------------------------
+    // Pure-function unit tests — no HDF5 dependency
+    // -------------------------------------------------------------------
+
+    mod subshell_xs_at {
+        use super::super::*;
+
+        fn make_subshell(xs: Vec<f64>) -> Subshell {
+            Subshell {
+                designator: "K".into(),
+                binding_energy: 100.0,
+                num_electrons: 2.0,
+                xs,
+                transitions: Vec::new(),
+            }
+        }
+
+        #[test]
+        fn at_offset_returns_first_point() {
+            let s = make_subshell(vec![10.0, 20.0, 30.0]);
+            // master grid length 5, xs length 3 => offset = 2.
+            assert_eq!(s.xs_at(5, 2), 10.0);
+        }
+
+        #[test]
+        fn at_last_master_index_returns_last_xs() {
+            let s = make_subshell(vec![10.0, 20.0, 30.0]);
+            assert_eq!(s.xs_at(5, 4), 30.0);
+        }
+
+        #[test]
+        fn below_offset_returns_zero() {
+            let s = make_subshell(vec![10.0, 20.0, 30.0]);
+            assert_eq!(s.xs_at(5, 0), 0.0);
+            assert_eq!(s.xs_at(5, 1), 0.0);
+        }
+
+        #[test]
+        fn empty_xs_returns_zero_everywhere() {
+            let s = make_subshell(vec![]);
+            // offset = master_len, every valid index is below offset.
+            for i in 0..5 {
+                assert_eq!(s.xs_at(5, i), 0.0, "expected 0 at i={i}");
+            }
+        }
+
+        #[test]
+        fn xs_fully_covers_master_grid() {
+            // When xs.len() == master_len the whole grid is tabulated.
+            let s = make_subshell(vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+            assert_eq!(s.xs_at(5, 0), 1.0);
+            assert_eq!(s.xs_at(5, 4), 5.0);
+        }
+
+        #[test]
+        #[should_panic(expected = "i_master")]
+        #[cfg(debug_assertions)]
+        fn oob_master_index_panics_in_debug() {
+            let s = make_subshell(vec![1.0, 2.0, 3.0]);
+            let _ = s.xs_at(5, 5);
+        }
+
+        #[test]
+        #[should_panic(expected = "master grid")]
+        #[cfg(debug_assertions)]
+        fn xs_longer_than_master_panics_in_debug() {
+            let s = make_subshell(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+            let _ = s.xs_at(5, 0);
+        }
+    }
+
+    mod photon_element_helpers {
+        use super::super::*;
+        use crate::photon::data::{
+            AnomalousFactors, Bremsstrahlung, ComptonProfiles, ScatteringFactor, TabulatedFactor,
+        };
+
+        fn empty_sf() -> ScatteringFactor {
+            ScatteringFactor { x: vec![], value: vec![] }
+        }
+
+        fn empty_tab() -> TabulatedFactor {
+            TabulatedFactor { grid: vec![], value: vec![] }
+        }
+
+        fn fixture(xs: Vec<[f64; 5]>) -> PhotonElement {
+            let n = xs.len();
+            PhotonElement {
+                z: 1,
+                symbol: "X".into(),
+                energy: (0..n).map(|i| i as f64).collect(),
+                coherent_xs: xs.iter().map(|r| r[0]).collect(),
+                incoherent_xs: xs.iter().map(|r| r[1]).collect(),
+                photoelectric_xs: xs.iter().map(|r| r[2]).collect(),
+                pair_production_nuclear_xs: xs.iter().map(|r| r[3]).collect(),
+                pair_production_electron_xs: xs.iter().map(|r| r[4]).collect(),
+                coherent_form_factor: empty_sf(),
+                coherent_integrated_form_factor: empty_sf(),
+                coherent_anomalous: AnomalousFactors {
+                    real: empty_tab(),
+                    imag: empty_tab(),
+                },
+                incoherent_scattering_factor: empty_sf(),
+                compton_profiles: ComptonProfiles {
+                    binding_energy: vec![],
+                    num_electrons: vec![],
+                    pz: vec![],
+                    j: vec![],
+                },
+                subshells: vec![],
+                bremsstrahlung: Bremsstrahlung {
+                    mean_excitation_energy: 0.0,
+                    electron_energy: vec![],
+                    photon_energy: vec![],
+                    dcs: vec![],
+                    ionization_energy: vec![],
+                    num_electrons: vec![],
+                },
+            }
+        }
+
+        #[test]
+        fn n_energy_matches_grid_length() {
+            let elem = fixture(vec![[0.0; 5]; 7]);
+            assert_eq!(elem.n_energy(), 7);
+        }
+
+        #[test]
+        fn total_xs_is_sum_of_five_channels() {
+            let elem = fixture(vec![
+                [1.0, 2.0, 3.0, 4.0, 5.0],
+                [0.5, 0.5, 0.5, 0.5, 0.5],
+            ]);
+            assert_eq!(elem.total_xs_at(0), 15.0);
+            assert_eq!(elem.total_xs_at(1), 2.5);
+        }
+
+        #[test]
+        fn total_xs_handles_zero_channels() {
+            let elem = fixture(vec![[0.0, 5.0, 0.0, 0.0, 0.0]]);
+            assert_eq!(elem.total_xs_at(0), 5.0);
+        }
+    }
+
+    mod compton_profiles {
+        use crate::photon::data::ComptonProfiles;
+
+        #[test]
+        fn n_shells_matches_binding_energy_len() {
+            let cp = ComptonProfiles {
+                binding_energy: vec![1.0, 2.0, 3.0],
+                num_electrons: vec![2.0, 2.0, 2.0],
+                pz: vec![0.0, 1.0],
+                j: vec![vec![1.0, 0.5]; 3],
+            };
+            assert_eq!(cp.n_shells(), 3);
+            assert_eq!(cp.n_pz(), 2);
+        }
+
+        #[test]
+        fn empty_profiles_report_zero() {
+            let cp = ComptonProfiles {
+                binding_energy: vec![],
+                num_electrons: vec![],
+                pz: vec![],
+                j: vec![],
+            };
+            assert_eq!(cp.n_shells(), 0);
+            assert_eq!(cp.n_pz(), 0);
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Error-path tests — no data file required
+    // -------------------------------------------------------------------
+
+    mod error_paths {
+        use super::super::*;
+        use std::io::Write;
+        use std::path::PathBuf;
+
+        #[test]
+        fn missing_file_returns_err() {
+            let path = PathBuf::from("data/photon/this-definitely-does-not-exist-1234.h5");
+            let result = PhotonElement::from_hdf5(&path);
+            assert!(
+                result.is_err(),
+                "loading a non-existent path should return Err, got Ok"
+            );
+        }
+
+        #[test]
+        fn non_hdf5_file_returns_err() {
+            // Write a plain text file and try to parse it as HDF5.
+            let dir = std::env::temp_dir();
+            let path = dir.join(format!(
+                "photon_bogus_{}.h5",
+                std::process::id()
+            ));
+            {
+                let mut f =
+                    std::fs::File::create(&path).expect("create scratch file");
+                f.write_all(b"this is not HDF5, it's plain text\n").unwrap();
+            }
+            let result = PhotonElement::from_hdf5(&path);
+            let _ = std::fs::remove_file(&path);
+            assert!(
+                result.is_err(),
+                "loading a non-HDF5 file should return Err, got Ok"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Cross-data physics consistency — checks that require real files
+    // -------------------------------------------------------------------
+
+    /// Validate that every transition in every subshell has well-formed
+    /// data: primary designator positive, secondary either 0 (radiative)
+    /// or positive, energy and probability non-negative.
+    ///
+    /// EADL uses a 1-based designator scheme running from 1 (K) up to
+    /// ~39 (outermost shells), independent of whether each shell appears
+    /// in a given element's photoelectric subshell list. The relaxation
+    /// cascade can therefore reference shells that have no tabulated
+    /// photoelectric cross section (e.g. valence shells receive holes
+    /// but the partial PE XS is absorbed into the total). We bound by
+    /// 50 rather than `subshells.len()` for this reason.
+    #[test]
+    fn uranium_transitions_well_formed() {
+        let Some(path) = photon_path("U.h5") else {
+            eprintln!("skipping: U.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load uranium");
+        const EADL_MAX_DESIGNATOR: i64 = 50; // safely above any physical shell
+
+        for s in &elem.subshells {
+            for (i, t) in s.transitions.iter().enumerate() {
+                let primary = t[0];
+                let secondary = t[1];
+
+                let primary_idx = primary.round() as i64;
+                assert!(
+                    (1..=EADL_MAX_DESIGNATOR).contains(&primary_idx),
+                    "shell {} transition {i}: primary designator {primary} outside [1, {EADL_MAX_DESIGNATOR}]",
+                    s.designator
+                );
+
+                if secondary != 0.0 {
+                    let secondary_idx = secondary.round() as i64;
+                    assert!(
+                        (1..=EADL_MAX_DESIGNATOR).contains(&secondary_idx),
+                        "shell {} transition {i}: secondary designator {secondary} outside [1, {EADL_MAX_DESIGNATOR}]",
+                        s.designator
+                    );
+                }
+
+                assert!(
+                    t[2] >= 0.0,
+                    "shell {} transition {i}: energy {} < 0",
+                    s.designator,
+                    t[2]
+                );
+                assert!(
+                    t[3] >= 0.0,
+                    "shell {} transition {i}: probability {} < 0",
+                    s.designator,
+                    t[3]
+                );
+            }
+        }
+    }
+
+    /// Physical-regime check: for lead at 10 keV, photoelectric must be
+    /// the dominant channel (by a large margin). At 10 MeV, pair
+    /// production becomes competitive with Compton. This catches gross
+    /// channel-misidentification bugs (e.g., swapping coherent/incoherent).
+    #[test]
+    fn lead_channel_dominance_by_energy() {
+        let Some(path) = photon_path("Pb.h5") else {
+            eprintln!("skipping: Pb.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load Pb");
+
+        // Find the index closest to 10 keV.
+        let idx_10kev = elem
+            .energy
+            .iter()
+            .position(|e| *e >= 1.0e4)
+            .expect("10 keV in grid");
+        let pe_10k = elem.photoelectric_xs[idx_10kev];
+        let total_10k = elem.total_xs_at(idx_10kev);
+        assert!(
+            pe_10k / total_10k > 0.9,
+            "Pb at 10 keV: photoelectric should dominate, fraction = {} (total = {total_10k})",
+            pe_10k / total_10k
+        );
+
+        // At 1 MeV, Compton (incoherent) should dominate for Pb.
+        let idx_1mev = elem
+            .energy
+            .iter()
+            .position(|e| *e >= 1.0e6)
+            .expect("1 MeV in grid");
+        let inc_1m = elem.incoherent_xs[idx_1mev];
+        let total_1m = elem.total_xs_at(idx_1mev);
+        assert!(
+            inc_1m / total_1m > 0.5,
+            "Pb at 1 MeV: Compton fraction = {} (expected > 0.5)",
+            inc_1m / total_1m
+        );
+
+        // At 100 MeV, pair production should dominate over Compton.
+        let idx_100mev = elem
+            .energy
+            .iter()
+            .position(|e| *e >= 1.0e8)
+            .expect("100 MeV in grid");
+        let pp_100m = elem.pair_production_nuclear_xs[idx_100mev]
+            + elem.pair_production_electron_xs[idx_100mev];
+        let inc_100m = elem.incoherent_xs[idx_100mev];
+        assert!(
+            pp_100m > inc_100m,
+            "Pb at 100 MeV: pair production ({pp_100m} b) should exceed Compton ({inc_100m} b)"
+        );
+    }
+
+    /// Compton profile physics: for a closed-shell Hartree-Fock ground
+    /// state J is an even, non-increasing function of |p_z|, so the
+    /// maximum is at p_z = 0. Ties at adjacent low-p_z points are
+    /// expected for deeply-bound inner shells where the profile is
+    /// broad (e.g. U K-shell electrons have ~100 keV binding energy
+    /// and the profile is flat-topped over the first few tabulated
+    /// p_z points). We therefore check `J(p_z) ≤ J(0)` with a small
+    /// tolerance rather than strict peaking.
+    #[test]
+    fn uranium_compton_profile_maximal_at_zero_pz() {
+        let Some(path) = photon_path("U.h5") else {
+            eprintln!("skipping: U.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load U");
+        let cp = &elem.compton_profiles;
+        for (shell, prof) in cp.j.iter().enumerate() {
+            let j0 = prof[0];
+            for (k, &j_val) in prof.iter().enumerate() {
+                assert!(
+                    j_val <= j0 + 1e-12,
+                    "U shell {shell}: J[pz={}] = {j_val} exceeds J[0] = {j0}",
+                    cp.pz[k]
+                );
+            }
+        }
+    }
+
+    /// For a closed-shell Hartree-Fock ground state J(p_z) is non-
+    /// increasing in |p_z|. Verify on all U shells (monotonic test
+    /// within the tabulated non-negative half).
+    #[test]
+    fn uranium_compton_profile_non_increasing() {
+        let Some(path) = photon_path("U.h5") else {
+            eprintln!("skipping: U.h5 not present");
+            return;
+        };
+        let elem = PhotonElement::from_hdf5(&path).expect("load U");
+        let cp = &elem.compton_profiles;
+        for (shell, prof) in cp.j.iter().enumerate() {
+            for w in prof.windows(2) {
+                assert!(
+                    w[1] <= w[0] + 1e-12,
+                    "U shell {shell}: J increased from {} to {}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
     }
 }
