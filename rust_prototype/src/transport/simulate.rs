@@ -322,6 +322,12 @@ pub struct BatchResult {
     /// In fixed-inactive mode this is simply `batch > config.inactive`.
     /// In auto-inactive mode it reflects the entropy-plateau decision.
     pub active: bool,
+    /// Per-cell count of non-fission absorption events (radiative
+    /// capture and other `(n,X)` absorptions). Indexed by the cell's
+    /// position in the `cells` slice passed to `run_eigenvalue`. Use
+    /// this to build a photon source for coupled neutron-photon
+    /// transport, or any other (n,γ)-rate-weighted tally.
+    pub captures_by_cell: Vec<f64>,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -398,6 +404,12 @@ struct ParticleResult {
     surface_crossings: u32,
     fissions: u32,
     collisions: u32,
+    /// Cell indices where this particle was captured (n,γ-style
+    /// non-fission absorption). Typical history captures at most
+    /// once, so this vec is usually empty or a single element —
+    /// allocation cost is amortised by the parallel reduction and the
+    /// fact that capture events are rare relative to scatter events.
+    capture_cells: Vec<usize>,
 }
 
 /// Transport a single particle to completion.
@@ -419,6 +431,7 @@ fn transport_particle<XS: XsProvider>(
         collisions: 0,
         thermal_scatters: 0,
         surface_crossings: 0,
+        capture_cells: Vec::new(),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -659,6 +672,7 @@ fn transport_particle<XS: XsProvider>(
                             CollisionOutcome::Scatter => {}
                             CollisionOutcome::Absorption => {
                                 result.absorptions += 1;
+                                result.capture_cells.push(particle.cell_idx);
                             }
                             CollisionOutcome::Fission { sites } => {
                                 result.fissions += 1;
@@ -717,6 +731,7 @@ fn transport_particle<XS: XsProvider>(
                         CollisionOutcome::Scatter => {}
                         CollisionOutcome::Absorption => {
                             result.absorptions += 1;
+                            result.capture_cells.push(particle.cell_idx);
                         }
                         CollisionOutcome::Fission { sites } => {
                             result.fissions += 1;
@@ -825,6 +840,7 @@ fn transport_particle_delta<XS: XsProvider>(
         collisions: 0,
         thermal_scatters: 0,
         surface_crossings: 0,
+        capture_cells: Vec::new(),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -1038,6 +1054,7 @@ fn transport_particle_delta<XS: XsProvider>(
             CollisionOutcome::Scatter => {}
             CollisionOutcome::Absorption => {
                 result.absorptions += 1;
+                result.capture_cells.push(particle.cell_idx);
             }
             CollisionOutcome::Fission { sites } => {
                 result.fissions += 1;
@@ -1157,6 +1174,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
         let mut collisions = 0_u32;
         let mut thermal_scatters = 0_u32;
         let mut surface_crossings = 0_u32;
+        let mut captures_by_cell = vec![0.0_f64; cells.len()];
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1166,6 +1184,11 @@ pub fn run_eigenvalue<XS: XsProvider>(
             collisions += pr.collisions;
             thermal_scatters += pr.thermal_scatters;
             surface_crossings += pr.surface_crossings;
+            for c in pr.capture_cells {
+                if c < captures_by_cell.len() {
+                    captures_by_cell[c] += 1.0;
+                }
+            }
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -1182,6 +1205,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
             surface_crossings,
             shannon_entropy: entropy,
             active: false,
+            captures_by_cell,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
