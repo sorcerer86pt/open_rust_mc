@@ -335,7 +335,12 @@ fn main() -> ExitCode {
 
         escaped_energy += r.energy_escaped;
         for (p, e) in &r.deposits {
-            if let Some(idx) = ray::find_cell(*p, &surfaces, &cells) {
+            // Electron-range displacement may push a deposit past the
+            // reflective lattice boundaries. Fold it back by reflection
+            // before resolving to a cell — this preserves the infinite-
+            // lattice symmetry that the outer BCs represent.
+            let p_folded = fold_into_lattice(*p);
+            if let Some(idx) = ray::find_cell(p_folded, &surfaces, &cells) {
                 deposited_per_cell[idx] += e;
             } else {
                 orphan_deposit += e;
@@ -584,11 +589,51 @@ fn load_photon_materials(data_dir: &Path) -> Result<Vec<Option<PhotonMaterial>>,
     let zr = load("Zr.h5")?;
     let u = load("U.h5")?;
 
-    let uo2 = PhotonMaterial::new(vec![(UO2_MOL_DENSITY, u), (2.0 * UO2_MOL_DENSITY, o1)]);
-    let clad = PhotonMaterial::mono(ZR_ATOM_DENSITY, zr);
-    let h2o = PhotonMaterial::new(vec![(2.0 * H2O_MOL_DENSITY, h), (H2O_MOL_DENSITY, o2)]);
+    // Mass densities (g/cm³) used for CSDA electron-range
+    // displacement. Match the atom-density choices:
+    //   UO₂: 10.4 g/cm³ (fresh PWR fuel pellet)
+    //   Zr: 6.55 g/cm³  (Zircaloy-4 approximation)
+    //   H₂O: 0.74 g/cm³ (~600 K PWR moderator density)
+    let uo2 = PhotonMaterial::new(vec![(UO2_MOL_DENSITY, u), (2.0 * UO2_MOL_DENSITY, o1)])
+        .with_density(10.4);
+    let clad = PhotonMaterial::mono(ZR_ATOM_DENSITY, zr).with_density(6.55);
+    let h2o = PhotonMaterial::new(vec![(2.0 * H2O_MOL_DENSITY, h), (H2O_MOL_DENSITY, o2)])
+        .with_density(0.74);
 
     Ok(vec![Some(uo2), Some(clad), Some(h2o)])
+}
+
+/// Fold a position back into the fundamental pin-cell box by
+/// reflection across the six reflective outer planes. Infinite-lattice
+/// symmetry is enforced on the photon-deposit positions after
+/// electron-range displacement has potentially pushed them past a
+/// reflective boundary.
+fn fold_into_lattice(p: Vec3) -> Vec3 {
+    let half_xy = PITCH / 2.0;
+    let half_z = PITCH / 2.0;
+    Vec3::new(
+        reflect_coord(p.x, half_xy),
+        reflect_coord(p.y, half_xy),
+        reflect_coord(p.z, half_z),
+    )
+}
+
+/// Reflect a coordinate into `[-half, +half]` assuming the coordinate
+/// axis has reflective planes at both `-half` and `+half`. Implements
+/// a triangle wave that models arbitrary-count bounces.
+fn reflect_coord(coord: f64, half: f64) -> f64 {
+    let period = 2.0 * half;
+    let double_period = 2.0 * period;
+    // Shift to [0, ...), wrap modulo double-period, then fold the
+    // [period, 2*period) half back onto [0, period] symmetrically.
+    let shifted = coord + half;
+    let wrapped = shifted.rem_euclid(double_period);
+    let folded = if wrapped <= period {
+        wrapped
+    } else {
+        double_period - wrapped
+    };
+    folded - half
 }
 
 #[allow(dead_code)]
