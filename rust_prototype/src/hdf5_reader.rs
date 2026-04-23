@@ -576,6 +576,12 @@ impl NuclideFileReader {
         read_fission_edist_from_file(&self.file, &self.nuclide_name)
     }
 
+    /// All prompt-photon products for reaction `mt`. See
+    /// [`read_photon_products`] for layout details.
+    pub fn photon_products(&self, mt: u32) -> Vec<PhotonProduct> {
+        read_photon_products_from_file(&self.file, &self.nuclide_name, mt)
+    }
+
     /// Read the outgoing-energy distribution for any reaction MT that
     /// stores `product_0/distribution_0/energy/{energy, distribution}`
     /// in the ContinuousTabular (ENDF Law 4) layout. Used for MT=91
@@ -1387,6 +1393,270 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
     }
 
     Ok(None)
+}
+
+// ── Photon products (MT=102, 18, 91, ...) ────────────────────────────
+
+/// Prompt-photon emission data for a single reaction.
+///
+/// OpenMC photon-producing reactions (radiative capture MT=102, fission
+/// MT=18, inelastic MT=51..91, etc.) store a `product_N` subgroup with
+/// `particle="photon"`, `emission_mode="prompt"`, a `yield` dataset
+/// (Tabulated1D giving `multiplicity(E_in)`) and a
+/// `distribution_0/energy/{energy,distribution}` tree in the same
+/// ContinuousTabular layout used for fission neutrons.
+///
+/// `yield_table(E_in)` is the **expected** number of photons per
+/// reaction event at incident energy `E_in`. Sample as
+///     `N = floor(y) + 1[ξ < frac(y)]`
+/// to get an integer multiplicity, then draw `N` independent outgoing
+/// energies from `energy_dist`.
+pub struct PhotonProduct {
+    pub mt: u32,
+    pub yield_table: NuBarTable,
+    pub energy_dist: EnergyDistribution,
+}
+
+impl PhotonProduct {
+    /// Sample the photon multiplicity and per-photon outgoing energies
+    /// for a single reaction event at incident energy `e_in`.
+    pub fn sample(&self, e_in: f64, rng: &mut crate::transport::rng::Rng) -> Vec<f64> {
+        let y = self.yield_table.lookup(e_in);
+        if y <= 0.0 {
+            return Vec::new();
+        }
+        let floor = y.floor();
+        let n = floor as usize + usize::from(rng.uniform() < (y - floor));
+        (0..n).map(|_| self.energy_dist.sample(e_in, rng)).collect()
+    }
+}
+
+/// Load every prompt-photon product for reaction `mt` from an OpenMC
+/// neutron HDF5 file. Returns an empty `Vec` if the reaction is
+/// absent or has no photon products. Each returned entry is one
+/// emission line / component — e.g. O-16 MT=107 has six separate
+/// photon products corresponding to different excited states of the
+/// residual nucleus, each with its own yield and outgoing-energy
+/// distribution.
+///
+/// Layout expected: `{nuclide}/reactions/reaction_{mt:03}/product_N`
+/// with attributes `particle == "photon"` and
+/// `emission_mode == "prompt"`. The yield is a `[2, K]` Tabulated1D
+/// (row 0 = energies, row 1 = values) and the outgoing-energy
+/// distribution follows the same `[3, N_total]` `(E_out, pdf, cdf)`
+/// layout as fission outgoing neutrons.
+pub fn read_photon_products(path: &Path, mt: u32) -> Result<Vec<PhotonProduct>> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+
+    let root = file.root();
+    let nuclide_name = root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+        .ok_or_else(|| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: "no nuclide group found".into(),
+        })?;
+
+    Ok(read_photon_products_from_file(&file, &nuclide_name, mt))
+}
+
+/// Same as [`read_photon_products`] but for an already-opened file.
+/// Returns an empty `Vec` on any missing group or malformed layout
+/// (never errors).
+fn read_photon_products_from_file(
+    file: &hdf5_pure::File,
+    nuclide_name: &str,
+    mt: u32,
+) -> Vec<PhotonProduct> {
+    let mut out = Vec::new();
+    let root = file.root();
+    let Ok(nuc) = root.group(nuclide_name) else {
+        return out;
+    };
+    let rxn_name = format!("reaction_{mt:03}");
+    let Ok(rxn) = nuc.group("reactions").and_then(|r| r.group(&rxn_name)) else {
+        return out;
+    };
+
+    let subgroups = rxn.groups().unwrap_or_default();
+    for product_name in &subgroups {
+        if !product_name.starts_with("product_") {
+            continue;
+        }
+
+        let product = match rxn.group(product_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+
+        let attrs = product.attrs().unwrap_or_default();
+        let is_photon = matches!(
+            attrs.get("particle"),
+            Some(hdf5_pure::AttrValue::String(s)) if s == "photon"
+        );
+        let is_prompt = matches!(
+            attrs.get("emission_mode"),
+            Some(hdf5_pure::AttrValue::String(s)) if s == "prompt"
+        );
+        if !is_photon || !is_prompt {
+            continue;
+        }
+
+        // --- Parse yield table (Tabulated1D [2, K]).
+        let yield_ds = match product.dataset("yield") {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        let yield_shape = yield_ds.shape().unwrap_or_default();
+        let yield_raw = yield_ds.read_f64().unwrap_or_default();
+        if yield_shape.len() != 2 || yield_shape[0] != 2 {
+            continue;
+        }
+        let n_y = yield_shape[1] as usize;
+        let yield_energies = yield_raw[..n_y].to_vec();
+        let yield_values = yield_raw[n_y..2 * n_y].to_vec();
+        let yield_table = NuBarTable {
+            energies: yield_energies,
+            values: yield_values,
+        };
+
+        // --- Parse distribution_0/energy ---
+        // Same [3, N_total] = (E_out, pdf, cdf) layout as fission.
+        let Ok(dist) = product.group("distribution_0") else {
+            // No energy distribution — return a degenerate single-line
+            // at the yield_table mean so callers still get *some*
+            // photon output instead of silently dropping the source.
+            let mean_e = estimate_mean_energy_from_yield(&yield_table);
+            out.push(PhotonProduct {
+                mt,
+                yield_table,
+                energy_dist: single_line_dist(mean_e),
+            });
+            continue;
+        };
+        let Ok(edist) = dist.group("energy") else {
+            let mean_e = estimate_mean_energy_from_yield(&yield_table);
+            out.push(PhotonProduct {
+                mt,
+                yield_table,
+                energy_dist: single_line_dist(mean_e),
+            });
+            continue;
+        };
+
+        let energy_ds = match edist.dataset("energy") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
+        let energies = energy_ds.read_f64().unwrap_or_default();
+        if energies.is_empty() {
+            continue;
+        }
+
+        let dist_ds = match edist.dataset("distribution") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
+        let dist_shape = dist_ds.shape().unwrap_or_default();
+        let dist_raw = dist_ds.read_f64().unwrap_or_default();
+        if dist_shape.len() != 2 || dist_shape[0] != 3 {
+            continue;
+        }
+        let n_total = dist_shape[1] as usize;
+
+        let dist_attrs = dist_ds.attrs().unwrap_or_default();
+        let offsets: Vec<usize> =
+            if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+                arr.iter().map(|&v| v as usize).collect()
+            } else {
+                let per_e = n_total / energies.len();
+                (0..energies.len()).map(|i| i * per_e).collect()
+            };
+
+        let e_out_values = &dist_raw[..n_total];
+        let pdf_values = &dist_raw[n_total..2 * n_total];
+        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+
+        let n_energies = energies.len();
+        let mut distributions = Vec::with_capacity(n_energies);
+        for i in 0..n_energies {
+            let start = offsets.get(i).copied().unwrap_or(0);
+            let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+            if start >= end || start >= n_total {
+                distributions.push(TabularEnergyDist {
+                    e_out: vec![1e5, 2e6],
+                    pdf: vec![1.0, 1.0],
+                    cdf: vec![0.0, 1.0],
+                });
+                continue;
+            }
+            distributions.push(TabularEnergyDist {
+                e_out: e_out_values[start..end].to_vec(),
+                pdf: pdf_values[start..end].to_vec(),
+                cdf: cdf_values[start..end].to_vec(),
+            });
+        }
+
+        out.push(PhotonProduct {
+            mt,
+            yield_table,
+            energy_dist: EnergyDistribution {
+                energies,
+                distributions,
+            },
+        });
+    }
+
+    out
+}
+
+/// Estimate an average photon energy from a yield table by taking
+/// the mean of the non-zero yield energies. Used only as a last
+/// resort when a reaction has a yield table but no `distribution_0`
+/// (rare — some light nuclides for high-MT radiative reactions).
+fn estimate_mean_energy_from_yield(y: &NuBarTable) -> f64 {
+    let mut sum = 0.0;
+    let mut n = 0;
+    for (e, v) in y.energies.iter().zip(y.values.iter()) {
+        if *v > 0.0 {
+            sum += e;
+            n += 1;
+        }
+    }
+    if n > 0 {
+        (sum / n as f64).max(1.0e5)
+    } else {
+        1.0e6
+    }
+}
+
+/// A degenerate single-line `EnergyDistribution` used as a fallback
+/// when a photon product's outgoing-energy distribution is missing.
+fn single_line_dist(e_gamma: f64) -> EnergyDistribution {
+    let e = e_gamma.max(1.0e4);
+    EnergyDistribution {
+        energies: vec![1.0e-5, 2.0e7],
+        distributions: vec![
+            TabularEnergyDist {
+                e_out: vec![e * 0.999, e * 1.001],
+                pdf: vec![500.0, 500.0],
+                cdf: vec![0.0, 1.0],
+            },
+            TabularEnergyDist {
+                e_out: vec![e * 0.999, e * 1.001],
+                pdf: vec![500.0, 500.0],
+                cdf: vec![0.0, 1.0],
+            },
+        ],
+    }
 }
 
 /// Unresolved Resonance Range (URR) probability tables.

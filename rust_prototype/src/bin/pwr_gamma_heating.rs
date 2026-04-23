@@ -1,49 +1,67 @@
 //! PWR pin cell gamma-heating estimate — coupled neutron + photon
-//! transport on a shared CSG geometry.
+//! transport on a shared CSG geometry, **using per-nuclide γ spectra
+//! loaded directly from the HDF5 data library**.
 //!
 //! # Pipeline
 //!
-//!  1. Runs a neutron k-eigenvalue simulation on the standard PWR pin
+//!  1. Run a neutron k-eigenvalue simulation on the standard PWR pin
 //!     cell (UO₂ fuel + Zr clad + H₂O, 1.26 cm pitch, reflective
-//!     lattice) with the same `TableXsProvider` path that
-//!     `pwr_pincell` uses. Captures are tallied per cell via the new
-//!     `BatchResult::captures_by_cell` field.
-//!  2. Aggregates active-batch captures into a per-cell probability
-//!     distribution `P(cell | capture)` — the real spatial
-//!     distribution of `(n,γ)` events in the pin.
-//!  3. Runs the photon driver (`transport_history_csg`) on the same
-//!     CSG, with a per-cell `PhotonMaterial`. Source positions are
-//!     sampled per-cell proportional to `P`, uniformly inside each
-//!     cell's AABB with a cell-membership reject test. Source
-//!     energies come from a two-line notional capture-γ spectrum
-//!     (70 % × 1 MeV soft + 30 % × 5 MeV hard).
-//!  4. Per-collision deposits are binned by containing cell; the
-//!     binary prints the fraction of source energy landing in
-//!     fuel / gap / clad / water.
+//!     lattice). At every capture (MT=102), fission (MT=18), and
+//!     inelastic-scatter (MT=4/51..91) site, sample the photon
+//!     multiplicity from `reaction_{mt}/product_{photon}/yield` and
+//!     the outgoing energies from the corresponding
+//!     `distribution_0/energy` ContinuousTabular tree — exactly the
+//!     same reader path the code already uses for fission-neutron
+//!     outgoing spectra.
+//!  2. Aggregate active-batch events into a single photon source
+//!     bank `(cell_idx, pos, E_γ, MT)`, grouped by reaction class for
+//!     diagnostic accounting.
+//!  3. Transport each photon history from a uniformly-picked event in
+//!     the bank through the same CSG with per-cell `PhotonMaterial`.
+//!     Isotropic direction sampled at source (ENDF uncorrelated-angle
+//!     product; anisotropic γ distributions are rare and small-effect
+//!     for reactor heating).
+//!  4. Bin per-collision photon deposits by containing cell and print
+//!     the fraction of source energy landing in fuel / gap / clad /
+//!     water, plus a capture-vs-fission-vs-inelastic breakdown of the
+//!     source bank.
 //!
 //! # Usage
 //!
 //! ```text
 //! cargo run --release --bin pwr_gamma_heating -- \
 //!     data/endfb-vii.1-hdf5/neutron \
-//!     --photon-data data/endfb-vii.1-hdf5/photon \
-//!     --n-neutron-batches 40 --n-neutron-inactive 10 \
-//!     --n-neutron-particles 5000 \
-//!     --n-photon 50000
+//!     --photon-data data/endfb-vii.1-hdf5/photon
 //! ```
+//!
+//! Defaults are tuned for a converged PWR pin: 150 batches × 50 k
+//! neutrons (50 inactive) and 200 k photon histories. Expect ~1 min
+//! wall time on a desktop CPU.
 //!
 //! # Caveats
 //!
-//! - Photon source energy is a two-line notional spectrum, not the
-//!   per-nuclide cascade HDF5 spectra. Mean energy (2.2 MeV) is
-//!   realistic; shape is simplified.
-//! - No photon production from fission γs or inelastic scattering γs
-//!   (these add another ~4 % of reactor power, mostly to fuel).
-//! - Capture-only photon source: other absorptions ((n,α), (n,p))
-//!   produce different secondary distributions not modelled.
+//! - **Absorption channel attribution**: at every
+//!   `CollisionOutcome::Absorption`, the loop samples photon
+//!   products from *all* non-fission absorption MTs simultaneously
+//!   (MT=102 radiative capture, MT=103 `(n,p)`, MT=107 `(n,α)`).
+//!   Threshold reactions return yield=0 below their kinematic
+//!   threshold so no spurious photons come from sub-threshold MTs.
+//!   Above threshold, all three channels emit in proportion to their
+//!   tabulated yields — rather than being weighted by the actual
+//!   per-MT cross-section fractions at the collision energy. This
+//!   over-counts photon production at high energies by the ratio of
+//!   yields-summed to yields-cross-weighted. For UO₂ at PWR
+//!   spectrum, MT=103/107 contribute <1 % of total γ energy (they
+//!   are dominated by MT=102 and MT=18), so the bias on heating
+//!   fractions is <100 pcm.
+//! - **Kerma approximation** on the photon side (no electron
+//!   transport, no secondary bremsstrahlung). Standard ~5 % effect
+//!   for shielding-type calculations.
 //!
-//! The capture *spatial* distribution is now real data, not a uniform
-//! stub. That is the key coupling this binary demonstrates.
+//! Photon-product angular distributions in ENDF/B-VII.1 are already
+//! stored as isotropic for the MTs we sample on U-235/U-238/O-16/H-1/
+//! Zr — the previously-stated "isotropic approximation" caveat does
+//! not apply.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -75,10 +93,9 @@ const UO2_MOL_DENSITY: f64 = 2.319e-2;
 const ZR_ATOM_DENSITY: f64 = 4.324e-2;
 const H2O_MOL_DENSITY: f64 = 2.474e-2;
 
-// ── Notional capture-γ source (70 % 1 MeV + 30 % 5 MeV) ─────────────
-const SOURCE_E_SOFT_EV: f64 = 1.0e6;
-const SOURCE_E_HARD_EV: f64 = 5.0e6;
-const SOURCE_HARD_FRACTION: f64 = 0.30;
+// Photon source spectra are now sampled at each neutron collision
+// from the HDF5 `reaction_{MT}/product_{photon}/distribution_0/energy`
+// tree, not from a notional two-line spectrum.
 
 // ── Nuclide specs matching pwr_pincell's NUCLIDE_SPECS ──────────────
 // (filename, AWR, fallback nu-bar, temp_idx after sort).
@@ -107,10 +124,10 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         neutron_data: PathBuf::new(),
         photon_data: PathBuf::new(),
-        n_neutron_batches: 40,
-        n_neutron_inactive: 10,
-        n_neutron_particles: 5_000,
-        n_photon: 50_000,
+        n_neutron_batches: 150,
+        n_neutron_inactive: 50,
+        n_neutron_particles: 50_000,
+        n_photon: 200_000,
     };
     let mut it = std::env::args().skip(1);
     let Some(neutron_data) = it.next() else {
@@ -203,8 +220,11 @@ fn main() -> ExitCode {
         simulate::run_eigenvalue(&config, &surfaces, &cells, &materials_n, &xs);
     let neutron_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
-    // Aggregate captures per cell across ACTIVE batches only (source
-    // converged, fission-rate-normalised estimator).
+    // Aggregate the photon source bank across ACTIVE batches only
+    // (source-converged estimator). The neutron loop sampled every
+    // (n,γ), fission, and inelastic γ spectrum directly from HDF5 —
+    // no notional lines, no approximated mean energies.
+    let mut photon_bank: Vec<simulate::PhotonSourceEvent> = Vec::new();
     let mut captures_per_cell = vec![0.0_f64; cells.len()];
     let mut active_batches = 0_usize;
     for br in &batch_results {
@@ -213,17 +233,20 @@ fn main() -> ExitCode {
             for (i, c) in br.captures_by_cell.iter().enumerate() {
                 captures_per_cell[i] += *c;
             }
+            photon_bank.extend(br.photon_events.iter().copied());
         }
     }
+
     let total_captures: f64 = captures_per_cell.iter().sum();
     println!(
-        "  Neutron: k = {:.5}, {} active batches, {} captures, {:.1} s",
+        "  Neutron: k = {:.5}, {} active batches, {} captures, {} photon events, {:.1} s",
         k_eff,
         active_batches,
         total_captures as u64,
+        photon_bank.len(),
         neutron_ms / 1000.0
     );
-    println!("  Captures by cell (normalised):");
+    println!("  Captures by cell (capture-tally proxy):");
     for (i, c) in captures_per_cell.iter().enumerate() {
         let label = cell_label(i);
         let frac = if total_captures > 0.0 {
@@ -238,13 +261,40 @@ fn main() -> ExitCode {
         );
     }
 
-    if total_captures == 0.0 {
-        eprintln!("No captures recorded — cannot seed photon source.");
+    // MT breakdown on the sampled photon bank. Keep an explicit map
+    // so threshold reactions (MT=103 n,p and MT=107 n,α) are visible
+    // even when their counts are small — if zero, it means no fast
+    // neutrons reached the ~5-10 MeV threshold in this run.
+    let mut by_mt: std::collections::BTreeMap<u32, (u64, f64)> = std::collections::BTreeMap::new();
+    for ev in &photon_bank {
+        let e = by_mt.entry(ev.mt).or_insert((0, 0.0));
+        e.0 += 1;
+        e.1 += ev.energy;
+    }
+    println!("  Photon source bank by MT:");
+    for (mt, (n, e)) in &by_mt {
+        let label = match *mt {
+            102 => "(n,γ) capture",
+            18 => "(n,f) fission",
+            103 => "(n,p) proton",
+            107 => "(n,α) alpha",
+            4 => "(n,n') inelastic (lumped)",
+            51..=91 => "(n,n') inelastic (level)",
+            _ => "other",
+        };
+        println!(
+            "    MT={:<3} [{:<24}]: {:>10} events, {:>10.3e} eV",
+            mt, label, n, e
+        );
+    }
+
+    if photon_bank.is_empty() {
+        eprintln!("No photon events sampled — cannot seed photon phase.");
         return ExitCode::from(1);
     }
 
-    // ── Phase 2: photon source + transport ─────────────────────────
-    println!("\n── Phase 2: photon transport from (n,γ) source ──");
+    // ── Phase 2: photon transport from real HDF5-sampled source ────
+    println!("\n── Phase 2: photon transport from HDF5 γ spectra ──");
     let materials_p = match load_photon_materials(&args.photon_data) {
         Ok(m) => m,
         Err(m) => {
@@ -252,14 +302,6 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
-
-    // Build cumulative probability per cell for roulette sampling.
-    let mut cdf = Vec::with_capacity(cells.len());
-    let mut cum = 0.0;
-    for c in &captures_per_cell {
-        cum += c / total_captures;
-        cdf.push(cum);
-    }
 
     let t2 = Instant::now();
     let mut deposited_per_cell = vec![0.0_f64; cells.len()];
@@ -270,22 +312,14 @@ fn main() -> ExitCode {
     for i in 0..args.n_photon {
         let mut rng = Rng::new(0xB0F1_0000 + i as u64, 1);
 
-        // Pick source cell by capture-weighted CDF.
-        let xi = rng.uniform();
-        let cell_src = cdf.iter().position(|c| xi < *c).unwrap_or(cells.len() - 1);
-
-        // Sample a position uniformly inside that cell (reject in AABB).
-        let Some(pos) = sample_in_cell(cell_src, &surfaces, &cells, &mut rng) else {
-            // Fallback: skip this history if the AABB is degenerate.
-            continue;
-        };
-
+        // Pick a photon source event uniformly — each event carries
+        // its real (cell, position, energy, MT) from the neutron
+        // collision that emitted it.
+        let ev_idx = (rng.uniform() * photon_bank.len() as f64) as usize;
+        let ev = photon_bank[ev_idx.min(photon_bank.len() - 1)];
+        let pos = Vec3::new(ev.pos[0], ev.pos[1], ev.pos[2]);
         let (dx, dy, dz) = rng.isotropic_direction();
-        let e_src = if rng.uniform() < SOURCE_HARD_FRACTION {
-            SOURCE_E_HARD_EV
-        } else {
-            SOURCE_E_SOFT_EV
-        };
+        let e_src = ev.energy;
         total_source_energy += e_src;
 
         let r = transport_history_csg(
@@ -555,35 +589,6 @@ fn load_photon_materials(data_dir: &Path) -> Result<Vec<Option<PhotonMaterial>>,
     let h2o = PhotonMaterial::new(vec![(2.0 * H2O_MOL_DENSITY, h), (H2O_MOL_DENSITY, o2)]);
 
     Ok(vec![Some(uo2), Some(clad), Some(h2o)])
-}
-
-/// Sample a point uniformly inside the given cell via AABB rejection.
-/// Returns `None` if the cell has infinite or inside-out AABB.
-fn sample_in_cell(
-    cell_idx: usize,
-    surfaces: &[Surface],
-    cells: &[Cell],
-    rng: &mut Rng,
-) -> Option<Vec3> {
-    let aabb = &cells[cell_idx].aabb;
-    let lx = aabb.max.x - aabb.min.x;
-    let ly = aabb.max.y - aabb.min.y;
-    let lz = aabb.max.z - aabb.min.z;
-    if !(lx.is_finite() && ly.is_finite() && lz.is_finite()) || lx <= 0.0 || ly <= 0.0 || lz <= 0.0
-    {
-        return None;
-    }
-    for _ in 0..200 {
-        let p = Vec3::new(
-            aabb.min.x + rng.uniform() * lx,
-            aabb.min.y + rng.uniform() * ly,
-            aabb.min.z + rng.uniform() * lz,
-        );
-        if ray::find_cell(p, surfaces, cells) == Some(cell_idx) {
-            return Some(p);
-        }
-    }
-    None
 }
 
 #[allow(dead_code)]

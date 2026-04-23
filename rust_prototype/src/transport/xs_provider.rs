@@ -83,6 +83,12 @@ pub struct NuclideKernels {
     pub n3n_edist: Option<EnergyDistribution>,
     /// URR probability tables.
     pub urr_tables: Option<UrrProbabilityTables>,
+    /// Photon products keyed by ENDF MT. Populated from HDF5
+    /// `reactions/reaction_{mt}/product_N` groups with
+    /// `particle="photon"`. Used by the transport loop to sample the
+    /// capture / fission / inelastic γ spectrum at each neutron
+    /// reaction site for coupled neutron-photon tallies.
+    pub photon_products: Vec<(u32, hdf5_reader::PhotonProduct)>,
 }
 
 /// A discrete inelastic level with its cross-section kernel and Q-value.
@@ -385,6 +391,10 @@ impl XsProvider for SvdXsProvider {
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         self.thermal.get(nuclide_idx)?.as_deref()
     }
+
+    fn photon_products(&self, nuclide_idx: usize) -> &[(u32, hdf5_reader::PhotonProduct)] {
+        &self.nuclides[nuclide_idx].photon_products
+    }
 }
 
 /// Build an SVD kernel for one reaction of one nuclide from HDF5 data.
@@ -530,6 +540,7 @@ pub fn load_nuclide(
                 n2n_edist: None,
                 n3n_edist: None,
                 urr_tables: None,
+                photon_products: Vec::new(),
             };
         }
     };
@@ -714,6 +725,7 @@ pub fn load_nuclide(
         n2n_edist,
         n3n_edist,
         urr_tables,
+        photon_products: load_photon_products(&reader),
     }
 }
 
@@ -751,6 +763,12 @@ pub struct NuclideTableData {
     pub n2n_edist: Option<EnergyDistribution>,
     pub n3n_edist: Option<EnergyDistribution>,
     pub urr_tables: Option<UrrProbabilityTables>,
+    /// Photon products keyed by ENDF MT. Populated from HDF5
+    /// `reactions/reaction_{mt}/product_N` groups with
+    /// `particle="photon"`. Used by the transport loop to sample the
+    /// capture / fission / inelastic γ spectrum at each neutron
+    /// reaction site for coupled neutron-photon tallies.
+    pub photon_products: Vec<(u32, hdf5_reader::PhotonProduct)>,
 }
 
 impl NuclideTableData {
@@ -977,6 +995,10 @@ impl XsProvider for TableXsProvider {
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         self.thermal.get(nuclide_idx)?.as_deref()
     }
+
+    fn photon_products(&self, nuclide_idx: usize) -> &[(u32, hdf5_reader::PhotonProduct)] {
+        &self.nuclides[nuclide_idx].photon_products
+    }
 }
 
 /// Build a pointwise table for one reaction using a shared energy grid.
@@ -1096,6 +1118,7 @@ pub fn load_nuclide_table(
                 n2n_edist: None,
                 n3n_edist: None,
                 urr_tables: None,
+                photon_products: Vec::new(),
             };
         }
     };
@@ -1226,6 +1249,7 @@ pub fn load_nuclide_table(
         n2n_edist,
         n3n_edist,
         urr_tables,
+        photon_products: load_photon_products(&reader),
     }
 }
 
@@ -1276,6 +1300,7 @@ pub fn load_nuclide_table_at_temp(
                 n2n_edist: None,
                 n3n_edist: None,
                 urr_tables: None,
+                photon_products: Vec::new(),
             };
         }
     };
@@ -1418,6 +1443,7 @@ pub fn load_nuclide_table_at_temp(
         n2n_edist,
         n3n_edist,
         urr_tables,
+        photon_products: load_photon_products(&reader),
     }
 }
 
@@ -1472,6 +1498,7 @@ pub fn load_nuclide_at_temp(
                 n2n_edist: None,
                 n3n_edist: None,
                 urr_tables: None,
+                photon_products: Vec::new(),
             };
         }
     };
@@ -1612,6 +1639,7 @@ pub fn load_nuclide_at_temp(
         n2n_edist,
         n3n_edist,
         urr_tables,
+        photon_products: load_photon_products(&reader),
     }
 }
 
@@ -1831,4 +1859,46 @@ fn build_kernel_at_temp(
         kernel.temp_coeffs(0)
     };
     Some(ReactionKernel { kernel, coeffs })
+}
+
+/// Load every prompt-photon product from every photon-emitting
+/// reaction present in the nuclide file for use in coupled
+/// neutron-photon tallies. Covers
+///
+///   * MT=102 — radiative capture `(n,γ)`,
+///   * MT=18  — fission,
+///   * MT=103 — `(n,p)` proton emission (threshold reaction,
+///     important for O-16 in PWR fast spectrum),
+///   * MT=107 — `(n,α)` alpha emission (likewise),
+///   * MT=4   — lumped inelastic scatter, with fallback to
+///     MT=51..91 discrete levels when MT=4 is absent.
+///
+/// For each MT we keep *all* tabulated photon products (a single MT
+/// may list several when different excited states of the residual
+/// nucleus emit different cascade lines — e.g. O-16 MT=107 has six
+/// photon products). Absent reactions or products are silently
+/// skipped; every nuclide ends up with whatever photon production
+/// its HDF5 file actually tabulates.
+fn load_photon_products(
+    reader: &hdf5_reader::NuclideFileReader,
+) -> Vec<(u32, hdf5_reader::PhotonProduct)> {
+    let mut out = Vec::new();
+    for mt in [102_u32, 18, 103, 107] {
+        for pp in reader.photon_products(mt) {
+            out.push((mt, pp));
+        }
+    }
+    let mt4 = reader.photon_products(4);
+    if !mt4.is_empty() {
+        for pp in mt4 {
+            out.push((4, pp));
+        }
+    } else {
+        for mt in 51_u32..=91 {
+            for pp in reader.photon_products(mt) {
+                out.push((mt, pp));
+            }
+        }
+    }
+    out
 }

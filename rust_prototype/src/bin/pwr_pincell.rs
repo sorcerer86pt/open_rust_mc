@@ -522,6 +522,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 n2n_edist: None,
                 n3n_edist: None,
                 urr_tables: None,
+                photon_products: Vec::new(),
             });
         } else {
             let offset_here = resolve_offset_for(nuc_idx, args);
@@ -722,6 +723,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
                 n2n_edist: None,
                 n3n_edist: None,
                 urr_tables: None,
+                photon_products: Vec::new(),
             });
         } else {
             match resolve_offset_for(nuc_idx, args) {
