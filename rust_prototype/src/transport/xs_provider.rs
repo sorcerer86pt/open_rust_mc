@@ -5,7 +5,20 @@
 //! fission, capture). At lookup time, reconstructs sigma(E) via a dot
 //! product instead of binary-searching a table.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+/// Read `OPEN_RUST_MC_NO_URR` exactly once and cache the result. URR
+/// apply is called per-nuclide per-collision in the hot transport
+/// loop; calling `std::env::var_os` there serialises on the process-
+/// wide env lock (esp. on Windows, which holds `ENV_LOCK` + issues
+/// `GetEnvironmentVariableW`) and produces a ~4x slowdown on PWR
+/// under rayon. Caching the bool drops that cost to a single atomic
+/// load per call.
+#[inline]
+fn urr_disabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| std::env::var_os("OPEN_RUST_MC_NO_URR").is_some())
+}
 
 use crate::decompose;
 use crate::hdf5_reader::{
@@ -193,8 +206,8 @@ impl NuclideKernels {
     pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
         // Ablation knob: `OPEN_RUST_MC_NO_URR=1` disables URR sampling so
         // Godiva/PWR offsets can be attributed to URR vs other engine
-        // effects. Cheap env check; only used for diagnostic runs.
-        if std::env::var_os("OPEN_RUST_MC_NO_URR").is_some() {
+        // effects. Cached once — see `urr_disabled`.
+        if urr_disabled() {
             return;
         }
         let urr = match &self.urr_tables {
@@ -766,7 +779,7 @@ impl NuclideTableData {
     }
 
     pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
-        if std::env::var_os("OPEN_RUST_MC_NO_URR").is_some() {
+        if urr_disabled() {
             return;
         }
         let urr = match &self.urr_tables {

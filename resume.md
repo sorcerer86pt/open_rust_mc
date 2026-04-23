@@ -229,15 +229,55 @@ Expected: (n,2n)/(n,3n) rates on Godiva are tiny (~0.0025/src
 combined) so shape differences between evaporation and ENDF can't
 make a big k dent.
 
-**Known perf regression**: PWR SVD transport ~4× slower after this
-commit. Hypothesis: PWR has 9 nuclides × 3 additional distribution
-kernels × ~60–80 KB = ~2 MB extra data loaded. If this evicts hot
-elastic/fission kernels from L2/L3 cache, per-collision time goes
-up. Godiva is 3 nuclides so unaffected.
+**Known perf regression at this point**: PWR SVD transport ~4×
+slower after this commit. Cache-pressure hypothesis (MT=16/17
+distribution load evicting hot kernels) turned out to be wrong —
+see section 10 for the real root cause and fix.
 
-Commit `481134e`. Follow-up: either lazy-load the MT=16/17
-distributions, gate them behind a cfg flag, or restructure the
-kernel layout to keep hot data cache-resident.
+Commit `481134e`.
+
+### 10. Fix #4: cache `OPEN_RUST_MC_NO_URR` env read
+
+The PWR regression was not MT=16/17 cache pressure. Commit `481134e`
+bundled two changes and misattributed the slowdown to the visible
+one. The actual culprit was the URR ablation knob:
+
+```rust
+pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
+    if std::env::var_os("OPEN_RUST_MC_NO_URR").is_some() { return; }
+    …
+}
+```
+
+`apply_urr` is called **per-nuclide per-collision** from the hot
+transport loop (`simulate.rs:530` and `:977`). On Windows,
+`std::env::var_os` acquires the process-wide `ENV_LOCK` mutex and
+issues `GetEnvironmentVariableW`. Under Rayon with every core
+hitting that lock on every collision, it serialised.
+
+Why Godiva escaped: 3 nuclides × ~20 collisions/history → low
+contention pressure. PWR hits it hard because of 9 nuclides ×
+thousands of collisions/history (thermal slowing-down).
+
+Fix: cache the env read in a `OnceLock<bool>` (`urr_disabled()`
+helper) and replace both call sites. One-file change in
+`rust_prototype/src/transport/xs_provider.rs`.
+
+PWR SVD (100 × 20k, seed 0, Ryzen 9800X3D):
+
+| state | ns/particle | vs regressed |
+|---|---|---|
+| pre-regression (mt91_working) | 52,345 | baseline |
+| post-`481134e` regressed | 419,604 | 0.12× |
+| **with env-cache fix** | **25,378** | **16.5×** |
+
+2× faster than even the pre-regression baseline — the env read
+was a latent cost that pre-existed but only mattered once PWR
+collision counts + parallel contention crossed a threshold.
+
+k_inf unchanged (1.32593 ± 0.00120). Godiva unchanged
+(1084 ns/particle, 3 nuclides, never bottlenecked). All 72 tests
+pass.
 
 ## Godiva results: session summary
 
@@ -293,10 +333,11 @@ the run was aborted.
    - Kalbach-Mann angular anisotropy for MT=91/16/17 above 5 MeV
      (r → 0.4 at 10 MeV). Currently isotropic in both codes'
      implementations; would need code inspection to confirm.
-2. **PWR 4× perf regression** after MT=16/17 ENDF distribution load.
-   Root-cause: probable L2/L3 cache pressure from ~2 MB additional
-   per-nuclide data × 9 nuclides. Fix options: lazy loading, cfg
-   flag, or kernel-layout restructure. Does not affect correctness.
+2. **PWR 4× perf regression** — RESOLVED. Root cause was
+   `std::env::var_os` being called per-nuclide per-collision inside
+   `apply_urr`, serialising on Windows' `ENV_LOCK` under Rayon.
+   Fixed by caching the env read in a `OnceLock<bool>`. PWR SVD now
+   2× faster than the pre-regression baseline. See section 10.
 3. **Paper revision.** Abstract still says `|Δk| ≤ 51 pcm on
    Godiva` — that's not supported by direct measurement (post-all-
    fixes: +178 pcm Rust-vs-OpenMC). `godiva.tex:86-94` "library
@@ -315,7 +356,10 @@ the run was aborted.
 - `6cec8b0` MT=91 continuum inelastic: sample from ENDF tabulated
   distribution.
 - `481134e` URR ablation flag + wire MT=16/17 ENDF distributions
-  into (n,2n)/(n,3n). **Contains known 4× PWR perf regression.**
+  into (n,2n)/(n,3n). Introduced the PWR perf regression (see next).
+- Cache `OPEN_RUST_MC_NO_URR` env read in `OnceLock<bool>` —
+  resolves the PWR 4× regression; now 2× faster than the
+  pre-regression baseline.
 
 All pushed to `origin/main`. All 72 library tests pass.
 
