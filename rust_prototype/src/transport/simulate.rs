@@ -462,13 +462,13 @@ struct ParticleResult {
 fn sample_photon_products<XS: XsProvider>(
     xs_provider: &XS,
     xs_kernel_idx: usize,
-    mt: u32,
+    mts: &[u32],
     particle: &Particle,
     rng: &mut Rng,
     out: &mut Vec<PhotonSourceEvent>,
 ) {
     for (mt_pp, pp) in xs_provider.photon_products(xs_kernel_idx) {
-        if *mt_pp != mt {
+        if !mts.contains(mt_pp) {
             continue;
         }
         let energies = pp.sample(particle.energy, rng);
@@ -482,6 +482,16 @@ fn sample_photon_products<XS: XsProvider>(
         }
     }
 }
+
+/// Non-fission absorption MTs whose photon products the transport
+/// loop samples at every `CollisionOutcome::Absorption` event. The
+/// yield tables for threshold reactions like MT=103 (n,p) and MT=107
+/// (n,α) return 0 below threshold — no spurious events are emitted
+/// for nuclides that can't reach those channels at the collision
+/// energy.
+const ABSORPTION_PHOTON_MTS: &[u32] = &[102, 103, 107];
+/// Fission photon-production MT (prompt γs from MT=18).
+const FISSION_PHOTON_MTS: &[u32] = &[18];
 
 /// Transport a single particle to completion.
 fn transport_particle<XS: XsProvider>(
@@ -755,7 +765,7 @@ fn transport_particle<XS: XsProvider>(
                                     sample_photon_products(
                                         xs_provider,
                                         xs_kernel_idx,
-                                        102,
+                                        ABSORPTION_PHOTON_MTS,
                                         &particle,
                                         &mut rng,
                                         &mut result.photon_events,
@@ -767,7 +777,7 @@ fn transport_particle<XS: XsProvider>(
                                     sample_photon_products(
                                         xs_provider,
                                         xs_kernel_idx,
-                                        18,
+                                        FISSION_PHOTON_MTS,
                                         &particle,
                                         &mut rng,
                                         &mut result.photon_events,
@@ -831,7 +841,7 @@ fn transport_particle<XS: XsProvider>(
                                 sample_photon_products(
                                     xs_provider,
                                     xs_kernel_idx,
-                                    102,
+                                    ABSORPTION_PHOTON_MTS,
                                     &particle,
                                     &mut rng,
                                     &mut result.photon_events,
@@ -843,7 +853,7 @@ fn transport_particle<XS: XsProvider>(
                                 sample_photon_products(
                                     xs_provider,
                                     xs_kernel_idx,
-                                    18,
+                                    FISSION_PHOTON_MTS,
                                     &particle,
                                     &mut rng,
                                     &mut result.photon_events,
@@ -1172,7 +1182,7 @@ fn transport_particle_delta<XS: XsProvider>(
                     sample_photon_products(
                         xs_provider,
                         xs_kernel_idx,
-                        102,
+                        ABSORPTION_PHOTON_MTS,
                         &particle,
                         &mut rng,
                         &mut result.photon_events,
@@ -1184,7 +1194,7 @@ fn transport_particle_delta<XS: XsProvider>(
                     sample_photon_products(
                         xs_provider,
                         xs_kernel_idx,
-                        18,
+                        FISSION_PHOTON_MTS,
                         &particle,
                         &mut rng,
                         &mut result.photon_events,

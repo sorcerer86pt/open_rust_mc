@@ -40,15 +40,28 @@
 //!
 //! # Caveats
 //!
-//! - Photon-product angular distributions are assumed isotropic.
-//!   ENDF uncorrelated-angle products dominate for the MTs we sample;
-//!   the handful of correlated-angle γ products in ENDF/B-VII.1
-//!   contribute <1 % of reactor-γ energy, so this is a small source
-//!   of residual bias (<100 pcm on heating fractions).
-//! - Photon production from other `(n,X)` absorptions (α, p, d) is
-//!   not modelled — amounts to <0.5 % of total γ energy in UO₂.
-//! - The kerma approximation is still in place on the photon side
-//!   (no electron transport, no secondary bremsstrahlung).
+//! - **Absorption channel attribution**: at every
+//!   `CollisionOutcome::Absorption`, the loop samples photon
+//!   products from *all* non-fission absorption MTs simultaneously
+//!   (MT=102 radiative capture, MT=103 `(n,p)`, MT=107 `(n,α)`).
+//!   Threshold reactions return yield=0 below their kinematic
+//!   threshold so no spurious photons come from sub-threshold MTs.
+//!   Above threshold, all three channels emit in proportion to their
+//!   tabulated yields — rather than being weighted by the actual
+//!   per-MT cross-section fractions at the collision energy. This
+//!   over-counts photon production at high energies by the ratio of
+//!   yields-summed to yields-cross-weighted. For UO₂ at PWR
+//!   spectrum, MT=103/107 contribute <1 % of total γ energy (they
+//!   are dominated by MT=102 and MT=18), so the bias on heating
+//!   fractions is <100 pcm.
+//! - **Kerma approximation** on the photon side (no electron
+//!   transport, no secondary bremsstrahlung). Standard ~5 % effect
+//!   for shielding-type calculations.
+//!
+//! Photon-product angular distributions in ENDF/B-VII.1 are already
+//! stored as isotropic for the MTs we sample on U-235/U-238/O-16/H-1/
+//! Zr — the previously-stated "isotropic approximation" caveat does
+//! not apply.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -248,42 +261,32 @@ fn main() -> ExitCode {
         );
     }
 
-    // MT breakdown on the sampled photon bank.
-    let mut n_capture = 0_u64;
-    let mut n_fission = 0_u64;
-    let mut n_inelastic = 0_u64;
-    let mut e_capture = 0.0_f64;
-    let mut e_fission = 0.0_f64;
-    let mut e_inelastic = 0.0_f64;
+    // MT breakdown on the sampled photon bank. Keep an explicit map
+    // so threshold reactions (MT=103 n,p and MT=107 n,α) are visible
+    // even when their counts are small — if zero, it means no fast
+    // neutrons reached the ~5-10 MeV threshold in this run.
+    let mut by_mt: std::collections::BTreeMap<u32, (u64, f64)> = std::collections::BTreeMap::new();
     for ev in &photon_bank {
-        match ev.mt {
-            102 => {
-                n_capture += 1;
-                e_capture += ev.energy;
-            }
-            18 => {
-                n_fission += 1;
-                e_fission += ev.energy;
-            }
-            _ => {
-                n_inelastic += 1;
-                e_inelastic += ev.energy;
-            }
-        }
+        let e = by_mt.entry(ev.mt).or_insert((0, 0.0));
+        e.0 += 1;
+        e.1 += ev.energy;
     }
-    println!("  Photon source bank by reaction class:");
-    println!(
-        "    capture (MT=102): {:>10} events, {:>10.3e} eV total",
-        n_capture, e_capture
-    );
-    println!(
-        "    fission (MT=18):  {:>10} events, {:>10.3e} eV total",
-        n_fission, e_fission
-    );
-    println!(
-        "    inelastic (MT=4/51-91): {:>10} events, {:>10.3e} eV total",
-        n_inelastic, e_inelastic
-    );
+    println!("  Photon source bank by MT:");
+    for (mt, (n, e)) in &by_mt {
+        let label = match *mt {
+            102 => "(n,γ) capture",
+            18 => "(n,f) fission",
+            103 => "(n,p) proton",
+            107 => "(n,α) alpha",
+            4 => "(n,n') inelastic (lumped)",
+            51..=91 => "(n,n') inelastic (level)",
+            _ => "other",
+        };
+        println!(
+            "    MT={:<3} [{:<24}]: {:>10} events, {:>10.3e} eV",
+            mt, label, n, e
+        );
+    }
 
     if photon_bank.is_empty() {
         eprintln!("No photon events sampled — cannot seed photon phase.");

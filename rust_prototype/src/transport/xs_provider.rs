@@ -1861,25 +1861,41 @@ fn build_kernel_at_temp(
     Some(ReactionKernel { kernel, coeffs })
 }
 
-/// Load photon products (MT=102 capture, MT=18 fission, MT=4 or
-/// MT=51..91 inelastic) from the nuclide file for use in coupled
-/// neutron-photon tallies. MTs without a photon product are silently
-/// skipped.
+/// Load every prompt-photon product from every photon-emitting
+/// reaction present in the nuclide file for use in coupled
+/// neutron-photon tallies. Covers
+///
+///   * MT=102 — radiative capture `(n,γ)`,
+///   * MT=18  — fission,
+///   * MT=103 — `(n,p)` proton emission (threshold reaction,
+///     important for O-16 in PWR fast spectrum),
+///   * MT=107 — `(n,α)` alpha emission (likewise),
+///   * MT=4   — lumped inelastic scatter, with fallback to
+///     MT=51..91 discrete levels when MT=4 is absent.
+///
+/// For each MT we keep *all* tabulated photon products (a single MT
+/// may list several when different excited states of the residual
+/// nucleus emit different cascade lines — e.g. O-16 MT=107 has six
+/// photon products). Absent reactions or products are silently
+/// skipped; every nuclide ends up with whatever photon production
+/// its HDF5 file actually tabulates.
 fn load_photon_products(
     reader: &hdf5_reader::NuclideFileReader,
 ) -> Vec<(u32, hdf5_reader::PhotonProduct)> {
     let mut out = Vec::new();
-    if let Some(pp) = reader.photon_product(102) {
-        out.push((102, pp));
+    for mt in [102_u32, 18, 103, 107] {
+        for pp in reader.photon_products(mt) {
+            out.push((mt, pp));
+        }
     }
-    if let Some(pp) = reader.photon_product(18) {
-        out.push((18, pp));
-    }
-    if let Some(pp) = reader.photon_product(4) {
-        out.push((4, pp));
+    let mt4 = reader.photon_products(4);
+    if !mt4.is_empty() {
+        for pp in mt4 {
+            out.push((4, pp));
+        }
     } else {
-        for mt in 51..=91 {
-            if let Some(pp) = reader.photon_product(mt) {
+        for mt in 51_u32..=91 {
+            for pp in reader.photon_products(mt) {
                 out.push((mt, pp));
             }
         }

@@ -576,9 +576,10 @@ impl NuclideFileReader {
         read_fission_edist_from_file(&self.file, &self.nuclide_name)
     }
 
-    /// Photon product for reaction `mt`. See [`read_photon_product`].
-    pub fn photon_product(&self, mt: u32) -> Option<PhotonProduct> {
-        read_photon_product_from_file(&self.file, &self.nuclide_name, mt)
+    /// All prompt-photon products for reaction `mt`. See
+    /// [`read_photon_products`] for layout details.
+    pub fn photon_products(&self, mt: u32) -> Vec<PhotonProduct> {
+        read_photon_products_from_file(&self.file, &self.nuclide_name, mt)
     }
 
     /// Read the outgoing-energy distribution for any reaction MT that
@@ -1430,17 +1431,21 @@ impl PhotonProduct {
     }
 }
 
-/// Load the prompt-photon product for reaction `mt` from an OpenMC
-/// neutron HDF5 file. Returns `Ok(None)` if the reaction is absent or
-/// has no photon product (common for light nuclides at MT=102).
+/// Load every prompt-photon product for reaction `mt` from an OpenMC
+/// neutron HDF5 file. Returns an empty `Vec` if the reaction is
+/// absent or has no photon products. Each returned entry is one
+/// emission line / component — e.g. O-16 MT=107 has six separate
+/// photon products corresponding to different excited states of the
+/// residual nucleus, each with its own yield and outgoing-energy
+/// distribution.
 ///
 /// Layout expected: `{nuclide}/reactions/reaction_{mt:03}/product_N`
-/// where exactly one `product_N` has attributes
-/// `particle == "photon"` and `emission_mode == "prompt"`. The yield
-/// is a `[2, K]` Tabulated1D (row 0 = energies, row 1 = values) and
-/// the outgoing-energy distribution follows the same `[3, N_total]`
-/// `(E_out, pdf, cdf)` layout as fission outgoing neutrons.
-pub fn read_photon_product(path: &Path, mt: u32) -> Result<Option<PhotonProduct>> {
+/// with attributes `particle == "photon"` and
+/// `emission_mode == "prompt"`. The yield is a `[2, K]` Tabulated1D
+/// (row 0 = energies, row 1 = values) and the outgoing-energy
+/// distribution follows the same `[3, N_total]` `(E_out, pdf, cdf)`
+/// layout as fission outgoing neutrons.
+pub fn read_photon_products(path: &Path, mt: u32) -> Result<Vec<PhotonProduct>> {
     let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
         path: path.display().to_string(),
         detail: format!("{e}"),
@@ -1460,22 +1465,26 @@ pub fn read_photon_product(path: &Path, mt: u32) -> Result<Option<PhotonProduct>
             detail: "no nuclide group found".into(),
         })?;
 
-    Ok(read_photon_product_from_file(&file, &nuclide_name, mt))
+    Ok(read_photon_products_from_file(&file, &nuclide_name, mt))
 }
 
-/// Same as [`read_photon_product`] but for an already-opened file.
-/// Returns `None` on any missing group, malformed layout, or absent
-/// photon product (never errors — caller falls back to a per-level
-/// Q-value approximation for inelastic or a default spectrum).
-fn read_photon_product_from_file(
+/// Same as [`read_photon_products`] but for an already-opened file.
+/// Returns an empty `Vec` on any missing group or malformed layout
+/// (never errors).
+fn read_photon_products_from_file(
     file: &hdf5_pure::File,
     nuclide_name: &str,
     mt: u32,
-) -> Option<PhotonProduct> {
+) -> Vec<PhotonProduct> {
+    let mut out = Vec::new();
     let root = file.root();
-    let nuc = root.group(nuclide_name).ok()?;
+    let Ok(nuc) = root.group(nuclide_name) else {
+        return out;
+    };
     let rxn_name = format!("reaction_{mt:03}");
-    let rxn = nuc.group("reactions").ok()?.group(&rxn_name).ok()?;
+    let Ok(rxn) = nuc.group("reactions").and_then(|r| r.group(&rxn_name)) else {
+        return out;
+    };
 
     let subgroups = rxn.groups().unwrap_or_default();
     for product_name in &subgroups {
@@ -1526,19 +1535,21 @@ fn read_photon_product_from_file(
             // at the yield_table mean so callers still get *some*
             // photon output instead of silently dropping the source.
             let mean_e = estimate_mean_energy_from_yield(&yield_table);
-            return Some(PhotonProduct {
+            out.push(PhotonProduct {
                 mt,
                 yield_table,
                 energy_dist: single_line_dist(mean_e),
             });
+            continue;
         };
         let Ok(edist) = dist.group("energy") else {
             let mean_e = estimate_mean_energy_from_yield(&yield_table);
-            return Some(PhotonProduct {
+            out.push(PhotonProduct {
                 mt,
                 yield_table,
                 energy_dist: single_line_dist(mean_e),
             });
+            continue;
         };
 
         let energy_ds = match edist.dataset("energy") {
@@ -1594,7 +1605,7 @@ fn read_photon_product_from_file(
             });
         }
 
-        return Some(PhotonProduct {
+        out.push(PhotonProduct {
             mt,
             yield_table,
             energy_dist: EnergyDistribution {
@@ -1604,7 +1615,7 @@ fn read_photon_product_from_file(
         });
     }
 
-    None
+    out
 }
 
 /// Estimate an average photon energy from a yield table by taking
