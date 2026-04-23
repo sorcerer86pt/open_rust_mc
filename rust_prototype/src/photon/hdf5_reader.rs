@@ -27,7 +27,10 @@
 use std::path::Path;
 
 use crate::error::{Result, SvdError};
-use crate::photon::data::{PhotonElement, ScatteringFactor, Subshell};
+use crate::photon::data::{
+    AnomalousFactors, Bremsstrahlung, ComptonProfiles, PhotonElement, ScatteringFactor, Subshell,
+    TabulatedFactor,
+};
 
 impl PhotonElement {
     /// Load one element's photon-interaction data from an OpenMC HDF5 file.
@@ -78,10 +81,21 @@ impl PhotonElement {
 
         let coherent_form_factor =
             read_scattering_factor(&element, "coherent", "scattering_factor", path)?;
+        let coherent_integrated_form_factor = read_scattering_factor(
+            &element,
+            "coherent",
+            "integrated_scattering_factor",
+            path,
+        )?;
+        let coherent_anomalous = read_anomalous_factors(&element, path)?;
+
         let incoherent_scattering_factor =
             read_scattering_factor(&element, "incoherent", "scattering_factor", path)?;
+        let compton_profiles = read_compton_profiles(&element, path)?;
 
         let subshells = read_subshells(&element, path)?;
+
+        let bremsstrahlung = read_bremsstrahlung(&element, path)?;
 
         Ok(PhotonElement {
             z,
@@ -93,8 +107,12 @@ impl PhotonElement {
             pair_production_nuclear_xs,
             pair_production_electron_xs,
             coherent_form_factor,
+            coherent_integrated_form_factor,
+            coherent_anomalous,
             incoherent_scattering_factor,
+            compton_profiles,
             subshells,
+            bremsstrahlung,
         })
     }
 }
@@ -229,6 +247,209 @@ fn read_subshells(element: &hdf5_pure::Group, path: &Path) -> Result<Vec<Subshel
     Ok(out)
 }
 
+fn read_tabulated_2xn(
+    group: &hdf5_pure::Group,
+    dataset: &str,
+    context: &str,
+    path: &Path,
+) -> Result<TabulatedFactor> {
+    let hdf5_err = |detail: String| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail,
+    };
+    let ds = group
+        .dataset(dataset)
+        .map_err(|e| hdf5_err(format!("cannot open {context}/{dataset}: {e}")))?;
+    let shape = ds
+        .shape()
+        .map_err(|e| hdf5_err(format!("cannot read {context}/{dataset} shape: {e}")))?;
+    let flat = ds
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read {context}/{dataset}: {e}")))?;
+    if shape.len() != 2 || shape[0] != 2 {
+        return Err(hdf5_err(format!(
+            "{context}/{dataset} shape {:?} is not [2, N]",
+            shape
+        )));
+    }
+    let n = shape[1] as usize;
+    if flat.len() != 2 * n {
+        return Err(hdf5_err(format!(
+            "{context}/{dataset} flat length {} != 2*{}",
+            flat.len(),
+            n
+        )));
+    }
+    Ok(TabulatedFactor {
+        grid: flat[..n].to_vec(),
+        value: flat[n..].to_vec(),
+    })
+}
+
+fn read_anomalous_factors(
+    element: &hdf5_pure::Group,
+    path: &Path,
+) -> Result<AnomalousFactors> {
+    let hdf5_err = |detail: String| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail,
+    };
+    let coherent = element
+        .group("coherent")
+        .map_err(|e| hdf5_err(format!("cannot open /coherent: {e}")))?;
+    let real = read_tabulated_2xn(&coherent, "anomalous_real", "/coherent", path)?;
+    let imag = read_tabulated_2xn(&coherent, "anomalous_imag", "/coherent", path)?;
+    Ok(AnomalousFactors { real, imag })
+}
+
+fn read_compton_profiles(
+    element: &hdf5_pure::Group,
+    path: &Path,
+) -> Result<ComptonProfiles> {
+    let hdf5_err = |detail: String| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail,
+    };
+    let cp = element
+        .group("compton_profiles")
+        .map_err(|e| hdf5_err(format!("cannot open /compton_profiles: {e}")))?;
+
+    let binding_energy = cp
+        .dataset("binding_energy")
+        .map_err(|e| hdf5_err(format!("cannot open binding_energy: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read binding_energy: {e}")))?;
+    let num_electrons = cp
+        .dataset("num_electrons")
+        .map_err(|e| hdf5_err(format!("cannot open num_electrons: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read num_electrons: {e}")))?;
+    let pz = cp
+        .dataset("pz")
+        .map_err(|e| hdf5_err(format!("cannot open pz: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read pz: {e}")))?;
+
+    let n_shells = binding_energy.len();
+    if num_electrons.len() != n_shells {
+        return Err(hdf5_err(format!(
+            "compton_profiles: num_electrons len {} != binding_energy len {}",
+            num_electrons.len(),
+            n_shells
+        )));
+    }
+    let n_pz = pz.len();
+
+    let j_ds = cp
+        .dataset("J")
+        .map_err(|e| hdf5_err(format!("cannot open J: {e}")))?;
+    let j_shape = j_ds
+        .shape()
+        .map_err(|e| hdf5_err(format!("cannot read J shape: {e}")))?;
+    let j_flat = j_ds
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read J: {e}")))?;
+    if j_shape.len() != 2 || j_shape[0] as usize != n_shells || j_shape[1] as usize != n_pz {
+        return Err(hdf5_err(format!(
+            "compton_profiles/J shape {:?} != [{}, {}]",
+            j_shape, n_shells, n_pz
+        )));
+    }
+    let mut j = Vec::with_capacity(n_shells);
+    for i in 0..n_shells {
+        j.push(j_flat[i * n_pz..(i + 1) * n_pz].to_vec());
+    }
+
+    Ok(ComptonProfiles {
+        binding_energy,
+        num_electrons,
+        pz,
+        j,
+    })
+}
+
+fn read_bremsstrahlung(
+    element: &hdf5_pure::Group,
+    path: &Path,
+) -> Result<Bremsstrahlung> {
+    let hdf5_err = |detail: String| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail,
+    };
+    let br = element
+        .group("bremsstrahlung")
+        .map_err(|e| hdf5_err(format!("cannot open /bremsstrahlung: {e}")))?;
+
+    let mean_excitation_energy = match br
+        .attrs()
+        .map_err(|e| hdf5_err(format!("cannot read bremsstrahlung attrs: {e}")))?
+        .get("I")
+    {
+        Some(hdf5_pure::AttrValue::F64(v)) => *v,
+        _ => 0.0,
+    };
+
+    let electron_energy = br
+        .dataset("electron_energy")
+        .map_err(|e| hdf5_err(format!("cannot open electron_energy: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read electron_energy: {e}")))?;
+    let photon_energy = br
+        .dataset("photon_energy")
+        .map_err(|e| hdf5_err(format!("cannot open photon_energy: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read photon_energy: {e}")))?;
+    let ionization_energy = br
+        .dataset("ionization_energy")
+        .map_err(|e| hdf5_err(format!("cannot open ionization_energy: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read ionization_energy: {e}")))?;
+    let num_electrons = br
+        .dataset("num_electrons")
+        .map_err(|e| hdf5_err(format!("cannot open bremsstrahlung num_electrons: {e}")))?
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read bremsstrahlung num_electrons: {e}")))?;
+
+    let n_e = electron_energy.len();
+    let n_k = photon_energy.len();
+    let dcs_ds = br
+        .dataset("dcs")
+        .map_err(|e| hdf5_err(format!("cannot open dcs: {e}")))?;
+    let dcs_shape = dcs_ds
+        .shape()
+        .map_err(|e| hdf5_err(format!("cannot read dcs shape: {e}")))?;
+    let dcs_flat = dcs_ds
+        .read_f64()
+        .map_err(|e| hdf5_err(format!("cannot read dcs: {e}")))?;
+    if dcs_shape.len() != 2 || dcs_shape[0] as usize != n_e || dcs_shape[1] as usize != n_k {
+        return Err(hdf5_err(format!(
+            "bremsstrahlung/dcs shape {:?} != [{}, {}]",
+            dcs_shape, n_e, n_k
+        )));
+    }
+    let mut dcs = Vec::with_capacity(n_e);
+    for i in 0..n_e {
+        dcs.push(dcs_flat[i * n_k..(i + 1) * n_k].to_vec());
+    }
+
+    if ionization_energy.len() != num_electrons.len() {
+        return Err(hdf5_err(format!(
+            "bremsstrahlung: ionization_energy len {} != num_electrons len {}",
+            ionization_energy.len(),
+            num_electrons.len()
+        )));
+    }
+
+    Ok(Bremsstrahlung {
+        mean_excitation_energy,
+        electron_energy,
+        photon_energy,
+        dcs,
+        ionization_energy,
+        num_electrons,
+    })
+}
+
 fn read_transitions(shell: &hdf5_pure::Group) -> Vec<[f64; 4]> {
     let ds = match shell.dataset("transitions") {
         Ok(d) => d,
@@ -336,5 +557,72 @@ mod tests {
         for w in elem.incoherent_scattering_factor.x.windows(2) {
             assert!(w[1] > w[0]);
         }
+
+        // Integrated form factor is non-decreasing (it is a cumulative of F²).
+        let iff = &elem.coherent_integrated_form_factor;
+        assert_eq!(iff.x.len(), iff.value.len());
+        for w in iff.value.windows(2) {
+            assert!(
+                w[1] >= w[0] - 1e-12,
+                "integrated form factor not monotone: {} -> {}",
+                w[0],
+                w[1]
+            );
+        }
+
+        // Anomalous factors present and sized consistently.
+        let af = &elem.coherent_anomalous;
+        assert_eq!(af.real.grid.len(), af.real.value.len());
+        assert_eq!(af.imag.grid.len(), af.imag.value.len());
+        assert!(!af.real.grid.is_empty());
+
+        // Compton profiles present; Carbon has 3 shells in the Compton
+        // tabulation (per inspection: shape (3, 31)).
+        let cp = &elem.compton_profiles;
+        assert_eq!(cp.n_shells(), 3);
+        assert_eq!(cp.n_pz(), 31);
+        assert_eq!(cp.j.len(), 3);
+        for row in &cp.j {
+            assert_eq!(row.len(), 31);
+        }
+        // pz grid ascends from 0.
+        assert!(cp.pz[0] == 0.0 || cp.pz[0].abs() < 1e-12);
+        for w in cp.pz.windows(2) {
+            assert!(w[1] > w[0]);
+        }
+        // Each profile J_i(p_z) is non-negative.
+        for row in &cp.j {
+            for v in row {
+                assert!(*v >= 0.0);
+            }
+        }
+
+        // Bremsstrahlung: 200 electron-energy × 30 photon-energy grid.
+        let br = &elem.bremsstrahlung;
+        assert_eq!(br.electron_energy.len(), 200);
+        assert_eq!(br.photon_energy.len(), 30);
+        assert_eq!(br.dcs.len(), 200);
+        for row in &br.dcs {
+            assert_eq!(row.len(), 30);
+        }
+        assert!(br.mean_excitation_energy > 0.0); // Carbon: I ≈ 81 eV
+        assert!((br.mean_excitation_energy - 81.0).abs() < 1.0);
+        assert_eq!(br.ionization_energy.len(), br.num_electrons.len());
+
+        // Subshell tail-alignment convention.
+        let k = elem.subshells.iter().find(|s| s.designator == "K").unwrap();
+        let n = elem.n_energy();
+        let offset = n - k.xs.len();
+        assert_eq!(
+            k.xs_at(n, offset),
+            k.xs[0],
+            "tail alignment off at offset"
+        );
+        assert_eq!(
+            k.xs_at(n, n - 1),
+            *k.xs.last().unwrap(),
+            "tail alignment off at last point"
+        );
+        assert_eq!(k.xs_at(n, offset.saturating_sub(1)), 0.0);
     }
 }

@@ -14,4 +14,7 @@
 pub mod data;
 pub mod hdf5_reader;
 
-pub use data::{PhotonElement, ScatteringFactor, Subshell};
+pub use data::{
+    AnomalousFactors, Bremsstrahlung, ComptonProfiles, PhotonElement, ScatteringFactor, Subshell,
+    TabulatedFactor,
+};

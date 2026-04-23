@@ -63,14 +63,46 @@ fn main() -> ExitCode {
     }
 
     println!();
-    println!("Coherent form factor: {} points, x in [{:.3e}, {:.3e}] 1/Å",
+    println!("Coherent form factor F(x,Z):                {} points, x in [{:.3e}, {:.3e}] 1/Å",
         elem.coherent_form_factor.x.len(),
         elem.coherent_form_factor.x.first().copied().unwrap_or(0.0),
         elem.coherent_form_factor.x.last().copied().unwrap_or(0.0));
-    println!("Incoherent scattering factor: {} points, x in [{:.3e}, {:.3e}] 1/Å",
+    println!("Coherent integrated F²(x,Z) cumulative:     {} points",
+        elem.coherent_integrated_form_factor.x.len());
+    println!("Coherent anomalous f'(E):                   {} points, E in [{:.3e}, {:.3e}] eV",
+        elem.coherent_anomalous.real.grid.len(),
+        elem.coherent_anomalous.real.grid.first().copied().unwrap_or(0.0),
+        elem.coherent_anomalous.real.grid.last().copied().unwrap_or(0.0));
+    println!("Coherent anomalous f''(E):                  {} points, E in [{:.3e}, {:.3e}] eV",
+        elem.coherent_anomalous.imag.grid.len(),
+        elem.coherent_anomalous.imag.grid.first().copied().unwrap_or(0.0),
+        elem.coherent_anomalous.imag.grid.last().copied().unwrap_or(0.0));
+    println!("Incoherent scattering factor S(x,Z):        {} points, x in [{:.3e}, {:.3e}] 1/Å",
         elem.incoherent_scattering_factor.x.len(),
         elem.incoherent_scattering_factor.x.first().copied().unwrap_or(0.0),
         elem.incoherent_scattering_factor.x.last().copied().unwrap_or(0.0));
+
+    println!();
+    let cp = &elem.compton_profiles;
+    let total_occ: f64 = cp.num_electrons.iter().sum();
+    println!("Compton profiles: {} shells, {} pz points, total occupancy = {:.2} (Z={})",
+        cp.n_shells(), cp.n_pz(), total_occ, elem.z);
+    println!("  pz grid [a.u.]: [{:.2}, {:.2}] in {} points",
+        cp.pz.first().copied().unwrap_or(0.0),
+        cp.pz.last().copied().unwrap_or(0.0),
+        cp.n_pz());
+
+    println!();
+    let br = &elem.bremsstrahlung;
+    println!("Bremsstrahlung DCS grid: {} electron-E × {} photon-E (I = {:.1} eV)",
+        br.electron_energy.len(), br.photon_energy.len(), br.mean_excitation_energy);
+    println!("  electron T_e in [{:.3e}, {:.3e}] eV",
+        br.electron_energy.first().copied().unwrap_or(0.0),
+        br.electron_energy.last().copied().unwrap_or(0.0));
+    println!("  photon k/T_e in [{:.3e}, {:.3e}] (scaled)",
+        br.photon_energy.first().copied().unwrap_or(0.0),
+        br.photon_energy.last().copied().unwrap_or(0.0));
+    println!("  Sternheimer oscillators: {}", br.ionization_energy.len());
 
     ExitCode::SUCCESS
 }
