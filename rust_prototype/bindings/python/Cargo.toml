@@ -1,0 +1,25 @@
+[package]
+name = "open-rust-mc-py"
+version = "0.1.0"
+# PyO3 0.22's generated code trips the Rust 2024 `unsafe_op_in_unsafe_fn`
+# lint. Stay on edition 2021 until PyO3 ≥ 0.23 is pulled in.
+edition = "2021"
+license = "MIT"
+
+[lib]
+# PyO3 requires `cdylib` to produce a loadable Python extension.
+# The extra `rlib` lets `cargo test` still link against Rust-side tests
+# inside this crate.
+name = "open_rust_mc"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+open-rust-mc = { path = "../.." }
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
+rayon = "1"
+
+[lints.clippy]
+# The engine crate inherits pedantic lints that block PyO3's
+# extension-module signature conventions (e.g. functions with
+# capital names match Python class conventions). Relax those.
+unwrap_used = "allow"

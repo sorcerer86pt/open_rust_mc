@@ -46,3 +46,13 @@ Thumbs.db
 /paper_results_*.txt
 /results_*.txt
 /resume.md
+
+# maturin / PyO3 build artefacts dropped into the Python package tree
+# by `maturin develop`. Only the source files (Cargo.toml,
+# pyproject.toml, src/, python/open_rust_mc/__init__.py, examples/)
+# should live in git.
+rust_prototype/bindings/python/python/open_rust_mc/*.pyd
+rust_prototype/bindings/python/python/open_rust_mc/*.so
+rust_prototype/bindings/python/python/open_rust_mc/*.dylib
+rust_prototype/bindings/python/python/open_rust_mc/*.pdb
+rust_prototype/bindings/python/python/open_rust_mc/__pycache__/

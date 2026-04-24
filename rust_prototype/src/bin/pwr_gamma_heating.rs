@@ -216,6 +216,8 @@ fn main() -> ExitCode {
         particles_per_batch: args.n_neutron_particles,
         seed: 1,
         auto_inactive: None,
+        verbose: true,
+        parallel: true,
     };
     let t1 = Instant::now();
     let (batch_results, k_eff) =

@@ -41,6 +41,35 @@ pub struct SimConfig {
     /// plateaus. The fixed `inactive` count is replaced by this
     /// criterion, bounded by the policy's `min_inactive` / `max_inactive`.
     pub auto_inactive: Option<EntropyConvergence>,
+    /// When `true` (default for CLI binaries), the engine prints
+    /// per-batch `k_eff`, entropy, collision/fission/leak counters to
+    /// stdout. When `false` (Python/FFI callers), the engine stays
+    /// silent and the caller consumes the returned `BatchResult`s.
+    /// Matters on Windows: locking stdout from a host process that
+    /// also uses stdout (e.g. Python) can deadlock; setting this to
+    /// `false` eliminates that risk.
+    pub verbose: bool,
+    /// When `true` (default), transport the per-batch particle bank
+    /// in parallel via `rayon::par_iter`. When `false`, fall back to
+    /// a sequential `iter().map().collect()`. The sequential path is
+    /// slower but sidesteps rayon's first-use thread-pool creation,
+    /// which on Windows can deadlock against Python's loader lock
+    /// when called from a PyO3 extension.
+    pub parallel: bool,
+}
+
+impl Default for SimConfig {
+    fn default() -> Self {
+        Self {
+            batches: 50,
+            inactive: 10,
+            particles_per_batch: 5_000,
+            seed: 1,
+            auto_inactive: None,
+            verbose: true,
+            parallel: true,
+        }
+    }
 }
 
 /// Policy for Shannon-entropy plateau detection. Defaults are tuned for
@@ -136,6 +165,7 @@ fn detect_tracking_mode<XS: XsProvider>(
     cells: &[Cell],
     materials: &[Material],
     xs_provider: &XS,
+    verbose: bool,
 ) -> TrackingMode {
     // Count unique material indices
     let mut mat_indices: Vec<usize> = cells
@@ -149,7 +179,9 @@ fn detect_tracking_mode<XS: XsProvider>(
     mat_indices.dedup();
 
     if mat_indices.len() <= 1 {
-        println!("  Tracking: SURFACE (single material — delta tracking not beneficial)");
+        if verbose {
+            println!("  Tracking: SURFACE (single material — delta tracking not beneficial)");
+        }
         return TrackingMode::Surface;
     }
 
@@ -198,10 +230,12 @@ fn detect_tracking_mode<XS: XsProvider>(
 
     // High contrast (>20x) means >95% virtual collisions — delta tracking is worse
     if max_contrast > 20.0 {
-        println!(
-            "  Tracking: SURFACE (heterogeneous but contrast={:.1}x too high for delta tracking)",
-            max_contrast
-        );
+        if verbose {
+            println!(
+                "  Tracking: SURFACE (heterogeneous but contrast={:.1}x too high for delta tracking)",
+                max_contrast
+            );
+        }
         return TrackingMode::Surface;
     }
 
@@ -210,12 +244,14 @@ fn detect_tracking_mode<XS: XsProvider>(
     } else {
         0.0
     };
-    println!(
-        "  Tracking: DELTA (heterogeneous — {} materials, contrast={:.1}x, ~{:.0}% virtual collisions)",
-        mat_indices.len(),
-        max_contrast,
-        avg_rejection * 100.0
-    );
+    if verbose {
+        println!(
+            "  Tracking: DELTA (heterogeneous — {} materials, contrast={:.1}x, ~{:.0}% virtual collisions)",
+            mat_indices.len(),
+            max_contrast,
+            avg_rejection * 100.0
+        );
+    }
 
     TrackingMode::Delta(MajorantTable {
         log_e_min: log_min,
@@ -1261,7 +1297,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
     let n = config.particles_per_batch as usize;
 
     // Auto-detect optimal tracking algorithm
-    let tracking = detect_tracking_mode(cells, materials, xs_provider);
+    let tracking = detect_tracking_mode(cells, materials, xs_provider, config.verbose);
 
     let seed = config.seed;
     let mut source_bank = initial_source(n, surfaces, cells, seed);
@@ -1299,31 +1335,40 @@ pub fn run_eigenvalue<XS: XsProvider>(
         // Parallel transport: dispatch based on tracking mode.
         // Seed offsets batch number to make each seed produce independent streams.
         let batch_seed = batch as u64 + seed * 100_000;
-        let particle_results: Vec<ParticleResult> = source_bank
-            .par_iter()
-            .enumerate()
-            .map(|(i, site)| match &tracking {
-                TrackingMode::Surface => transport_particle(
-                    site,
-                    batch_seed,
-                    i as u64,
-                    surfaces,
-                    cells,
-                    materials,
-                    xs_provider,
-                ),
-                TrackingMode::Delta(majorant) => transport_particle_delta(
-                    site,
-                    batch_seed,
-                    i as u64,
-                    surfaces,
-                    cells,
-                    materials,
-                    xs_provider,
-                    majorant,
-                ),
-            })
-            .collect();
+        let transport_one = |(i, site): (usize, &FissionSite)| match &tracking {
+            TrackingMode::Surface => transport_particle(
+                site,
+                batch_seed,
+                i as u64,
+                surfaces,
+                cells,
+                materials,
+                xs_provider,
+            ),
+            TrackingMode::Delta(majorant) => transport_particle_delta(
+                site,
+                batch_seed,
+                i as u64,
+                surfaces,
+                cells,
+                materials,
+                xs_provider,
+                majorant,
+            ),
+        };
+        let particle_results: Vec<ParticleResult> = if config.parallel {
+            source_bank
+                .par_iter()
+                .enumerate()
+                .map(transport_one)
+                .collect()
+        } else {
+            source_bank
+                .iter()
+                .enumerate()
+                .map(transport_one)
+                .collect()
+        };
 
         // Reduce: merge per-particle results
         let mut fission_bank = FissionBank::new();
@@ -1388,8 +1433,10 @@ pub fn run_eigenvalue<XS: XsProvider>(
             } else {
                 "plateau"
             };
-            println!("  [auto-inactive] entropy converged at batch {batch} ({reason})");
-            let _ = std::io::stdout().flush();
+            if config.verbose {
+                println!("  [auto-inactive] entropy converged at batch {batch} ({reason})");
+                let _ = std::io::stdout().flush();
+            }
         }
 
         let is_active = batch > effective_inactive;
@@ -1399,13 +1446,15 @@ pub fn run_eigenvalue<XS: XsProvider>(
             k_count += 1;
         }
 
-        let active_str = if is_active { " *" } else { "" };
-        println!(
-            "  Batch {batch:>4}: k={k_batch:.5}  H={entropy:.4}  \
-             coll={collisions}  fiss={fissions}  leak={leakage}  \
-             therm={thermal_scatters}  surf={surface_crossings}{active_str}"
-        );
-        let _ = std::io::stdout().flush();
+        if config.verbose {
+            let active_str = if is_active { " *" } else { "" };
+            println!(
+                "  Batch {batch:>4}: k={k_batch:.5}  H={entropy:.4}  \
+                 coll={collisions}  fiss={fissions}  leak={leakage}  \
+                 therm={thermal_scatters}  surf={surface_crossings}{active_str}"
+            );
+            let _ = std::io::stdout().flush();
+        }
 
         results.push(result);
 
@@ -1704,6 +1753,8 @@ mod tests {
             particles_per_batch: 500,
             seed: 0,
             auto_inactive: None,
+            verbose: false,
+            parallel: false,
         };
 
         let (results, k_final) =
@@ -1815,6 +1866,8 @@ mod tests {
             particles_per_batch: 200,
             seed: 0,
             auto_inactive: None,
+            verbose: false,
+            parallel: false,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -1861,7 +1914,7 @@ mod tests {
             }],
         };
 
-        let mode = detect_tracking_mode(&cells, &materials, &xs);
+        let mode = detect_tracking_mode(&cells, &materials, &xs, false);
         assert!(
             matches!(mode, TrackingMode::Surface),
             "Single material should use surface tracking"
@@ -1925,7 +1978,7 @@ mod tests {
             ],
         };
 
-        let mode = detect_tracking_mode(&cells, &materials, &xs);
+        let mode = detect_tracking_mode(&cells, &materials, &xs, false);
         assert!(
             matches!(mode, TrackingMode::Surface),
             "High contrast should fall back to surface tracking"
@@ -1972,6 +2025,8 @@ mod tests {
             particles_per_batch: 500,
             seed: 0,
             auto_inactive: None,
+            verbose: false,
+            parallel: false,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -1979,6 +2034,8 @@ mod tests {
             particles_per_batch: 500,
             seed: 1,
             auto_inactive: None,
+            verbose: false,
+            parallel: false,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);

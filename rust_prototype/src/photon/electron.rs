@@ -227,7 +227,7 @@ pub fn katz_penfold_range_g_per_cm2(e_kin_ev: f64) -> f64 {
 /// formula used elsewhere in this file. For E > 2.5 MeV the Katz-
 /// Penfold range is linear, so dR/dE = 0.530 and dE/dR = 1/0.530.
 #[inline]
-pub fn instantaneous_dE_per_dR(e_kin_ev: f64) -> f64 {
+pub fn instantaneous_de_per_dr(e_kin_ev: f64) -> f64 {
     let r_kp = katz_penfold_range_g_per_cm2(e_kin_ev);
     if r_kp <= 0.0 {
         return 0.0;
@@ -445,7 +445,7 @@ pub fn track_integrate_electron_csg_with_ms(
         // Capped at the electron's remaining energy so we never
         // deposit more than we carry.
         let cost = ds_step * rho;
-        let de_per_dr = instantaneous_dE_per_dR(e_current);
+        let de_per_dr = instantaneous_de_per_dr(e_current);
         let e_lost = (cost * de_per_dr).min(e_current);
         per_cell_deposit[cell_idx] += e_lost;
         e_current -= e_lost;
@@ -560,9 +560,9 @@ mod tests {
     fn instantaneous_de_per_dr_grows_as_electron_slows() {
         // Bragg-like: dE/dR should increase as E decreases (electron
         // deposits energy faster per unit path when slow).
-        let s_1mev = instantaneous_dE_per_dR(1.0e6);
-        let s_100kev = instantaneous_dE_per_dR(1.0e5);
-        let s_50kev = instantaneous_dE_per_dR(5.0e4);
+        let s_1mev = instantaneous_de_per_dr(1.0e6);
+        let s_100kev = instantaneous_de_per_dr(1.0e5);
+        let s_50kev = instantaneous_de_per_dr(5.0e4);
         assert!(s_100kev > s_1mev, "dE/dR(100 keV) > dE/dR(1 MeV): {s_100kev} vs {s_1mev}");
         assert!(s_50kev > s_100kev, "dE/dR(50 keV) > dE/dR(100 keV)");
         // Sanity: 1 MeV electron in solid (ρ=1 g/cm³, step 0.01 cm →

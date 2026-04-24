@@ -218,6 +218,16 @@ cargo test --lib
 Pass `--mode svd`, `--mode table`, `--mode wmp`, or `--mode hybrid`
 to run a single provider instead of the honesty test.
 
+## Python API
+
+A PyO3 binding exposes the engine to Python via a fluent
+`Scene`/`Material`/`Surface` builder. The same Godiva eigenvalue
+that the Rust binary runs above is reproducible from a ~20-line
+Python script (`rust_prototype/bindings/python/examples/godiva.py`).
+Rust remains the source of truth — Python is a ~200-line glue layer
+over the engine. See **[PYTHON.md](PYTHON.md)** for the quick-start,
+API reference, and build-from-source instructions.
+
 ## Development
 
 CI runs Rust, Python, and LaTeX jobs on every push (`.github/workflows/ci.yml`).

@@ -66,6 +66,35 @@ pub enum Surface {
         radius: f64,
         bc: BoundaryCondition,
     },
+    /// Double-cone aligned with the Z axis, apex at (x0, y0, z0):
+    /// (x-x0)² + (y-y0)² = r²(z-z0)²  where `r_sq = tan²(half-angle)`.
+    /// The negative half-space is the interior of both sheets; cell
+    /// regions typically intersect with a `PlaneZ` to pick one sheet.
+    ConeZ {
+        x0: f64,
+        y0: f64,
+        z0: f64,
+        r_sq: f64,
+        bc: BoundaryCondition,
+    },
+    /// Double-cone aligned with the X axis, apex at (x0, y0, z0):
+    /// (y-y0)² + (z-z0)² = r²(x-x0)².
+    ConeX {
+        x0: f64,
+        y0: f64,
+        z0: f64,
+        r_sq: f64,
+        bc: BoundaryCondition,
+    },
+    /// Double-cone aligned with the Y axis, apex at (x0, y0, z0):
+    /// (x-x0)² + (z-z0)² = r²(y-y0)².
+    ConeY {
+        x0: f64,
+        y0: f64,
+        z0: f64,
+        r_sq: f64,
+        bc: BoundaryCondition,
+    },
 }
 
 /// Coincidence tolerance (same as OpenMC).
@@ -114,6 +143,24 @@ impl Surface {
                 let dx = p.x - center_x;
                 let dz = p.z - center_z;
                 dx.mul_add(dx, dz * dz) - radius * radius
+            }
+            Self::ConeZ { x0, y0, z0, r_sq, .. } => {
+                let dx = p.x - x0;
+                let dy = p.y - y0;
+                let dz = p.z - z0;
+                dx.mul_add(dx, dy * dy) - r_sq * dz * dz
+            }
+            Self::ConeX { x0, y0, z0, r_sq, .. } => {
+                let dx = p.x - x0;
+                let dy = p.y - y0;
+                let dz = p.z - z0;
+                dy.mul_add(dy, dz * dz) - r_sq * dx * dx
+            }
+            Self::ConeY { x0, y0, z0, r_sq, .. } => {
+                let dx = p.x - x0;
+                let dy = p.y - y0;
+                let dz = p.z - z0;
+                dx.mul_add(dx, dz * dz) - r_sq * dy * dy
             }
         }
     }
@@ -180,6 +227,21 @@ impl Surface {
                 let d_rot = Vec3::new(dir.x, dir.z, dir.y);
                 cylinder_z_intersect(p_rot, d_rot, *center_x, *center_z, *radius)
             }
+            Self::ConeZ { x0, y0, z0, r_sq, .. } => {
+                cone_z_intersect(p, dir, *x0, *y0, *z0, *r_sq)
+            }
+            Self::ConeX { x0, y0, z0, r_sq, .. } => {
+                // X-axis cone = Z-axis cone with (y, z, x) → (x, y, z).
+                let p_rot = Vec3::new(p.y, p.z, p.x);
+                let d_rot = Vec3::new(dir.y, dir.z, dir.x);
+                cone_z_intersect(p_rot, d_rot, *y0, *z0, *x0, *r_sq)
+            }
+            Self::ConeY { x0, y0, z0, r_sq, .. } => {
+                // Y-axis cone: swap y and z so y becomes the axis.
+                let p_rot = Vec3::new(p.x, p.z, p.y);
+                let d_rot = Vec3::new(dir.x, dir.z, dir.y);
+                cone_z_intersect(p_rot, d_rot, *x0, *z0, *y0, *r_sq)
+            }
         }
     }
 
@@ -194,7 +256,10 @@ impl Surface {
             | Self::Sphere { bc, .. }
             | Self::CylinderZ { bc, .. }
             | Self::CylinderX { bc, .. }
-            | Self::CylinderY { bc, .. } => *bc,
+            | Self::CylinderY { bc, .. }
+            | Self::ConeZ { bc, .. }
+            | Self::ConeX { bc, .. }
+            | Self::ConeY { bc, .. } => *bc,
         }
     }
 
@@ -216,6 +281,17 @@ impl Surface {
             Self::CylinderY {
                 center_x, center_z, ..
             } => Vec3::new(p.x - center_x, 0.0, p.z - center_z).normalized(),
+            Self::ConeZ { x0, y0, z0, r_sq, .. } => {
+                // ∇f = (2(x-x0), 2(y-y0), -2·r²(z-z0)); dropping the
+                // factor of 2 before normalising.
+                Vec3::new(p.x - x0, p.y - y0, -r_sq * (p.z - z0)).normalized()
+            }
+            Self::ConeX { x0, y0, z0, r_sq, .. } => {
+                Vec3::new(-r_sq * (p.x - x0), p.y - y0, p.z - z0).normalized()
+            }
+            Self::ConeY { x0, y0, z0, r_sq, .. } => {
+                Vec3::new(p.x - x0, -r_sq * (p.y - y0), p.z - z0).normalized()
+            }
         }
     }
 
@@ -313,6 +389,58 @@ fn cylinder_z_intersect(p: Vec3, dir: Vec3, cx: f64, cy: f64, r: f64) -> Option<
     None
 }
 
+// ── Ray-cone (Z-aligned double cone) intersection ─────────────────────────
+
+#[inline]
+fn cone_z_intersect(p: Vec3, dir: Vec3, x0: f64, y0: f64, z0: f64, r_sq: f64) -> Option<f64> {
+    // f(p + t·d) = (Δx + t·dx)² + (Δy + t·dy)² − r²(Δz + t·dz)²
+    //            = A·t² + B·t + C
+    let dx = p.x - x0;
+    let dy = p.y - y0;
+    let dz = p.z - z0;
+
+    let a = dir.x.mul_add(dir.x, dir.y * dir.y) - r_sq * dir.z * dir.z;
+    let b = 2.0 * (dx.mul_add(dir.x, dy * dir.y) - r_sq * dz * dir.z);
+    let c = dx.mul_add(dx, dy * dy) - r_sq * dz * dz;
+
+    quadratic_smallest_positive(a, b, c)
+}
+
+/// Smallest `t > COINCIDENCE_TOL` satisfying `a·t² + b·t + c = 0`, or
+/// `None` if there's no such root. Handles the degenerate linear case
+/// when `|a| < COINCIDENCE_TOL`, which for cones happens when the ray
+/// is parallel to a generatrix.
+#[inline]
+fn quadratic_smallest_positive(a: f64, b: f64, c: f64) -> Option<f64> {
+    if a.abs() < COINCIDENCE_TOL {
+        // Linear: b·t + c = 0.
+        if b.abs() < COINCIDENCE_TOL {
+            return None;
+        }
+        let t = -c / b;
+        return if t > COINCIDENCE_TOL { Some(t) } else { None };
+    }
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let sqrt_disc = disc.sqrt();
+    let inv_2a = 0.5 / a;
+    let t1 = (-b - sqrt_disc) * inv_2a;
+    let t2 = (-b + sqrt_disc) * inv_2a;
+    // We want the smallest t > COINCIDENCE_TOL. Note that with a < 0
+    // (can happen for cones depending on ray direction) the two roots
+    // swap ordering, so check both.
+    let (tmin, tmax) = if t1 <= t2 { (t1, t2) } else { (t2, t1) };
+    if tmin > COINCIDENCE_TOL {
+        Some(tmin)
+    } else if tmax > COINCIDENCE_TOL {
+        Some(tmax)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +510,77 @@ mod tests {
         let d = Vec3::new(1.0, 0.0, 0.0);
         let t = s.distance(p, d).expect("should intersect");
         assert!((t - 4.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cone_z_45deg_side_hit() {
+        // Double-cone apex at origin, 45° half-angle → r² = tan²(45°) = 1.
+        // Particle at (2, 0, -5) heading +z hits at t = 3 (position
+        // (2, 0, -2), where f = 2² + 0 − 1·(-2)² = 0).
+        let s = Surface::ConeZ {
+            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        let p = Vec3::new(2.0, 0.0, -5.0);
+        let d = Vec3::new(0.0, 0.0, 1.0);
+        let t = s.distance(p, d).expect("should hit");
+        assert!((t - 3.0).abs() < 1.0e-10, "t = {t}");
+        // Sign check: (2,0,-5) is outside because f = 4 − 25 = −21, so
+        // evaluate is negative. Approach from negative half-space.
+        assert!(s.evaluate(p) < 0.0);
+    }
+
+    #[test]
+    fn cone_z_miss_when_inside_generatrix_parallel() {
+        // 45° cone apex at origin. Ray parallel to a generatrix
+        // direction (1, 0, 1)/√2 starting at (1, 0, 0). With A = 0
+        // (exactly parallel), the quadratic degenerates to linear.
+        let s = Surface::ConeZ {
+            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        let p = Vec3::new(1.0, 0.0, 0.0);
+        let d = Vec3::new(1.0, 0.0, 1.0).normalized();
+        // f at p: 1 − 0 = 1 > 0 (outside), heading roughly along the
+        // cone surface → they diverge; expect no hit or a distant one.
+        let _ = s.distance(p, d); // just ensure no panic on the linear branch
+    }
+
+    #[test]
+    fn cone_x_equivalent_under_axis_swap() {
+        // ConeX with same parameters as ConeZ should match when we
+        // swap the test ray through the same rotation.
+        let s_z = Surface::ConeZ {
+            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        let s_x = Surface::ConeX {
+            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        // Z-test: ray at (2, 0, -5) heading +z hits at t = 3.
+        // X-equivalent: ray at (-5, 0, 2) heading +x.
+        let t_z = s_z.distance(Vec3::new(2.0, 0.0, -5.0), Vec3::new(0.0, 0.0, 1.0));
+        let t_x = s_x.distance(Vec3::new(-5.0, 0.0, 2.0), Vec3::new(1.0, 0.0, 0.0));
+        assert!(t_z.is_some() && t_x.is_some());
+        assert!((t_z.unwrap() - t_x.unwrap()).abs() < 1.0e-10);
+    }
+
+    #[test]
+    fn cone_normal_points_outward() {
+        // 45° cone apex at origin. At point (1, 0, 1) on the +z sheet,
+        // outward normal should point roughly in the radial-outward
+        // direction with a slope matching the cone opening.
+        let s = Surface::ConeZ {
+            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        let n = s.normal_at(Vec3::new(1.0, 0.0, 1.0));
+        // Should be in the x>0 direction and have a z component.
+        assert!(n.x > 0.5, "n.x = {}", n.x);
+        // For 45° cone at (1,0,1), ∇f = (2, 0, -2), normalised to (1/√2, 0, -1/√2).
+        assert!((n.x - 1.0 / (2.0_f64).sqrt()).abs() < 1.0e-10);
+        assert!((n.z + 1.0 / (2.0_f64).sqrt()).abs() < 1.0e-10);
     }
 
     #[test]

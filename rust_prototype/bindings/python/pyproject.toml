@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "open-rust-mc"
+version = "0.1.0"
+description = "Python bindings for the open-rust-mc Monte Carlo neutron transport engine"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "sorcerer86pt", email = "fabio.rodrigues@outsystems.com" }]
+readme = "../../../README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/sorcerer86pt/open_rust_mc"
+Repository = "https://github.com/sorcerer86pt/open_rust_mc"
+
+[tool.maturin]
+# Mixed Rust + Python source layout: the Rust extension is rooted at
+# `bindings/python/src/lib.rs`, Python support code (convenience
+# wrappers, type stubs) lives in `bindings/python/python/open_rust_mc`.
+python-source = "python"
+module-name = "open_rust_mc._core"
+features = ["pyo3/extension-module"]

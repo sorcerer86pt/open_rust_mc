@@ -233,6 +233,8 @@ fn run_multi_seed<XS: XsProvider>(
             } else {
                 None
             },
+            verbose: true,
+            parallel: true,
         };
 
         if args.seeds > 1 {
