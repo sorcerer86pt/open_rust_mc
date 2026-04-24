@@ -74,6 +74,8 @@ use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3, ray};
 use open_rust_mc::hdf5_reader;
 use open_rust_mc::photon::PhotonElement;
+use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
+use open_rust_mc::photon::electron::{radiation_length_cm, track_integrate_electron_csg_with_ms};
 use open_rust_mc::photon::material::PhotonMaterial;
 use open_rust_mc::photon::transport::transport_history_csg;
 use open_rust_mc::thermal::ThermalScatteringData;
@@ -302,12 +304,49 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
     };
+    // Per-cell Seltzer-Berger bremsstrahlung samplers, mirroring
+    // `materials_p` one-to-one. Voids remain `None`, so a Compton
+    // recoil electron born in the He gap (which cannot happen for
+    // Compton but could for other edge cases) will cleanly skip the
+    // brems step rather than panicking.
+    let brems_p: Vec<Option<MaterialBremss>> = materials_p
+        .iter()
+        .map(|m| m.as_ref().map(MaterialBremss::from_photon_material))
+        .collect();
+
+    // Per-cell radiation length X₀ [cm] for Highland multiple-scattering.
+    // Void cells get ∞ (no MS). Cells whose `cell.fill` is
+    // `CellFill::Material(m)` resolve to `materials_p[m]` via Bragg
+    // additivity of the element table; density is taken from the same
+    // `PhotonMaterial`.
+    let x0_per_cell: Vec<f64> = cells
+        .iter()
+        .map(|c| match c.fill {
+            CellFill::Material(m) => materials_p
+                .get(m as usize)
+                .and_then(|o| o.as_ref())
+                .map(radiation_length_cm)
+                .unwrap_or(f64::INFINITY),
+            _ => f64::INFINITY,
+        })
+        .collect();
+    println!("  Radiation lengths per cell (cm):");
+    for (i, x0) in x0_per_cell.iter().enumerate() {
+        let label = cell_label(i);
+        if x0.is_finite() {
+            println!("    cell {i} [{label:<5}]: X₀ = {x0:.3} cm");
+        } else {
+            println!("    cell {i} [{label:<5}]: X₀ = ∞ (void / no MS)");
+        }
+    }
 
     let t2 = Instant::now();
     let mut deposited_per_cell = vec![0.0_f64; cells.len()];
     let mut escaped_energy = 0.0_f64;
     let mut orphan_deposit = 0.0_f64;
     let mut total_source_energy = 0.0_f64;
+    let mut brems_photons_emitted = 0_u64;
+    let mut brems_energy_emitted = 0.0_f64;
 
     for i in 0..args.n_photon {
         let mut rng = Rng::new(0xB0F1_0000 + i as u64, 1);
@@ -322,28 +361,86 @@ fn main() -> ExitCode {
         let e_src = ev.energy;
         total_source_energy += e_src;
 
-        let r = transport_history_csg(
-            pos,
-            Vec3::new(dx, dy, dz),
-            e_src,
-            &surfaces,
-            &cells,
-            &materials_p,
-            1_000.0, // 1 keV cutoff
-            &mut rng,
-        );
+        // Secondary photon bank for this history — holds both photon
+        // products from transport_history_csg and bremsstrahlung γs
+        // born during electron track integration. Transported until
+        // empty so one source neutron fully completes before moving on.
+        let mut photon_bank_local: Vec<(Vec3, Vec3, f64, usize)> =
+            vec![(pos, Vec3::new(dx, dy, dz), e_src, 0)];
 
-        escaped_energy += r.energy_escaped;
-        for (p, e) in &r.deposits {
-            // Electron-range displacement may push a deposit past the
-            // reflective lattice boundaries. Fold it back by reflection
-            // before resolving to a cell — this preserves the infinite-
-            // lattice symmetry that the outer BCs represent.
-            let p_folded = fold_into_lattice(*p);
-            if let Some(idx) = ray::find_cell(p_folded, &surfaces, &cells) {
-                deposited_per_cell[idx] += e;
-            } else {
-                orphan_deposit += e;
+        while let Some((p0, d0, e0, _c0)) = photon_bank_local.pop() {
+            let r = transport_history_csg(
+                p0, d0, e0, &surfaces, &cells, &materials_p,
+                1_000.0, &mut rng,
+            );
+
+            escaped_energy += r.energy_escaped;
+            // Non-electron photon-side deposits (low-E cutoff, sub-
+            // threshold pair production).
+            for (p, e) in &r.deposits {
+                if let Some(idx) = ray::find_cell(*p, &surfaces, &cells) {
+                    deposited_per_cell[idx] += e;
+                } else {
+                    orphan_deposit += e;
+                }
+            }
+            // Recoil electrons — track-integrate through the CSG.
+            // Before integrating, sample a single TTB bremsstrahlung
+            // photon from the birth cell's material. Its energy is
+            // deducted from the electron's CSDA budget and a photon is
+            // added to the local bank for transport through the same
+            // CSG, redistributing energy that otherwise would have been
+            // pinned to the electron's immediate neighbourhood.
+            for ele in &r.electrons {
+                let mut csda_energy = ele.e_kin_ev;
+                let mid = cell_material_id(&cells[ele.cell_idx]);
+                // Brems emission is sampled as a single Poisson-like
+                // event along the electron's CSDA track: probability
+                // P = 1 − exp(−Σ_rad · R_e(E)). Only emit when the
+                // sampled ξ falls inside that probability band so
+                // total radiative yield matches physics (~1 % for
+                // UO₂ at sub-MeV electrons, <0.1 % for water). Using
+                // `sample_photon_energy` unconditionally as before
+                // over-emitted by ~20-30×.
+                if let (Some(Some(bs)), Some(Some(_mat))) =
+                    (brems_p.get(mid), materials_p.get(mid))
+                {
+                    // NIST ESTAR-calibrated radiation yield as the
+                    // single-photon emission probability. See
+                    // `MaterialBremss::radiative_yield_approx` for the
+                    // fit; σ_rad is unreliable as an absolute value
+                    // because the HDF5 DCS scaling convention varies.
+                    let p_brems = bs.radiative_yield_approx(ele.e_kin_ev);
+                    if p_brems > 0.0 && rng.uniform() < p_brems {
+                        if let Some(e_gamma) =
+                            bs.sample_photon_energy(ele.e_kin_ev, &mut rng)
+                        {
+                            let (gx, gy, gz) = rng.isotropic_direction();
+                            photon_bank_local.push((
+                                ele.pos,
+                                Vec3::new(gx, gy, gz),
+                                e_gamma,
+                                ele.cell_idx,
+                            ));
+                            brems_photons_emitted += 1;
+                            brems_energy_emitted += e_gamma;
+                            csda_energy -= e_gamma;
+                            if csda_energy < 0.0 {
+                                csda_energy = 0.0;
+                            }
+                        }
+                    }
+                }
+                // 0.005 cm sub-step: ~1/8 of UO₂ range at 1 MeV,
+                // ~1/100 of H₂O range. Smaller steps → more Highland
+                // scatters applied but also more geometry queries;
+                // 0.005 balances fidelity and runtime.
+                track_integrate_electron_csg_with_ms(
+                    ele.pos, ele.dir, csda_energy, ele.cell_idx,
+                    &surfaces, &cells, &materials_p,
+                    &x0_per_cell, 0.005, &mut rng,
+                    &mut deposited_per_cell,
+                );
             }
         }
     }
@@ -356,6 +453,14 @@ fn main() -> ExitCode {
         args.n_photon as f64 / photon_s,
         total_source_energy
     );
+    if brems_photons_emitted > 0 {
+        let brems_frac = brems_energy_emitted / total_source_energy;
+        let n_electrons_rough = brems_photons_emitted; // one photon per electron in TTB
+        println!(
+            "  Bremsstrahlung: {} γ emitted, {:.3e} eV total ({:.3} % of source energy)",
+            n_electrons_rough, brems_energy_emitted, 100.0 * brems_frac
+        );
+    }
 
     // ── Final report ───────────────────────────────────────────────
     println!("\n── Energy deposition by region ──");
@@ -406,6 +511,16 @@ fn main() -> ExitCode {
 }
 
 // ── Geometry (same as pwr_pincell) ──────────────────────────────────
+
+/// Material ID for a cell, used to index into `brems_p` / `materials_p`.
+/// Returns `usize::MAX` for void/universe fills, which harmlessly indexes
+/// outside the materials array so the caller's `.get()` yields `None`.
+fn cell_material_id(cell: &Cell) -> usize {
+    match cell.fill {
+        CellFill::Material(m) => m as usize,
+        _ => usize::MAX,
+    }
+}
 
 fn cell_label(idx: usize) -> &'static str {
     match idx {
@@ -601,39 +716,6 @@ fn load_photon_materials(data_dir: &Path) -> Result<Vec<Option<PhotonMaterial>>,
         .with_density(0.74);
 
     Ok(vec![Some(uo2), Some(clad), Some(h2o)])
-}
-
-/// Fold a position back into the fundamental pin-cell box by
-/// reflection across the six reflective outer planes. Infinite-lattice
-/// symmetry is enforced on the photon-deposit positions after
-/// electron-range displacement has potentially pushed them past a
-/// reflective boundary.
-fn fold_into_lattice(p: Vec3) -> Vec3 {
-    let half_xy = PITCH / 2.0;
-    let half_z = PITCH / 2.0;
-    Vec3::new(
-        reflect_coord(p.x, half_xy),
-        reflect_coord(p.y, half_xy),
-        reflect_coord(p.z, half_z),
-    )
-}
-
-/// Reflect a coordinate into `[-half, +half]` assuming the coordinate
-/// axis has reflective planes at both `-half` and `+half`. Implements
-/// a triangle wave that models arbitrary-count bounces.
-fn reflect_coord(coord: f64, half: f64) -> f64 {
-    let period = 2.0 * half;
-    let double_period = 2.0 * period;
-    // Shift to [0, ...), wrap modulo double-period, then fold the
-    // [period, 2*period) half back onto [0, period] symmetrically.
-    let shifted = coord + half;
-    let wrapped = shifted.rem_euclid(double_period);
-    let folded = if wrapped <= period {
-        wrapped
-    } else {
-        double_period - wrapped
-    };
-    folded - half
 }
 
 #[allow(dead_code)]

@@ -35,9 +35,11 @@
 //!   - Perkins et al., LLNL EADL/EEDL (UCRL-50400 vol. 30) — atomic
 //!     relaxation transition data lineage
 
+pub mod bremsstrahlung;
 pub mod coherent;
 pub mod compton;
 pub mod data;
+pub mod electron;
 pub mod hdf5_reader;
 pub mod material;
 pub mod pair;

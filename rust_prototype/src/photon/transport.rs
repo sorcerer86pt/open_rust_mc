@@ -34,6 +34,20 @@ use crate::photon::pair::{ANNIHILATION_ENERGY_EV, pair_produce};
 use crate::photon::photoelectric::{DEFAULT_PHOTON_CUTOFF_EV, photoelectric_absorb};
 use crate::transport::rng::Rng;
 
+/// A Compton/photoelectric/pair electron emitted at a collision site.
+/// The CSG transport driver emits these as "track sources" for the
+/// caller to integrate via `electron::track_integrate_electron_csg`.
+/// The point-deposit code path in `transport_history` (no CSG) keeps
+/// emitting via `deposits` unchanged — only the CSG driver populates
+/// `electrons`.
+#[derive(Debug, Clone, Copy)]
+pub struct ElectronSource {
+    pub pos: Vec3,
+    pub dir: Vec3,
+    pub e_kin_ev: f64,
+    pub cell_idx: usize,
+}
+
 /// Outcome of one complete source-photon history (including all
 /// banked secondaries).
 #[derive(Debug, Clone)]
@@ -45,10 +59,16 @@ pub struct HistoryResult {
     pub energy_escaped: f64,
     /// Number of collisions processed (source photon + all secondaries).
     pub n_collisions: u32,
-    /// Per-collision record for tallies that need position-resolved
-    /// deposition (e.g. pulse-height in a finite detector). Each
-    /// entry is `(position, local_deposit_eV)`.
+    /// Per-collision photon-side point deposits — low-E cutoff dumps
+    /// and below-threshold pair production. Does NOT include recoil
+    /// electron kinetic energies when the CSG transport driver is
+    /// used; those are surfaced via `electrons` for track integration.
     pub deposits: Vec<(Vec3, f64)>,
+    /// Recoil electrons born at Compton/photoelectric/pair collisions.
+    /// Populated only by the CSG transport driver. Callers should
+    /// track-integrate each with
+    /// [`crate::photon::electron::track_integrate_electron_csg`].
+    pub electrons: Vec<ElectronSource>,
 }
 
 /// A single photon track in the bank.
@@ -82,6 +102,7 @@ pub fn transport_history<F: Fn(Vec3) -> bool>(
         energy_escaped: 0.0,
         n_collisions: 0,
         deposits: Vec::new(),
+        electrons: Vec::new(),
     };
     let mut bank: Vec<BankEntry> = Vec::with_capacity(8);
     bank.push(BankEntry {
@@ -287,6 +308,7 @@ pub fn transport_history_csg(
         energy_escaped: 0.0,
         n_collisions: 0,
         deposits: Vec::new(),
+        electrons: Vec::new(),
     };
 
     // Find starting cell; if the source is outside the model the
@@ -429,18 +451,24 @@ fn transport_one_csg(
                     Channel::Incoherent => {
                         let out = compton_scatter(elem, energy, rng);
                         result.energy_deposited += out.electron_kinetic;
-                        let dep_pos =
-                            electron_deposit_pos(pos, dir, material, out.electron_kinetic);
-                        result.deposits.push((dep_pos, out.electron_kinetic));
+                        result.electrons.push(ElectronSource {
+                            pos,
+                            dir,
+                            e_kin_ev: out.electron_kinetic,
+                            cell_idx,
+                        });
                         energy = out.energy_out;
                         dir = deflect(dir, out.mu, rng);
                     }
                     Channel::Photoelectric => {
                         let out = photoelectric_absorb(elem, energy, DEFAULT_PHOTON_CUTOFF_EV, rng);
                         result.energy_deposited += out.local_deposition;
-                        let dep_pos =
-                            electron_deposit_pos(pos, dir, material, out.local_deposition);
-                        result.deposits.push((dep_pos, out.local_deposition));
+                        result.electrons.push(ElectronSource {
+                            pos,
+                            dir,
+                            e_kin_ev: out.local_deposition,
+                            cell_idx,
+                        });
                         for ep in out.fluorescence_photons {
                             let (dx, dy, dz) = rng.isotropic_direction();
                             bank.push((pos, Vec3::new(dx, dy, dz), ep, cell_idx));
@@ -450,13 +478,19 @@ fn transport_one_csg(
                     Channel::PairProductionNuclear | Channel::PairProductionElectron => {
                         if let Some(out) = pair_produce(energy, rng) {
                             result.energy_deposited += out.local_deposition();
-                            // Pair kinetic energy is shared between e⁻ and
-                            // e⁺; average range displacement uses the
-                            // half-energy per particle rather than the
-                            // combined kinetic energy.
-                            let per_particle_ke = 0.5 * out.local_deposition();
-                            let dep_pos = electron_deposit_pos(pos, dir, material, per_particle_ke);
-                            result.deposits.push((dep_pos, out.local_deposition()));
+                            // Emit the pair kinetic energy as a single
+                            // track source. The electron and positron
+                            // go in opposite directions on average, but
+                            // both deposit along similar paths at high
+                            // energies; lumping them together under one
+                            // forward-going source matches the previous
+                            // midrange approximation.
+                            result.electrons.push(ElectronSource {
+                                pos,
+                                dir,
+                                e_kin_ev: out.local_deposition(),
+                                cell_idx,
+                            });
                             let (dx, dy, dz) = rng.isotropic_direction();
                             let ann_dir = Vec3::new(dx, dy, dz);
                             bank.push((pos, ann_dir, ANNIHILATION_ENERGY_EV, cell_idx));
@@ -474,33 +508,6 @@ fn transport_one_csg(
     // Event budget exhausted — deposit remaining energy locally.
     result.energy_deposited += energy;
     result.deposits.push((pos, energy));
-}
-
-/// Compute where a recoil-electron's kinetic energy should be
-/// deposited, given the photon's pre-collision position and
-/// direction, the host material, and the electron kinetic energy.
-///
-/// Uses the CSDA midrange approximation: the electron travels
-/// `R_e(E) / 2` on average before depositing its energy. Electron
-/// direction is approximated by the incoming photon's direction
-/// (photons and their Compton/photoelectric/pair electrons share
-/// the forward lab-frame momentum on average at reactor energies).
-///
-/// Materials with `density_g_per_cm3 == 0` disable displacement and
-/// fall back to kerma (deposit at collision point) — the range
-/// evaluates to 0 in that case.
-fn electron_deposit_pos(
-    pos: Vec3,
-    dir: Vec3,
-    material: &PhotonMaterial,
-    electron_kinetic_ev: f64,
-) -> Vec3 {
-    let r_cm = material.electron_range_cm(electron_kinetic_ev);
-    if r_cm <= 0.0 {
-        pos
-    } else {
-        pos + dir * (r_cm * 0.5)
-    }
 }
 
 /// Apply the boundary condition at a surface hit. Returns `false` when
