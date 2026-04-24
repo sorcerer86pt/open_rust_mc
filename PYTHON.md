@@ -35,9 +35,9 @@ virtualenv builds and installs in one step.
 ## Hello, Godiva
 
 The canonical smoke test — ICSBEP HEU-MET-FAST-001 (a bare 8.7407 cm
-93.5 %-enriched uranium sphere) reproducing the Rust binary's
-answer of `k_eff ≈ 1.000` to within ~300 pcm statistical noise in a
-few seconds:
+93.5 %-enriched uranium sphere) driving the engine from Python in a
+few seconds. `k_eff` comes back in ICSBEP's 1.0000 ± 100 pcm band; at
+these stats you'll see a few hundred pcm of statistical noise:
 
 ```python
 from open_rust_mc import Material, Scene, Sphere, Settings, run_eigenvalue
@@ -285,13 +285,40 @@ separate `abi3-py313` build target.
   registration is kept. Keep the mapping 1:1 in practice.
 - **Fixed-source photon runs are not exposed.** `run_gamma_heating`
   drives the coupled n-γ pipeline; standalone photon-only simulations
-  (e.g. Cs-137 spectrum) still require the Rust binary. Wiring that up
+  (e.g. Cs-137 spectrum) aren't wired through the FFI yet. Adding them
   is a small extension of the existing photon-transport surface.
 - **No per-cell energy-spectrum tallies.** Aggregate tallies (k_eff,
   per-cell captures, γ deposition) are exposed; energy-binned flux /
   current tallies need further FFI surface.
 
+## What the Python layer actually validates
+
+The Python package is not a re-implementation of the engine — it's a
+FFI wrapper that constructs `Cell` / `Material` / `Surface` /
+`SimConfig` values from Python objects and forwards them to the same
+`simulate::run_eigenvalue` and photon-transport paths the Rust
+binaries use. A Python call produces the same numbers as the Rust
+binary **by construction**, so "Python matches Rust binary" is not a
+meaningful physics claim — it's a mechanical consequence of calling
+the same function.
+
+The claims that are meaningful are:
+
+- **Plumbing correctness:** the `Scene` builder → engine translation
+  (region parsing, AABB derivation from half-space tokens, per-
+  material photon-material indexing, S(α,β) wiring, thermal-file
+  loading, tally extraction) produces physically correct inputs.
+  Failing any of these would show up as bad answers — when the
+  photon-material indexing was off-by-one during development, the
+  PWR pin cell's clad cell went to 0 % deposition. The 84 / 0 / 10 /
+  6 split only emerges once every piece is right.
+- **Validation against OpenMC:** the PWR γ-heating example lands at
+  84 / 0 / 10 / 6 vs OpenMC's 85 / 0 / 9 / 6 on identical geometry.
+  This is the real physics cross-check (see `scripts/openmc_pwr_gamma_heating.py`);
+  it validates the engine + Python path together against an
+  independent Monte Carlo code.
+
 ## Examples
 
-- [`examples/godiva.py`](rust_prototype/bindings/python/examples/godiva.py) — ICSBEP HEU-MET-FAST-001 (a bare uranium sphere), reproduces the Rust-binary k_eff in ~0.2 s.
-- [`examples/pwr_gamma_heating.py`](rust_prototype/bindings/python/examples/pwr_gamma_heating.py) — coupled neutron-photon PWR pin cell γ-heating using `uranium_oxide_material`, `zircaloy4_material`, `water_material`, S(α,β) thermal scattering, and `run_gamma_heating`. Matches the Rust binary's 84 / 0 / 10 / 6 % split and agrees with OpenMC.
+- [`examples/godiva.py`](rust_prototype/bindings/python/examples/godiva.py) — ICSBEP HEU-MET-FAST-001 (a bare uranium sphere) driving the engine from Python. k_eff lands inside ICSBEP's 1.0000 ± 100 pcm band; runtime ~0.2 s at 50 × 5 k.
+- [`examples/pwr_gamma_heating.py`](rust_prototype/bindings/python/examples/pwr_gamma_heating.py) — coupled neutron-photon PWR pin cell γ-heating using `uranium_oxide_material`, `zircaloy4_material`, `water_material`, S(α,β) thermal scattering, and `run_gamma_heating`. Deposition split lands at 84 / 0 / 10 / 6, within ~1 pp of OpenMC 0.15.3 on the same geometry.
