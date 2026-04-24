@@ -38,8 +38,14 @@ use pyo3::prelude::*;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
-use open_rust_mc::geometry::{Aabb, Vec3};
+use open_rust_mc::geometry::{Aabb, Vec3, ray};
+use open_rust_mc::photon::PhotonElement;
+use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
+use open_rust_mc::photon::electron::{radiation_length_cm, track_integrate_electron_csg_with_ms};
+use open_rust_mc::photon::material::PhotonMaterial as RustPhotonMaterial;
+use open_rust_mc::photon::transport::transport_history_csg;
 use open_rust_mc::transport::material::Material as RustMaterial;
+use open_rust_mc::transport::rng::Rng;
 use open_rust_mc::transport::simulate::{self, SimConfig};
 use open_rust_mc::transport::xs_provider::{self, TableXsProvider};
 
@@ -156,6 +162,9 @@ struct NuclideSpec {
     atom_density: f64,
     awr: f64,
     nubar: f64,
+    /// Optional S(α,β) thermal-scattering HDF5 file name (e.g.
+    /// "c_H_in_H2O.h5"), resolved relative to the scene's data dir.
+    thermal_file: Option<String>,
 }
 
 #[pyclass(name = "Material", module = "open_rust_mc._core")]
@@ -183,31 +192,100 @@ impl PyMaterial {
     /// Append a nuclide via its HDF5 file name, atom density
     /// [atoms/(barn·cm)], atomic weight ratio, and mean nu-bar fallback.
     ///
+    /// `thermal_file` attaches an S(α,β) thermal-scattering library
+    /// to this nuclide (e.g. `"c_H_in_H2O.h5"` for hydrogen in water).
+    /// Pass `None` to use free-gas kinematics only. The file must
+    /// live in the scene's data directory.
+    ///
     /// Atom density is the absolute macro unit used throughout the
     /// engine (Σ = n · σ in cm⁻¹ when σ is in barn). Compute it from
     /// macro density + stoichiometry on the Python side, or pass an
     /// already-computed value.
-    #[pyo3(signature = (hdf5_file, atom_density, awr, nubar=0.0))]
+    #[pyo3(signature = (hdf5_file, atom_density, awr, nubar=0.0, thermal_file=None))]
     fn add_nuclide(
         mut slf: PyRefMut<'_, Self>,
         hdf5_file: String,
         atom_density: f64,
         awr: f64,
         nubar: f64,
+        thermal_file: Option<String>,
     ) -> PyRefMut<'_, Self> {
         slf.nuclides.push(NuclideSpec {
             hdf5_file,
             atom_density,
             awr,
             nubar,
+            thermal_file,
         });
         slf
+    }
+
+    /// Total atom density of the material, summed over its nuclides.
+    fn total_atom_density(&self) -> f64 {
+        self.nuclides.iter().map(|n| n.atom_density).sum()
     }
 
     fn __repr__(&self) -> String {
         format!(
             "<Material {:?} at {:.1} K, {} nuclides>",
             self.name, self.temperature, self.nuclides.len()
+        )
+    }
+}
+
+// ── PhotonMaterial ────────────────────────────────────────────────────────
+
+/// Per-element entry in a photon material (HDF5 file name + atom density).
+#[derive(Clone)]
+struct PhotonElementSpec {
+    hdf5_file: String,
+    atom_density: f64,
+}
+
+/// Photon-transport material: a homogeneous element mixture with a
+/// mass density. Atom densities are in atoms/(b·cm), same convention
+/// as the neutron `Material`. Mass density (g/cm³) is used for the
+/// Katz-Penfold CSDA electron-range scaling in the track-integrated
+/// electron deposit.
+#[pyclass(name = "PhotonMaterial", module = "open_rust_mc._core")]
+#[derive(Clone)]
+struct PyPhotonMaterial {
+    density_g_per_cm3: f64,
+    elements: Vec<PhotonElementSpec>,
+}
+
+#[pymethods]
+impl PyPhotonMaterial {
+    #[new]
+    #[pyo3(signature = (density_g_per_cm3))]
+    fn new(density_g_per_cm3: f64) -> Self {
+        Self {
+            density_g_per_cm3,
+            elements: Vec::new(),
+        }
+    }
+
+    /// Append an element. `hdf5_file` is the per-element photon data
+    /// file name (e.g. `"U.h5"`, `"O.h5"`) located in the scene's
+    /// photon data directory. `atom_density` in atoms/(b·cm).
+    #[pyo3(signature = (hdf5_file, atom_density))]
+    fn add_element(
+        mut slf: PyRefMut<'_, Self>,
+        hdf5_file: String,
+        atom_density: f64,
+    ) -> PyRefMut<'_, Self> {
+        slf.elements.push(PhotonElementSpec {
+            hdf5_file,
+            atom_density,
+        });
+        slf
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<PhotonMaterial density={:.3} g/cm3, {} elements>",
+            self.density_g_per_cm3,
+            self.elements.len()
         )
     }
 }
@@ -262,11 +340,17 @@ struct CellSpec {
 #[pyclass(name = "Scene", module = "open_rust_mc._core")]
 struct PyScene {
     data_dir: PathBuf,
+    /// Optional photon data directory (per-element HDF5 files). Only
+    /// needed when calling `run_gamma_heating`.
+    photon_data_dir: Option<PathBuf>,
     materials: HashMap<String, PyMaterial>,
     material_order: Vec<String>,
     surfaces: HashMap<String, PySurface>,
     surface_order: Vec<String>,
     cells: Vec<CellSpec>,
+    /// Per-cell photon material, indexed by cell name. `None` means
+    /// the cell is void for photons.
+    photon_materials: HashMap<String, PyPhotonMaterial>,
 }
 
 #[pymethods]
@@ -282,12 +366,42 @@ impl PyScene {
         }
         Ok(Self {
             data_dir,
+            photon_data_dir: None,
             materials: HashMap::new(),
             material_order: Vec::new(),
             surfaces: HashMap::new(),
             surface_order: Vec::new(),
             cells: Vec::new(),
+            photon_materials: HashMap::new(),
         })
+    }
+
+    /// Set the photon (per-element) HDF5 data directory, required for
+    /// `run_gamma_heating`. Builder-style, returns `self`.
+    fn set_photon_data_dir<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        path: PathBuf,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        if !path.exists() {
+            return Err(PyFileNotFoundError::new_err(format!(
+                "photon_data_dir does not exist: {}",
+                path.display()
+            )));
+        }
+        slf.photon_data_dir = Some(path);
+        Ok(slf)
+    }
+
+    /// Attach a `PhotonMaterial` to a previously-registered cell by
+    /// name. Cells without a photon material are treated as void for
+    /// photon transport.
+    fn add_photon_material<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        cell_name: String,
+        material: PyPhotonMaterial,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.photon_materials.insert(cell_name, material);
+        Ok(slf)
     }
 
     fn add_material<'a>(
@@ -366,6 +480,33 @@ struct PyEigenvalueResult {
     total_histories: u64,
     #[pyo3(get)]
     runtime_seconds: f64,
+    /// Per-batch k_eff values, one per batch (both inactive and
+    /// active). Use to plot convergence or compute custom statistics.
+    #[pyo3(get)]
+    k_per_batch: Vec<f64>,
+    /// Per-batch Shannon entropy of the fission-source bank.
+    #[pyo3(get)]
+    entropy_per_batch: Vec<f64>,
+    /// Mask parallel to `k_per_batch` — `true` for active batches.
+    #[pyo3(get)]
+    active_mask: Vec<bool>,
+    /// Per-cell capture counts summed across all active batches.
+    /// Indexed by the order cells were registered via
+    /// `Scene.add_cell`. Use as a capture-rate tally proxy.
+    #[pyo3(get)]
+    captures_by_cell: Vec<f64>,
+    /// Names of cells, in the same order as `captures_by_cell`.
+    #[pyo3(get)]
+    cell_names: Vec<String>,
+    /// Total collisions across all active batches (diagnostic).
+    #[pyo3(get)]
+    total_collisions: u64,
+    /// Total fissions across all active batches.
+    #[pyo3(get)]
+    total_fissions: u64,
+    /// Total leakages (particles escaping through vacuum BC).
+    #[pyo3(get)]
+    total_leakage: u64,
 }
 
 #[pymethods]
@@ -376,78 +517,673 @@ impl PyEigenvalueResult {
             self.k_eff, self.k_sigma, self.active_batches
         )
     }
+
+    /// Captures by cell as a `{name: count}` dictionary.
+    fn captures_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = pyo3::types::PyDict::new_bound(py);
+        for (n, c) in self.cell_names.iter().zip(self.captures_by_cell.iter()) {
+            d.set_item(n, *c)?;
+        }
+        Ok(d.into())
+    }
+}
+
+// ── Gamma-heating pipeline ────────────────────────────────────────────────
+
+#[pyclass(name = "GammaHeatingResult", module = "open_rust_mc._core")]
+struct PyGammaHeatingResult {
+    #[pyo3(get)]
+    k_eff: f64,
+    #[pyo3(get)]
+    k_sigma: f64,
+    /// Per-cell γ-deposition fractions (sum over cells = 1 − escaped −
+    /// orphan). Order matches `cell_names`.
+    #[pyo3(get)]
+    deposition_fraction: Vec<f64>,
+    /// Per-cell absolute γ deposition in eV (sum over all photon
+    /// histories).
+    #[pyo3(get)]
+    deposition_ev: Vec<f64>,
+    #[pyo3(get)]
+    cell_names: Vec<String>,
+    /// Total photon source energy summed over all photon histories (eV).
+    #[pyo3(get)]
+    total_source_energy_ev: f64,
+    /// Energy that escaped through vacuum BCs (eV).
+    #[pyo3(get)]
+    escaped_energy_ev: f64,
+    /// Energy whose deposit position didn't resolve to any cell (eV).
+    #[pyo3(get)]
+    orphan_energy_ev: f64,
+    /// Number of bremsstrahlung photons emitted during photon transport.
+    #[pyo3(get)]
+    brems_photons_emitted: u64,
+    /// Total energy carried by emitted brems photons (eV).
+    #[pyo3(get)]
+    brems_energy_ev: f64,
+    #[pyo3(get)]
+    neutron_runtime_seconds: f64,
+    #[pyo3(get)]
+    photon_runtime_seconds: f64,
+    #[pyo3(get)]
+    photon_events: u64,
+}
+
+#[pymethods]
+impl PyGammaHeatingResult {
+    fn __repr__(&self) -> String {
+        let fracs: Vec<String> = self
+            .cell_names
+            .iter()
+            .zip(self.deposition_fraction.iter())
+            .map(|(n, f)| format!("{n}={:.2}%", 100.0 * f))
+            .collect();
+        format!(
+            "<GammaHeatingResult k={:.5}, [{}]>",
+            self.k_eff,
+            fracs.join(" ")
+        )
+    }
+
+    /// Deposition fractions as a `{cell_name: fraction}` dictionary.
+    fn fractions_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = pyo3::types::PyDict::new_bound(py);
+        for (n, f) in self
+            .cell_names
+            .iter()
+            .zip(self.deposition_fraction.iter())
+        {
+            d.set_item(n, *f)?;
+        }
+        Ok(d.into())
+    }
+}
+
+/// Run the coupled neutron-photon pipeline:
+/// 1. neutron k-eigenvalue, collecting photon source events at each
+///    capture / fission / inelastic collision;
+/// 2. photon transport with track-integrated CSDA electrons, Highland
+///    multiple scattering, Seltzer-Berger bremsstrahlung, Bethe-Bloch-
+///    style non-uniform dE/dx — all enabled by default in the engine.
+///
+/// Returns per-cell γ-deposition fractions, escaped energy, and
+/// diagnostics.
+#[pyfunction]
+#[pyo3(signature = (scene, neutron_settings, n_photon_histories=200_000, photon_energy_cutoff_ev=1000.0, photon_seed_base=0xB0F1_0000))]
+fn run_gamma_heating(
+    py: Python<'_>,
+    scene: &PyScene,
+    neutron_settings: &PySettings,
+    n_photon_histories: usize,
+    photon_energy_cutoff_ev: f64,
+    photon_seed_base: u64,
+) -> PyResult<PyGammaHeatingResult> {
+    // ── Preflight: photon data dir must be set ─────────────────────
+    let photon_dir = scene.photon_data_dir.as_ref().ok_or_else(|| {
+        PyValueError::new_err(
+            "run_gamma_heating requires Scene.set_photon_data_dir(path) to point at \
+             the per-element photon HDF5 directory (e.g. 'photon/' in the ENDF release)",
+        )
+    })?;
+
+    // ── Phase 0: same geometry + neutron-side build as run_eigenvalue ──
+    // Collect nuclides and XS tables.
+    #[derive(PartialEq, Clone)]
+    struct NuclideKey {
+        hdf5_file: String,
+        temp_idx: usize,
+    }
+    let mut nuclide_keys: Vec<NuclideKey> = Vec::new();
+    let mut nuclide_specs: Vec<(String, f64, f64, usize)> = Vec::new();
+    for mat_name in &scene.material_order {
+        let mat = &scene.materials[mat_name];
+        for n in &mat.nuclides {
+            let key = NuclideKey {
+                hdf5_file: n.hdf5_file.clone(),
+                temp_idx: mat.temp_idx,
+            };
+            if !nuclide_keys.contains(&key) {
+                nuclide_keys.push(key.clone());
+                nuclide_specs.push((n.hdf5_file.clone(), n.awr, n.nubar, mat.temp_idx));
+            }
+        }
+    }
+    let mut tables = Vec::with_capacity(nuclide_specs.len());
+    for (file, awr, nubar, temp_idx) in &nuclide_specs {
+        let path = scene.data_dir.join(file);
+        if !path.exists() {
+            return Err(PyFileNotFoundError::new_err(format!(
+                "missing nuclide file: {}",
+                path.display()
+            )));
+        }
+        tables.push(xs_provider::load_nuclide_table(&path, *temp_idx, *awr, *nubar));
+    }
+    // Thermal scattering (same logic as run_eigenvalue).
+    let mut thermal_files: Vec<Option<String>> = vec![None; nuclide_specs.len()];
+    for mat_name in &scene.material_order {
+        let mat = &scene.materials[mat_name];
+        for n in &mat.nuclides {
+            if let Some(tf) = &n.thermal_file {
+                let key = NuclideKey {
+                    hdf5_file: n.hdf5_file.clone(),
+                    temp_idx: mat.temp_idx,
+                };
+                let idx = nuclide_keys.iter().position(|k| k == &key).unwrap();
+                thermal_files[idx] = Some(tf.clone());
+            }
+        }
+    }
+    let mut thermal: Vec<Option<std::sync::Arc<open_rust_mc::thermal::ThermalScatteringData>>> =
+        vec![None; nuclide_specs.len()];
+    for (i, tf) in thermal_files.iter().enumerate() {
+        if let Some(tf) = tf {
+            let path = scene.data_dir.join(tf);
+            if let Ok(tsl) = open_rust_mc::hdf5_reader::load_thermal_scattering(&path) {
+                thermal[i] = Some(std::sync::Arc::new(tsl));
+            }
+        }
+    }
+    let xs = TableXsProvider {
+        nuclides: tables,
+        thermal,
+    };
+
+    // Surfaces, materials, cells.
+    let mut surf_idx: HashMap<String, usize> = HashMap::new();
+    let mut surfaces_rt: Vec<Surface> = Vec::with_capacity(scene.surface_order.len());
+    for (i, name) in scene.surface_order.iter().enumerate() {
+        surf_idx.insert(name.clone(), i);
+        surfaces_rt.push(scene.surfaces[name].inner.clone());
+    }
+    let mut material_idx: HashMap<String, usize> = HashMap::new();
+    let mut materials_rt: Vec<RustMaterial> = Vec::with_capacity(scene.material_order.len());
+    for (i, name) in scene.material_order.iter().enumerate() {
+        let mat = &scene.materials[name];
+        let mut m = RustMaterial::new(&mat.name, mat.temperature);
+        for n in &mat.nuclides {
+            let key = NuclideKey {
+                hdf5_file: n.hdf5_file.clone(),
+                temp_idx: mat.temp_idx,
+            };
+            let nuc_idx = nuclide_keys.iter().position(|k| k == &key).unwrap();
+            m.add_nuclide(n.atom_density, nuc_idx);
+        }
+        material_idx.insert(name.clone(), i);
+        materials_rt.push(m);
+    }
+    let mut cells_rt: Vec<Cell> = Vec::with_capacity(scene.cells.len());
+    for (i, c) in scene.cells.iter().enumerate() {
+        let region = build_region(&c.region_expr, &surf_idx)?;
+        let aabb = aabb_from_region(&c.region_expr, &surfaces_rt, &surf_idx);
+        let fill = match &c.fill {
+            None => CellFill::Void,
+            Some(mat_name) => {
+                let idx = material_idx.get(mat_name).ok_or_else(|| {
+                    PyValueError::new_err(format!(
+                        "cell {:?} references unknown material {:?}",
+                        c.name, mat_name
+                    ))
+                })?;
+                CellFill::Material(*idx as u32)
+            }
+        };
+        cells_rt.push(
+            Cell::new(CellId(i as u32), region, fill)
+                .with_aabb(aabb)
+                .with_temperature(c.temperature),
+        );
+    }
+
+    // ── Phase 1: neutron transport ─────────────────────────────────
+    let config = SimConfig {
+        batches: neutron_settings.batches,
+        inactive: neutron_settings.inactive,
+        particles_per_batch: neutron_settings.particles,
+        seed: neutron_settings.seed,
+        auto_inactive: None,
+        verbose: false,
+        parallel: true,
+    };
+    let t_neu = std::time::Instant::now();
+    let (batch_results, k_running) = py.allow_threads(|| {
+        simulate::run_eigenvalue(&config, &surfaces_rt, &cells_rt, &materials_rt, &xs)
+    });
+    let neutron_runtime = t_neu.elapsed().as_secs_f64();
+
+    // Gather photon source bank from active batches.
+    let mut photon_bank: Vec<simulate::PhotonSourceEvent> = Vec::new();
+    for br in &batch_results {
+        if br.active {
+            photon_bank.extend(br.photon_events.iter().copied());
+        }
+    }
+    if photon_bank.is_empty() {
+        return Err(PyValueError::new_err(
+            "no photon source events produced — make sure the XS provider carries \
+             photon product data (neutron HDF5 files must have `/reaction_MT/product_photon` groups)",
+        ));
+    }
+    let active: Vec<f64> = batch_results
+        .iter()
+        .filter(|b| b.active)
+        .map(|b| b.k_eff)
+        .collect();
+    let n_active = active.len().max(1);
+    let k_mean: f64 = active.iter().sum::<f64>() / n_active as f64;
+    let k_var = if n_active > 1 {
+        active.iter().map(|k| (k - k_mean).powi(2)).sum::<f64>() / (n_active - 1) as f64
+    } else {
+        0.0
+    };
+    let k_sigma = (k_var / n_active as f64).sqrt();
+    let _ = k_running;
+
+    // ── Phase 2: build photon-side materials and run photon transport ──
+    // Per-cell PhotonMaterial + per-cell X₀ + per-cell brems sampler.
+    // Build `materials_p` indexed by MATERIAL id (same as `materials_rt`),
+    // which is what the engine expects — `CellFill::Material(m)` maps
+    // to `materials_p[m]`. Photon materials from the Python side are
+    // attached by cell name, so we resolve each `cell_name ->
+    // material_name -> material_idx`. Two cells sharing a material
+    // must agree on the photon material.
+    let mut materials_p: Vec<Option<RustPhotonMaterial>> =
+        (0..scene.material_order.len()).map(|_| None).collect();
+    for (cell_name, py_pm) in &scene.photon_materials {
+        let cell_spec = scene
+            .cells
+            .iter()
+            .find(|c| &c.name == cell_name)
+            .ok_or_else(|| {
+                PyValueError::new_err(format!(
+                    "photon material attached to unknown cell {:?}",
+                    cell_name
+                ))
+            })?;
+        let mat_name = cell_spec.fill.as_ref().ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "cannot attach photon material to void cell {:?}",
+                cell_name
+            ))
+        })?;
+        let mat_idx = *material_idx.get(mat_name).ok_or_else(|| {
+            PyValueError::new_err(format!(
+                "cell {:?} references unknown material {:?}",
+                cell_name, mat_name
+            ))
+        })?;
+        let mut entries = Vec::with_capacity(py_pm.elements.len());
+        for e in &py_pm.elements {
+            let path = photon_dir.join(&e.hdf5_file);
+            if !path.exists() {
+                return Err(PyFileNotFoundError::new_err(format!(
+                    "missing photon element file: {}",
+                    path.display()
+                )));
+            }
+            let elem = PhotonElement::from_hdf5(&path).map_err(|err| {
+                PyValueError::new_err(format!(
+                    "failed to load photon element {}: {err}",
+                    path.display()
+                ))
+            })?;
+            entries.push((e.atom_density, elem));
+        }
+        if materials_p[mat_idx].is_some() {
+            // Silently keep the first one — consistent with "two cells
+            // sharing a material agree on the photon material". We
+            // could check for equality but Rust's PhotonMaterial isn't
+            // PartialEq.
+            continue;
+        }
+        materials_p[mat_idx] = Some(
+            RustPhotonMaterial::new(entries).with_density(py_pm.density_g_per_cm3),
+        );
+    }
+    // Brems samplers are also per-material.
+    let brems_p: Vec<Option<MaterialBremss>> = materials_p
+        .iter()
+        .map(|m| m.as_ref().map(MaterialBremss::from_photon_material))
+        .collect();
+    // X₀ is per-cell — indirect through the cell's material id. Cells
+    // with void fill get ∞ (no MS).
+    let x0_per_cell: Vec<f64> = cells_rt
+        .iter()
+        .map(|c| match c.fill {
+            CellFill::Material(m) => materials_p
+                .get(m as usize)
+                .and_then(|o| o.as_ref())
+                .map(radiation_length_cm)
+                .unwrap_or(f64::INFINITY),
+            _ => f64::INFINITY,
+        })
+        .collect();
+
+    // Photon transport loop (mirrors pwr_gamma_heating.rs).
+    let t_ph = std::time::Instant::now();
+    let mut deposited_per_cell = vec![0.0_f64; cells_rt.len()];
+    let mut escaped_energy = 0.0_f64;
+    let mut orphan_deposit = 0.0_f64;
+    let mut total_source_energy = 0.0_f64;
+    let mut brems_photons_emitted = 0_u64;
+    let mut brems_energy_emitted = 0.0_f64;
+
+    py.allow_threads(|| {
+        for i in 0..n_photon_histories {
+            let mut rng = Rng::new(photon_seed_base.wrapping_add(i as u64), 1);
+            let ev_idx = (rng.uniform() * photon_bank.len() as f64) as usize;
+            let ev = photon_bank[ev_idx.min(photon_bank.len() - 1)];
+            let pos = Vec3::new(ev.pos[0], ev.pos[1], ev.pos[2]);
+            let (dx, dy, dz) = rng.isotropic_direction();
+            let e_src = ev.energy;
+            total_source_energy += e_src;
+
+            let mut photon_bank_local: Vec<(Vec3, Vec3, f64, usize)> =
+                vec![(pos, Vec3::new(dx, dy, dz), e_src, 0)];
+
+            while let Some((p0, d0, e0, _c0)) = photon_bank_local.pop() {
+                let r = transport_history_csg(
+                    p0,
+                    d0,
+                    e0,
+                    &surfaces_rt,
+                    &cells_rt,
+                    &materials_p,
+                    photon_energy_cutoff_ev,
+                    &mut rng,
+                );
+
+                escaped_energy += r.energy_escaped;
+                for (p, e) in &r.deposits {
+                    if let Some(idx) = ray::find_cell(*p, &surfaces_rt, &cells_rt) {
+                        deposited_per_cell[idx] += e;
+                    } else {
+                        orphan_deposit += e;
+                    }
+                }
+                for ele in &r.electrons {
+                    let mut csda_energy = ele.e_kin_ev;
+                    // Look up the cell's material id first, then fetch
+                    // brems/photon materials for that material — not
+                    // the cell index directly. materials_p is indexed
+                    // by material id (same as the engine's convention).
+                    let mat_id = match cells_rt.get(ele.cell_idx).map(|c| &c.fill) {
+                        Some(CellFill::Material(m)) => *m as usize,
+                        _ => usize::MAX,
+                    };
+                    if let (Some(Some(bs)), Some(Some(_mat))) =
+                        (brems_p.get(mat_id), materials_p.get(mat_id))
+                    {
+                        let p_brems = bs.radiative_yield_approx(ele.e_kin_ev);
+                        if p_brems > 0.0 && rng.uniform() < p_brems {
+                            if let Some(e_gamma) =
+                                bs.sample_photon_energy(ele.e_kin_ev, &mut rng)
+                            {
+                                let (gx, gy, gz) = rng.isotropic_direction();
+                                photon_bank_local.push((
+                                    ele.pos,
+                                    Vec3::new(gx, gy, gz),
+                                    e_gamma,
+                                    ele.cell_idx,
+                                ));
+                                brems_photons_emitted += 1;
+                                brems_energy_emitted += e_gamma;
+                                csda_energy -= e_gamma;
+                                if csda_energy < 0.0 {
+                                    csda_energy = 0.0;
+                                }
+                            }
+                        }
+                    }
+                    track_integrate_electron_csg_with_ms(
+                        ele.pos,
+                        ele.dir,
+                        csda_energy,
+                        ele.cell_idx,
+                        &surfaces_rt,
+                        &cells_rt,
+                        &materials_p,
+                        &x0_per_cell,
+                        0.005,
+                        &mut rng,
+                        &mut deposited_per_cell,
+                    );
+                }
+            }
+        }
+    });
+    let photon_runtime = t_ph.elapsed().as_secs_f64();
+
+    let cell_names: Vec<String> = scene.cells.iter().map(|c| c.name.clone()).collect();
+    let deposition_fraction: Vec<f64> = deposited_per_cell
+        .iter()
+        .map(|d| if total_source_energy > 0.0 { d / total_source_energy } else { 0.0 })
+        .collect();
+
+    Ok(PyGammaHeatingResult {
+        k_eff: k_mean,
+        k_sigma,
+        deposition_fraction,
+        deposition_ev: deposited_per_cell,
+        cell_names,
+        total_source_energy_ev: total_source_energy,
+        escaped_energy_ev: escaped_energy,
+        orphan_energy_ev: orphan_deposit,
+        brems_photons_emitted,
+        brems_energy_ev: brems_energy_emitted,
+        neutron_runtime_seconds: neutron_runtime,
+        photon_runtime_seconds: photon_runtime,
+        photon_events: photon_bank.len() as u64,
+    })
+}
+
+/// AABB of a surface's half-space, given the sign.
+///
+/// - `+name` (positive half-space): for axis-aligned planes, the
+///   open half above the plane; for closed quadrics (sphere, cylinder,
+///   cone), the complement of the surface's own bounding box which
+///   we can't represent tightly — fall back to infinite.
+/// - `-name` (negative half-space): for closed quadrics, the surface's
+///   bounding box; for planes, the open half below the plane.
+fn half_space_aabb(surface: &Surface, positive: bool) -> Aabb {
+    let inf = f64::INFINITY;
+    let neg_inf = f64::NEG_INFINITY;
+    match surface {
+        Surface::PlaneX { x0, .. } => {
+            if positive {
+                Aabb::new(
+                    Vec3::new(*x0, neg_inf, neg_inf),
+                    Vec3::new(inf, inf, inf),
+                )
+            } else {
+                Aabb::new(
+                    Vec3::new(neg_inf, neg_inf, neg_inf),
+                    Vec3::new(*x0, inf, inf),
+                )
+            }
+        }
+        Surface::PlaneY { y0, .. } => {
+            if positive {
+                Aabb::new(
+                    Vec3::new(neg_inf, *y0, neg_inf),
+                    Vec3::new(inf, inf, inf),
+                )
+            } else {
+                Aabb::new(
+                    Vec3::new(neg_inf, neg_inf, neg_inf),
+                    Vec3::new(inf, *y0, inf),
+                )
+            }
+        }
+        Surface::PlaneZ { z0, .. } => {
+            if positive {
+                Aabb::new(
+                    Vec3::new(neg_inf, neg_inf, *z0),
+                    Vec3::new(inf, inf, inf),
+                )
+            } else {
+                Aabb::new(
+                    Vec3::new(neg_inf, neg_inf, neg_inf),
+                    Vec3::new(inf, inf, *z0),
+                )
+            }
+        }
+        // Oblique plane, or non-axis-aligned: we don't have a tight
+        // half-space AABB; use the surface's own AABB for `-` (which
+        // for closed quadrics is their bounding sphere/cylinder box)
+        // and infinity for `+` (open outside).
+        _ => {
+            if positive {
+                Aabb::INFINITE
+            } else {
+                surface.aabb()
+            }
+        }
+    }
 }
 
 /// AABB for a cell derived from its region expression.
 ///
-/// For each `-<name>` token (inside half-space), the cell is bounded
-/// by that surface's own AABB. We take the intersection of all such
-/// "inside" AABBs — giving a tight bounding box for rejection
-/// sampling in `initial_source`. `+<name>` tokens (outside half-space)
-/// are ignored: the cell extends to infinity on those sides unless
-/// constrained by another surface's inside token.
-///
-/// For a void cell with no `-name` tokens (e.g. the "outside" cell of
-/// Godiva), the result is `Aabb::INFINITE`. That's fine because
-/// initial_source only samples fissile cells (those with
-/// `CellFill::Material`), not void cells.
+/// Each OR-group contributes its own intersected half-space AABBs;
+/// the whole cell's AABB encloses every group's box. Both `+name`
+/// and `-name` tokens contribute (via `half_space_aabb`), so
+/// axis-aligned plane-bounded cells like a PWR pin cell get finite
+/// AABBs on every axis. "~name" and unknown names are skipped.
 fn aabb_from_region(
     expr: &str,
     surfaces: &[Surface],
     surf_idx: &HashMap<String, usize>,
 ) -> Aabb {
-    let mut acc: Option<Aabb> = None;
-    for token in expr.split_whitespace() {
-        let (sign, name) = match token.chars().next() {
-            Some('-') => ('-', &token[1..]),
-            _ => continue, // only inside tokens constrain the AABB
-        };
-        if sign != '-' {
-            continue;
+    let mut group_boxes: Vec<Aabb> = Vec::new();
+    for group in expr.split('|') {
+        let mut acc: Option<Aabb> = None;
+        for token in group.split_whitespace() {
+            if token.starts_with('~') {
+                continue; // complement — hard to derive AABB
+            }
+            let (positive, name) = match token.chars().next() {
+                Some('-') => (false, &token[1..]),
+                Some('+') => (true, &token[1..]),
+                _ => continue,
+            };
+            let Some(&i) = surf_idx.get(name) else { continue };
+            let a = half_space_aabb(&surfaces[i], positive);
+            acc = Some(match acc {
+                None => a,
+                Some(b) => Aabb::new(
+                    Vec3::new(
+                        b.min.x.max(a.min.x),
+                        b.min.y.max(a.min.y),
+                        b.min.z.max(a.min.z),
+                    ),
+                    Vec3::new(
+                        b.max.x.min(a.max.x),
+                        b.max.y.min(a.max.y),
+                        b.max.z.min(a.max.z),
+                    ),
+                ),
+            });
         }
-        let Some(&i) = surf_idx.get(name) else { continue };
-        let a = surfaces[i].aabb();
-        acc = Some(match acc {
-            None => a,
-            Some(b) => Aabb::new(
-                Vec3::new(b.min.x.max(a.min.x), b.min.y.max(a.min.y), b.min.z.max(a.min.z)),
-                Vec3::new(b.max.x.min(a.max.x), b.max.y.min(a.max.y), b.max.z.min(a.max.z)),
-            ),
-        });
+        if let Some(b) = acc {
+            group_boxes.push(b);
+        }
     }
-    acc.unwrap_or(Aabb::INFINITE)
+    if group_boxes.is_empty() {
+        return Aabb::INFINITE;
+    }
+    group_boxes
+        .into_iter()
+        .reduce(|a, b| {
+            Aabb::new(
+                Vec3::new(
+                    a.min.x.min(b.min.x),
+                    a.min.y.min(b.min.y),
+                    a.min.z.min(b.min.z),
+                ),
+                Vec3::new(
+                    a.max.x.max(b.max.x),
+                    a.max.y.max(b.max.y),
+                    a.max.z.max(b.max.z),
+                ),
+            )
+        })
+        .unwrap()
 }
 
-/// Build the Region for `expr` like `-a +b -c` with name→index map.
+/// Build a `Region` from a string expression.
+///
+/// Grammar (no nested parentheses, adequate for reactor benchmarks):
+/// - `-name`    — inside the named surface (negative half-space)
+/// - `+name`    — outside the named surface (positive half-space)
+/// - `~-name`   — complement of inside, i.e. NOT(inside) — equivalent
+///   to `+name` for a simple half-space, but the `~` form composes
+///   through unions/intersections so `~(-a -b)` means "not in both"
+/// - whitespace-separated tokens within a group are AND'd
+/// - `|` at the top level splits OR-groups; each OR-group is an AND
+///   of its tokens, and the overall region is the union of groups
+///
+/// Examples:
+/// - `"-fuel_or"`                       fuel disc
+/// - `"+fuel_or -clad_ir"`              annular gap
+/// - `"-inner | -other"`                union of two regions
+/// - `"~-a ~-b"`                        outside a AND outside b
 fn build_region(expr: &str, surf_idx: &HashMap<String, usize>) -> PyResult<Region> {
-    let mut parts = Vec::new();
-    for token in expr.split_whitespace() {
-        let (sign, name) = match token.chars().next() {
-            Some('-') => ('-', &token[1..]),
-            Some('+') => ('+', &token[1..]),
-            _ => {
-                return Err(PyValueError::new_err(format!(
-                    "region token {token:?} must start with '+' or '-'"
-                )));
-            }
-        };
-        let idx = *surf_idx.get(name).ok_or_else(|| {
-            PyValueError::new_err(format!("unknown surface {name:?} in region {expr:?}"))
-        })?;
-        parts.push(if sign == '-' {
-            cell::inside(idx)
-        } else {
-            cell::outside(idx)
-        });
-    }
-    if parts.is_empty() {
+    let or_groups: Vec<&str> = expr
+        .split('|')
+        .map(|g| g.trim())
+        .filter(|g| !g.is_empty())
+        .collect();
+    if or_groups.is_empty() {
         return Err(PyValueError::new_err("region expression is empty"));
     }
-    Ok(if parts.len() == 1 {
-        parts.into_iter().next().unwrap()
-    } else {
-        cell::intersect_all(parts)
-    })
+
+    let mut group_regions: Vec<Region> = Vec::with_capacity(or_groups.len());
+    for group in or_groups {
+        let mut and_terms: Vec<Region> = Vec::new();
+        for token in group.split_whitespace() {
+            let (complement, rest) = match token.strip_prefix('~') {
+                Some(stripped) => (true, stripped),
+                None => (false, token),
+            };
+            let (is_inside, name) = match rest.chars().next() {
+                Some('-') => (true, &rest[1..]),
+                Some('+') => (false, &rest[1..]),
+                _ => {
+                    return Err(PyValueError::new_err(format!(
+                        "region token {token:?} must be '-name', '+name', '~-name', or '~+name'"
+                    )));
+                }
+            };
+            let idx = *surf_idx.get(name).ok_or_else(|| {
+                PyValueError::new_err(format!("unknown surface {name:?} in region {expr:?}"))
+            })?;
+            let half = if is_inside {
+                cell::inside(idx)
+            } else {
+                cell::outside(idx)
+            };
+            and_terms.push(if complement {
+                Region::Complement(Box::new(half))
+            } else {
+                half
+            });
+        }
+        if and_terms.is_empty() {
+            return Err(PyValueError::new_err(format!(
+                "empty or-group in region {expr:?}"
+            )));
+        }
+        group_regions.push(if and_terms.len() == 1 {
+            and_terms.into_iter().next().unwrap()
+        } else {
+            cell::intersect_all(and_terms)
+        });
+    }
+
+    Ok(group_regions
+        .into_iter()
+        .reduce(|a, b| Region::Union(Box::new(a), Box::new(b)))
+        .expect("or_groups is non-empty"))
 }
 
 #[pyfunction]
@@ -492,7 +1228,57 @@ fn run_eigenvalue(
         }
         tables.push(xs_provider::load_nuclide_table(&path, *temp_idx, *awr, *nubar));
     }
-    let thermal = vec![None; nuclide_specs.len()];
+
+    // 2b. Build per-nuclide thermal scattering table. Indexed by the
+    //     same nuclide index as `tables`. A nuclide is "thermal" if
+    //     ANY material using it specified a `thermal_file` — we pick
+    //     the first such file (all uses must agree). This mirrors
+    //     pwr_pincell.rs's `load_thermal` path.
+    let mut thermal_files: Vec<Option<String>> = vec![None; nuclide_specs.len()];
+    for mat_name in &scene.material_order {
+        let mat = &scene.materials[mat_name];
+        for n in &mat.nuclides {
+            if let Some(tf) = &n.thermal_file {
+                let key = NuclideKey {
+                    hdf5_file: n.hdf5_file.clone(),
+                    temp_idx: mat.temp_idx,
+                };
+                let idx = nuclide_keys.iter().position(|k| k == &key).unwrap();
+                match &thermal_files[idx] {
+                    None => thermal_files[idx] = Some(tf.clone()),
+                    Some(existing) if existing != tf => {
+                        return Err(PyValueError::new_err(format!(
+                            "conflicting thermal files for {}: {} vs {}",
+                            n.hdf5_file, existing, tf
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let mut thermal: Vec<Option<std::sync::Arc<open_rust_mc::thermal::ThermalScatteringData>>> =
+        vec![None; nuclide_specs.len()];
+    for (i, tf) in thermal_files.iter().enumerate() {
+        if let Some(tf) = tf {
+            let path = scene.data_dir.join(tf);
+            if !path.exists() {
+                return Err(PyFileNotFoundError::new_err(format!(
+                    "missing thermal scattering file: {}",
+                    path.display()
+                )));
+            }
+            match open_rust_mc::hdf5_reader::load_thermal_scattering(&path) {
+                Ok(tsl) => thermal[i] = Some(std::sync::Arc::new(tsl)),
+                Err(e) => {
+                    return Err(PyValueError::new_err(format!(
+                        "failed to load thermal scattering {}: {e}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
     let xs = TableXsProvider {
         nuclides: tables,
         thermal,
@@ -571,7 +1357,7 @@ fn run_eigenvalue(
     });
     let runtime = t0.elapsed().as_secs_f64();
 
-    // 7. Compute k mean/std over active batches.
+    // 7. Compute k mean/std and roll up per-batch tallies.
     let active: Vec<f64> = batch_results
         .iter()
         .filter(|b| b.active)
@@ -589,14 +1375,43 @@ fn run_eigenvalue(
     } else {
         0.0
     };
-    let std = (variance / n as f64).sqrt();
+    let std_dev = (variance / n as f64).sqrt();
+
+    let k_per_batch: Vec<f64> = batch_results.iter().map(|b| b.k_eff).collect();
+    let entropy_per_batch: Vec<f64> = batch_results.iter().map(|b| b.shannon_entropy).collect();
+    let active_mask: Vec<bool> = batch_results.iter().map(|b| b.active).collect();
+
+    // Per-cell capture tally: sum over active batches.
+    let mut captures_by_cell = vec![0.0_f64; cells_rt.len()];
+    let mut total_collisions: u64 = 0;
+    let mut total_fissions: u64 = 0;
+    let mut total_leakage: u64 = 0;
+    for br in batch_results.iter().filter(|b| b.active) {
+        for (i, c) in br.captures_by_cell.iter().enumerate() {
+            if i < captures_by_cell.len() {
+                captures_by_cell[i] += *c;
+            }
+        }
+        total_collisions += br.collisions as u64;
+        total_fissions += br.fissions as u64;
+        total_leakage += br.leakage as u64;
+    }
+    let cell_names: Vec<String> = scene.cells.iter().map(|c| c.name.clone()).collect();
 
     Ok(PyEigenvalueResult {
         k_eff: mean,
-        k_sigma: std,
+        k_sigma: std_dev,
         active_batches: n,
         total_histories: n as u64 * settings.particles as u64,
         runtime_seconds: runtime,
+        k_per_batch,
+        entropy_per_batch,
+        active_mask,
+        captures_by_cell,
+        cell_names,
+        total_collisions,
+        total_fissions,
+        total_leakage,
     })
 }
 
@@ -613,9 +1428,11 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // IS inside the loader lock (module init runs from LoadLibrary).
     m.add_class::<PySurface>()?;
     m.add_class::<PyMaterial>()?;
+    m.add_class::<PyPhotonMaterial>()?;
     m.add_class::<PySettings>()?;
     m.add_class::<PyScene>()?;
     m.add_class::<PyEigenvalueResult>()?;
+    m.add_class::<PyGammaHeatingResult>()?;
 
     m.add_function(wrap_pyfunction!(Sphere, m)?)?;
     m.add_function(wrap_pyfunction!(ZCylinder, m)?)?;
@@ -626,6 +1443,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ZPlane, m)?)?;
 
     m.add_function(wrap_pyfunction!(run_eigenvalue, m)?)?;
+    m.add_function(wrap_pyfunction!(run_gamma_heating, m)?)?;
 
     Ok(())
 }

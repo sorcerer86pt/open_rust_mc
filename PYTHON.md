@@ -93,18 +93,40 @@ index (which of the HDF5 column sets to use for on-library lookups).
 
 | Method | Purpose |
 |---|---|
-| `add_nuclide(hdf5_file, atom_density, awr, nubar=0.0)` | Append a nuclide. `hdf5_file` is the basename inside the data dir (e.g. `"U235.h5"`); `atom_density` in atoms/(b·cm); `awr` is atomic-weight ratio; `nubar` is a fallback mean neutron yield used only if the HDF5 doesn't provide energy-dependent ν̄(E). |
+| `add_nuclide(hdf5_file, atom_density, awr, nubar=0.0, thermal_file=None)` | Append a nuclide. `hdf5_file` is the basename inside the data dir (e.g. `"U235.h5"`); `atom_density` in atoms/(b·cm); `awr` is atomic-weight ratio; `nubar` is a fallback mean neutron yield used only if the HDF5 doesn't provide energy-dependent ν̄(E). Pass `thermal_file="c_H_in_H2O.h5"` (or similar) to bind an S(α,β) library to this nuclide. |
+| `total_atom_density()` | Sum of nuclide atom densities in the material. |
 
 Atom density is the absolute macro unit (`Σ = n·σ` gives cm⁻¹ when
-σ is in barns). Compute it on the Python side from macro density and
-stoichiometry, or pass a pre-computed value.
+σ is in barns).
+
+**Convenience builders** (in `open_rust_mc`, Python-side):
+
+- `uranium_oxide_material(name, density_g_per_cm3, enrichment, ...)` —
+  build UO₂ at a given U-235 enrichment. Does the stoichiometry + atom
+  density math from `density × N_A / M_UO₂`. Returns a `Material` with
+  U-234, U-235, U-238, O-16 populated.
+- `water_material(name="H2O", density_g_per_cm3=0.74, ...)` — H₂O with
+  S(α,β) for H in water attached by default (`c_H_in_H2O.h5`).
+- `zircaloy4_material(name="Zircaloy-4", density_g_per_cm3=6.55, ...)` —
+  four major Zr isotopes at natural abundance.
+- `atom_density_from_mass_density(density_g_per_cm3, molar_mass_g_per_mol)` —
+  the `ρ · N_A / M · 1e-24` primitive if you want to roll your own.
+- `NUCLIDE_DATA` — dict mapping common nuclide names (U235, O16, H1, …)
+  to their `{awr, a, nubar, file}` record, pulled from the HDF5 headers.
+
+### `PhotonMaterial(density_g_per_cm3)`
+
+Per-element mixture used for photon transport. Attach to cells via
+`Scene.add_photon_material(cell_name, photon_material)`.
+
+| Method | Purpose |
+|---|---|
+| `add_element(hdf5_file, atom_density)` | Append a per-element photon data file (e.g. `"U.h5"`, `"O.h5"`) in the scene's photon data directory with its atom density in atoms/(b·cm). |
 
 ### Surfaces
 
-All eight variants from the engine are exposed as constructor
-functions. Each returns a `Surface` handle that you pass to
-`Scene.add_surface`. Every surface accepts a `bc=` keyword for the
-boundary condition — one of `"transmission"` (default), `"reflective"`,
+Surface constructors return a `Surface` handle for `Scene.add_surface`.
+All accept a `bc=` keyword — `"transmission"` (default), `"reflective"`,
 or `"vacuum"`.
 
 | Constructor | Equation | Keyword arguments |
@@ -118,31 +140,34 @@ or `"vacuum"`.
 | `ZPlane(z0)` | z = z0 | offset |
 
 The engine also supports axis-aligned double cones (`ConeX`, `ConeY`,
-`ConeZ`); Python constructors for them land in a follow-up change.
+`ConeZ`); their Python constructors are a follow-up.
 
 ### Region expressions
 
-A cell's `region=` argument is a boolean-AND expression over registered
-surface names, using OpenMC's sign convention:
+Cells take a string region expression. The grammar is adequate for
+reactor benchmarks without nested parentheses:
 
 | Token | Meaning |
 |---|---|
 | `"-name"` | inside (negative half-space) of the named surface |
 | `"+name"` | outside (positive half-space) of the named surface |
-| `"-a -b +c"` | intersection of the listed half-spaces |
+| `"~-name"` / `"~+name"` | complement — `~-name ~-other` reads "outside `name` AND outside `other`" |
+| whitespace-separated tokens | AND'd into an intersection |
+| `" | "` at the top level | splits OR-groups; the cell is the union of groups |
 
-Godiva uses just two cells: the fuel sphere is `"-boundary"`, the
-outer vacuum region is `"+boundary"`. A PWR pin cell would use
-`"-fuel_or"` for the fuel, `"+fuel_or -clad_ir"` for the He gap, and
-so on. Unions and complements are a planned follow-up; for ICSBEP
-benchmarks and reactor pin cells, intersections are sufficient.
+Examples:
 
-Cell AABBs are computed automatically from the `-name` tokens in the
-region: each inside-surface's own bounding box contributes to the
-cell's bounding box via intersection. This is what keeps the
-rejection-sampled initial fission source finite — a cell with no
-inside tokens (pure-`+name` outer cells) gets `Aabb::INFINITE`, which
-is safe because only cells with material fills are sampled.
+- `"-boundary"` — fuel disc of a Godiva sphere
+- `"+fuel_or -clad_ir"` — annular gap in a pin cell
+- `"-a | -b"` — inside `a` OR inside `b` (union)
+- `"~-a ~-b"` — NOT(inside a) AND NOT(inside b)
+
+Cell AABBs are auto-computed from the axis-aligned half-space tokens:
+planes contribute their sided half-space (so `"+xmin -xmax +ymin -ymax
++zmin -zmax"` yields a finite box), cylinders and spheres contribute
+their own bounding boxes. A cell with no bounded tokens falls back to
+`Aabb::INFINITE`, which is safe because `initial_source` only samples
+fissile (material-filled) cells.
 
 ### `Settings(batches, inactive, particles, seed=1)`
 
@@ -163,6 +188,41 @@ Rust side runs fully native with all cores. Returns:
 | `active_batches` | `int` | number of batches counted toward k |
 | `total_histories` | `int` | active_batches × particles |
 | `runtime_seconds` | `float` | Rust-side wall time |
+| `k_per_batch` | `list[float]` | k_eff value for every batch (active and inactive) |
+| `entropy_per_batch` | `list[float]` | Shannon entropy of the fission-site bank, for convergence plots |
+| `active_mask` | `list[bool]` | `True` for batches counted toward the active tally |
+| `captures_by_cell` | `list[float]` | Non-fission absorption counts per cell, summed over active batches |
+| `cell_names` | `list[str]` | Cell names in the same order as `captures_by_cell` |
+| `total_collisions` | `int` | Summed across active batches (diagnostic) |
+| `total_fissions` | `int` | Summed across active batches |
+| `total_leakage` | `int` | Summed across active batches |
+
+Helper: `result.captures_dict()` returns `{cell_name: count}` for
+convenient pandas / plot input.
+
+### `run_gamma_heating(scene, neutron_settings, n_photon_histories=200_000, ...)`
+
+Coupled neutron-photon pipeline:
+
+1. Run neutron k-eigenvalue with the XS provider collecting per-MT
+   photon source events at every capture, fission, and inelastic
+   scattering site (no notional spectra — the outgoing energies are
+   sampled from the HDF5 `distribution_0/energy` trees).
+2. Run photon transport from the aggregated source bank through the
+   same CSG with per-cell `PhotonMaterial`. Electrons born from
+   Compton / photoelectric / pair production are track-integrated
+   with Highland multiple scattering, Bethe-Bloch-style non-uniform
+   `dE/dx`, and single-event Seltzer-Berger bremsstrahlung — all on
+   by default in the engine.
+
+Requires `Scene.set_photon_data_dir(path)` and at least one
+`Scene.add_photon_material(cell_name, photon_material)` call.
+
+Returns a `GammaHeatingResult` with `k_eff` / `k_sigma`,
+`deposition_fraction` + `deposition_ev` per cell, `total_source_energy_ev`,
+`escaped_energy_ev`, `orphan_energy_ev`, bremsstrahlung counts, and
+neutron / photon runtimes. `result.fractions_dict()` returns
+`{cell_name: fraction}`.
 
 ## Architecture
 
@@ -211,26 +271,27 @@ is designed around. Parallel parameter sweeps launched from a Python
 thread pool will want the free-threaded build eventually — that's a
 separate `abi3-py313` build target.
 
-## Known limitations (first cut)
+## Known limitations
 
-- **No region unions or complements.** `-a -b` (intersection) works;
-  `-a | -b` (union) and `~-a` (complement) don't. Region grammar is
-  a whitespace-separated list of signed surface-name tokens.
-- **Atom densities only** — no enrichment-to-density conversion helper.
-  For a 3.1 % enriched UO₂ you pass the three pre-computed densities.
-  A `Material.add_nuclide_by_enrichment()` helper is a natural follow-up.
-- **No S(α,β) thermal scattering binding.** The engine supports it
-  (see `pwr_pincell.rs`); wiring up the Python path is follow-up work.
-- **No photon transport, no γ-heating.** The scaffold is in place
-  (all physics kernels live in the engine crate); exposing
-  `Scene.add_photon_material` and `run_gamma_heating` is the next
-  chunk of FFI surface.
-- **No tallies.** Today you get `k_eff` and timing; per-cell heating,
-  fission-rate maps, and energy-spectrum tallies are planned but
-  currently require dropping to Rust.
+- **No cone constructors yet.** The engine supports `ConeX`, `ConeY`,
+  `ConeZ`; their Python wrappers are a small follow-up.
+- **Region grammar is flat.** Unions (`|`), intersections
+  (whitespace), and complements (`~`) compose without nested
+  parentheses. For any geometry expressible as a finite union of
+  half-space-intersections, this is sufficient; arbitrary CSG with
+  nested groups would need a recursive-descent parser.
+- **Photon materials via cell name.** If two cells share a neutron
+  material but should have different photon materials, only the first
+  registration is kept. Keep the mapping 1:1 in practice.
+- **Fixed-source photon runs are not exposed.** `run_gamma_heating`
+  drives the coupled n-γ pipeline; standalone photon-only simulations
+  (e.g. Cs-137 spectrum) still require the Rust binary. Wiring that up
+  is a small extension of the existing photon-transport surface.
+- **No per-cell energy-spectrum tallies.** Aggregate tallies (k_eff,
+  per-cell captures, γ deposition) are exposed; energy-binned flux /
+  current tallies need further FFI surface.
 
 ## Examples
 
-- [`examples/godiva.py`](rust_prototype/bindings/python/examples/godiva.py) — ICSBEP HEU-MET-FAST-001 reproduction.
-
-More examples will land as the FFI surface grows.
+- [`examples/godiva.py`](rust_prototype/bindings/python/examples/godiva.py) — ICSBEP HEU-MET-FAST-001 (a bare uranium sphere), reproduces the Rust-binary k_eff in ~0.2 s.
+- [`examples/pwr_gamma_heating.py`](rust_prototype/bindings/python/examples/pwr_gamma_heating.py) — coupled neutron-photon PWR pin cell γ-heating using `uranium_oxide_material`, `zircaloy4_material`, `water_material`, S(α,β) thermal scattering, and `run_gamma_heating`. Matches the Rust binary's 84 / 0 / 10 / 6 % split and agrees with OpenMC.
