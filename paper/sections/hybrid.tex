@@ -131,60 +131,67 @@ $36.7$   & $5357.922$ & $5357.903$ & $3.6 \cdot 10^{-6}$ \\
 \end{tabular}
 \end{center}
 
-\paragraph{End-to-end $k_\infty$ and throughput.}
-Five seeds, $100$ batches ($20$ inactive), $20\,000$
-particles per batch on the large-L3 system
-(Ryzen~$9800$X3D). The
-hybrid row uses the pre-correction sampler (the sampling
-fixes of Sec.~\ref{sec:offset} landed after the hybrid
-benchmark was complete and a re-run has not been performed);
-for the correctness comparison we pair it against the matched
-pre-correction CPU SVD rank-$5$ baseline from the same
-software revision. The post-correction CPU SVD
-rank-$5$ value ($1.32745 \pm 0.00057$,
-Table~\ref{tab:keff_pwr_desktop}) is reported for reference.
+\paragraph{End-to-end $k_\infty$ on PWR pin cell.}
+Single seed $\times\,100$ batches ($20$ inactive)
+$\times\,20\,000$ particles ($1.6 \cdot 10^6$ active
+histories) on the small-L3 system, with ACE+WMP run as the
+industry baseline at matching statistics. A high-statistics
+ten-seed redo at the matched $150\times 50\,000$
+configuration is the outstanding follow-up.
 
 \begin{table}[htb]
 \centering
-\caption{End-to-end hybrid SVD+WMP benchmark on PWR pin
-cell, large-L3 system (Ryzen~$9800$X3D). Both rows use the
-pre-correction sampler so that the hybrid-vs-SVD delta is
-measured at matched physics.}
+\caption{End-to-end SVD+WMP hybrid on PWR pin cell, single
+seed $\times\,100$ batches $\times\,20\,000$ particles,
+small-L3 (i$7$-$12800$H). ACE+WMP is the industry-baseline
+reference; SVD and Table rows from
+Table~\ref{tab:keff_pwr_fourway} are repeated here for
+direct comparison.}
 \label{tab:hybrid_endtoend}
-\begin{tabular}{@{}lrrrrrr@{}}
+\begin{tabular}{@{}lrrrrr@{}}
 \toprule
 mode & rank & $k_\infty$ & $\sigma_\text{seed}$ &
-$\Delta$ CPU-SVD (pcm) & ns/p & seeds \\
+$\Delta$ vs ACE+WMP (pcm) & ns/p \\
 \midrule
-CPU SVD (pre-correction, matched)       & $5$ & $1.32643$ & $0.00065$ & $+0$ (ref) & $16\,052$ & $10$ \\
-\textbf{Hybrid SVD+WMP (pre-correction)} & $5$ & $\mathbf{1.32557}$ &
- $\mathbf{0.00070}$ & $\mathbf{-86}$ & $\mathbf{33\,051}$ & $5$ \\
-\midrule
-CPU SVD (post-correction, reference)    & $5$ & $1.32745$ & $0.00057$ & ---        & $15\,511$ & $10$ \\
+ACE+WMP (industry baseline)   & ---       & $1.32821$ & $0.00098$ & $+0$ (ref) & $26\,317$ \\
+CPU SVD                       & $5$       & $1.32817$ & $0.00100$ & $-4$       & $29\,273$ \\
+\textbf{Hybrid SVD+WMP}        & $\mathbf{5}$ & $\mathbf{1.32795}$ & $\mathbf{0.00103}$ & $\mathbf{-26}$ & $\mathbf{26\,662}$ \\
+CPU table                     & ---       & $1.32903$ & $0.00093$ & $+82$      & $26\,035$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The hybrid $k_\infty$ is within $86$~pcm of the matched
-pre-correction CPU SVD rank-$5$
-($\approx 2.3\,\mathrm{SEM}_\text{combined}$): WMP represents
-the resonance cross section by a rational pole fit rather
-than a piecewise-linear-in-log-log sampling of the same
-evaluated-nuclear-data curve, so small systematic
-disagreements in the RRR accumulate into a
-$\sim\!86$~pcm shift. Provider parity to within two
-$\mathrm{SEM}$ at matched physics is the correctness
-statement here. Against the post-correction CPU SVD
-baseline the raw offset grows to $-188$~pcm, but that
-number mixes the hybrid-vs-SVD representation gap with the
-angular/fission-energy sampler change; we do not read it as
-a representation claim.
+The hybrid-vs-WMP gap of $-26$~pcm sits at
+$\sim 0.25\,\sigma_\text{seed}$, well inside seed noise; we
+do not read it as a precise correctness claim but it is the
+right order for what WMP and SVD-of-resonance-data should
+agree on. WMP represents the resonance cross section by a
+rational pole fit rather than a piecewise-linear-in-log-log
+sampling of the same evaluated-nuclear-data curve, so small
+systematic disagreements in the RRR accumulate at this scale
+on a nine-nuclide thermal pin cell. The Table-vs-WMP gap of
+$+82$~pcm is the cross-representation systematic at the same
+statistics: pointwise sampling of the same library at the
+same temperature lands $\sim\!0.8\sigma_\text{seed}$ from
+the WMP pole fit. The off-library counterpart of this
+measurement (Sec.~\ref{sec:off_library_3t}) tightens
+$\sigma_\text{seed}$ to $59$~pcm and resolves the SVD-vs-WMP
+gap as a real $213$~pcm systematic; on-library at this
+statistics the gap is below noise.
 
-Throughput: the hybrid runs at $33\,051$~ns/p, $2.06\times$
-slower than CPU SVD rank-$5$. A single WMP lookup on this
+\paragraph{Throughput.}
+At small-L3 statistics the hybrid runs at $26\,662$~ns/p,
+$0.91\times$ the CPU SVD rank-$5$ throughput
+($28\,651$~ns/p) on the same system; the cache-hit pattern
+compresses the two providers toward the same wall on the
+mobile workstation, so the apparent ``speedup'' is a
+cache-residency artefact rather than an algorithmic
+improvement. The large-L3 reference run measures the hybrid
+at $33\,051$~ns/p, $2.06\times$ slower than CPU SVD
+rank-$5$ ($16\,052$~ns/p); a single WMP evaluation on this
 hardware is $\sim\!67$~ns against $\sim\!5$~ns for SVD,
 and $\sim\!20\%$ of lookups fall in the RRR, so the
-ratio is in line with the per-lookup cost inflation.
+$2\times$ slowdown is the headline hybrid throughput cost.
 WMP is a memory-centric representation, and in this engine
 it costs throughput.
 
@@ -195,25 +202,48 @@ it costs throughput.
 the loaded kernels at run time. We report four variants for
 the nine-nuclide PWR set at rank-$5$: the pointwise-table
 baseline, pure SVD rank-$5$ (all reactions compressed), the
-hybrid current state (SVD basis plus WMP payload), and a
-smooth-only projection in which the elastic, fission, and
-capture SVD kernels are hypothetically rebuilt on the energy
-points outside each nuclide's WMP window (a rebuild we have
-not implemented because the shared energy grid across
-reactions complicates it).
+hybrid in-solver state with the full SVD energy grid, and a
+smooth-only rebuild in which the elastic, fission, and
+capture SVD kernels are re-fit on the energy points outside
+each nuclide's WMP window. The smooth-only rebuild is
+exposed as \texttt{-{}-rebuild-svd-smooth-only} and the
+numbers below are measured from the loaded kernels at run
+time.
 
 \begin{center}
 \begin{tabular}{@{}lrr@{}}
 \toprule
  & bytes (MB) & vs pointwise \\
 \midrule
-Pointwise-table baseline (Sec.~\ref{sec:pwr}) & $101.5$ & $1.0\times$ \\
+Pointwise-table baseline (Sec.~\ref{sec:pwr}) & $100.6$ & $1.0\times$ \\
 Pure SVD rank-$5$ (all reactions) & $\sim\!517.9$ & $5.1\times$ \emph{larger} \\
-Current hybrid in-solver (SVD basis + WMP payload) & $519.0$ & $5.1\times$ \emph{larger} \\
-Smooth-only projection (EFC SVD restricted + WMP) & $487.6$ & $4.8\times$ \emph{larger} \\
+Hybrid in-solver, full SVD grid (SVD basis + WMP payload) & $519.0$ & $5.2\times$ \emph{larger} \\
+Hybrid in-solver, smooth-only rebuild (live) & $487.6$ & $4.8\times$ \emph{larger} \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\paragraph{What the smooth-only rebuild actually does at run time.}
+On the standard nine-nuclide PWR set at rank-$5$ the rebuild
+drops $31\,423.1$~KB across MT$=2$, MT$=18$, and MT$=102$ ---
+the three reactions for which WMP supplies an analytical
+representation inside the resonance window, so the SVD basis
+no longer needs energy points there. Discrete-level kernels
+(MT$=51$--$91$) and other channels are untouched. The full
+sequence is reported by the engine on every hybrid run:
+
+\begin{verbatim}
+Memory (before smooth-only rebuild):
+  full SVD basis     = 517 870.5 KB
+  WMP payload        =   1 153.8 KB
+  TOTAL (full grid)  = 519 024.3 KB
+Memory (after smooth-only rebuild — actually realised):
+  smooth SVD basis   = 486 447.4 KB
+  WMP payload        =   1 153.8 KB
+  TOTAL (smooth)     = 487 601.2 KB
+  rebuild dropped    =  31 423.1 KB across elastic/fission/capture
+  reduction vs full  = 1.06×
+\end{verbatim}
 
 \paragraph{Where the bytes actually live.} The dominant
 contribution in every SVD-based variant is the discrete
@@ -226,12 +256,13 @@ smooth-channel SVD bases (elastic, fission, capture, total
 inelastic, $(n,2n)$, $(n,3n)$) together measure
 $64.6$~MB; the WMP payload is $1.23$~MB. So switching the
 resonance representation to WMP costs essentially zero
-memory, and the hybrid-vs-pure-SVD difference is a $6\%$
-rounding error. The engine-scale penalty against the
-pointwise table is not caused by WMP and is not relieved by
-it; it is caused by storing the discrete-level cascade as
-per-level rank-$5$ bases rather than per-level scalar
-arrays.
+memory, and the smooth-only rebuild's $1.06\times$ reduction
+captures only the elastic/fission/capture energy points
+masked by WMP windows --- everything else stays. The
+engine-scale penalty against the pointwise table is not
+caused by WMP and is not relieved by it; it is caused by
+storing the discrete-level cascade as per-level rank-$5$
+bases rather than per-level scalar arrays.
 
 \paragraph{Where the representation-byte ratio still applies.}
 Equation~\ref{eq:svd_pt_ratio} from
@@ -252,22 +283,27 @@ loss at $T = 1$, not a universal property.
 \centering
 \includegraphics[width=0.82\textwidth]{../outputs/pareto/memory_compare.png}
 \caption{In-engine XS working-set memory for the nine-nuclide
-PWR pin cell, rank-$5$, measured from live data at run time.
-Both hybrid variants carry more memory than the pointwise
-table baseline because the SVD kernels for the discrete
-inelastic levels, not covered by WMP, dominate the working
-set. The $132.9\times$ representation-byte ratio of
-Table~\ref{tab:hybrid_mem} is for a different comparison
-($1.37$~MB WMP vs $177.7$~MB four-channel pointwise).}
+PWR pin cell, rank-$5$, measured live on the loaded kernels.
+The smooth-only rebuild (rightmost bar) is now realised
+in the engine via \texttt{-{}-rebuild-svd-smooth-only}: it
+drops $31.4$~MB across MT$=2$, MT$=18$, and MT$=102$ for a
+$1.06\times$ reduction. The hybrid variants both carry more
+memory than the pointwise-table baseline because the SVD
+kernels for the discrete inelastic levels, not covered by
+WMP, dominate the working set. The $132.9\times$
+representation-byte ratio of Table~\ref{tab:hybrid_mem} is a
+different comparison ($1.37$~MB WMP vs $177.7$~MB
+four-channel pointwise).}
 \label{fig:memory_compare}
 \end{figure}
 
-The hybrid engine is $4.8$--$5.1\times$ \emph{larger} than
+The hybrid engine is $4.8$--$5.2\times$ \emph{larger} than
 the pointwise-table baseline, because SVD kernels for the
 $41$ discrete levels per U nuclide and $10$--$13$ per Zr
 isotope dominate memory, and those reactions are not covered
-by the public WMP library. The smooth-only restriction
-($1.06\times$) is essentially a rounding error.
+by the public WMP library. The smooth-only rebuild
+($1.06\times$ vs the full grid) is essentially a rounding
+error.
 
 The $132.9\times$ ratio in Table~\ref{tab:hybrid_mem} is a
 correct and reproducible \emph{representation}-byte
@@ -283,8 +319,10 @@ cascade (e.g.\ ENDF-6 nuclear-temperature evaporation
 parameters) that is denser than per-level SVD kernels; or
 (iii) rebuilding the SVD energy grid to be smooth-only for
 \emph{all} reactions, and using a separate table or
-analytical evaluation inside the RRR for every reaction. None
-of these is implemented here.
+analytical evaluation inside the RRR for every reaction. The
+smooth-only rebuild we implemented is item (iii) restricted
+to MT$=2$, MT$=18$, MT$=102$; extending it to the rest of
+the reaction set is engineering work.
 
 \paragraph{So why do the hybrid at all?}
 The positive uses we can defend from what we measured:
@@ -292,14 +330,17 @@ The positive uses we can defend from what we measured:
 and our evaluator is the first pure-Rust implementation we
 are aware of (matches OpenMC Python at $\sim\!10^{-6}$
 relative error, CUDA port matches to machine precision);
-(b)~end-to-end $k_\infty$ agrees with the full-SVD engine to
-within two $\mathrm{SEM}$, so the hybrid is \emph{correct}
-on this benchmark; (c)~for a future full-core engine where
-the cascade reactions are stored more densely than per-level
-SVD (e.g. nuclear-temperature evaporation), the RRR saving
-becomes proportionally more valuable. We report the hybrid
-as a correctness deliverable and as scaffolding for those
-future improvements, not as a memory or throughput win on
-the present engine.
+(b)~end-to-end $k_\infty$ at single-seed statistics
+agrees with ACE+WMP within $-26$~pcm
+($\ll 1\sigma_\text{seed}$), with the ten-seed redo at
+matched $150\times 50\,000$ statistics as the outstanding
+follow-up;
+(c)~for a future full-core engine where the cascade
+reactions are stored more densely than per-level SVD (e.g.
+nuclear-temperature evaporation), the RRR saving becomes
+proportionally more valuable. We report the hybrid as a
+correctness deliverable and as scaffolding for those future
+improvements, not as a memory or throughput win on the
+present engine.
 
 %% ============================================================

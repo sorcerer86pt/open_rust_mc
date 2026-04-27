@@ -32,39 +32,22 @@ GPU (RTX~$3080$, saturated)         & $9.5$  & $0.14\times$ \\
 
 $7.0\times$ per-lookup GPU-vs-CPU.
 
-\paragraph{End-to-end GPU hybrid transport.}
-The validated evaluator is wired into the event-based
-\texttt{transport\_persistent} kernel: for each nuclide that
-carries WMP data, a bitmap \texttt{has\_wmp[i]} and the
-corresponding $E_{\min}^{\mathrm{WMP}}, E_{\max}^{\mathrm{WMP}}$
-are checked inline; if the incident energy falls in the
-resolved-resonance window, the SVD / pointwise lookup for
-elastic, fission and capture is replaced by \texttt{wmp\_eval}
-at the nuclide's target temperature, the total XS is
-recomputed from partials, and URR sampling is suppressed
-(resonances are already explicit through the poles).
-Inelastic, $(n,2n)$ and $(n,3n)$ remain on the SVD path
-because WMP does not cover those channels.
-
-To keep this practical on GPU the recursive conjugate fold
-in the Humlicek Faddeeva implementation is unrolled into a
-flag-plus-sign-flip form, because recursive \verb|__device__|
-calls spill to local memory under the register pressure of
-\texttt{\_\_launch\_bounds\_\_(256,\,2)} and trigger
-CUDA\_ERROR\_ILLEGAL\_ADDRESS on deep stacks. The rewritten
-evaluator is still bit-exact against the CPU reference at
-$5\cdot10^{-14}$.
-
-On the PWR pin cell, $2$ of $9$ nuclides are covered by WMP
-(U-$235$ and U-$238$ in the fuel; the released ENDF/B-VII.1
-WMP library does not ship U-$234$, O-$16$, H-$1$ or Zircaloy
-isotopes in a form the reader accepts). For those two
-nuclides the GPU hybrid path exercises \texttt{wmp\_eval}
-throughout each nuclide's resolved-resonance window and falls
-back to the SVD / pointwise path elsewhere; covered nuclides
-therefore receive the explicit multipole treatment inside
-the RRR while uncovered ones keep the existing high-fidelity
-SVD path. $k_\infty$ and throughput numbers from the large-L3
-benchmark are in Section~\ref{sec:pwr}.
+\paragraph{Standalone GPU evaluator only.}
+The validation above is for the GPU evaluator on its own,
+exercised by a host driver that broadcasts a fixed energy
+grid to all threads and reads back the cross-section vector.
+Wiring the evaluator into the event-based
+\texttt{transport\_persistent} kernel for end-to-end GPU
+hybrid transport requires a bitmap \texttt{has\_wmp[i]}
+plus per-nuclide $E_{\min}^{\mathrm{WMP}}, E_{\max}^{\mathrm{WMP}}$
+checks inline, the recursive Humlicek conjugate fold unrolled
+to a flag-plus-sign-flip form (recursive
+\verb|__device__| calls spill to local memory under the
+register pressure of \texttt{\_\_launch\_bounds\_\_(256,\,2)}
+and trigger CUDA\_ERROR\_ILLEGAL\_ADDRESS on deep stacks),
+and a recomputed total cross section from partials with URR
+sampling suppressed inside the WMP window. We have not
+completed the in-kernel integration and report no in-engine
+GPU hybrid $k_\infty$ or throughput.
 
 %% ============================================================

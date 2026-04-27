@@ -17,11 +17,11 @@ OpenMC~$0.15.3$ to $|\Delta| \le 51$~pcm at ten-seed
 statistics after a transport-level bug audit closed an
 initial $78$--$127$~pcm engine offset. A Humlicek-W4
 Faddeeva evaluator, pure-Rust WMP reader, and SVD+WMP hybrid
-provider all work end-to-end and reproduce $k_\infty$ within
-two $\mathrm{SEM}$ of the matched SVD baseline at the same
-software revision; a CUDA port of the WMP evaluator is
-bit-exact against the CPU path and $7\times$ faster per
-lookup on a consumer GPU.
+provider all work end-to-end and agree with the ACE+WMP
+industry baseline within $-26$~pcm at single-seed statistics
+($\ll 1\sigma_\text{seed}$); a CUDA port of the WMP
+evaluator is bit-exact against the CPU path and $7\times$
+faster per lookup on a consumer GPU.
 
 On Godiva (HEU-MET-FAST-$001$) the physical benchmark is
 the ICSBEP experimental critical mass
@@ -91,12 +91,13 @@ The hybrid is $2.06\times$ slower than CPU SVD because
 WMP evaluation is $\sim\!15\times$ more expensive than the
 SVD FMA per lookup.
 
-The \emph{memory} story is a correction of our earlier
-messaging. The representation-byte ratio of
+The \emph{memory} story has two parts that must not be
+conflated. The representation-byte ratio of
 $132.9\times$ (WMP + smooth-SVD vs four-channel
-six-temperature pointwise) is real; the in-engine
-reduction we measured is $1.06\times$, and the hybrid
-engine is absolutely $4.8$--$5.1\times$ larger than the
+six-temperature pointwise) is real; the live in-engine
+reduction from the smooth-only SVD rebuild is
+$1.06\times$ ($519.0 \to 487.6$~MB), and the hybrid engine
+is absolutely $4.8$--$5.2\times$ larger than the
 pointwise-table baseline. The discrete-level SVD kernels,
 which WMP does not cover, dominate the engine's working
 set. Reducing those kernels from rank $5$ to rank $1$ ---

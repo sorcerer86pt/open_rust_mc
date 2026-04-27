@@ -191,13 +191,14 @@ sides, without requiring any library correction.
 
 \begin{table}[htb]
 \centering
-\caption{Godiva CPU SVD rank sweep, large-L3 system. Ten seeds,
-$150$ batches ($20$ inactive), $50\,000$ particles per batch.
-These rows used the pre-correction sampler and are retained
-only to illustrate rank-vs-$k_\text{eff}$ stability; the
-absolute $k_\text{eff}$ values are systematically
-$\sim\!180$~pcm higher than their post-correction counterparts
-in Table~\ref{tab:keff_godiva_desktop}.}
+\caption{Godiva CPU SVD rank sweep, large-L3 system. Ten
+seeds, $150$ batches ($20$ inactive), $50\,000$ particles
+per batch. Retained only to illustrate
+rank-vs-$k_\text{eff}$ stability before the closure
+sequence of Sec.~\ref{sec:godiva_fixes}; the absolute
+$k_\text{eff}$ values are systematically $\sim\!180$~pcm
+higher than the closed-sampler values in
+Table~\ref{tab:keff_godiva_desktop}.}
 \label{tab:keff_godiva_ranksweep}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
@@ -236,8 +237,8 @@ faster than the pointwise table at a modest $75$~pcm bias
 relative to its own pointwise baseline.
 
 Figure~\ref{fig:pareto_godiva} shows the small-L3 Pareto and
-Figure~\ref{fig:throughput_godiva} shows the post-correction
-large-L3 benchmark (throughput plus $k_\text{eff}$).
+Figure~\ref{fig:throughput_godiva} shows the large-L3
+benchmark (throughput plus $k_\text{eff}$).
 
 \begin{figure}[htb]
 \centering
@@ -254,16 +255,14 @@ in the same engine.}
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/throughput_godiva.png}
 \caption{Godiva, large-L3 four-provider throughput snapshot
-(ten seeds, \emph{pre-fix} engine revision kept for
-CPU-vs-GPU throughput comparison). \emph{Left:} ns/particle
-per provider (blue CPU, red GPU). \emph{Right:}
-$k_\text{eff}$ per provider, $\sigma_\text{seed}$ error bars;
-dashed line is the ICSBEP experimental value $1.0000 \pm
-100$~pcm. The post-fix $k_\text{eff}$ values are in
-Table~\ref{tab:keff_godiva_desktop} and are $\sim 250$~pcm
-lower than the $k_\text{eff}$ panel here;
-Table~\ref{tab:keff_godiva_fixes} traces the closure
-sequence.}
+(ten seeds, kept for CPU-vs-GPU throughput comparison).
+\emph{Left:} ns/particle per provider (blue CPU, red GPU).
+\emph{Right:} $k_\text{eff}$ per provider,
+$\sigma_\text{seed}$ error bars; dashed line is the ICSBEP
+experimental value $1.0000 \pm 100$~pcm. The $k_\text{eff}$
+values shown here precede the closure sequence of
+Sec.~\ref{sec:godiva_fixes}, which moves them into the
+ICSBEP band shown in Table~\ref{tab:keff_godiva_desktop}.}
 \label{fig:throughput_godiva}
 \end{figure}
 

@@ -79,23 +79,24 @@ throughput across providers and across the two systems.
 
 \begin{figure}[htb]
 \centering
-\includegraphics[width=0.88\textwidth]{../outputs/pareto/throughput_pwr.png}
+\includegraphics[width=0.99\textwidth]{../outputs/pareto/throughput_pwr.png}
 \caption{PWR pin cell throughput (ns/particle, lower is
 better). CPU-SVD beats CPU-table on both systems.
 GPU pointwise is the fastest path; GPU SVD is slower by
 $1.3\times$ because of the clad level-sum cost
-(Sec.~\ref{sec:gpu}). The hybrid SVD+WMP (large-L3 only,
-pre-correction sampler) is $2\times$ slower than CPU SVD
-because of Faddeeva evaluation cost
-(Sec.~\ref{sec:hybrid_e2e}).}
+(Sec.~\ref{sec:gpu}). The hybrid SVD+WMP large-L3 row is the
+five-seed reference run (Sec.~\ref{sec:hybrid_e2e}); the
+small-L3 hybrid and ACE+WMP rows are single-seed
+honesty-test data (Table~\ref{tab:keff_pwr_fourway}).}
 \label{fig:throughput_pwr}
 \end{figure}
 
 \begin{table}[htb]
 \centering
 \caption{PWR pin cell, large-L3 system (Ryzen~$9800$X3D +
-RTX~$3080$), all four providers post-correction. Ten seeds,
-$150$ batches ($20$ inactive), $50\,000$ particles per batch.}
+RTX~$3080$), all four in-engine providers. Ten seeds,
+$150$ batches ($20$ inactive), $50\,000$ particles per
+batch.}
 \label{tab:keff_pwr_desktop}
 \begin{tabular}{@{}lcccccc@{}}
 \toprule
@@ -140,6 +141,72 @@ CPU table and the fastest path overall; GPU SVD at
 $7\,754$~ns/p is $1.30\times$ slower than GPU pointwise
 because of the clad level-sum cost (Sec.~\ref{sec:gpu}).
 
+\subsection{Four-way honesty test (single seed)}
+\label{sec:pwr_fourway}
+
+The large-L3 ten-seed run of Table~\ref{tab:keff_pwr_desktop}
+covers the four in-engine providers (Table, SVD, GPU
+pointwise, GPU SVD). Adding ACE+WMP and Hybrid SVD+WMP at
+the same statistics requires multi-hour wall time on the
+small-L3 mobile workstation we use for repeat runs; we
+report a preliminary single-seed snapshot here and mark the
+high-statistics redo as the open follow-up.
+
+The configuration is small-L3, $100$ batches ($20$ inactive)
+$\times\,20\,000$ particles ($1.6 \cdot 10^6$ active
+histories), single seed. The output logs are in
+\texttt{outputs/full\_test\_run/\{04,10,11\}\_pwr\_*.txt}.
+
+\begin{table}[htb]
+\centering
+\caption{PWR pin cell on-library, four-way honesty test,
+single seed $\times\,100$ batches $\times\,20\,000$ particles.
+Reference is ACE+WMP (industry baseline).
+$\sigma_\text{seed}$ is the within-run standard error
+reported by the engine; absolute gaps are within
+$1\sigma_\text{seed}$ except Table-vs-WMP, which is at
+$\sim\!0.8\sigma_\text{seed}$. A ten-seed redo at the
+matched $150$-batch $\times\,50\,000$-particle configuration
+is the outstanding follow-up.}
+\label{tab:keff_pwr_fourway}
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+Mode & $k_\infty$ & $\sigma_\text{seed}$ &
+$\Delta$ vs ACE+WMP (pcm) & ns/particle \\
+\midrule
+ACE+WMP (reference)         & $1.32821$ & $0.00098$ & $+0$  & $26\,317$ \\
+CPU SVD r=$5$                & $1.32817$ & $0.00100$ & $-4$  & $29\,273$ \\
+\textbf{Hybrid SVD+WMP r=$5$} & $\mathbf{1.32795}$ & $\mathbf{0.00103}$ & $\mathbf{-26}$ & $\mathbf{26\,662}$ \\
+CPU table                   & $1.32903$ & $0.00093$ & $+82$ & $26\,035$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.99\textwidth]{../outputs/pareto/pwr_four_way.png}
+\caption{PWR pin cell, four-way honesty test (small-L3,
+single seed $\times\,100$ batches $\times\,20\,000$
+particles). \emph{Left:} $k_\infty$ for the four
+providers with $\sigma_\text{seed}$ error bars; horizontal
+band shows OpenMC $0.15.3$ at $1.32770 \pm 0.00150$.
+\emph{Right:} gap to ACE+WMP industry baseline. SVD and
+Hybrid SVD+WMP land within $1\sigma_\text{seed}$; Table sits
+at $+82$~pcm, $\sim\!0.8\sigma_\text{seed}$.}
+\label{fig:pwr_four_way}
+\end{figure}
+
+The snapshot is consistent with both the ten-seed
+Table~\ref{tab:keff_pwr_desktop} (Table and SVD within
+$30$~pcm of OpenMC) and with the off-library three-way
+result of Sec.~\ref{sec:off_library_3t} (the SVD-vs-WMP gap
+is $213$~pcm at $\sigma_\text{seed} \approx 59$~pcm).
+On-library the gap is well below seed noise; off-library it
+is a real $\sim\!3.6\sigma$ systematic. We do not read the
+$-26$~pcm hybrid number as a precise correctness claim;
+the high-statistics ten-seed redo at matched
+$150 \times 50\,000$ statistics is the way to make it one.
+
 \subsection{Engine-level offset from OpenMC, traced and closed}
 \label{sec:offset}
 
@@ -148,7 +215,7 @@ providers $78$--$127$~pcm below
 OpenMC~$0.15.3$~\cite{romano2015openmc}. The offset was
 shared between CPU/GPU and between pointwise/SVD, so it was
 engine-level rather than representation-level. A three-part
-audit closed it (post-correction numbers in
+audit closed it (final numbers in
 Table~\ref{tab:keff_pwr_desktop}):
 
 \begin{center}
@@ -181,11 +248,11 @@ pick the high bin with probability $r$) plus scaled kinematic
 adjustment for the energy distribution. Both are valid
 univariate sampling schemes; the differences accumulate into a
 $\sim\!100$~pcm $k_\infty$ shift on thermal PWR. We match
-OpenMC's convention now and applied the same fix to the CUDA
-kernel, which is why the GPU rows in
-Table~\ref{tab:keff_pwr_desktop} are post-correction and agree
-with OpenMC to $|\Delta| \le 51$~pcm. The XS audit (i) rules
-out the capture-residue hypothesis --- our total-XS assembly
+OpenMC's convention now and applied the same fix to the
+CUDA kernel; the GPU rows in
+Table~\ref{tab:keff_pwr_desktop} agree with OpenMC to
+$|\Delta| \le 51$~pcm. The XS audit (i) rules out the
+capture-residue hypothesis --- our total-XS assembly
 matches OpenMC to $<\!0.25\%$ across all nuclides. (ii) is a
 clear bug in our HDF5 reader, exposed by the audit.
 A Shannon-entropy monitor
