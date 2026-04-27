@@ -89,10 +89,14 @@ Drivers:
   `PhotonMaterial`, reusing the same `Surface`/`Cell`/`Region`
   geometry + `ray::trace_step` the neutron loop uses
 
-Simplified electron transport: Katz–Penfold CSDA midrange deposit
-(`R_e(E) / 2` forward displacement) with per-material mass density
-and reflective-lattice folding. Removes most of the kerma bias for
-pin-cell heating (~5 % textbook error → <0.5 % in UO₂).
+Full condensed-history electron transport: track-integrated step-
+and-deposit with non-uniform Bethe-Bloch `dE/dx`, Highland multiple-
+scattering angular spread (per-cell radiation length `X₀`), and
+single-event Seltzer-Berger bremsstrahlung secondaries banked back
+into the photon loop. Reflective-lattice folding keeps reflective-BC
+pin cells consistent with the neutron loop. Replaces the older
+Katz-Penfold CSDA midrange displacement; the "He gap deposition
+artefact" goes from 1.5 % to 0 %.
 
 ## Coupled neutron-photon transport
 
@@ -110,23 +114,56 @@ reflective lattice): a short neutron k-eigenvalue, aggregate the
 event bank across active batches, then transport 200 k photon
 histories and bin per-collision deposits by containing cell.
 
-Converged result (150 b × 50 k n + 200 k γ, ~2.5 min):
+Run conditions: 150 batches (20 inactive + 130 active) × 50 000
+neutrons/batch + 200 000 photon histories, single seed, full
+electron transport on by default; ~5 min wall on the test box
+described under "Benchmarks" below. OpenMC reference is 0.15.3 on
+identical geometry / same library, recorded in
+`outputs/openmc_pwr_gamma_heating.json`.
 
-| region | fraction |
-|--------|---------:|
-| fuel   | **84.4 %** |
-| gap    | 1.5 % (*CSDA midrange artefact*) |
-| clad   | 7.9 % |
-| water  | 5.9 % |
-| escape | 0.0 % |
-| sum    | 99.66 % (missing 0.34 % = EADL valence-binding) |
+| region | open_rust_mc | OpenMC 0.15.3 |
+|--------|-------------:|--------------:|
+| fuel   | **84.12 %**  | ~85 %         |
+| gap    | 0.00 %       | 0 %           |
+| clad   | 9.81 %       | ~9 %          |
+| water  | 5.72 %       | ~6 %          |
+| escape | 0.00 %       | 0             |
+| sum    | 99.65 %      | (EADL leak)   |
+
+Bremsstrahlung fires self-consistently: this run emits 2 312 brems γ
+totalling 7.43 × 10⁸ eV (0.353 % of source energy), each banked back
+into the photon transport phase.
 
 ## CUDA backend
 
 `gpu.rs` and `gpu_transport.rs` implement pointwise and SVD providers
 on device via `cudarc`. The GPU path is bit-parity with CPU SVD at
 machine precision (the `--force-svd` parity harness verifies this
-across seeds). Enable with `--features cuda`.
+across seeds).
+
+`src/photon/gpu.rs` adds GPU sampling kernels for photon transport,
+all NVRTC-compiled into one PTX module:
+
+- `GpuComptonContext` / `GpuComptonVarECtx` — Klein-Nishina + S(x,Z)/Z
+  bound-electron rejection, with optional Compton-profile Doppler
+  broadening when profiles are uploaded
+- `GpuRayleighContext` — direct `x²` CDF inversion + Thomson rejection
+- `GpuPairContext` — Bethe-Heitler ε rejection sampling
+- Photoelectric phase 1 (XS lookup + subshell sampling) on device;
+  EADL relaxation cascade still on CPU pending a divergence-tolerant
+  GPU SoA design
+
+The GPU samplers reproduce CPU samples bit-for-bit (PCG-64 mirrors
+`Rng::for_particle(batch_id, tid)`). A persistent-kernel mode runs
+full Compton history loops in a single launch (~107× faster than
+per-collision launches; ~2.2× faster than rayon-20-thread CPU). 
+High-Z photoelectric is the biggest win at ~9.8× on U / Zr at 1 MeV.
+See `resume.md` for ns/event tables and run conditions.
+
+Other GPU-technology hooks (cuBLAS batched DGEMM for SVD
+reconstruction, software BVH ray-AABB traversal, NVLink split-and-
+merge plumbing) live behind feature flags on `gpu_photon_features`.
+Enable with `--features cuda`.
 
 ## Repository layout
 
@@ -147,8 +184,11 @@ rust_prototype/
       compton.rs              Klein-Nishina + S(x,Z)/Z + Doppler
       photoelectric.rs        Photoelectric + EADL cascade
       pair.rs                 Bethe-Heitler pair production
-      material.rs             PhotonMaterial + CSDA range (Katz-Penfold)
+      bremsstrahlung.rs       Seltzer-Berger DCS + secondary emission
+      material.rs             PhotonMaterial + electron transport
+                               (Bethe-Bloch dE/dx + Highland MS)
       transport.rs            Closure-based + CSG photon drivers
+      gpu.rs                  CUDA NVRTC kernels (cuda feature)
     geometry/                 CSG surfaces, cells, BVH, lattices
     hdf5_reader.rs            Pure-Rust neutron HDF5 reader
                                + read_photon_products for γ spectra
@@ -163,8 +203,16 @@ rust_prototype/
     pwr_gamma_heating.rs      Coupled n-γ PWR pin γ-heating benchmark
     cs137_pulse_height.rs     Cs-137 + NaI detector validation
     photon_dump.rs            Photon HDF5 data inspection utility
-    gpu_bench.rs              GPU reconstruction microbenchmark
+    gpu_bench.rs              GPU XS reconstruction microbenchmark
+    gpu_compton_validate.rs   GPU vs CPU Compton bit-parity harness
+    gpu_compton_scaling.rs    GPU batch-size scaling (free + Doppler)
+    gpu_cpu_bench.rs          Full CPU-vs-GPU photon kernel benchmark
+                               + persistent-kernel Compton history mode
+    gpu_photon_features.rs    cuBLAS DGEMM, NVLink, persistent kernel,
+                               software BVH ray-AABB demos
     wmp_validate.rs           WMP evaluator cross-check vs Python reference
+  bindings/python/            PyO3 Python API (Scene, Material,
+                               XsMode, run_eigenvalue, run_gamma_heating)
   tests/                      Integration tests
                                (Cs-137, Hubbell Compton, ANSI/ANS-6.6.1)
 cuda_bench/                   Standalone CUDA SVD reconstruction kernel
@@ -175,6 +223,22 @@ scripts/
 paper/                        LaTeX manuscript (main.tex) + bib
 .github/workflows/ci.yml      Rust + Python + LaTeX CI
 ```
+
+## Test environment for the numbers in this README
+
+All quantitative results in this document (γ-heating splits, GPU
+ns/event, PWR k_inf, etc.) come from one fixed-seed sweep on:
+
+- **CPU**: 20-core Intel mobile workstation, 32 GB RAM, Windows 11,
+  rayon over all 20 threads.
+- **GPU**: NVIDIA RTX A1000 (laptop, 4 GB, fp64 ~0.51 TFLOP/s, no
+  tensor-core fp64) via `cudarc` + NVRTC.
+- **Library**: ENDF/B-VII.1 HDF5
+  (`../data/endfb-vii.1-hdf5/{neutron,photon}`).
+- **Reference code**: OpenMC 0.15.3 on the same library.
+
+Per-test particle / batch / iteration counts are stated alongside
+each result. Raw outputs are checked into `outputs/full_test_run/`.
 
 ## Build and run
 
@@ -221,12 +285,20 @@ to run a single provider instead of the honesty test.
 ## Python API
 
 A PyO3 binding exposes the engine to Python via a fluent
-`Scene`/`Material`/`Surface` builder. The same Godiva eigenvalue
-that the Rust binary runs above is reproducible from a ~20-line
-Python script (`rust_prototype/bindings/python/examples/godiva.py`).
-Rust remains the source of truth — Python is a ~200-line glue layer
-over the engine. See **[PYTHON.md](PYTHON.md)** for the quick-start,
-API reference, and build-from-source instructions.
+`Scene`/`Material`/`Surface`/`PhotonMaterial` builder. The same
+Godiva eigenvalue and PWR γ-heating run that the Rust binaries
+drive are reproducible from short Python scripts
+(`rust_prototype/bindings/python/examples/godiva.py`,
+`pwr_gamma_heating.py`, `xs_mode_quick.py`). Rust remains the
+source of truth — Python is a ~200-line glue layer over the engine.
+
+The full provider matrix is exposed as the `XsMode` enum
+(`Table` / `Svd` / `HybridTableWmp` / `HybridSvdWmp`) with per-MT
+SVD rank overrides via `Scene.set_svd_ranks({mt: rank, …})`.
+`run_gamma_heating` drives the coupled neutron-photon pipeline
+end-to-end with full electron transport on by default. See
+**[PYTHON.md](PYTHON.md)** for the quick-start, API reference, and
+build-from-source instructions.
 
 ## Development
 
