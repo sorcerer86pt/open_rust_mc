@@ -22,7 +22,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     use cudarc::nvrtc;
     use open_rust_mc::wmp::WindowedMultipole;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     const KERNEL_SRC: &str = include_str!("../../gpu/cuda/transport.cu");
 
@@ -74,17 +73,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Upload poles as flat f64 (pairs of re/im), reinterpreted on device
     // as double2 (16 bytes, contiguous). CUDA double2 is {x:f64, y:f64}.
     let poles_f64: Vec<f64> = wmp.poles.iter().flat_map(|c| [c.re, c.im]).collect();
-    let d_poles_f64 = stream.memcpy_stod(&poles_f64)?;
+    let d_poles_f64 = stream.clone_htod(&poles_f64)?;
 
     // Windows array: stored 0-based startw, endw (already converted in Rust loader)
-    let d_windows = stream.memcpy_stod(&wmp.windows)?;
+    let d_windows = stream.clone_htod(&wmp.windows)?;
 
     // broaden_poly: Vec<u8> -> Vec<i8>
     let broaden_i8: Vec<i8> = wmp.broaden_poly.iter().map(|&x| x as i8).collect();
-    let d_broaden = stream.memcpy_stod(&broaden_i8)?;
+    let d_broaden = stream.clone_htod(&broaden_i8)?;
 
-    let d_curvefit = stream.memcpy_stod(&wmp.curvefit)?;
-    let d_energies = stream.memcpy_stod(&energies)?;
+    let d_curvefit = stream.clone_htod(&wmp.curvefit)?;
+    let d_energies = stream.clone_htod(&energies)?;
 
     let mut d_out_s: CudaSlice<f64> = stream.alloc_zeros(n)?;
     let mut d_out_a: CudaSlice<f64> = stream.alloc_zeros(n)?;
@@ -131,9 +130,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .arg(&mut d_out_f)
             .launch(cfg)?;
     }
-    let _gpu_s = stream.memcpy_dtov(&d_out_s)?;
-    let gpu_a = stream.memcpy_dtov(&d_out_a)?;
-    let gpu_f = stream.memcpy_dtov(&d_out_f)?;
+    let _gpu_s = stream.clone_dtoh(&d_out_s)?;
+    let gpu_a = stream.clone_dtoh(&d_out_a)?;
+    let gpu_f = stream.clone_dtoh(&d_out_f)?;
 
     // ── Throughput benchmark ──
     // Evaluate on a dense log-spaced grid across the RRR and time both
@@ -155,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .collect();
 
-    let d_be = stream.memcpy_stod(&bench_energies)?;
+    let d_be = stream.clone_htod(&bench_energies)?;
     let mut d_bs: CudaSlice<f64> = stream.alloc_zeros(n_bench)?;
     let mut d_ba: CudaSlice<f64> = stream.alloc_zeros(n_bench)?;
     let mut d_bf: CudaSlice<f64> = stream.alloc_zeros(n_bench)?;

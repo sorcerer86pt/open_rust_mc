@@ -607,7 +607,17 @@ fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
         }
     }
 
-    let provider = HybridSvdWmpXsProvider::new(svd_provider, wmps);
+    let mut provider = HybridSvdWmpXsProvider::new(svd_provider, wmps);
+
+    // Pre-rebuild memory snapshot.
+    let report_before = provider.memory_report();
+    let mem_before = report_before.current_total();
+
+    // Drop the SVD basis rows that fall inside the WMP window — those
+    // queries are answered by the multipole evaluator, not by SVD. This
+    // is the production-precision memory layout.
+    let (svd_before, svd_after) = provider.rebuild_smooth_only();
+
     let report = provider.memory_report();
     let total_mem = report.current_total();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
@@ -616,9 +626,22 @@ fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
         covered,
         WMP_SPECS.len()
     );
-    println!("  Memory (current scaffolding):");
+    println!("  Memory (before smooth-only rebuild):");
     println!(
         "    full SVD basis     = {:.1} KB",
+        report_before.current_svd_bytes as f64 / 1024.0
+    );
+    println!(
+        "    WMP payload        = {:.1} KB",
+        report_before.wmp_payload_bytes as f64 / 1024.0
+    );
+    println!(
+        "    TOTAL (full grid)  = {:.1} KB",
+        mem_before as f64 / 1024.0
+    );
+    println!("  Memory (after smooth-only rebuild — actually realised):");
+    println!(
+        "    smooth SVD basis   = {:.1} KB",
         report.current_svd_bytes as f64 / 1024.0
     );
     println!(
@@ -626,25 +649,16 @@ fn load_hybrid(args: &Args) -> (HybridSvdWmpXsProvider, usize, f64) {
         report.wmp_payload_bytes as f64 / 1024.0
     );
     println!(
-        "    TOTAL (current)    = {:.1} KB",
-        report.current_total() as f64 / 1024.0
-    );
-    println!("  Memory (smooth-only projection, measured from loaded data):");
-    println!(
-        "    smooth-only SVD    = {:.1} KB",
-        report.smooth_only_svd_bytes as f64 / 1024.0
+        "    TOTAL (smooth)     = {:.1} KB",
+        total_mem as f64 / 1024.0
     );
     println!(
-        "    WMP payload        = {:.1} KB",
-        report.wmp_payload_bytes as f64 / 1024.0
+        "    rebuild dropped    = {:.1} KB across elastic/fission/capture",
+        (svd_before.saturating_sub(svd_after)) as f64 / 1024.0
     );
     println!(
-        "    TOTAL (projected)  = {:.1} KB",
-        report.smooth_only_total() as f64 / 1024.0
-    );
-    println!(
-        "    reduction vs full  = {:.1}x",
-        report.current_total() as f64 / report.smooth_only_total() as f64
+        "    reduction vs full  = {:.2}x",
+        mem_before as f64 / total_mem as f64
     );
 
     (provider, total_mem, load_ms)

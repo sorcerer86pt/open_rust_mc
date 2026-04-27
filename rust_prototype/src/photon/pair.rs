@@ -46,7 +46,7 @@ pub const PAIR_THRESHOLD_EV: f64 = 2.0 * M_E_C2_EV;
 pub const ANNIHILATION_ENERGY_EV: f64 = M_E_C2_EV;
 
 /// Outcome of a single pair-production event.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PairOutcome {
     /// Electron kinetic energy in eV (deposited locally under kerma).
     pub electron_kinetic: f64,
@@ -58,8 +58,9 @@ pub struct PairOutcome {
     pub mu_positron: f64,
     /// Annihilation photon energies in eV. At-rest approximation:
     /// two 511 keV photons back-to-back, orientations set by the
-    /// caller (transport loop samples an isotropic axis).
-    pub annihilation_photons: Vec<f64>,
+    /// caller (transport loop samples an isotropic axis). Stored
+    /// inline to keep `PairOutcome` allocation-free on the hot path.
+    pub annihilation_photons: [f64; 2],
 }
 
 impl PairOutcome {
@@ -89,7 +90,7 @@ pub fn pair_produce(energy_in: f64, rng: &mut Rng) -> Option<PairOutcome> {
         // is ~ m_e c²/E and symmetric about the incoming direction.
         mu_electron: 1.0,
         mu_positron: 1.0,
-        annihilation_photons: vec![ANNIHILATION_ENERGY_EV, ANNIHILATION_ENERGY_EV],
+        annihilation_photons: [ANNIHILATION_ENERGY_EV, ANNIHILATION_ENERGY_EV],
     })
 }
 

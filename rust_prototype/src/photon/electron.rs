@@ -60,7 +60,7 @@ fn standard_atomic_weight(z: u32) -> f64 {
         13 => 26.982,
         14 => 28.085,
         26 => 55.845,
-        40 => 91.224,  // Zr
+        40 => 91.224, // Zr
         50 => 118.710,
         82 => 207.2,   // Pb
         92 => 238.029, // U
@@ -94,9 +94,7 @@ fn x0_element_g_per_cm2(z: u32) -> f64 {
     let alpha_z = z_f / 137.036;
     let alpha_z_sq = alpha_z * alpha_z;
     let f_z = alpha_z_sq
-        * (1.0 / (1.0 + alpha_z_sq)
-            + 0.20206
-            - 0.0369 * alpha_z_sq
+        * (1.0 / (1.0 + alpha_z_sq) + 0.20206 - 0.0369 * alpha_z_sq
             + 0.0083 * alpha_z_sq * alpha_z_sq
             - 0.002 * alpha_z_sq.powi(3));
     let inv_x0 = 1.396e-3 / a * (z_f * z_f * (l_rad - f_z) + z_f * l_rad_prime);
@@ -269,6 +267,7 @@ fn cell_density(cell: &Cell, materials: &[Option<PhotonMaterial>]) -> f64 {
 /// `start_cell_idx` must be the cell containing `birth_pos` (the
 /// caller already knows this from the photon's collision site). The
 /// birth energy below 10 keV is deposited locally without transport.
+#[allow(clippy::too_many_arguments)]
 pub fn track_integrate_electron_csg(
     birth_pos: Vec3,
     birth_dir: Vec3,
@@ -461,10 +460,10 @@ pub fn track_integrate_electron_csg_with_ms(
             return;
         } else if ds_step >= ds_to_surface - 1.0e-12 && trace.is_some() {
             // Boundary hit — handle BC, no MS at interface.
-            if let Some(hit) = trace {
-                if !handle_boundary(hit, surfaces, &mut pos, &mut dir, &mut cell_idx) {
-                    return;
-                }
+            if let Some(hit) = trace
+                && !handle_boundary(hit, surfaces, &mut pos, &mut dir, &mut cell_idx)
+            {
+                return;
             }
         } else {
             // Interior sub-step: advance, then apply MS deflection.
@@ -527,10 +526,12 @@ mod tests {
 
     fn load_h() -> Option<PhotonElement> {
         let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let p = manifest
-            .parent()?
-            .join("data/endfb-vii.1-hdf5/photon/H.h5");
-        if p.exists() { Some(PhotonElement::from_hdf5(&p).unwrap()) } else { None }
+        let p = manifest.parent()?.join("data/endfb-vii.1-hdf5/photon/H.h5");
+        if p.exists() {
+            Some(PhotonElement::from_hdf5(&p).unwrap())
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -563,12 +564,18 @@ mod tests {
         let s_1mev = instantaneous_de_per_dr(1.0e6);
         let s_100kev = instantaneous_de_per_dr(1.0e5);
         let s_50kev = instantaneous_de_per_dr(5.0e4);
-        assert!(s_100kev > s_1mev, "dE/dR(100 keV) > dE/dR(1 MeV): {s_100kev} vs {s_1mev}");
+        assert!(
+            s_100kev > s_1mev,
+            "dE/dR(100 keV) > dE/dR(1 MeV): {s_100kev} vs {s_1mev}"
+        );
         assert!(s_50kev > s_100kev, "dE/dR(50 keV) > dE/dR(100 keV)");
         // Sanity: 1 MeV electron in solid (ρ=1 g/cm³, step 0.01 cm →
         // cost 0.01 g/cm², dE ≈ 0.01 × 1.4 MeV = 14 keV). Ballpark.
         let de = s_1mev * 0.01;
-        assert!(de > 5_000.0 && de < 30_000.0, "dE over 0.01 g/cm² = {de} eV");
+        assert!(
+            de > 5_000.0 && de < 30_000.0,
+            "dE over 0.01 g/cm² = {de} eV"
+        );
     }
 
     #[test]
@@ -598,28 +605,54 @@ mod tests {
     /// width.
     #[test]
     fn single_cell_deposits_all_energy() {
-        let Some(h) = load_h() else { return; };
+        let Some(h) = load_h() else {
+            return;
+        };
         let water = PhotonMaterial::new(vec![(2.0 * 3.343e-2, h)]).with_density(1.0);
         // A 10 cm cube bounded by 6 reflective planes.
         let surfaces = vec![
-            Surface::PlaneX { x0: -5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneX { x0:  5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: -5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0:  5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0: -5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0:  5.0, bc: BoundaryCondition::Reflective },
+            Surface::PlaneX {
+                x0: -5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneX {
+                x0: 5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: -5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: 5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneZ {
+                z0: -5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneZ {
+                z0: 5.0,
+                bc: BoundaryCondition::Reflective,
+            },
         ];
         let cells = vec![
             Cell::new(
                 CellId(0),
                 cell::intersect_all(vec![
-                    cell::outside(0), cell::inside(1),
-                    cell::outside(2), cell::inside(3),
-                    cell::outside(4), cell::inside(5),
+                    cell::outside(0),
+                    cell::inside(1),
+                    cell::outside(2),
+                    cell::inside(3),
+                    cell::outside(4),
+                    cell::inside(5),
                 ]),
                 CellFill::Material(0),
             )
-            .with_aabb(Aabb::new(Vec3::new(-5.0, -5.0, -5.0), Vec3::new(5.0, 5.0, 5.0))),
+            .with_aabb(Aabb::new(
+                Vec3::new(-5.0, -5.0, -5.0),
+                Vec3::new(5.0, 5.0, 5.0),
+            )),
         ];
         let materials = vec![Some(water)];
         let mut deposit = vec![0.0_f64];
@@ -629,11 +662,17 @@ mod tests {
             Vec3::new(1.0, 0.0, 0.0),
             1.0e6,
             0,
-            &surfaces, &cells, &materials,
+            &surfaces,
+            &cells,
+            &materials,
             &mut deposit,
         );
 
-        assert!((deposit[0] - 1.0e6).abs() < 1.0, "deposit[0] = {}", deposit[0]);
+        assert!(
+            (deposit[0] - 1.0e6).abs() < 1.0,
+            "deposit[0] = {}",
+            deposit[0]
+        );
     }
 
     /// Two-cell slab separated at x=0: one dense (water), one void
@@ -641,16 +680,39 @@ mod tests {
     /// cell, where it deposits all its energy.
     #[test]
     fn void_cell_transits_without_loss() {
-        let Some(h) = load_h() else { return; };
+        let Some(h) = load_h() else {
+            return;
+        };
         let water = PhotonMaterial::new(vec![(2.0 * 3.343e-2, h)]).with_density(1.0);
         let surfaces = vec![
-            Surface::PlaneX { x0:  0.0, bc: BoundaryCondition::Transmission },
-            Surface::PlaneX { x0: -5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneX { x0:  5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: -5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0:  5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0: -5.0, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0:  5.0, bc: BoundaryCondition::Reflective },
+            Surface::PlaneX {
+                x0: 0.0,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::PlaneX {
+                x0: -5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneX {
+                x0: 5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: -5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: 5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneZ {
+                z0: -5.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneZ {
+                z0: 5.0,
+                bc: BoundaryCondition::Reflective,
+            },
         ];
         // Surface 0 is PlaneX at x=0; `inside(0)` is x < 0 (negative
         // half-space), `outside(0)` is x > 0. cell 0 on the left is
@@ -660,24 +722,36 @@ mod tests {
                 CellId(0),
                 cell::intersect_all(vec![
                     cell::inside(0),
-                    cell::outside(1), cell::inside(2),
-                    cell::outside(3), cell::inside(4),
-                    cell::outside(5), cell::inside(6),
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                    cell::outside(5),
+                    cell::inside(6),
                 ]),
                 CellFill::Void,
             )
-            .with_aabb(Aabb::new(Vec3::new(-5.0, -5.0, -5.0), Vec3::new(0.0, 5.0, 5.0))),
+            .with_aabb(Aabb::new(
+                Vec3::new(-5.0, -5.0, -5.0),
+                Vec3::new(0.0, 5.0, 5.0),
+            )),
             Cell::new(
                 CellId(1),
                 cell::intersect_all(vec![
                     cell::outside(0),
-                    cell::outside(1), cell::inside(2),
-                    cell::outside(3), cell::inside(4),
-                    cell::outside(5), cell::inside(6),
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                    cell::outside(5),
+                    cell::inside(6),
                 ]),
                 CellFill::Material(0),
             )
-            .with_aabb(Aabb::new(Vec3::new(0.0, -5.0, -5.0), Vec3::new(5.0, 5.0, 5.0))),
+            .with_aabb(Aabb::new(
+                Vec3::new(0.0, -5.0, -5.0),
+                Vec3::new(5.0, 5.0, 5.0),
+            )),
         ];
         let materials = vec![Some(water)];
         let mut deposit = vec![0.0_f64, 0.0_f64];
@@ -688,11 +762,17 @@ mod tests {
             Vec3::new(1.0, 0.0, 0.0),
             1.0e6,
             0,
-            &surfaces, &cells, &materials,
+            &surfaces,
+            &cells,
+            &materials,
             &mut deposit,
         );
 
-        assert!(deposit[0] < 1.0, "void cell got {} eV (should be 0)", deposit[0]);
+        assert!(
+            deposit[0] < 1.0,
+            "void cell got {} eV (should be 0)",
+            deposit[0]
+        );
         assert!(
             (deposit[1] - 1.0e6).abs() < 1.0,
             "water cell got {} eV (should be 1 MeV)",

@@ -44,6 +44,38 @@ impl HybridSvdWmpXsProvider {
         self.wmps.iter().filter(|w| w.is_some()).count()
     }
 
+    /// Rebuild every WMP-covered nuclide's elastic/fission/capture SVD
+    /// kernels on a smooth-only energy grid (points outside the WMP
+    /// window). After this call, queries inside `[e_min^WMP, e_max^WMP]`
+    /// are answered exclusively by the multipole evaluator (which the
+    /// `lookup` impl was already routing) and the SVD basis matrices for
+    /// those three reactions shrink by `kernel_smooth_fraction`.
+    ///
+    /// The non-WMP reactions (inelastic, (n,2n), (n,3n), discrete levels,
+    /// total) are untouched — they need full-grid coverage. Idempotent;
+    /// the smooth grid is already a subset of the original.
+    ///
+    /// Returns the byte-count delta `(before, after)` summed across all
+    /// rebuilt kernels for diagnostic logging.
+    pub fn rebuild_smooth_only(&mut self) -> (usize, usize) {
+        let mut before = 0_usize;
+        let mut after = 0_usize;
+        for (i, nuc) in self.inner.nuclides.iter_mut().enumerate() {
+            let Some((wmp, _)) = self.wmps[i].as_ref() else {
+                continue;
+            };
+            let (e_lo, e_hi) = (wmp.e_min, wmp.e_max);
+            for slot in [&mut nuc.elastic, &mut nuc.fission, &mut nuc.capture] {
+                if let Some(rxn) = slot.as_mut() {
+                    before += rxn.kernel.memory_bytes();
+                    rxn.kernel = rxn.kernel.trim_to_outside(e_lo, e_hi);
+                    after += rxn.kernel.memory_bytes();
+                }
+            }
+        }
+        (before, after)
+    }
+
     /// Memory budget report for the hybrid architecture.
     ///
     /// Reports both the current in-solver memory (full SVD basis + WMP

@@ -510,7 +510,77 @@ pub fn load_nuclide(
     awr_fallback: f64,
     nu_bar_fallback: f64,
 ) -> NuclideKernels {
-    println!("  Loading {} (rank={svd_rank})...", h5_path.display());
+    load_nuclide_with_policy(
+        h5_path,
+        &RankPolicy::new(svd_rank),
+        temp_idx,
+        awr_fallback,
+        nu_bar_fallback,
+    )
+}
+
+/// Per-reaction SVD rank policy. Use `RankPolicy::new(default)` for a
+/// uniform rank, then `with_mt(mt, rank)` to override. The default is
+/// applied to any MT not explicitly overridden, plus to all discrete
+/// inelastic levels (MT=51..91) for GPU stride-compatibility — the GPU
+/// kernel reads discrete-level basis with a single fixed `P_RANK`.
+///
+/// Recommended defaults from `scripts/phase5_*.py` analysis on U-235:
+///   - 47 of 52 reactions are rank-1 (machine-epsilon)
+///   - smooth reactions (MT 2 elastic / 18 fission / 102 capture):
+///     rank-1 sufficient when paired with WMP for the resonance window
+///   - inelastic (MT 4) and continuum: rank 3-5
+#[derive(Clone, Debug)]
+pub struct RankPolicy {
+    pub default: usize,
+    pub per_mt: std::collections::HashMap<u32, usize>,
+}
+
+impl RankPolicy {
+    pub fn new(default: usize) -> Self {
+        Self {
+            default: default.max(1),
+            per_mt: std::collections::HashMap::new(),
+        }
+    }
+    pub fn with_mt(mut self, mt: u32, rank: usize) -> Self {
+        if rank > 0 {
+            self.per_mt.insert(mt, rank);
+        }
+        self
+    }
+    pub fn rank_for(&self, mt: u32) -> usize {
+        *self.per_mt.get(&mt).unwrap_or(&self.default)
+    }
+}
+
+/// Adaptive-rank loader. Uses `policy.rank_for(MT)` for the six smooth
+/// reactions (MT 2/4/16/17/18/102) and `policy.default` for all
+/// discrete inelastic levels (GPU compatibility constraint, see comment
+/// inside).
+pub fn load_nuclide_with_policy(
+    h5_path: &std::path::Path,
+    policy: &RankPolicy,
+    temp_idx: usize,
+    awr_fallback: f64,
+    nu_bar_fallback: f64,
+) -> NuclideKernels {
+    let svd_rank = policy.default;
+    if policy.per_mt.is_empty() {
+        println!("  Loading {} (rank={svd_rank})...", h5_path.display());
+    } else {
+        let mut overrides: Vec<_> = policy.per_mt.iter().collect();
+        overrides.sort_by_key(|(mt, _)| **mt);
+        let s: Vec<String> = overrides
+            .iter()
+            .map(|(m, r)| format!("MT={m}:{r}"))
+            .collect();
+        println!(
+            "  Loading {} (rank={svd_rank}, overrides: {})...",
+            h5_path.display(),
+            s.join(", ")
+        );
+    }
 
     // Open file ONCE and cache energy grids
     let reader = match NuclideFileReader::open(h5_path) {
@@ -630,34 +700,37 @@ pub fn load_nuclide(
     let total_table = total_xs_vec
         .as_ref()
         .map(|xs| PointwiseTable::from_shared_grid(shared_grid.clone(), xs.clone()));
-    let elastic = build_kernel_from_reader(&reader, 2, svd_rank, temp_idx, &shared_grid);
+    let elastic = build_kernel_from_reader(&reader, 2, policy.rank_for(2), temp_idx, &shared_grid);
     if elastic.is_some() {
-        println!("    MT=2 (elastic)");
+        println!("    MT=2  (elastic)  rank={}", policy.rank_for(2));
     }
-    let inelastic = build_kernel_from_reader(&reader, 4, svd_rank, temp_idx, &shared_grid);
+    let inelastic =
+        build_kernel_from_reader(&reader, 4, policy.rank_for(4), temp_idx, &shared_grid);
     if inelastic.is_some() {
-        println!("    MT=4 (inelastic)");
+        println!("    MT=4  (inelastic) rank={}", policy.rank_for(4));
     } else if !discrete_levels.is_empty() {
         println!(
-            "    MT=4 (inelastic) — synthesized from {} discrete levels",
+            "    MT=4  (inelastic) — synthesized from {} discrete levels",
             discrete_levels.len()
         );
     }
-    let n2n = build_kernel_from_reader(&reader, 16, svd_rank, temp_idx, &shared_grid);
+    let n2n = build_kernel_from_reader(&reader, 16, policy.rank_for(16), temp_idx, &shared_grid);
     if n2n.is_some() {
-        println!("    MT=16 (n,2n)");
+        println!("    MT=16 (n,2n)     rank={}", policy.rank_for(16));
     }
-    let n3n = build_kernel_from_reader(&reader, 17, svd_rank, temp_idx, &shared_grid);
+    let n3n = build_kernel_from_reader(&reader, 17, policy.rank_for(17), temp_idx, &shared_grid);
     if n3n.is_some() {
-        println!("    MT=17 (n,3n)");
+        println!("    MT=17 (n,3n)     rank={}", policy.rank_for(17));
     }
-    let fission = build_kernel_from_reader(&reader, 18, svd_rank, temp_idx, &shared_grid);
+    let fission =
+        build_kernel_from_reader(&reader, 18, policy.rank_for(18), temp_idx, &shared_grid);
     if fission.is_some() {
-        println!("    MT=18 (fission)");
+        println!("    MT=18 (fission)  rank={}", policy.rank_for(18));
     }
-    let capture = build_kernel_from_reader(&reader, 102, svd_rank, temp_idx, &shared_grid);
+    let capture =
+        build_kernel_from_reader(&reader, 102, policy.rank_for(102), temp_idx, &shared_grid);
     if capture.is_some() {
-        println!("    MT=102 (capture)");
+        println!("    MT=102 (capture) rank={}", policy.rank_for(102));
     }
 
     let missing_xs = total_xs_vec.as_ref().map(|total| {

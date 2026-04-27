@@ -1363,11 +1363,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
                 .map(transport_one)
                 .collect()
         } else {
-            source_bank
-                .iter()
-                .enumerate()
-                .map(transport_one)
-                .collect()
+            source_bank.iter().enumerate().map(transport_one).collect()
         };
 
         // Reduce: merge per-particle results

@@ -144,19 +144,25 @@ impl Surface {
                 let dz = p.z - center_z;
                 dx.mul_add(dx, dz * dz) - radius * radius
             }
-            Self::ConeZ { x0, y0, z0, r_sq, .. } => {
+            Self::ConeZ {
+                x0, y0, z0, r_sq, ..
+            } => {
                 let dx = p.x - x0;
                 let dy = p.y - y0;
                 let dz = p.z - z0;
                 dx.mul_add(dx, dy * dy) - r_sq * dz * dz
             }
-            Self::ConeX { x0, y0, z0, r_sq, .. } => {
+            Self::ConeX {
+                x0, y0, z0, r_sq, ..
+            } => {
                 let dx = p.x - x0;
                 let dy = p.y - y0;
                 let dz = p.z - z0;
                 dy.mul_add(dy, dz * dz) - r_sq * dx * dx
             }
-            Self::ConeY { x0, y0, z0, r_sq, .. } => {
+            Self::ConeY {
+                x0, y0, z0, r_sq, ..
+            } => {
                 let dx = p.x - x0;
                 let dy = p.y - y0;
                 let dz = p.z - z0;
@@ -227,16 +233,20 @@ impl Surface {
                 let d_rot = Vec3::new(dir.x, dir.z, dir.y);
                 cylinder_z_intersect(p_rot, d_rot, *center_x, *center_z, *radius)
             }
-            Self::ConeZ { x0, y0, z0, r_sq, .. } => {
-                cone_z_intersect(p, dir, *x0, *y0, *z0, *r_sq)
-            }
-            Self::ConeX { x0, y0, z0, r_sq, .. } => {
+            Self::ConeZ {
+                x0, y0, z0, r_sq, ..
+            } => cone_z_intersect(p, dir, *x0, *y0, *z0, *r_sq),
+            Self::ConeX {
+                x0, y0, z0, r_sq, ..
+            } => {
                 // X-axis cone = Z-axis cone with (y, z, x) → (x, y, z).
                 let p_rot = Vec3::new(p.y, p.z, p.x);
                 let d_rot = Vec3::new(dir.y, dir.z, dir.x);
                 cone_z_intersect(p_rot, d_rot, *y0, *z0, *x0, *r_sq)
             }
-            Self::ConeY { x0, y0, z0, r_sq, .. } => {
+            Self::ConeY {
+                x0, y0, z0, r_sq, ..
+            } => {
                 // Y-axis cone: swap y and z so y becomes the axis.
                 let p_rot = Vec3::new(p.x, p.z, p.y);
                 let d_rot = Vec3::new(dir.x, dir.z, dir.y);
@@ -281,17 +291,19 @@ impl Surface {
             Self::CylinderY {
                 center_x, center_z, ..
             } => Vec3::new(p.x - center_x, 0.0, p.z - center_z).normalized(),
-            Self::ConeZ { x0, y0, z0, r_sq, .. } => {
+            Self::ConeZ {
+                x0, y0, z0, r_sq, ..
+            } => {
                 // ∇f = (2(x-x0), 2(y-y0), -2·r²(z-z0)); dropping the
                 // factor of 2 before normalising.
                 Vec3::new(p.x - x0, p.y - y0, -r_sq * (p.z - z0)).normalized()
             }
-            Self::ConeX { x0, y0, z0, r_sq, .. } => {
-                Vec3::new(-r_sq * (p.x - x0), p.y - y0, p.z - z0).normalized()
-            }
-            Self::ConeY { x0, y0, z0, r_sq, .. } => {
-                Vec3::new(p.x - x0, -r_sq * (p.y - y0), p.z - z0).normalized()
-            }
+            Self::ConeX {
+                x0, y0, z0, r_sq, ..
+            } => Vec3::new(-r_sq * (p.x - x0), p.y - y0, p.z - z0).normalized(),
+            Self::ConeY {
+                x0, y0, z0, r_sq, ..
+            } => Vec3::new(p.x - x0, -r_sq * (p.y - y0), p.z - z0).normalized(),
         }
     }
 
@@ -518,7 +530,10 @@ mod tests {
         // Particle at (2, 0, -5) heading +z hits at t = 3 (position
         // (2, 0, -2), where f = 2² + 0 − 1·(-2)² = 0).
         let s = Surface::ConeZ {
-            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            r_sq: 1.0,
             bc: BoundaryCondition::Transmission,
         };
         let p = Vec3::new(2.0, 0.0, -5.0);
@@ -536,7 +551,10 @@ mod tests {
         // direction (1, 0, 1)/√2 starting at (1, 0, 0). With A = 0
         // (exactly parallel), the quadratic degenerates to linear.
         let s = Surface::ConeZ {
-            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            r_sq: 1.0,
             bc: BoundaryCondition::Transmission,
         };
         let p = Vec3::new(1.0, 0.0, 0.0);
@@ -551,19 +569,27 @@ mod tests {
         // ConeX with same parameters as ConeZ should match when we
         // swap the test ray through the same rotation.
         let s_z = Surface::ConeZ {
-            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            r_sq: 1.0,
             bc: BoundaryCondition::Transmission,
         };
         let s_x = Surface::ConeX {
-            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            r_sq: 1.0,
             bc: BoundaryCondition::Transmission,
         };
         // Z-test: ray at (2, 0, -5) heading +z hits at t = 3.
         // X-equivalent: ray at (-5, 0, 2) heading +x.
         let t_z = s_z.distance(Vec3::new(2.0, 0.0, -5.0), Vec3::new(0.0, 0.0, 1.0));
         let t_x = s_x.distance(Vec3::new(-5.0, 0.0, 2.0), Vec3::new(1.0, 0.0, 0.0));
-        assert!(t_z.is_some() && t_x.is_some());
-        assert!((t_z.unwrap() - t_x.unwrap()).abs() < 1.0e-10);
+        let (Some(t_z_v), Some(t_x_v)) = (t_z, t_x) else {
+            panic!("expected both ray-cone hits");
+        };
+        assert!((t_z_v - t_x_v).abs() < 1.0e-10);
     }
 
     #[test]
@@ -572,7 +598,10 @@ mod tests {
         // outward normal should point roughly in the radial-outward
         // direction with a slope matching the cone opening.
         let s = Surface::ConeZ {
-            x0: 0.0, y0: 0.0, z0: 0.0, r_sq: 1.0,
+            x0: 0.0,
+            y0: 0.0,
+            z0: 0.0,
+            r_sq: 1.0,
             bc: BoundaryCondition::Transmission,
         };
         let n = s.normal_at(Vec3::new(1.0, 0.0, 1.0));

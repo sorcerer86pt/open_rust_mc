@@ -31,6 +31,7 @@ pub struct GpuTransportContext {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     k_init_source: CudaFunction,
+    #[allow(dead_code)] // retained for future event-based path; loaded from PTX
     k_count_alive: CudaFunction,
     k_compact_alive: CudaFunction,
     k_energy_bin_count: CudaFunction,

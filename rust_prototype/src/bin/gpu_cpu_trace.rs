@@ -230,7 +230,6 @@ mod cuda_main {
         xs_provider: &xs_provider::TableXsProvider,
     ) -> Vec<[f64; 17]> {
         use open_rust_mc::geometry;
-        use open_rust_mc::physics::collision::InelasticData;
         use open_rust_mc::transport::particle::Particle;
 
         // Match GPU RNG seeding exactly: pcg_init(seed=42+tid*100000, stream=tid)
@@ -476,10 +475,10 @@ mod cuda_main {
                 if xi < cum {
                     row[9] = 0.0; // elastic
                     // Free-gas or two-body elastic
-                    let cell_kT = cell.temperature * 8.617333262e-5;
-                    if particle.energy < 400.0 * cell_kT {
+                    let cell_kt = cell.temperature * 8.617333262e-5;
+                    if particle.energy < 400.0 * cell_kt {
                         // Simplified free-gas: use same kinematics as GPU
-                        let sigma = (cell_kT / a).sqrt();
+                        let sigma = (cell_kt / a).sqrt();
                         let v_n = (2.0 * particle.energy).sqrt();
                         let u1 = rng.uniform();
                         let u2 = rng.uniform();
@@ -683,7 +682,7 @@ mod cuda_main {
             nuclides: table_nuclides,
             thermal: thermal.clone(),
         };
-        let svd_thermal = thermal;
+        let _svd_thermal = thermal;
 
         let materials = setup_materials();
         let (surfaces, cells) = setup_geometry();

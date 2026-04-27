@@ -34,6 +34,7 @@ from ._core import (
     PhotonMaterial,
     Settings,
     Scene,
+    XsMode,
     # Results
     EigenvalueResult,
     GammaHeatingResult,
@@ -218,6 +219,7 @@ __all__ = [
     "PhotonMaterial",
     "Settings",
     "Scene",
+    "XsMode",
     "EigenvalueResult",
     "GammaHeatingResult",
     "run_eigenvalue",

@@ -372,8 +372,14 @@ fn main() -> ExitCode {
 
         while let Some((p0, d0, e0, _c0)) = photon_bank_local.pop() {
             let r = transport_history_csg(
-                p0, d0, e0, &surfaces, &cells, &materials_p,
-                1_000.0, &mut rng,
+                p0,
+                d0,
+                e0,
+                &surfaces,
+                &cells,
+                &materials_p,
+                1_000.0,
+                &mut rng,
             );
 
             escaped_energy += r.energy_escaped;
@@ -404,8 +410,7 @@ fn main() -> ExitCode {
                 // UO₂ at sub-MeV electrons, <0.1 % for water). Using
                 // `sample_photon_energy` unconditionally as before
                 // over-emitted by ~20-30×.
-                if let (Some(Some(bs)), Some(Some(_mat))) =
-                    (brems_p.get(mid), materials_p.get(mid))
+                if let (Some(Some(bs)), Some(Some(_mat))) = (brems_p.get(mid), materials_p.get(mid))
                 {
                     // NIST ESTAR-calibrated radiation yield as the
                     // single-photon emission probability. See
@@ -413,23 +418,22 @@ fn main() -> ExitCode {
                     // fit; σ_rad is unreliable as an absolute value
                     // because the HDF5 DCS scaling convention varies.
                     let p_brems = bs.radiative_yield_approx(ele.e_kin_ev);
-                    if p_brems > 0.0 && rng.uniform() < p_brems {
-                        if let Some(e_gamma) =
-                            bs.sample_photon_energy(ele.e_kin_ev, &mut rng)
-                        {
-                            let (gx, gy, gz) = rng.isotropic_direction();
-                            photon_bank_local.push((
-                                ele.pos,
-                                Vec3::new(gx, gy, gz),
-                                e_gamma,
-                                ele.cell_idx,
-                            ));
-                            brems_photons_emitted += 1;
-                            brems_energy_emitted += e_gamma;
-                            csda_energy -= e_gamma;
-                            if csda_energy < 0.0 {
-                                csda_energy = 0.0;
-                            }
+                    if p_brems > 0.0
+                        && rng.uniform() < p_brems
+                        && let Some(e_gamma) = bs.sample_photon_energy(ele.e_kin_ev, &mut rng)
+                    {
+                        let (gx, gy, gz) = rng.isotropic_direction();
+                        photon_bank_local.push((
+                            ele.pos,
+                            Vec3::new(gx, gy, gz),
+                            e_gamma,
+                            ele.cell_idx,
+                        ));
+                        brems_photons_emitted += 1;
+                        brems_energy_emitted += e_gamma;
+                        csda_energy -= e_gamma;
+                        if csda_energy < 0.0 {
+                            csda_energy = 0.0;
                         }
                     }
                 }
@@ -438,9 +442,16 @@ fn main() -> ExitCode {
                 // scatters applied but also more geometry queries;
                 // 0.005 balances fidelity and runtime.
                 track_integrate_electron_csg_with_ms(
-                    ele.pos, ele.dir, csda_energy, ele.cell_idx,
-                    &surfaces, &cells, &materials_p,
-                    &x0_per_cell, 0.005, &mut rng,
+                    ele.pos,
+                    ele.dir,
+                    csda_energy,
+                    ele.cell_idx,
+                    &surfaces,
+                    &cells,
+                    &materials_p,
+                    &x0_per_cell,
+                    0.005,
+                    &mut rng,
                     &mut deposited_per_cell,
                 );
             }
@@ -460,7 +471,9 @@ fn main() -> ExitCode {
         let n_electrons_rough = brems_photons_emitted; // one photon per electron in TTB
         println!(
             "  Bremsstrahlung: {} γ emitted, {:.3e} eV total ({:.3} % of source energy)",
-            n_electrons_rough, brems_energy_emitted, 100.0 * brems_frac
+            n_electrons_rough,
+            brems_energy_emitted,
+            100.0 * brems_frac
         );
     }
 

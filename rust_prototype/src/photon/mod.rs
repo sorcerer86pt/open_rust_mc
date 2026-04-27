@@ -40,6 +40,7 @@ pub mod coherent;
 pub mod compton;
 pub mod data;
 pub mod electron;
+pub mod gpu;
 pub mod hdf5_reader;
 pub mod material;
 pub mod pair;

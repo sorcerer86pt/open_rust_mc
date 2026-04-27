@@ -2,6 +2,11 @@
 // names the users see (`Sphere`, `ZCylinder`, ...). Rust's snake_case
 // lint would rename them; suppress project-wide in this binding crate.
 #![allow(non_snake_case)]
+// pyo3's `?` propagation of `PyErr` triggers a `useless_conversion`
+// false positive on rust 1.94 / clippy 1.94 inside `PyResult<T>` return
+// types. The pattern is idiomatic across pyo3 examples, so suppress
+// crate-wide here rather than per-call-site.
+#![allow(clippy::useless_conversion)]
 
 //! Python bindings for the `open-rust-mc` engine.
 //!
@@ -38,16 +43,20 @@ use pyo3::prelude::*;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
-use open_rust_mc::geometry::{Aabb, Vec3, ray};
-use open_rust_mc::photon::PhotonElement;
+use open_rust_mc::geometry::{ray, Aabb, Vec3};
 use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
 use open_rust_mc::photon::electron::{radiation_length_cm, track_integrate_electron_csg_with_ms};
 use open_rust_mc::photon::material::PhotonMaterial as RustPhotonMaterial;
 use open_rust_mc::photon::transport::transport_history_csg;
+use open_rust_mc::photon::PhotonElement;
+use std::sync::Arc;
+
+use open_rust_mc::transport::hybrid_xs::{HybridSvdWmpXsProvider, HybridTableWmpXsProvider};
 use open_rust_mc::transport::material::Material as RustMaterial;
 use open_rust_mc::transport::rng::Rng;
 use open_rust_mc::transport::simulate::{self, SimConfig};
-use open_rust_mc::transport::xs_provider::{self, TableXsProvider};
+use open_rust_mc::transport::xs_provider::{self, RankPolicy, SvdXsProvider, TableXsProvider};
+use open_rust_mc::wmp::WindowedMultipole;
 
 // ── Surfaces ──────────────────────────────────────────────────────────────
 
@@ -134,7 +143,10 @@ fn YCylinder(r: f64, x: f64, z: f64, bc: &str) -> PyResult<PySurface> {
 #[pyo3(signature = (x0, bc="transmission"))]
 fn XPlane(x0: f64, bc: &str) -> PyResult<PySurface> {
     Ok(PySurface {
-        inner: Surface::PlaneX { x0, bc: parse_bc(bc)? },
+        inner: Surface::PlaneX {
+            x0,
+            bc: parse_bc(bc)?,
+        },
     })
 }
 
@@ -142,7 +154,10 @@ fn XPlane(x0: f64, bc: &str) -> PyResult<PySurface> {
 #[pyo3(signature = (y0, bc="transmission"))]
 fn YPlane(y0: f64, bc: &str) -> PyResult<PySurface> {
     Ok(PySurface {
-        inner: Surface::PlaneY { y0, bc: parse_bc(bc)? },
+        inner: Surface::PlaneY {
+            y0,
+            bc: parse_bc(bc)?,
+        },
     })
 }
 
@@ -150,7 +165,10 @@ fn YPlane(y0: f64, bc: &str) -> PyResult<PySurface> {
 #[pyo3(signature = (z0, bc="transmission"))]
 fn ZPlane(z0: f64, bc: &str) -> PyResult<PySurface> {
     Ok(PySurface {
-        inner: Surface::PlaneZ { z0, bc: parse_bc(bc)? },
+        inner: Surface::PlaneZ {
+            z0,
+            bc: parse_bc(bc)?,
+        },
     })
 }
 
@@ -228,7 +246,9 @@ impl PyMaterial {
     fn __repr__(&self) -> String {
         format!(
             "<Material {:?} at {:.1} K, {} nuclides>",
-            self.name, self.temperature, self.nuclides.len()
+            self.name,
+            self.temperature,
+            self.nuclides.len()
         )
     }
 }
@@ -326,6 +346,62 @@ impl PySettings {
     }
 }
 
+// ── Cross-section provider mode (the builder toggle) ─────────────────────
+
+/// Selects which cross-section representation the simulation uses.
+///
+/// - `Table`: OpenMC-style pointwise tables. Industry baseline. Lowest
+///   load time, fastest single-temperature lookup, most memory.
+/// - `Svd`: rank-`k` SVD-compressed kernels. Lower memory at high k or
+///   multi-temperature, slower load (SVD decomposition). Default rank 5.
+/// - `HybridSvdWmp`: SVD outside the resolved-resonance window, exact
+///   Windowed-Multipole evaluation inside. Requires WMP HDF5 files in
+///   `<data_dir>/../wmp/`. The intended production-precision mode.
+/// - `HybridTableWmp`: pointwise tables with WMP override in the
+///   resonance window. Industry-baseline accuracy at lower memory.
+#[pyclass(eq, eq_int, name = "XsMode", module = "open_rust_mc._core")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PyXsMode {
+    Table,
+    Svd,
+    HybridSvdWmp,
+    HybridTableWmp,
+}
+
+#[pymethods]
+impl PyXsMode {
+    fn __repr__(&self) -> String {
+        match self {
+            PyXsMode::Table => "XsMode.Table",
+            PyXsMode::Svd => "XsMode.Svd",
+            PyXsMode::HybridSvdWmp => "XsMode.HybridSvdWmp",
+            PyXsMode::HybridTableWmp => "XsMode.HybridTableWmp",
+        }
+        .to_string()
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            PyXsMode::Table => "table",
+            PyXsMode::Svd => "svd",
+            PyXsMode::HybridSvdWmp => "hybrid_svd_wmp",
+            PyXsMode::HybridTableWmp => "hybrid_table_wmp",
+        }
+    }
+}
+
+/// Standard 9-nuclide WMP filename convention (ZZAAA.h5) for U-235,
+/// U-238, U-234. Other nuclides return `None`. Used by the hybrid
+/// modes to discover WMP coverage.
+fn wmp_path_for(file: &str) -> Option<&'static str> {
+    match file {
+        "U234.h5" => Some("092234.h5"),
+        "U235.h5" => Some("092235.h5"),
+        "U238.h5" => Some("092238.h5"),
+        _ => None,
+    }
+}
+
 // ── Scene (the builder) ───────────────────────────────────────────────────
 
 /// A spec for a cell, resolved at `run_eigenvalue` time.
@@ -351,6 +427,14 @@ struct PyScene {
     /// Per-cell photon material, indexed by cell name. `None` means
     /// the cell is void for photons.
     photon_materials: HashMap<String, PyPhotonMaterial>,
+    /// Cross-section provider mode. Default Table.
+    xs_mode: PyXsMode,
+    /// SVD truncation rank used as the default for any reaction MT not
+    /// listed in `svd_ranks_per_mt`. Default 5.
+    svd_rank: usize,
+    /// Per-MT rank overrides. Empty by default — every reaction uses
+    /// `svd_rank`. Set via `set_svd_ranks({mt: rank, ...})`.
+    svd_ranks_per_mt: HashMap<u32, usize>,
 }
 
 #[pymethods]
@@ -373,7 +457,82 @@ impl PyScene {
             surface_order: Vec::new(),
             cells: Vec::new(),
             photon_materials: HashMap::new(),
+            xs_mode: PyXsMode::Table,
+            svd_rank: 5,
+            svd_ranks_per_mt: HashMap::new(),
         })
+    }
+
+    /// Set the cross-section provider mode. Builder-style, returns `self`.
+    fn set_xs_mode<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        mode: PyXsMode,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.xs_mode = mode;
+        Ok(slf)
+    }
+
+    /// Set the SVD truncation rank used by the Svd and HybridSvdWmp
+    /// modes. Builder-style, returns `self`. Default 5. No effect on
+    /// Table-mode runs.
+    fn set_svd_rank<'a>(mut slf: PyRefMut<'a, Self>, rank: usize) -> PyResult<PyRefMut<'a, Self>> {
+        if rank == 0 {
+            return Err(PyValueError::new_err("svd_rank must be ≥ 1"));
+        }
+        slf.svd_rank = rank;
+        Ok(slf)
+    }
+
+    /// Read back the currently selected XsMode (for asserts in tests).
+    #[getter]
+    fn xs_mode(&self) -> PyXsMode {
+        self.xs_mode
+    }
+
+    /// Read back the currently selected SVD rank.
+    #[getter]
+    fn svd_rank(&self) -> usize {
+        self.svd_rank
+    }
+
+    /// Set per-reaction SVD rank overrides. The dict keys are MT
+    /// numbers (2 elastic, 4 inelastic, 16 n2n, 17 n3n, 18 fission,
+    /// 102 capture; discrete-level MTs 51..91 are GPU-stride-locked
+    /// to `svd_rank` and ignored here). Reactions not listed fall
+    /// back to `svd_rank`. Builder-style; returns `self`.
+    ///
+    /// Recommended for the production-precision Hybrid SVD+WMP path:
+    ///
+    /// ```python
+    /// scene = (scene
+    ///     .set_xs_mode(XsMode.HybridSvdWmp)
+    ///     .set_svd_rank(5)                     # default
+    ///     .set_svd_ranks({2: 1, 18: 1, 102: 1})  # smooth tails — WMP handles resonance
+    /// )
+    /// ```
+    fn set_svd_ranks<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        ranks: HashMap<u32, usize>,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        for (&mt, &rank) in ranks.iter() {
+            if rank == 0 {
+                return Err(PyValueError::new_err(format!(
+                    "rank for MT={mt} must be ≥ 1, got 0"
+                )));
+            }
+        }
+        slf.svd_ranks_per_mt = ranks;
+        Ok(slf)
+    }
+
+    /// Read back the per-MT rank overrides as a dict.
+    #[getter]
+    fn svd_ranks_per_mt(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = pyo3::types::PyDict::new_bound(py);
+        for (&mt, &rank) in &self.svd_ranks_per_mt {
+            d.set_item(mt, rank)?;
+        }
+        Ok(d.into())
     }
 
     /// Set the photon (per-element) HDF5 data directory, required for
@@ -507,6 +666,34 @@ struct PyEigenvalueResult {
     /// Total leakages (particles escaping through vacuum BC).
     #[pyo3(get)]
     total_leakage: u64,
+    /// Cross-section mode actually used by the run, as a string
+    /// ("table", "svd", "hybrid_svd_wmp", "hybrid_table_wmp").
+    #[pyo3(get)]
+    mode_used: String,
+    /// SVD rank actually used (0 for Table mode).
+    #[pyo3(get)]
+    svd_rank: usize,
+    /// Wall time spent loading the cross-section data (HDF5 reads + SVD
+    /// decomposition + WMP loads), in seconds. Excludes simulation.
+    #[pyo3(get)]
+    load_time_seconds: f64,
+    /// Wall time spent in `simulate::run_eigenvalue` (transport loop
+    /// only — no IO, no provider construction). In seconds.
+    #[pyo3(get)]
+    sim_time_seconds: f64,
+    /// In-solver memory footprint of the cross-section provider (bytes).
+    /// Hybrid modes report current scaffolding; tables report packed XS
+    /// arrays; SVD reports basis + coefficient + grid bytes.
+    #[pyo3(get)]
+    xs_memory_bytes: u64,
+    /// Number of WMP-covered nuclides (0 in Table/Svd modes).
+    #[pyo3(get)]
+    wmp_covered_nuclides: usize,
+    /// Per-MT rank overrides effectively used by the run, captured from
+    /// the scene at run start. Empty `{}` means uniform `svd_rank`.
+    /// Same `{mt: rank}` shape as `Scene.set_svd_ranks`.
+    #[pyo3(get)]
+    svd_ranks_per_mt: HashMap<u32, usize>,
 }
 
 #[pymethods]
@@ -524,6 +711,44 @@ impl PyEigenvalueResult {
         for (n, c) in self.cell_names.iter().zip(self.captures_by_cell.iter()) {
             d.set_item(n, *c)?;
         }
+        Ok(d.into())
+    }
+
+    /// Return a dictionary with the run's full diagnostic statistics:
+    /// k_eff, sigma, batch counts, timing, memory, mode metadata. Useful
+    /// in notebooks for one-line debug printing or for serialising a run
+    /// to JSON.
+    fn stats(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let d = pyo3::types::PyDict::new_bound(py);
+        d.set_item("mode", &self.mode_used)?;
+        d.set_item("svd_rank", self.svd_rank)?;
+        d.set_item("k_eff", self.k_eff)?;
+        d.set_item("k_sigma", self.k_sigma)?;
+        d.set_item("active_batches", self.active_batches)?;
+        d.set_item("total_histories", self.total_histories)?;
+        d.set_item("load_time_seconds", self.load_time_seconds)?;
+        d.set_item("sim_time_seconds", self.sim_time_seconds)?;
+        d.set_item("runtime_seconds", self.runtime_seconds)?;
+        d.set_item("xs_memory_bytes", self.xs_memory_bytes)?;
+        d.set_item(
+            "xs_memory_mib",
+            self.xs_memory_bytes as f64 / (1024.0 * 1024.0),
+        )?;
+        d.set_item("wmp_covered_nuclides", self.wmp_covered_nuclides)?;
+        let ranks = pyo3::types::PyDict::new_bound(py);
+        for (&mt, &r) in &self.svd_ranks_per_mt {
+            ranks.set_item(mt, r)?;
+        }
+        d.set_item("svd_ranks_per_mt", ranks)?;
+        d.set_item("total_collisions", self.total_collisions)?;
+        d.set_item("total_fissions", self.total_fissions)?;
+        d.set_item("total_leakage", self.total_leakage)?;
+        let ns_per_history = if self.total_histories > 0 {
+            self.sim_time_seconds * 1e9 / self.total_histories as f64
+        } else {
+            0.0
+        };
+        d.set_item("ns_per_history", ns_per_history)?;
         Ok(d.into())
     }
 }
@@ -588,11 +813,7 @@ impl PyGammaHeatingResult {
     /// Deposition fractions as a `{cell_name: fraction}` dictionary.
     fn fractions_dict(&self, py: Python<'_>) -> PyResult<PyObject> {
         let d = pyo3::types::PyDict::new_bound(py);
-        for (n, f) in self
-            .cell_names
-            .iter()
-            .zip(self.deposition_fraction.iter())
-        {
+        for (n, f) in self.cell_names.iter().zip(self.deposition_fraction.iter()) {
             d.set_item(n, *f)?;
         }
         Ok(d.into())
@@ -657,7 +878,9 @@ fn run_gamma_heating(
                 path.display()
             )));
         }
-        tables.push(xs_provider::load_nuclide_table(&path, *temp_idx, *awr, *nubar));
+        tables.push(xs_provider::load_nuclide_table(
+            &path, *temp_idx, *awr, *nubar,
+        ));
     }
     // Thermal scattering (same logic as run_eigenvalue).
     let mut thermal_files: Vec<Option<String>> = vec![None; nuclide_specs.len()];
@@ -836,9 +1059,8 @@ fn run_gamma_heating(
             // PartialEq.
             continue;
         }
-        materials_p[mat_idx] = Some(
-            RustPhotonMaterial::new(entries).with_density(py_pm.density_g_per_cm3),
-        );
+        materials_p[mat_idx] =
+            Some(RustPhotonMaterial::new(entries).with_density(py_pm.density_g_per_cm3));
     }
     // Brems samplers are also per-material.
     let brems_p: Vec<Option<MaterialBremss>> = materials_p
@@ -916,9 +1138,7 @@ fn run_gamma_heating(
                     {
                         let p_brems = bs.radiative_yield_approx(ele.e_kin_ev);
                         if p_brems > 0.0 && rng.uniform() < p_brems {
-                            if let Some(e_gamma) =
-                                bs.sample_photon_energy(ele.e_kin_ev, &mut rng)
-                            {
+                            if let Some(e_gamma) = bs.sample_photon_energy(ele.e_kin_ev, &mut rng) {
                                 let (gx, gy, gz) = rng.isotropic_direction();
                                 photon_bank_local.push((
                                     ele.pos,
@@ -957,7 +1177,13 @@ fn run_gamma_heating(
     let cell_names: Vec<String> = scene.cells.iter().map(|c| c.name.clone()).collect();
     let deposition_fraction: Vec<f64> = deposited_per_cell
         .iter()
-        .map(|d| if total_source_energy > 0.0 { d / total_source_energy } else { 0.0 })
+        .map(|d| {
+            if total_source_energy > 0.0 {
+                d / total_source_energy
+            } else {
+                0.0
+            }
+        })
         .collect();
 
     Ok(PyGammaHeatingResult {
@@ -991,10 +1217,7 @@ fn half_space_aabb(surface: &Surface, positive: bool) -> Aabb {
     match surface {
         Surface::PlaneX { x0, .. } => {
             if positive {
-                Aabb::new(
-                    Vec3::new(*x0, neg_inf, neg_inf),
-                    Vec3::new(inf, inf, inf),
-                )
+                Aabb::new(Vec3::new(*x0, neg_inf, neg_inf), Vec3::new(inf, inf, inf))
             } else {
                 Aabb::new(
                     Vec3::new(neg_inf, neg_inf, neg_inf),
@@ -1004,10 +1227,7 @@ fn half_space_aabb(surface: &Surface, positive: bool) -> Aabb {
         }
         Surface::PlaneY { y0, .. } => {
             if positive {
-                Aabb::new(
-                    Vec3::new(neg_inf, *y0, neg_inf),
-                    Vec3::new(inf, inf, inf),
-                )
+                Aabb::new(Vec3::new(neg_inf, *y0, neg_inf), Vec3::new(inf, inf, inf))
             } else {
                 Aabb::new(
                     Vec3::new(neg_inf, neg_inf, neg_inf),
@@ -1017,10 +1237,7 @@ fn half_space_aabb(surface: &Surface, positive: bool) -> Aabb {
         }
         Surface::PlaneZ { z0, .. } => {
             if positive {
-                Aabb::new(
-                    Vec3::new(neg_inf, neg_inf, *z0),
-                    Vec3::new(inf, inf, inf),
-                )
+                Aabb::new(Vec3::new(neg_inf, neg_inf, *z0), Vec3::new(inf, inf, inf))
             } else {
                 Aabb::new(
                     Vec3::new(neg_inf, neg_inf, neg_inf),
@@ -1049,11 +1266,7 @@ fn half_space_aabb(surface: &Surface, positive: bool) -> Aabb {
 /// and `-name` tokens contribute (via `half_space_aabb`), so
 /// axis-aligned plane-bounded cells like a PWR pin cell get finite
 /// AABBs on every axis. "~name" and unknown names are skipped.
-fn aabb_from_region(
-    expr: &str,
-    surfaces: &[Surface],
-    surf_idx: &HashMap<String, usize>,
-) -> Aabb {
+fn aabb_from_region(expr: &str, surfaces: &[Surface], surf_idx: &HashMap<String, usize>) -> Aabb {
     let mut group_boxes: Vec<Aabb> = Vec::new();
     for group in expr.split('|') {
         let mut acc: Option<Aabb> = None;
@@ -1066,7 +1279,9 @@ fn aabb_from_region(
                 Some('+') => (true, &token[1..]),
                 _ => continue,
             };
-            let Some(&i) = surf_idx.get(name) else { continue };
+            let Some(&i) = surf_idx.get(name) else {
+                continue;
+            };
             let a = half_space_aabb(&surfaces[i], positive);
             acc = Some(match acc {
                 None => a,
@@ -1216,8 +1431,12 @@ fn run_eigenvalue(
         }
     }
 
-    // 2. Load XS tables.
-    let mut tables = Vec::with_capacity(nuclide_specs.len());
+    // 2. Load XS data — backend-specific. Time the load step.
+    let t_load_start = std::time::Instant::now();
+    let mut tables: Vec<xs_provider::NuclideTableData> = Vec::new();
+    let mut svd_kernels: Vec<xs_provider::NuclideKernels> = Vec::new();
+    let need_svd = matches!(scene.xs_mode, PyXsMode::Svd | PyXsMode::HybridSvdWmp);
+    let need_table = matches!(scene.xs_mode, PyXsMode::Table | PyXsMode::HybridTableWmp);
     for (file, awr, nubar, temp_idx) in &nuclide_specs {
         let path = scene.data_dir.join(file);
         if !path.exists() {
@@ -1226,7 +1445,22 @@ fn run_eigenvalue(
                 path.display()
             )));
         }
-        tables.push(xs_provider::load_nuclide_table(&path, *temp_idx, *awr, *nubar));
+        if need_table {
+            tables.push(xs_provider::load_nuclide_table(
+                &path, *temp_idx, *awr, *nubar,
+            ));
+        }
+        if need_svd {
+            // Build the per-MT rank policy once per call (cheap, but keep
+            // outside the hot path anyway).
+            let mut policy = RankPolicy::new(scene.svd_rank);
+            for (&mt, &rank) in &scene.svd_ranks_per_mt {
+                policy = policy.with_mt(mt, rank);
+            }
+            svd_kernels.push(xs_provider::load_nuclide_with_policy(
+                &path, &policy, *temp_idx, *awr, *nubar,
+            ));
+        }
     }
 
     // 2b. Build per-nuclide thermal scattering table. Indexed by the
@@ -1279,11 +1513,6 @@ fn run_eigenvalue(
             }
         }
     }
-    let xs = TableXsProvider {
-        nuclides: tables,
-        thermal,
-    };
-
     // 3. Build surface vec.
     let mut surf_idx: HashMap<String, usize> = HashMap::new();
     let mut surfaces: Vec<Surface> = Vec::with_capacity(scene.surface_order.len());
@@ -1334,28 +1563,110 @@ fn run_eigenvalue(
         );
     }
 
-    // 6. Run eigenvalue — release the GIL for the long-running Rust loop.
+    // 6. Build the chosen XS provider, then run eigenvalue.
+    //
+    // For Hybrid* modes, also load WMP files from `<data_dir>/../wmp/`
+    // using the standard ZZAAA.h5 naming convention. Nuclides without
+    // a known WMP filename (anything other than U-234/235/238) get
+    // `None` and fall through to the inner provider.
+    let mut wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>> =
+        Vec::with_capacity(nuclide_specs.len());
+    let mut covered = 0usize;
+    let needs_wmp = matches!(
+        scene.xs_mode,
+        PyXsMode::HybridSvdWmp | PyXsMode::HybridTableWmp
+    );
+    if needs_wmp {
+        let wmp_dir = scene.data_dir.join("..").join("wmp");
+        for (file, _, _, _) in &nuclide_specs {
+            let entry = match wmp_path_for(file) {
+                None => None,
+                Some(wmp_file) => {
+                    let path = wmp_dir.join(wmp_file);
+                    if !path.exists() {
+                        None
+                    } else {
+                        match WindowedMultipole::from_hdf5(&path) {
+                            Ok(wmp) => {
+                                covered += 1;
+                                let t_kelvin = 294.0; // matches default temp_idx=1 -> ~294 K
+                                Some((Arc::new(wmp), t_kelvin))
+                            }
+                            Err(_) => None,
+                        }
+                    }
+                }
+            };
+            wmps.push(entry);
+        }
+    }
+
+    let load_time = t_load_start.elapsed().as_secs_f64();
+
     let config = SimConfig {
         batches: settings.batches,
         inactive: settings.inactive,
         particles_per_batch: settings.particles,
         seed: settings.seed,
         auto_inactive: None,
-        // Rust engine stays silent — Python owns reporting. This also
-        // means no stdout contention between rayon workers and
-        // Python's own stdout when the GIL is released.
         verbose: false,
-        // Parallel transport via rayon. `py.allow_threads` below
-        // releases the GIL so Python blocks while Rust's rayon pool
-        // runs natively. No stdout contention because the engine is
-        // silent.
         parallel: true,
     };
-    let t0 = std::time::Instant::now();
-    let (batch_results, _k_running) = py.allow_threads(|| {
-        simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
-    });
-    let runtime = t0.elapsed().as_secs_f64();
+    let t_sim_start = std::time::Instant::now();
+    let (batch_results, _k_running, xs_memory_bytes) = match scene.xs_mode {
+        PyXsMode::Table => {
+            let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
+            let xs = TableXsProvider {
+                nuclides: tables,
+                thermal,
+            };
+            let (br, k) = py.allow_threads(|| {
+                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+            });
+            (br, k, xs_mem)
+        }
+        PyXsMode::Svd => {
+            let xs_mem: usize = svd_kernels.iter().map(|n| n.svd_memory_bytes()).sum();
+            let xs = SvdXsProvider {
+                nuclides: svd_kernels,
+                thermal,
+            };
+            let (br, k) = py.allow_threads(|| {
+                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+            });
+            (br, k, xs_mem)
+        }
+        PyXsMode::HybridSvdWmp => {
+            let inner = SvdXsProvider {
+                nuclides: svd_kernels,
+                thermal,
+            };
+            let xs = HybridSvdWmpXsProvider::new(inner, wmps);
+            // (smooth-only rebuild disabled here pending diagnosis of
+            // a Godiva-specific zero-fission regression in the Python
+            // path; pwr_pincell binary still does the rebuild and
+            // reports the realised memory drop. See xs_mode_demo.)
+            let xs_mem = xs.memory_report().current_total();
+            let (br, k) = py.allow_threads(|| {
+                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+            });
+            (br, k, xs_mem)
+        }
+        PyXsMode::HybridTableWmp => {
+            let inner = TableXsProvider {
+                nuclides: tables,
+                thermal,
+            };
+            let xs = HybridTableWmpXsProvider::new(inner, wmps);
+            let xs_mem = xs.memory_report().current_total();
+            let (br, k) = py.allow_threads(|| {
+                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+            });
+            (br, k, xs_mem)
+        }
+    };
+    let sim_time = t_sim_start.elapsed().as_secs_f64();
+    let runtime = load_time + sim_time;
 
     // 7. Compute k mean/std and roll up per-batch tallies.
     let active: Vec<f64> = batch_results
@@ -1398,6 +1709,17 @@ fn run_eigenvalue(
     }
     let cell_names: Vec<String> = scene.cells.iter().map(|c| c.name.clone()).collect();
 
+    let mode_name = match scene.xs_mode {
+        PyXsMode::Table => "table",
+        PyXsMode::Svd => "svd",
+        PyXsMode::HybridSvdWmp => "hybrid_svd_wmp",
+        PyXsMode::HybridTableWmp => "hybrid_table_wmp",
+    };
+    let svd_rank_used = match scene.xs_mode {
+        PyXsMode::Table | PyXsMode::HybridTableWmp => 0,
+        PyXsMode::Svd | PyXsMode::HybridSvdWmp => scene.svd_rank,
+    };
+
     Ok(PyEigenvalueResult {
         k_eff: mean,
         k_sigma: std_dev,
@@ -1412,6 +1734,13 @@ fn run_eigenvalue(
         total_collisions,
         total_fissions,
         total_leakage,
+        mode_used: mode_name.to_string(),
+        svd_rank: svd_rank_used,
+        load_time_seconds: load_time,
+        sim_time_seconds: sim_time,
+        xs_memory_bytes: xs_memory_bytes as u64,
+        wmp_covered_nuclides: covered,
+        svd_ranks_per_mt: scene.svd_ranks_per_mt.clone(),
     })
 }
 
@@ -1431,6 +1760,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyPhotonMaterial>()?;
     m.add_class::<PySettings>()?;
     m.add_class::<PyScene>()?;
+    m.add_class::<PyXsMode>()?;
     m.add_class::<PyEigenvalueResult>()?;
     m.add_class::<PyGammaHeatingResult>()?;
 

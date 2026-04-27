@@ -3,17 +3,52 @@
 //! [`PhotonElement::bremsstrahlung`].
 //!
 //! Scaling convention (Seltzer-Berger 1986, matching OpenMC's photon
-//! HDF5 layout):
+//! HDF5 layout, see openmc/data/photon.py::IncidentPhoton._add_bremsstrahlung
+//! where the raw mbarn values are multiplied by `1.0e-3` before HDF5 write):
 //!
-//!   dcs[i_e][i_k] = (β² / Z²) · k · dσ/dk    [in mbarn]
+//!   dcs[i_e][i_k] = (β² / Z²) · E_γ · dσ/dE_γ    [in barn]
 //!
-//! so that
+//! Equivalently, with `k = E_γ / T_e ∈ [0, 1]` the scaled photon energy:
 //!
-//!   dσ/dk = dcs · Z² / (β² · k)              [mbarn/eV, for scaled k]
-//!   k·(dσ/dk) = dcs · Z² / β²                [mbarn]
+//!   dσ/dk = dcs · Z² / (β² · k)                  [barn, dimensionless k]
+//!   k·(dσ/dk) = dcs · Z² / β²                    [barn]
 //!
-//! where `k = E_γ / T_e` is the scaled photon energy, `β = v/c` is the
-//! electron velocity, and `T_e` is electron kinetic energy.
+//! Radiative cross section per atom (barn):
+//!
+//!   σ_rad(T_e) = ∫(dσ/dk) dk = (Z²/β²) · ∫(dcs/k) dk
+//!
+//! Radiative stopping cross section per atom (eV · barn):
+//!
+//!   S_rad(T_e) = ∫E_γ · (dσ/dE_γ) dE_γ = T_e · (Z²/β²) · ∫dcs dk
+//!
+//! # Important: this matches OpenMC, but does NOT match NIST ESTAR
+//!
+//! Computing S_rad/ρ from these formulae and comparing to NIST ESTAR
+//! gives a Z-dependent over-prediction (~0.7× at H-1, ~5× at U-92 at
+//! T_e = 1 MeV). The disagreement is **not a code bug**; it is the
+//! well-known Coulomb-screening / electron-electron correction gap
+//! between the raw Seltzer-Berger 1986 χ tables (used here for
+//! spectrum-shape sampling) and the Berger-Seltzer 1982 with screening
+//! tables that NIST ESTAR uses for absolute stopping powers. See:
+//!
+//!   - Seltzer & Berger, At. Data Nucl. Data Tables 35, 345 (1986)
+//!     — describes the unscreened nuclear-field DCS tabulated here.
+//!   - Berger & Seltzer, NBSIR 82-2550 (1982) — adds Coulomb,
+//!     screening, and electron-electron corrections used by ESTAR.
+//!   - Pratt et al., At. Data Nucl. Data Tables 20, 175 (1977) —
+//!     screening corrections.
+//!
+//! Production path for the per-electron emission *probability* is the
+//! NIST-calibrated empirical fit
+//! [`MaterialBremss::radiative_yield_approx`], which lives at the
+//! material level. The per-atom σ_rad here is used internally only as
+//! a **relative** weight for which element to sample from in
+//! [`MaterialBremss::sample_element`] — the Z-dependent miscalibration
+//! enters there but is small compared to the across-element σ_rad
+//! ratio (which is dominated by Z²) at the materials we benchmark.
+//!
+//! See `tests/brems_nist_cross_check.rs` for the integration test
+//! that documents the current discrepancy quantitatively.
 //!
 //! Use
 //! ----
@@ -62,15 +97,17 @@ pub struct ElementBremss {
     /// Scaled photon energy grid k = Eγ/T_e, ascending in (0, 1].
     /// A leading 0 may be present.
     k_grid: Vec<f64>,
-    /// Seltzer-Berger χ table, row-major `chi[i_e][i_k]` in mbarn.
+    /// Seltzer-Berger χ table, row-major `chi[i_e][i_k]` in **barn**
+    /// (OpenMC HDF5 stores `(β²/Z²) · E_γ · dσ/dE_γ` in barn after the
+    /// internal `1e-3` mbarn → barn conversion).
     chi: Vec<Vec<f64>>,
     /// Integrated CDF over k at each electron energy, with CDF[0] = 0
-    /// and CDF[N_k-1] = total ∫ (dσ/dk) dk in mbarn · (unit of 1/β²·Z²).
+    /// and CDF[N_k-1] = total ∫ (χ/k) dk in χ-native units (barn).
     /// We keep it in the χ-native scaling so the normalisation cancels
     /// during inverse-CDF sampling.
     cdf_k: Vec<Vec<f64>>,
-    /// ∫ k · (dσ/dk) dk at each electron energy, stored un-scaled in
-    /// χ-units — needed for σ_rad integrals. Shape `[N_e]`.
+    /// ∫ χ dk at each electron energy in χ-native units (barn).
+    /// Used by `sigma_rad_barns` and `mean_k`.
     integral_chi: Vec<f64>,
 }
 
@@ -105,17 +142,54 @@ impl ElementBremss {
     }
 
     /// Integrated radiative cross section per atom, σ_rad(T_e) in barns.
+    /// Raw Seltzer-Berger 1986 (no screening / electron-electron
+    /// corrections); see module docstring on the NIST ESTAR gap.
     ///
-    /// σ_rad = ∫[0,1] dσ/dk dk = (Z² / β²) · ∫ (χ / k) dk · 1e-3   (b)
+    ///   σ_rad = ∫[0,1] (dσ/dk) dk = (Z² / β²) · ∫ (χ / k) dk
     ///
+    /// `χ` is already in barn (OpenMC HDF5 convention, post mbarn→barn
+    /// conversion at write-time), so no extra unit factor is needed.
     /// Interpolates log-linearly in T_e on the stored grid.
     pub fn sigma_rad_barns(&self, t_e_ev: f64) -> f64 {
         if t_e_ev <= self.electron_energy[0] {
             return 0.0;
         }
-        let integral_mbarn = log_interp(&self.electron_energy, &self.integral_chi, t_e_ev);
+        let integral_barn = log_interp(&self.electron_energy, &self.integral_chi, t_e_ev);
         let b2 = beta2(t_e_ev).max(1.0e-10);
-        integral_mbarn * self.z * self.z / b2 * 1.0e-3
+        integral_barn * self.z * self.z / b2
+    }
+
+    /// Atomic number of this element. Used by the NIST cross-check.
+    pub fn z(&self) -> f64 {
+        self.z
+    }
+
+    /// Radiative stopping cross section per atom, S_rad(T_e), in eV·barn.
+    /// Computed from the OpenMC Seltzer-Berger formula
+    ///
+    ///   S_rad = T_e · (Z² / β²) · ∫ χ dk
+    ///
+    /// Comparing this against NIST ESTAR will show a Z-dependent
+    /// over-prediction (Coulomb / e-e screening gap; see module
+    /// docstring). Exposed for the NIST cross-check test, not used
+    /// internally for emission-probability sampling.
+    ///
+    /// Note: `integral_chi` (stored on `Self`) holds `∫(χ/k) dk`, not
+    /// `∫χ dk` — the integrand needed for `mean_k`. So we compute
+    /// `∫χ dk` on-demand from the nearest tabulated row.
+    pub fn s_rad_per_atom_ev_barn(&self, t_e_ev: f64) -> f64 {
+        if t_e_ev <= self.electron_energy[0] {
+            return 0.0;
+        }
+        let row_idx = nearest_row(&self.electron_energy, t_e_ev);
+        let row = &self.chi[row_idx];
+        let mut integ_barn = 0.0;
+        for i in 1..self.k_grid.len() {
+            let dk = self.k_grid[i] - self.k_grid[i - 1];
+            integ_barn += 0.5 * (row[i] + row[i - 1]) * dk;
+        }
+        let b2 = beta2(t_e_ev).max(1.0e-10);
+        t_e_ev * self.z * self.z / b2 * integ_barn
     }
 
     /// Mean radiative yield fraction `<k>` at electron energy `T_e`.
@@ -174,13 +248,7 @@ fn build_cdf_and_integral(k_grid: &[f64], chi_row: &[f64]) -> (Vec<f64>, f64) {
     // nonzero-k point.
     let n = k_grid.len();
     let mut cdf = vec![0.0_f64; n];
-    let mut last_valid_i = 0;
-    for i in 0..n {
-        if k_grid[i] > 0.0 {
-            last_valid_i = i;
-            break;
-        }
-    }
+    let last_valid_i = k_grid.iter().position(|&k| k > 0.0).unwrap_or(0);
     for i in (last_valid_i + 1)..n {
         let k_a = k_grid[i - 1];
         let k_b = k_grid[i];
@@ -357,7 +425,11 @@ mod tests {
             .parent()?
             .join("data/endfb-vii.1-hdf5/photon")
             .join(name);
-        if p.exists() { Some(PhotonElement::from_hdf5(&p).unwrap()) } else { None }
+        if p.exists() {
+            Some(PhotonElement::from_hdf5(&p).unwrap())
+        } else {
+            None
+        }
     }
 
     #[test]
@@ -373,14 +445,17 @@ mod tests {
 
     #[test]
     fn integrated_cdf_is_monotone_positive() {
-        let Some(u) = load("U.h5") else { return; };
+        let Some(u) = load("U.h5") else {
+            return;
+        };
         let s = ElementBremss::new(&u);
         for (i_e, row) in s.cdf_k.iter().enumerate() {
             for i in 1..row.len() {
                 assert!(
                     row[i] >= row[i - 1] - 1.0e-18,
                     "non-monotone CDF at i_e={i_e} i={i}: {} -> {}",
-                    row[i - 1], row[i]
+                    row[i - 1],
+                    row[i]
                 );
             }
             assert!(row[row.len() - 1] >= 0.0);
@@ -389,8 +464,12 @@ mod tests {
 
     #[test]
     fn sigma_rad_grows_with_z() {
-        let Some(h) = load("H.h5") else { return; };
-        let Some(u) = load("U.h5") else { return; };
+        let Some(h) = load("H.h5") else {
+            return;
+        };
+        let Some(u) = load("U.h5") else {
+            return;
+        };
         let h_s = ElementBremss::new(&h);
         let u_s = ElementBremss::new(&u);
         // At 1 MeV σ_rad ∝ Z²; U has Z=92, H has Z=1, so ratio ~8000.
@@ -401,7 +480,9 @@ mod tests {
 
     #[test]
     fn sampled_mean_k_matches_analytic_mean() {
-        let Some(u) = load("U.h5") else { return; };
+        let Some(u) = load("U.h5") else {
+            return;
+        };
         let s = ElementBremss::new(&u);
         // Draw many samples at 1 MeV and compare to the analytic <k>.
         let analytic = s.mean_k(1.0e6);
@@ -409,7 +490,7 @@ mod tests {
             analytic > 0.01 && analytic < 1.0,
             "mean_k implausible: {analytic}"
         );
-        let mut rng = Rng::new(0xDEADC0DE_F00D_BABEu64, 1);
+        let mut rng = Rng::new(0xDEAD_C0DE_F00D_BABE_u64, 1);
         let n = 50_000;
         let mut sum = 0.0;
         for _ in 0..n {
@@ -429,7 +510,9 @@ mod tests {
     /// single-photon TTB).
     #[test]
     fn u_mean_k_at_10mev_is_appreciable() {
-        let Some(u) = load("U.h5") else { return; };
+        let Some(u) = load("U.h5") else {
+            return;
+        };
         let s = ElementBremss::new(&u);
         let mean = s.mean_k(1.0e7);
         // Mean scaled photon energy should exceed 0.1 at 10 MeV in U

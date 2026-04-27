@@ -188,6 +188,53 @@ impl SvdKernel {
         self.energies.len() * std::mem::size_of::<f64>()
     }
 
+    /// Return a new kernel restricted to energy points **outside**
+    /// `[e_lo, e_hi]`. Used by the hybrid SVD+WMP layout to drop the
+    /// resonance window from the SVD basis (the window is handled by
+    /// the multipole evaluator). The `vt_coeffs` matrix is unchanged
+    /// since it is rank × n_t and indexed by temperature, not energy.
+    ///
+    /// The returned kernel owns a fresh energy `Arc<[f64]>` — callers
+    /// trimming several reactions on the same nuclide should arrange
+    /// to share that Arc across them if they want a single shared
+    /// smooth-grid (currently unused; reactions are memory-light at
+    /// rank 5 so per-reaction Arcs cost <1 MB total).
+    pub fn trim_to_outside(&self, e_lo: f64, e_hi: f64) -> SvdKernel {
+        let mut keep: Vec<usize> = Vec::with_capacity(self.n_e);
+        for (i, &e) in self.energies.iter().enumerate() {
+            if e < e_lo || e > e_hi {
+                keep.push(i);
+            }
+        }
+        let new_n_e = keep.len();
+        let mut new_energies: Vec<f64> = Vec::with_capacity(new_n_e);
+        let mut new_basis: Vec<f64> = Vec::with_capacity(new_n_e * self.rank);
+        for &i in &keep {
+            new_energies.push(self.energies[i]);
+            let row = &self.basis[i * self.rank..(i + 1) * self.rank];
+            new_basis.extend_from_slice(row);
+        }
+        // Construct without going through `SvdKernel::new`, which would
+        // build a Brown-2014-style log-spaced hash table on the trimmed
+        // grid. That hash table assumes a contiguous energy span; with
+        // a gap at `[e_lo, e_hi]` it routes queries inside the gap to
+        // wrong bracket bins and returns garbage. The hybrid path's
+        // contract is that no query ever lands in the trimmed gap (the
+        // multipole evaluator intercepts those), but we defensively
+        // disable the hash table so any out-of-contract query falls
+        // back to a clean binary search instead of returning corrupt
+        // values that silently destroy the fission rate.
+        SvdKernel {
+            basis: new_basis,
+            vt_coeffs: self.vt_coeffs.clone(),
+            energies: Arc::from(new_energies.into_boxed_slice()),
+            hash_table: None,
+            rank: self.rank,
+            n_e: new_n_e,
+            n_t: self.n_t,
+        }
+    }
+
     /// Pre-compute the k temperature coefficients for a given temperature index.
     ///
     /// Returns a `rank`-length vector: `coeffs[j] = vt[j, t_idx]`.

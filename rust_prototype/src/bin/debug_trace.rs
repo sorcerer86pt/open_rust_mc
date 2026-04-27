@@ -156,6 +156,7 @@ fn run_gpu_comparison(_args: &Args, _provider: &xs_provider::SvdXsProvider) {
 #[cfg(feature = "cuda")]
 fn run_gpu_comparison(_args: &Args, provider: &xs_provider::SvdXsProvider) {
     use open_rust_mc::gpu_transport::GpuTransportContext;
+    use open_rust_mc::transport::material::Material;
 
     println!("\n── GPU vs CPU Angular Distribution ──");
     let gpu = match GpuTransportContext::new() {
