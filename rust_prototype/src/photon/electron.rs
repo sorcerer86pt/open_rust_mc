@@ -30,7 +30,9 @@
 //! of each sub-step, the direction is perturbed by a Gaussian polar
 //! angle drawn from the Highland-1975 (PDG review) width:
 //!
-//!     θ_0 = (13.6 MeV / β·p·c) × √(s/X₀) × (1 + 0.038 ln(s/X₀))
+//! ```text
+//! θ_0 = (13.6 MeV / β·p·c) × √(s/X₀) × (1 + 0.038 ln(s/X₀))
+//! ```
 //!
 //! The azimuth φ is uniform in [0, 2π). Radiation length X₀ is
 //! computed per material via Tsai's formula with Bragg additivity on

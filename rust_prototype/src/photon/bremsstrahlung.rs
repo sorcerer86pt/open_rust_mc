@@ -355,7 +355,9 @@ impl MaterialBremss {
     /// Fit to NIST ESTAR radiation-yield fractions for H, C, Al, Fe, Pb,
     /// U from 0.1 MeV to 10 MeV:
     ///
-    ///     Y(E, Z) = x / (1 + x),    x = 3.5·10⁻⁴ · Z · E_MeV^1.25
+    /// ```text
+    /// Y(E, Z) = x / (1 + x),    x = 3.5·10⁻⁴ · Z · E_MeV^1.25
+    /// ```
     ///
     /// Typical residuals |Δ/Y| ≤ 40 % across the fit set — similar to
     /// the uncertainty of the full Seltzer-Berger + Bethe-Bloch
