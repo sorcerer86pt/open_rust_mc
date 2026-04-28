@@ -1,15 +1,31 @@
 # Python API
 
 A thin PyO3 binding over the Rust engine, designed so Python scripts
-can build Monte Carlo neutron-transport scenes and run eigenvalue
-simulations without touching Rust. **Rust is the source of truth** —
-the builder, region validation, and simulation core all live on the
-Rust side; the Python layer is ~200 lines of class/function exports.
+can build Monte Carlo neutron-transport scenes (and now coupled
+neutron-photon γ-heating runs) without touching Rust. **Rust is the
+source of truth** — the builder, region validation, and simulation
+core all live on the Rust side; the Python layer is ~200 lines of
+class/function exports.
 
 The binding crate is at
 [`rust_prototype/bindings/python/`](rust_prototype/bindings/python/);
 sample scripts live in
 [`rust_prototype/bindings/python/examples/`](rust_prototype/bindings/python/examples/).
+
+What's exposed today (v0.4.0):
+
+- All four cross-section providers via the `XsMode` enum
+  (`Table`, `Svd`, `HybridTableWmp`, `HybridSvdWmp`).
+- Per-MT SVD rank overrides via `Scene.set_svd_ranks({mt: rank})`.
+- S(α,β) thermal scattering attached per nuclide
+  (`Material.add_nuclide(..., thermal_file="c_H_in_H2O.h5")`).
+- Coupled neutron-photon γ-heating (`run_gamma_heating`) with
+  full electron transport (CSDA + Highland MS + Bethe-Bloch
+  + Seltzer-Berger bremsstrahlung) on by default.
+- Convenience material builders for UO₂, water (with S(α,β)),
+  and Zircaloy-4.
+- Region grammar: intersection (whitespace), union (`|`),
+  and complement (`~`) — flat, no nested parentheses.
 
 ## Quick start
 
@@ -85,6 +101,28 @@ consume). All builder methods return `self` for chaining.
 | `add_material(name, material)` | Register a `Material` under a string name |
 | `add_surface(name, surface)` | Register a surface under a name |
 | `add_cell(name, region, fill=None, temperature=293.15)` | Register a cell with a region expression and an optional material fill |
+| `set_xs_mode(mode)` | Pick the XS provider — `XsMode.Table` (default), `Svd`, `HybridTableWmp`, or `HybridSvdWmp` |
+| `set_svd_rank(rank)` | Default SVD truncation rank for `Svd` and `HybridSvdWmp` modes (default 5; ignored in Table mode) |
+| `set_svd_ranks({mt: rank, …})` | Per-MT rank overrides — e.g. drop smooth tails (MT=2/18/102) to rank 1 while keeping discrete-level MTs at the default |
+| `set_photon_data_dir(path)` | Per-element photon HDF5 directory; required for `run_gamma_heating` |
+| `add_photon_material(cell_name, photon_material)` | Attach a `PhotonMaterial` to a previously-registered cell |
+
+### `XsMode`
+
+Selects the cross-section representation. All four providers share
+the same `XsProvider` trait on the Rust side, so the same geometry
+and physics kernels run unchanged across modes.
+
+| Variant | What it does |
+|---|---|
+| `XsMode.Table` | OpenMC-style pointwise tables. Lowest load time, fastest single-temperature lookup, most memory. The industry baseline. |
+| `XsMode.Svd` | Rank-*k* SVD-compressed kernels. Slower load (SVD decomposition), lower memory at high *k* or multi-temperature. Default rank 5. |
+| `XsMode.HybridTableWmp` | Pointwise tables with Windowed Multipole override inside each nuclide's resolved-resonance window. Industry-baseline accuracy at lower memory than pure tables. |
+| `XsMode.HybridSvdWmp` | SVD outside the RRR window, exact WMP evaluation inside. The intended production-precision mode. Set per-MT ranks to push smooth tails (MT=2/18/102) to rank 1 — WMP handles all the resonance structure. |
+
+Hybrid modes look for WMP files in `<data_dir>/../wmp/` (standard
+`092234.h5`, `092235.h5`, `092238.h5` naming). Nuclides without WMP
+coverage transparently fall back to the non-WMP path.
 
 ### `Material(name, temperature=293.15, temp_idx=1)`
 
@@ -197,8 +235,15 @@ Rust side runs fully native with all cores. Returns:
 | `total_fissions` | `int` | Summed across active batches |
 | `total_leakage` | `int` | Summed across active batches |
 
-Helper: `result.captures_dict()` returns `{cell_name: count}` for
-convenient pandas / plot input.
+Helpers:
+
+- `result.captures_dict()` — `{cell_name: count}` for pandas / plot input.
+- `result.stats()` — full diagnostic dict for one-line debug printing
+  or JSON serialisation. Includes `mode`, `svd_rank`, `svd_ranks_per_mt`,
+  `k_eff`, `k_sigma`, `active_batches`, `total_histories`, `load_time_seconds`,
+  `sim_time_seconds`, `runtime_seconds`, `xs_memory_bytes`, `xs_memory_mib`,
+  `wmp_covered_nuclides`, `total_collisions`, `total_fissions`,
+  `total_leakage`, and `ns_per_history`.
 
 ### `run_gamma_heating(scene, neutron_settings, n_photon_histories=200_000, ...)`
 
@@ -290,6 +335,15 @@ separate `abi3-py313` build target.
 - **No per-cell energy-spectrum tallies.** Aggregate tallies (k_eff,
   per-cell captures, γ deposition) are exposed; energy-binned flux /
   current tallies need further FFI surface.
+- **No off-library temperature flag.** The Rust binaries take
+  `--target-temp` / `--target-temp-offset` to drive the 3-point Ducru
+  kernel-Gram QP weights; that knob isn't on `Settings` yet. Workaround:
+  set the `temperature` per `Material` / per cell, and pick a `temp_idx`
+  bracketing the target.
+- **GPU backend is binary-only.** `--features cuda` is a Cargo flag
+  on the Rust side; the Python wheel ships CPU-only. Re-exposing
+  the GPU XS providers as a `XsMode.GpuSvd` is straightforward but
+  not done.
 
 ## What the Python layer actually validates
 
@@ -320,5 +374,14 @@ The claims that are meaningful are:
 
 ## Examples
 
-- [`examples/godiva.py`](rust_prototype/bindings/python/examples/godiva.py) — ICSBEP HEU-MET-FAST-001 (a bare uranium sphere) driving the engine from Python. k_eff lands inside ICSBEP's 1.0000 ± 100 pcm band; runtime ~0.2 s at 50 × 5 k.
-- [`examples/pwr_gamma_heating.py`](rust_prototype/bindings/python/examples/pwr_gamma_heating.py) — coupled neutron-photon PWR pin cell γ-heating using `uranium_oxide_material`, `zircaloy4_material`, `water_material`, S(α,β) thermal scattering, and `run_gamma_heating`. Deposition split lands at 84 / 0 / 10 / 6, within ~1 pp of OpenMC 0.15.3 on the same geometry.
+All examples live in
+[`rust_prototype/bindings/python/examples/`](rust_prototype/bindings/python/examples/).
+
+| Script | What it shows |
+|---|---|
+| [`godiva.py`](rust_prototype/bindings/python/examples/godiva.py) | ICSBEP HEU-MET-FAST-001 (bare 8.74 cm HEU sphere). k_eff lands inside ICSBEP's 1.0000 ± 100 pcm band; runtime ~0.2 s at 50 × 5 k. The hello-world for the `Scene` builder. |
+| [`xs_mode_demo.py`](rust_prototype/bindings/python/examples/xs_mode_demo.py) | Cycles all four `XsMode` variants on Godiva and prints the `result.stats()` table — load time, sim time, memory, WMP coverage. The shape of the data the engine pushes back. |
+| [`xs_mode_quick.py`](rust_prototype/bindings/python/examples/xs_mode_quick.py) | Smaller smoke test of the same matrix, plus a couple of per-MT adaptive-rank rows (drop MT=2/18/102 to rank 1 under the SVD+WMP hybrid). |
+| [`pwr_pincell.py`](rust_prototype/bindings/python/examples/pwr_pincell.py) | Neutron-only PWR pin k_inf with reflective BCs, UO₂ + Zr-4 + H₂O-with-S(α,β), and per-cell capture tallies. The starter for any pin-cell-shaped reactor problem. |
+| [`pwr_gamma_heating.py`](rust_prototype/bindings/python/examples/pwr_gamma_heating.py) | Coupled neutron-photon γ-heating end-to-end. Deposition split lands at 84 / 0 / 10 / 6, within ~1 pp of OpenMC 0.15.3 on the same geometry. |
+| [`seed_sweep.py`](rust_prototype/bindings/python/examples/seed_sweep.py) | Multi-seed Godiva run with a Student-t 95 % confidence interval on k_eff. The pattern any benchmark-quality run wants. |
