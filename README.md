@@ -1,11 +1,16 @@
 # open_rust_mc
 
+[![Latest release](https://img.shields.io/badge/release-v0.4.0-blue)](https://github.com/sorcerer86pt/open_rust_mc/releases/latest)
+
 A pure-Rust continuous-energy Monte Carlo neutron **and photon**
 transport engine. Reads OpenMC HDF5 nuclear data directly (no C
 dependency), runs k-eigenvalue simulations end-to-end on CPU (rayon)
 or CUDA GPU, and is validated against OpenMC on two reference
 benchmarks. A coupled neutron-photon pipeline drives a PWR pin cell
 γ-heating calculation directly off the ENDF/B-VII.1 HDF5 library.
+
+166 lib tests + 10 integration tests pass on each push (`cargo test`),
+including doctests on the photon stack.
 
 The engine is designed as a research vehicle for studying cross-section
 representation: it ships **four interchangeable cross-section providers**
