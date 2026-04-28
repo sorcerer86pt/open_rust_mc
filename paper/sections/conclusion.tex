@@ -1,129 +1,154 @@
 \section{Conclusion}
 
-Truncated SVD of the $\log_{10}$-transformed cross-section
-matrix is a defensible drop-in representation for the
-pointwise table. The rank-$5$ SVD provider reproduces the
-ICSBEP HEU-MET-FAST-$001$ critical
-$k_\text{eff} = 1.0000 \pm 100$~pcm
-($1\sigma$)~\cite{icsbep_hmf001} to $+79 \pm 38$~pcm,
-inside the experimental uncertainty band. OpenMC~$0.15.3$
-on the same ENDF/B-VII.1 HDF5 files sits at $-99$~pcm,
-also inside the band; the two codes straddle the
-experimental value from opposite sides. The cross-code
-spread to OpenMC ($+178$~pcm) is larger than either
-code's offset from experiment and is reported as a
-cross-code diagnostic, not as a deviation from the
-physical benchmark.
+Truncated SVD of $\log_{10}\sigma(E,T)$ is a viable
+drop-in for pointwise tables in continuous-energy Monte
+Carlo neutron transport, with the following constraints
+satisfied: rank~$5$ on the smooth channels, rank~$1$ on
+the MT$=51$--$91$ discrete-level cascade,
+three-point unity-normalized Ducru weights for off-library
+temperature interpolation, and channel-consistent
+stochastic $T$-picking. Validation against
+ICSBEP HEU-MET-FAST-$001$ lands at $+79 \pm 38$~pcm,
+inside the experimental $\pm100$~pcm uncertainty band;
+on a $9$-nuclide PWR pin cell, agreement with the engine's
+own pointwise table is $5$--$47$~pcm and with OpenMC
+$0.15.3$ on the same library is $|\Delta| \le 51$~pcm at
+ten-seed statistics.
 
-On a nine-nuclide thermal PWR pin cell (no physical
-benchmark exists; OpenMC~$0.15.3$ is the independent
-code-to-code reference) the same engine running rank-$5$
-SVD vs its own pointwise table agrees on $k_\infty$ within
-$13$--$47$~pcm on two hardware tiers, and all four
-in-engine providers (CPU table, CPU SVD, GPU pointwise,
-GPU SVD) agree with OpenMC~$0.15.3$ to
-$|\Delta| \le 51$~pcm at ten-seed statistics. A Humlicek-W4
-Faddeeva evaluator, a pure-Rust WMP reader, and a SVD+WMP
-hybrid provider all work end-to-end and agree with the
-ACE+WMP industry baseline within $-26$~pcm at single-seed
-statistics ($\ll 1\sigma_\text{seed}$). A CUDA port of the
-WMP evaluator is bit-exact against the CPU path and
-$7\times$ faster per lookup on a consumer GPU.
+\subsection{When SVD pays}
+\label{sec:when}
 
-At a realistic \emph{off-library} operating temperature,
-the story is more interesting. With a uniform $+150$~K
-offset applied to every nuclide (fuel $900\!\to\!1050$~K,
-moderator $600\!\to\!750$~K), OpenMC-style stochastic
-$T$-picking enabled on the pointwise and hybrid paths, and
-a three-point unity Ducru weight scheme on the SVD path
-(Sec.~\ref{sec:ducru_puoi}), SVD reproduces $k_\infty$
-within $213$~pcm of ACE+WMP at ten-seed $50\,000$-particle
-$120$-batch statistics ($\sim\!3.6\sigma_\text{seed}$).
-SVD is $22\%$ smaller than ACE+WMP in memory and matches
-its speed within $0.07\%$. At a realistic off-library
-operating temperature a compressed SVD representation of
-ENDF/B-VII.1 cross sections is smaller than the industry
-ACE+WMP baseline, ties it on speed, and trails it by a
-characterisable small systematic on
-$k_\infty$ (Sec.~\ref{sec:off_library_3t}).
+\paragraph{Off-library temperatures.}
+This is the regime where SVD's measurement story is
+unambiguously positive. At a uniform $+150$~K offset on
+PWR, SVD with three-point unity Ducru is $22\%$ smaller
+than ACE+WMP in memory ($156$ vs $206$~MB), matches
+its CPU throughput within $0.07\%$, and trails its
+$k_\infty$ by $213$~pcm
+($\sim\!3.6\sigma_\text{seed}$, Sec.~\ref{sec:off_library_3t}).
+The pointwise table doubles its memory off-library because
+stochastic $T$-picking requires both bracketing library
+columns to be resident; SVD reconstructs the off-library
+$\sigma$ from a single basis with three weights and does
+not pay this cost.
 
-A two-point unity Ducru ablation leaves a $2094$~pcm
-kernel-approximation bias at the same operating conditions
-(Sec.~\ref{sec:off_library_3t}); a simplex-projected QP
-that clips the signed Ducru weights to non-negativity is
-worse ($5\%$ L2 error on U-$238$ capture versus $0.84\%$
-for the signed three-point scheme) because the simplex
-projection is Euclidean-optimal in weight space whereas
-the raw Ducru weights are Euclidean-optimal in the
-Doppler-kernel norm (Sec.~\ref{sec:off_library_qp}).
-Channel-consistent stochastic $T$-picking is required:
-$\xi$ is drawn once per nuclide-collision and shared across
-every partial channel, so the sum of partials stays at a
-single sampled library temperature
-(Sec.~\ref{sec:off_library_bug}); on-library measurements
-do not exercise the pick.
+\paragraph{High rank-$1$ reaction-channel mix.}
+$43$ of $47$ U-$235$ reaction channels are rank-$1$ to
+machine precision (Sec.~\ref{sec:spectrum}); the
+weakly-$T$-dependent MT$=51$--$91$ discrete levels are
+each rank-$1$ to machine precision across all seven
+ENDF/B-VII.1 library columns. Where the reaction-channel
+mix matches this profile, the rank budget is small and the
+in-engine memory penalty for SVD is correspondingly
+small.
 
-The on-library performance picture is mixed.
-CPU SVD rank-$5$ is $1.37\times$--$1.90\times$ faster than
-the in-engine pointwise table on PWR pin cell
-(hardware-dependent) and $1.43\times$ faster than the table
-on Godiva on the large-L3 system; GPU SVD is $1.30\times$ \emph{slower}
-than GPU pointwise on PWR because four clad nuclides require
-summing $13$ discrete-level SVD kernels per lookup.
+\paragraph{Multi-temperature libraries.}
+With $T = 6$ library columns (the standard
+depletion-feedback multi-temp HDF5 set), the pointwise
+baseline grows linearly in $T$ to $\sim\!600$~MB on the
+$9$-nuclide set while pure SVD and hybrid stay at
+$\sim\!519$~MB; the on-library memory ordering inverts
+in SVD's favour. The measurements in this paper use
+$T = 1$, so this is a projection, not a measured win.
+
+\subsection{Where SVD does not pay}
+\label{sec:where_not}
+
+\paragraph{On-library, $T = 1$, full-physics deployment.}
+At every rank measured ($1$, $2$, $3$, $5$, $7$), SVD
+in-engine memory is monotonically larger than the
+pointwise table at on-library temperatures
+(Sec.~\ref{sec:memprec}). The basis stores $r$ values per
+energy point; the table stores one. CPU throughput is
+favourable ($1.37\times$--$1.90\times$ vs the in-engine
+pointwise table on PWR), but on memory there is no
+on-library rank that wins.
+
+\paragraph{GPU.}
+GPU SVD on PWR is $1.30\times$ \emph{slower} than GPU
+pointwise because four clad nuclides require summing $13$
+discrete-level SVD kernels per lookup, and the
+divergent gather pattern of per-level rank-$1$
+reconstruction does not map well to warp coalescing on
+the geometries tested here. The CPU SVD picture is
+favourable; the GPU SVD picture is not.
+
+\paragraph{Hybrid SVD+WMP throughput.}
 The hybrid is $2.06\times$ slower than CPU SVD because
-WMP evaluation is $\sim\!15\times$ more expensive than the
-SVD FMA per lookup.
+the Faddeeva evaluation inside each WMP window is
+$\sim\!15\times$ more expensive than the SVD FMA. The
+hybrid is shipped as a correctness deliverable, not as
+a throughput improvement; it is the right path only when
+WMP-grade resonance accuracy is required and the
+$2\times$ slowdown is acceptable.
 
-The memory picture has two distinct components. The representation-byte ratio of
-$132.9\times$ (WMP + smooth-SVD vs four-channel
-six-temperature pointwise) is real; the live in-engine
-reduction from the smooth-only SVD rebuild is
-$1.06\times$ ($519.0 \to 487.6$~MB), and the hybrid engine
-is absolutely $4.8$--$5.2\times$ larger than the
-pointwise-table baseline. The discrete-level SVD kernels,
-which WMP does not cover, dominate the engine's working
-set. Reducing those kernels from rank $5$ to rank $1$ is a
-zero-cost change because levels are weakly $T$-dependent
-(Sec.~\ref{sec:discrete_rank}); it closes $\approx\!70\%$
-of the engine's SVD working set on Godiva with no
-measurable $k_\text{eff}$ shift. This is
-what enables the off-library $22\%$ memory win against
-ACE+WMP referenced above: with discrete-level rank $1$
-applied, the SVD engine is absolutely smaller than the
-two-endpoint stochastic-$T$ pointwise table even before
-the WMP comparison.
+\subsection{Caveats and limits}
+\label{sec:caveats}
 
-Rank-$5$ SVD with three-point unity Ducru temperature
-interpolation and discrete-level rank-$1$ reproduces the
-ICSBEP Godiva experimental $k_\text{eff}$ within
-$+79 \pm 38$~pcm (inside the $100$~pcm experimental
-uncertainty), agrees with OpenMC and its own pointwise
-baseline within $\le 3\,\mathrm{SEM}_{10}$ on PWR at
-on-library $T$, and agrees with ACE+WMP within
-$\sim\!3.6\,\mathrm{SEM}_{10}$ on PWR at off-library $T$.
-On memory it is modestly smaller on-library and $22\%$
-smaller off-library; on speed it is
-$1.4\times$--$1.9\times$ faster than pointwise on CPU and
-at parity with ACE+WMP off-library. The $43/47$ rank-one
-reactions and the weakly-$T$-dependent discrete levels
-are structural properties of ENDF/B-VII.1 cross sections;
-the raw Ducru weights are not a partition of unity and
-must be normalized before being applied to a $\log\sigma$
-SVD.
+\paragraph{Engine-scale memory $\neq$ representation-byte
+ratio.}
+The $132.9\times$ representation-byte ratio of
+WMP$+$smooth-SVD against a hypothetical four-channel
+multi-temperature pointwise table is correct
+per-nuclide-per-channel
+(Table~\ref{tab:hybrid_mem}), but the in-engine working
+set on PWR is $4.8$--$5.2\times$ \emph{larger} than the
+pointwise baseline at $T = 1$, because the discrete-level
+SVD kernels (which WMP does not cover) dominate the
+engine memory. The smooth-only-rebuild reduces this by
+$1.06\times$ ($519.0 \to 487.6$~MB). Quoting a single
+compression ratio without scope conflates these two
+metrics; both are reported here so the comparison is
+unambiguous.
 
-The kernel-Gram QP from \cite{ducru2017}~§4 has a
-structural subtlety relative to the signed unity scheme:
-at low rank it wins (U-$238$ MT$=102$ $6.67$~eV peak ratio
-$1.000$ at rank~$3$ vs $0.994$ for signed unity), but at
-production rank~$5$ it is worse ($0.983$ vs $0.990$ on the
-same peak). The QP's constrained optimum lies on the
-boundary of the probability simplex --- one weight clips
-to zero, collapsing the three-point problem to a two-point
-one --- and at higher rank the signed unity scheme's
-negative weight on the far-away library column acts as a
-useful shape-cancellation term. Non-negativity is the
-wrong constraint once basis-truncation error stops
-dominating; signed three-point unity is the production
-default at rank~$5$.
+\paragraph{Rank-$1$ on PWR collapses.}
+Rank-$1$ SVD reconstructs U-$238$ resonance self-shielding
+to a single basis vector and produces $k_\infty = 0.871$
+on the on-library PWR pin cell ($\sim\!46\,000$~pcm
+low). Rank-$2$ overshoots ($1.409$, $\sim\!8\,000$~pcm
+high). Rank-$3$ is the lowest deployable rank
+on resonance-dominated thermal systems; rank-$5$ is the
+production floor.
 
-%% ============================================================
+\paragraph{Library-bias not investigated.}
+Both the engine and OpenMC sit inside the ICSBEP
+$\pm 100$~pcm uncertainty band on Godiva, from opposite
+sides; the $+178$~pcm cross-code spread between them is
+larger than either's offset from experiment. A fully
+independent reference (MCNP, Serpent) would localise the
+spread to one code or to the underlying ENDF/B-VII.1
+evaluation. This is not investigated here.
+
+\paragraph{S($\alpha,\beta$) coverage limited to H/H$_2$O.}
+D$_2$O, graphite, ZrH and other thermal libraries are not
+validated against an independent reference at this stage.
+
+\paragraph{Charged-particle channels absorbed into capture.}
+Channels MT$=103$, $107$, and first-chance fission
+(MT$=19$--$21$) are folded into the capture macroscopic.
+$k_\infty$ is correct under this convention; MT-level
+reaction-rate tallies are not.
+
+\paragraph{Single-seed hybrid statistics.}
+The end-to-end Hybrid SVD+WMP $k_\infty = 1.32795 \pm
+0.00103$ ($-26$~pcm vs ACE+WMP) is single-seed only at
+the matched $150 \times 50\,000$ statistics; the
+ten-seed redo is not in this paper.
+
+\subsection{Bottom line}
+
+SVD compression of ENDF/B-VII.1 cross sections is the
+right choice for off-library, multi-temperature, or
+rank-$1$-channel-heavy operating regimes on CPU; the
+pointwise table remains the right choice for on-library,
+single-temperature, GPU-deployed, or memory-constrained
+configurations. The signed three-point unity Ducru
+scheme is the production default at rank~$5$; the
+kernel-Gram QP wins at low rank but loses at the
+production rank. Three structural properties of
+ENDF/B-VII.1 --- the rank-$1$ majority of U-$235$ reaction
+channels, the weakly-$T$-dependent discrete-level
+cascade, and the rank deficiency of $\log\sigma(E,T)$ at
+fixed $E$ --- are real and exploitable; the raw Ducru
+weights are not a partition of unity and must be
+normalized before being applied to a $\log\sigma$ SVD.
