@@ -35,6 +35,19 @@ A three- or four-way "honesty test" mode (`--mode both` / `--mode all`)
 runs every provider back-to-back on the same geometry and prints a
 head-to-head comparison.
 
+**Where SVD wins on memory:** SVD is monotonically *larger* than the
+pointwise table at every rank (1–7) in on-library 9-nuclide PWR and
+3-nuclide Godiva measurements (`outputs/sweep_svd_wins.csv`,
+`outputs/full_test_run/10_pwr_all_rank5.txt`). The actual memory
+win shows up at off-library temperatures, where stochastic
+pseudo-interpolation forces Table to load two columns (Godiva
+450 K: SVD 164 MB vs Table 222 MB at rank 5 = 1.35×). Compression
+headlines computed from per-nuclide representation byte counts —
+e.g. paper Table 5's 132.9× WMP-vs-pointwise ratio — are
+representation-level metrics; the in-engine working-set is
+4.8–5.2× *larger* than the pointwise baseline once geometry, BVH,
+energy grids, and discrete-level data are included.
+
 ## Off-library temperature handling
 
 The pointwise and hybrid providers implement OpenMC-style **stochastic
@@ -160,10 +173,15 @@ all NVRTC-compiled into one PTX module:
 
 The GPU samplers reproduce CPU samples bit-for-bit (PCG-64 mirrors
 `Rng::for_particle(batch_id, tid)`). A persistent-kernel mode runs
-full Compton history loops in a single launch (~107× faster than
-per-collision launches; ~2.2× faster than rayon-20-thread CPU). 
-High-Z photoelectric is the biggest win at ~9.8× on U / Zr at 1 MeV.
-See `resume.md` for ns/event tables and run conditions.
+full Compton history loops in a single launch — kernel-only,
+free Klein–Nishina, no detector: ~107× faster than the per-collision
+launch model and ~2.2× faster than rayon-20-thread CPU on N = 1 M
+histories (RTX A1000 laptop). Photon photoelectric on U / Zr at
+1 MeV is the highest per-kernel lift at ~9.8×. **These are
+kernel-level numbers; the integrated-transport story is mixed —
+see `paper §gpu` for the full provider matrix, where GPU SVD on
+Godiva is in fact 1.3× *slower* than GPU pointwise.** See
+`resume.md` for ns/event tables and run conditions.
 
 Other GPU-technology hooks (cuBLAS batched DGEMM for SVD
 reconstruction, software BVH ray-AABB traversal, NVLink split-and-

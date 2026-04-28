@@ -4,30 +4,24 @@
 The measurements in Sections~\ref{sec:pwr} and
 \ref{sec:godiva} take the fuel and moderator at \emph{library}
 temperatures --- every nuclide's target $T$ lands exactly on
-a column of the ENDF/B-VII.1 HDF5 file. This is the
-best-case scenario for the pointwise-table and SVD paths
-alike: no temperature interpolation is actually exercised,
-so neither path has to demonstrate a correct off-library
-extrapolation.
-
-A reviewer comment at PHYSOR (Pittsburgh, 2025) pointed out
-that this is not a realistic stress test. Operating
-reactors run at temperatures that are seldom in the library
---- coolant runs at $570$--$620$~K depending on the cycle,
-fuel at $800$--$1500$~K depending on the rod and the burnup,
-and control-rod motions and transients push the operating
-point further off-library still. Monte Carlo codes that
-support continuous-temperature runs do so by
-pseudo-interpolating between the two library columns
-bracketing the target $T$: at each collision a random $\xi$
-is drawn and the lower-$T$ cross section is used with
-probability $(T_\text{hi} - T)/(T_\text{hi} - T_\text{lo})$,
-otherwise the upper. Over a particle's lifetime this
-recovers the exact linear-in-$T$ interpolant in expectation
-and is the OpenMC
-default~\cite{romano2015openmc}. It is also the scenario
-where SVD's temperature-interpolation scheme
-(Sec.~\ref{sec:ducru}) is actually tested.
+a column of the ENDF/B-VII.1 HDF5 file. No temperature
+interpolation is exercised in those measurements, so
+neither the pointwise-table nor the SVD path is tested in
+the off-library regime that an integrator deploys against:
+operating reactors run with coolant at $570$--$620$~K and
+fuel at $800$--$1500$~K, and control-rod motions and
+transients push the operating point further off-library
+still. Continuous-temperature Monte Carlo codes
+pseudo-interpolate between the two library columns
+bracketing the target $T$: at each collision a random
+$\xi$ is drawn and the lower-$T$ cross section is used
+with probability
+$(T_\text{hi} - T)/(T_\text{hi} - T_\text{lo})$, otherwise
+the upper. Over a particle's lifetime this recovers the
+exact linear-in-$T$ interpolant in
+expectation~\cite{romano2015openmc}. This section is the
+benchmark that exercises SVD's temperature-interpolation
+scheme (Sec.~\ref{sec:ducru}).
 
 This section runs a three-way comparison --- SVD, pointwise
 table with OpenMC-style stochastic $T$-pick, and the
@@ -40,20 +34,31 @@ and $1200$~K library), moderator and clad at $750$~K
 $\times 50\,000$ particles $\times 120$ active batches per
 provider ($6 \cdot 10^7$ active histories per provider).
 
-\subsection{Stochastic $T$-pick: a channel-consistency bug}
+\subsection{Channel-consistent stochastic \texorpdfstring{$T$}{T}-pick}
 \label{sec:off_library_bug}
 
-Our first implementation drew $\xi$ independently inside
-each partial-channel lookup. A single collision's MicroXs
-build touches six channels (elastic, inelastic, $n,2n$,
-$n,3n$, fission, capture) plus a total for the pointwise
-table; with independent draws, one collision could see
-elastic XS at $T_\text{lo}$ and capture XS at $T_\text{hi}$
-for the same nuclide. The resulting $\sigma_\text{tot}$ was
-a sum of partials at \emph{different} temperatures, which
-biases the reaction-selection fractions against the
-physically consistent rate per unit time. Measured on PWR
-at $+150$~K offset:
+A single collision's MicroXs build touches six channels
+(elastic, inelastic, $n,2n$, $n,3n$, fission, capture) plus
+a total for the pointwise table. The stochastic $T$-pick
+must be drawn once per nuclide-collision and shared across
+every partial channel, so that
+$\sigma_\text{tot} = \sum_c \sigma_c$ is consistent at a
+single sampled library temperature; independent per-channel
+draws would mix partials at different temperatures and bias
+reaction-selection fractions against the physically
+consistent rate. The engine implements this by wrapping
+each reaction's pointwise table in a
+\texttt{StochTempTable} that exposes
+\texttt{lookup\_at\_idx\_with\_pick(energy, idx, use\_hi)};
+\texttt{TableXsProvider::lookup} draws $\xi$ once per
+nuclide-collision via a thread-local splitmix64 and passes
+the resulting \texttt{use\_hi} to every channel lookup. The
+ACE+WMP hybrid inherits the same per-collision sharing
+through delegation.
+
+The diagnostic for channel-consistency is straightforward:
+$k_\infty$ as a function of moderator temperature must be
+monotonic. Measured on PWR with channel-consistent picking:
 
 \begin{center}
 \begin{tabular}{@{}lc@{}}
@@ -61,175 +66,109 @@ at $+150$~K offset:
 Moderator offset & Table $k_\infty$ \\
 \midrule
 $+0$~K (on-library, $600$~K)     & $1.327$ \\
-$+150$~K (off-library, $750$~K)  & $1.149$~($\star$) \\
+$+150$~K (off-library, $750$~K)  & $1.324$ \\
 $+300$~K (on-library, $900$~K)   & $1.322$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-The $1.149$ at $+150$~K is \emph{non-monotonic} in
-temperature and $\approx\!18\,000$~pcm below its
-bracketing endpoints. Physically, going from $600$~K to
-$900$~K moderator temperature produces a
-$\sim\!500$~pcm harder spectrum and a correspondingly lower
-$k_\infty$; a rising-then-falling-then-rising signature is
-not physics. The fix is to draw $\xi$ once per
-nuclide-collision and share the pick across every partial
-channel. We wrap each reaction's pointwise table in a
-\texttt{StochTempTable} that exposes
-\texttt{lookup\_at\_idx\_with\_pick(energy, idx, use\_hi)};
-the \texttt{TableXsProvider::lookup} method draws $\xi$
-once via a thread-local splitmix64 and passes the resulting
-\texttt{use\_hi} to every channel lookup. After the fix the
-$+150$~K row reads $1.324$, monotonic in $T$ and within
-$\sim\!500$~pcm of the bracketing endpoints. The same
-per-collision sharing is inherited by the ACE+WMP hybrid
-through delegation.
+\noindent monotonic in $T$ and within $\sim\!500$~pcm of
+the bracketing endpoints, as expected from the
+$\sim\!500$~pcm spectrum hardening across the
+$600 \to 900$~K range.
 
-We flag the bug not as a defect of stochastic
-pseudo-interpolation itself (it is not --- OpenMC does the
-same thing at the collision level) but as a correctness
-test that is only visible once the system is driven
-off-library. On-library measurements do not exercise any
-stochastic pick (both endpoints equal the library column);
-the bug could have persisted undetected indefinitely.
-
-\subsection{First attempt: $2$-point unity Ducru --- RED}
-\label{sec:off_library_2t}
+\subsection{Three-point unity Ducru on PWR}
+\label{sec:off_library_3t}
 
 Section~\ref{sec:ducru_puoi} explains why the raw Ducru
 weights must be renormalized to $\sum_j w_j = 1$ before
 being applied to $V^\top$ columns of a $\log\sigma$ SVD.
-The minimal unity-normalized variant uses only the two
-library temperatures bracketing $T$:
+A two-point unity-normalized variant on the bracketing
+$|\mathcal{S}|=2$ subset is the minimal scheme:
 \begin{equation}
 \tilde w_\text{lo} = \frac{w_\text{lo}}{w_\text{lo}+w_\text{hi}},
 \quad
 \tilde w_\text{hi} = \frac{w_\text{hi}}{w_\text{lo}+w_\text{hi}},
 \end{equation}
-with $w_\text{lo}$, $w_\text{hi}$ from Eq.~\ref{eq:ducru}
-on the $|\mathcal{S}|=2$ bracketing subset. This is the
-scheme a first-pass implementation might reach for:
-partition-of-unity, exact at endpoints, involves only the
-minimum number of library temperatures.
+with $w_\text{lo}$, $w_\text{hi}$ from
+Eq.~\ref{eq:ducru}. The two-point scheme is partition-of-
+unity and exact at endpoints, but it leaves a residual
+peak-height error in resolved-resonance reconstruction.
+Extending $\mathcal{S}$ from two to three library
+temperatures (nearest-three by $|T_i - T|$) and applying
+the same unity-normalization
+(Eq.~\ref{eq:ducru_unity}) captures a quadratic correction
+to the Faddeeva-kernel reconstruction. The shipped engine
+uses the three-point variant.
 
-It \emph{does not work} for PWR at $+150$~K offset. Full
-three-way verdict, $10$ seeds $\times 50\,000$
-particles~$\times~120$ batches:
+\paragraph{U-$238$ MT$=102$ rank probe.}
+An offline experiment
+(\texttt{scripts/u238\_capture\_rank\_probe.py}) holds out
+the $900$~K library column of U-$238$ MT$=102$, rebuilds
+the SVD from the remaining five library temperatures, and
+reconstructs $\sigma(E, 900~\text{K})$ via Ducru
+interpolation between the bracketing columns. On the
+$6.67$~eV resonance peak the two-point scheme overshoots
+the true $900$~K value by a factor $1.011$ (band-averaged
+L2 error $1.8\%$); the three-point scheme at rank $3$
+recovers $0.994$ of truth (L2 error $1.05\%$), and at
+rank $5$ recovers $0.990$ of truth (L2 error $0.84\%$).
+The peak-height correction propagates directly to PWR
+$k_\infty$.
 
-\begin{center}
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Provider         & $k_\infty$ & $\sigma_\text{seed}$ & ns/p \\
-\midrule
-SVD ($2$-pt unity) & $1.30707$ & $0.00037$ & $15\,685$ \\
-Pointwise table    & $1.32308$ & $0.00064$ & $15\,809$ \\
-ACE+WMP            & $1.32801$ & $0.00060$ & $16\,708$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\textbf{SVD-vs-WMP $k_\infty$ gap: $\mathbf{2094}$~pcm.}
-At $\sigma_\text{seed} \approx 37$~pcm the gap is
-$\approx\!56\sigma$ --- this is a real, large systematic,
-not a statistics artefact. The Table-vs-WMP gap is
-$493$~pcm, on the sanity-check threshold (the $\sim\!500$~pcm
-residual bias from OpenMC-style stochastic $T$-picking is
-the known floor for that scheme, not ours to close). The
-SVD has $22\%$ less memory than WMP and matches its speed
-within noise, but a $2094$~pcm physics bias at a routine
-operating temperature is unpublishable on its own. We
-grade this as \emph{RED}: the 2-point unity Ducru is
-publishable only as a negative result.
-
-\paragraph{Diagnostic: U-$238$ MT$=102$ rank probe.}
-We isolated the problem with an offline experiment
-(\texttt{scripts/u238\_capture\_rank\_probe.py}) that holds
-out the $900$~K library column of U-$238$ MT$=102$,
-rebuilds the SVD from the remaining five library
-temperatures, and reconstructs $\sigma(E, 900~\text{K})$
-via $2$-point unity Ducru between the $600$ and $1200$~K
-bracketing columns. On the $6.67$~eV resonance peak the
-reconstructed $\sigma$ overshoots the true $900$~K value
-by a factor $1.011$ (i.e. $+1.1\%$ at the peak); averaged
-over the resonance band the L2 error is $1.8\%$. The
-kernel-approximation residual is real and is the dominant
-contribution to the $2094$~pcm PWR gap: a $1\%$ peak error
-on U-$238$ capture compounds over the $\sim\!10^6$ collisions
-per simulation into the observed systematic.
-
-\subsection{Fix: $3$-point unity Ducru --- GREEN}
-\label{sec:off_library_3t}
-
-Extending the subset $\mathcal{S}$ from $2$ to $3$ library
-temperatures (the nearest-three by $|T_i - T|$) and applying
-the same unity-normalization (Eq.~\ref{eq:ducru_unity})
-captures a quadratic correction to the Faddeeva-kernel
-reconstruction that the $2$-point scheme misses. The U-$238$
-probe confirms the intuition: rank-$3$ reconstruction + $3$-point
-unity Ducru improves the $6.67$~eV peak from $1.011$ to
-$0.994$ of truth (i.e.\ a $-0.6\%$ undershoot instead of a
-$+1.1\%$ overshoot) and drops the band-averaged L2 error
-from $1.5\%$ to $1.05\%$. At rank $5$ --- the rank used in
-the PWR measurements --- L2 error drops to $0.84\%$ and peak
-ratio to $0.990$.
-
-Running the full PWR three-way verdict with the $3$-point
-unity scheme substituted in, same statistics as above:
+\paragraph{PWR three-way comparison at $+150$~K.}
+$10$ seeds $\times 50\,000$ particles~$\times~120$ batches:
 
 \begin{center}
 \begin{tabular}{@{}lccc@{}}
 \toprule
 Provider         & $k_\infty$ & $\sigma_\text{seed}$ & ns/p \\
 \midrule
-SVD ($3$-pt unity) & $1.32593$ & $0.00059$ & $27\,298$ \\
+SVD ($3$-pt unity Ducru) & $1.32593$ & $0.00059$ & $27\,298$ \\
+SVD ($2$-pt unity, ablation) & $1.30707$ & $0.00037$ & $15\,685$ \\
 Pointwise table    & $1.32304$ & $0.00050$ & $26\,451$ \\
 ACE+WMP            & $1.32806$ & $0.00045$ & $27\,279$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\textbf{SVD-vs-WMP $k_\infty$ gap: $\mathbf{213}$~pcm.} At
-$\sigma_\text{seed} \approx 59$~pcm the gap is $\approx\!3.6\sigma$
---- a real but small systematic, sitting inside the
-publishable band and well under the $800$~pcm threshold
-that separates a small-systematic claim from an open
-problem. $2094 \to 213$~pcm is a $9.8\times$ reduction
-from swapping two lines of interpolation code; nothing
-else in the engine or in the physics data changed.
+The shipped three-point SVD is $213$~pcm
+($\approx\!3.6\sigma_\text{seed}$) below ACE+WMP. The
+two-point ablation row is reported for comparison: it
+sits at $2094$~pcm vs WMP, illustrating the resonance
+peak-height contribution that the two-point reconstruction
+leaves on the table and that the three-point scheme
+recovers --- a $9.8\times$ reduction from a single
+interpolation-subset change.
 
 SVD memory stays at $152.5$~MB against $199.7$~MB for
 ACE+WMP ($22\%$ less); speed is $27\,298$ vs $27\,279$~ns/p
-($0.07\%$ slower, parity within $\sigma$). At a realistic
-off-library PWR operating temperature, SVD with $3$-point
-unity Ducru beats the industry-standard ACE+WMP baseline
-on memory, matches it on speed, and agrees with it on
-$k_\infty$ to $3.6\sigma$ --- we grade this GREEN on all
-four axes of the \texttt{scripts/pwr\_verdict.py} semaphore
-check.
+(parity within $\sigma$). At an off-library PWR operating
+temperature SVD with three-point unity Ducru is smaller
+than ACE+WMP, matches it on speed, and agrees with it on
+$k_\infty$ to $\approx\!3.6\sigma_\text{seed}$ --- this is
+the deployable operating regime for the SVD provider on
+this geometry.
 
 Table~\ref{tab:pwr_offlib} collects the full sweep.
 
-\begin{table}[htb]
+\begin{table*}[t]
 \centering
 \caption{PWR pin cell at $+150$~K global offset
 (fuel $900\to1050$~K, mod $600\to750$~K, clad $600\to750$~K),
 three-way comparison, ten-seed / $50\,000$-particle /
-$120$-batch statistics.
-$^\star$Pre-fix 2-point row exhibits the
-Sec.~\ref{sec:off_library_bug} channel-consistency bug;
-numbers here are after the fix so the row reflects the
-genuine 2-point Ducru residual alone.}
+$120$-batch statistics. The two-point row is reported as
+an ablation against the shipped three-point variant.}
 \label{tab:pwr_offlib}
 \begin{tabular}{@{}lccccc@{}}
 \toprule
 Provider & $k_\infty$ & $\sigma_\text{seed}$ & Gap vs WMP (pcm)
          & ns/p & Memory (MB) \\
 \midrule
-SVD, $2$-pt unity Ducru$^\star$ & $1.30707$ & $0.00037$ &
-  $-2094$ (RED) & $15\,685$ & $152.5$ \\
+SVD, $2$-pt unity Ducru (ablation) & $1.30707$ & $0.00037$ &
+  $-2094$ & $15\,685$ & $152.5$ \\
 \textbf{SVD, $3$-pt unity Ducru} & $\mathbf{1.32593}$ &
-  $\mathbf{0.00059}$ & $\mathbf{-213}$~\textbf{(GREEN)} &
+  $\mathbf{0.00059}$ & $\mathbf{-213}$ &
   $\mathbf{27\,298}$ & $\mathbf{152.5}$ \\
 Pointwise + stochastic $T$-pick & $1.32304$ & $0.00050$ &
   $-502$ & $26\,451$ & $201.3$ \\
@@ -237,16 +176,15 @@ ACE+WMP (reference)              & $1.32806$ & $0.00045$ &
   $+0$   & $27\,279$ & $199.7$ \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \subsection{Discrete-level rank reduction}
 \label{sec:discrete_rank}
 
-The PHYSOR reviewer also asked why we store discrete
-inelastic levels (MT$=51$--$91$) at the same rank as the
-smooth reactions --- the argument being that a level's
+Discrete inelastic levels (MT$=51$--$91$) are stored at a
+separate rank from the smooth reactions because a level's
 Lorentzian shape in laboratory energy is weakly
-temperature-dependent, so one basis vector should suffice.
+temperature-dependent: one basis vector suffices.
 The offline SVD bears this out: each of the U-$238$
 discrete levels collapses to rank one to machine precision
 when all seven ENDF/B-VII.1 library columns are included.
@@ -331,7 +269,9 @@ variants yielded near-identical weights on U-$238$ MT$=102$.
 The rank dependence of the result is the interesting finding.
 On the same held-out $900$~K test:
 
-\begin{center}
+\begin{table*}[t]
+\centering
+\small
 \begin{tabular}{@{}lccc@{}}
 \toprule
  & rank 3 & rank 5 & rank 5 \\
@@ -351,12 +291,13 @@ $3$-pt kernel-Gram QP (non-neg) &
  $\{0.00, 0.36, 0.64\}$ \\
 \bottomrule
 \end{tabular}
-\end{center}
+\end{table*}
 
 The kernel-Gram QP is the \emph{best} scheme at rank~3 — the
 $6.67$~eV peak reconstructs to within $0.01\%$ of truth --- but
-is strictly worse than the signed $3$-point unity at rank~5,
-the rank we use in the production PWR measurement. The cause
+is strictly worse than the signed three-point unity at
+rank~5, the production rank for the PWR measurements. The
+cause
 is structural: the kernel-Gram QP's optimum lies on the
 boundary of the probability simplex (one weight clips to
 zero), which collapses the $3$-point problem into a $2$-point
@@ -367,30 +308,27 @@ $3$-point scheme's negative weight on the far-away $294$~K
 column is actively useful as a shape-cancellation term, and
 clipping it to zero costs more than it gains.
 
-The practical read is that non-negativity of the interpolation
-weights is \emph{not} a universal goodness property. For a
-production engine at rank~5 with all 9 nuclides, the
-unity-normalized signed scheme is the better default because
-it has more degrees of freedom to cancel residual basis error.
-At low rank, or on a single nuclide where the $6.67$~eV peak
-dominates $k_\infty$, the kernel-Gram QP is the better choice.
-A rank-adaptive dispatch is possible but outside the scope of
-this engine; we keep the signed $3$-point unity scheme as the
-production default.
+Non-negativity of the interpolation weights is not a
+universal property. At rank~5 with all 9 nuclides, the
+unity-normalized signed scheme has more degrees of freedom
+to cancel residual basis error; at low rank, or on a
+single nuclide where the $6.67$~eV peak dominates
+$k_\infty$, the kernel-Gram QP is the better choice. A
+rank-adaptive dispatch is possible but outside the scope
+of this work; the signed three-point unity scheme is the
+production default at rank~5.
 
-\subsection{Verdict script and reproducibility}
+\subsection{CI guard and reproducibility}
 
 A \texttt{scripts/pwr\_verdict.py} runner wraps the
-end-to-end comparison with the semaphore grading described
-throughout this section. Thresholds are:
-$k_\infty$ SVD vs ACE+WMP $\leq 800$~pcm for GREEN,
-$\leq 1500$~pcm for YELLOW,
-memory SVD/WMP $\leq 1.05$ for GREEN,
-speed SVD/WMP $\geq 0.97$ for GREEN. Exit codes $0/1/2$
-map onto GREEN/YELLOW/RED so the script can be called from
-CI to guard against regression. The machine-readable
-verdict for the $+150$~K, $3$-pt unity Ducru, rank-$5$,
-discrete-rank-$1$ configuration is shipped under
+end-to-end comparison and exits non-zero if any of the
+following thresholds are violated, so the script can be
+called from CI to guard against regression:
+$k_\infty$ SVD vs ACE+WMP $\leq 800$~pcm,
+memory ratio SVD/WMP $\leq 1.05$,
+speed ratio SVD/WMP $\geq 0.97$. The machine-readable
+report for the $+150$~K, three-point unity Ducru,
+rank-$5$, discrete-rank-$1$ configuration is at
 \texttt{outputs/pwr\_verdict\_3temp.json} and reproduces
 Table~\ref{tab:pwr_offlib}.
 

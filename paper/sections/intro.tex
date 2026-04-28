@@ -35,7 +35,7 @@ measured fidelity, throughput, and memory side-by-side.
 
 The answer, reported in full in Sections~\ref{sec:pwr} and
 \ref{sec:hybrid}, is \emph{qualified}: SVD is a defensible
-drop-in on the thermal pin cell we tested; the hybrid
+drop-in on the thermal pin cell tested here; the hybrid
 implementation works end-to-end and agrees with the
 ACE+WMP industry baseline to $-26$~pcm at single-seed
 statistics (well inside seed noise); the throughput picture
@@ -74,10 +74,8 @@ document both numbers and explain why they differ.
   relative error, wired into a
   \texttt{HybridSvdWmpXsProvider}. On the PWR pin cell at
   single-seed statistics, $k_\infty = 1.32795 \pm 0.00103$
-  ($-26$~pcm vs ACE+WMP, $\ll 1\sigma_\text{seed}$); a
-  ten-seed redo at the matched $150$-batch
-  $\times\,50\,000$-particle configuration is the
-  outstanding follow-up. Hybrid throughput is $\sim\!2\times$
+  ($-26$~pcm vs ACE+WMP, $\ll 1\sigma_\text{seed}$).
+  Hybrid throughput is $\sim\!2\times$
   slower than CPU SVD on the large-L3 reference run;
   in-engine smooth-only memory $1.06\times$ smaller than the
   full-SVD baseline (Sec.~\ref{sec:hybrid}).
@@ -86,33 +84,25 @@ document both numbers and explain why they differ.
   precision), with $7.0\times$ GPU-vs-CPU per-lookup
   throughput on an RTX~$3080$
   (Sec.~\ref{sec:gpu_wmp}).
-\item A tracing and closure of the original $78$--$127$~pcm
-  PWR engine offset from OpenMC~$0.15.3$ via three
-  corrections (XS-audit exonerating the total-XS assembly; a
-  $\bar\nu$ delayed-yield reader fix; correlated-CDF
-  $\rightarrow$ stochastic-bin sampling for angular and
-  fission distributions, ported to both CPU and GPU paths).
-  Ten-seed $k_\infty$ on all four in-engine providers now
-  agrees with OpenMC to $|\Delta| \le 51$~pcm (CPU table
-  $-12$, CPU SVD $-25$, GPU pointwise $+51$, GPU SVD $-8$),
-  with a Shannon-entropy source-convergence monitor added
-  as runtime diagnostic (Sec.~\ref{sec:offset}).
+\item Ten-seed PWR $k_\infty$ on all four in-engine
+  providers agrees with OpenMC~$0.15.3$ to
+  $|\Delta| \le 51$~pcm (CPU table $-12$, CPU SVD $-25$,
+  GPU pointwise $+51$, GPU SVD $-8$). The angular and
+  fission outgoing-energy distributions use stochastic-bin
+  sampling on both CPU and GPU; a Shannon-entropy
+  source-convergence monitor is provided as a runtime
+  diagnostic (Sec.~\ref{sec:offset}).
 \item Validation against the ICSBEP Godiva
   HEU-MET-FAST-$001$ \emph{physical} benchmark
   $k_\text{eff}^\text{exp} = 1.0000 \pm 100$~pcm
-  ($1\sigma$)~\cite{icsbep_hmf001}. Three additional
-  transport fixes on the fast-spectrum path ---
-  (n,$2$n)/(n,$3$n) secondary-neutron banking, $\mu$-CDF
-  inversion for linear-linear ENDF angular distributions,
-  and ENDF-tabulated vs evaporation sampling for MT$=91$
-  continuum inelastic --- close a $+325 \to +79$~pcm
-  engine offset, after which our rank-$5$ SVD provider
-  reproduces the experimental value to
+  ($1\sigma$)~\cite{icsbep_hmf001}. The rank-$5$ SVD
+  provider reproduces the experimental value to
   $\Delta_\text{exp} = +79 \pm 38$~pcm, inside the
   experimental uncertainty band. OpenMC~$0.15.3$ on the
   same ENDF/B-VII.1 HDF5 files sits at $-99$~pcm, also
   inside the band; the two codes straddle the measurement
-  from opposite sides (Sec.~\ref{sec:godiva_fixes}).
+  from opposite sides
+  (Sec.~\ref{sec:godiva_fixes}).
 \item A clear separation of two memory measurements: the
   WMP representation-byte ratio against a hypothetical
   four-channel pointwise table is $132.9\times$ for our

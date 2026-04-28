@@ -1,22 +1,44 @@
-\documentclass[11pt,a4paper]{article}
+\documentclass[10pt,twocolumn,a4paper]{article}
 
+\usepackage[T1]{fontenc}
 \usepackage{amsmath,amssymb}
+\usepackage{newtxtext,newtxmath}
+\usepackage[scaled=0.95,varqu,varl]{inconsolata}
 \usepackage{booktabs}
 \usepackage{graphicx}
 \usepackage[colorlinks=true,linkcolor=blue,citecolor=blue,linktoc=all]{hyperref}
 \usepackage{siunitx}
 \usepackage{algorithm}
 \usepackage{algpseudocode}
-\usepackage[margin=2.5cm]{geometry}
+\usepackage[margin=1.8cm,top=2cm,bottom=2cm,columnsep=0.7cm]{geometry}
 \usepackage[numbers,sort&compress]{natbib}
+\usepackage{abstract}
+\usepackage{titling}
+\usepackage[font=small,labelfont=bf,labelsep=period]{caption}
 \bibliographystyle{unsrtnat}
+
+% ── Frontmatter styling ───────────────────────────────────────
+\renewcommand{\maketitlehookd}{\vspace{-0.5em}}
+\setlength{\droptitle}{-2.5em}
+\pretitle{\begin{center}\Large\bfseries}
+\posttitle{\par\end{center}\vspace{0.3em}}
+\preauthor{\begin{center}\normalsize}
+\postauthor{\par\end{center}\vspace{-0.2em}}
+\predate{\begin{center}\small\itshape}
+\postdate{\par\end{center}}
+
+\renewcommand{\abstractnamefont}{\normalfont\bfseries\small}
+\renewcommand{\abstracttextfont}{\normalfont\small}
+\setlength{\absleftindent}{1.5em}
+\setlength{\absrightindent}{1.5em}
 
 \begin{document}
 
-% ─── Front matter ────────────────────────────────────────────
+% ─── Front matter (spans both columns) ───────────────────────
+\twocolumn[\begin{@twocolumnfalse}
 \input{sections/abstract}
-
-\tableofcontents
+\vspace{1em}
+\end{@twocolumnfalse}]
 
 % ─── Body ────────────────────────────────────────────────────
 \input{sections/intro}
@@ -25,6 +47,7 @@
 \input{sections/spectrum}
 \input{sections/godiva}
 \input{sections/pwr}
+\input{sections/memory_vs_precision}
 \input{sections/off_library}
 \input{sections/gpu}
 \input{sections/hybrid}

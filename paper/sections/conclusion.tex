@@ -1,86 +1,69 @@
 \section{Conclusion}
 
 Truncated SVD of the $\log_{10}$-transformed cross-section
-matrix is a defensible drop-in \emph{representation} for
-the pointwise table. On the Godiva HEU-MET-FAST-$001$
-physical benchmark, our rank-$5$ SVD provider reproduces
-the measured critical $k_\text{eff} = 1.0000 \pm 100$~pcm
-($1\sigma$)~\cite{icsbep_hmf001} to $+79 \pm 38$~pcm ---
-inside the experimental uncertainty band. On a nine-nuclide
-thermal PWR pin cell (no physical benchmark exists;
-OpenMC~$0.15.3$ is the independent code-to-code reference)
-the same engine running rank-$5$ SVD vs its own pointwise
-table agrees on $k_\infty$ within $13$--$47$~pcm on two
-hardware tiers, and all four in-engine providers (CPU table,
-CPU SVD, GPU pointwise, GPU SVD) agree with
-OpenMC~$0.15.3$ to $|\Delta| \le 51$~pcm at ten-seed
-statistics after a transport-level bug audit closed an
-initial $78$--$127$~pcm engine offset. A Humlicek-W4
-Faddeeva evaluator, pure-Rust WMP reader, and SVD+WMP hybrid
-provider all work end-to-end and agree with the ACE+WMP
-industry baseline within $-26$~pcm at single-seed statistics
-($\ll 1\sigma_\text{seed}$); a CUDA port of the WMP
-evaluator is bit-exact against the CPU path and $7\times$
-faster per lookup on a consumer GPU.
-
-On Godiva (HEU-MET-FAST-$001$) the physical benchmark is
-the ICSBEP experimental critical mass
-$1.0000 \pm 100$~pcm ($1\sigma$)~\cite{icsbep_hmf001}. Our
-rank-$5$ SVD provider reproduces it to $+79 \pm 38$~pcm,
+matrix is a defensible drop-in representation for the
+pointwise table. The rank-$5$ SVD provider reproduces the
+ICSBEP HEU-MET-FAST-$001$ critical
+$k_\text{eff} = 1.0000 \pm 100$~pcm
+($1\sigma$)~\cite{icsbep_hmf001} to $+79 \pm 38$~pcm,
 inside the experimental uncertainty band. OpenMC~$0.15.3$
 on the same ENDF/B-VII.1 HDF5 files sits at $-99$~pcm,
-also inside the band; the two codes straddle experiment
-from opposite sides. Reaching that number required three
-transport sampling fixes --- (n,$2$n)/(n,$3$n) secondary
-banking, $\mu$-CDF inversion for linear-linear ENDF
-angular distributions, and evaporation-vs-tabulated
-continuum-inelastic MT$=91$ outgoing energy --- which
-together close $+325 \to +79$~pcm against ICSBEP
-(Sec.~\ref{sec:godiva_fixes}). Because OpenMC on the
-identical HDF5 sits inside $\sigma_\text{exp}$ from the
-opposite side, the offset is engine-level, not a library
-bias. The cross-code spread to OpenMC ($+178$~pcm at
-these statistics) is larger than either code's offset
-from the experiment; we report it as a cross-code
-diagnostic, not as a deviation from the physical
-benchmark.
+also inside the band; the two codes straddle the
+experimental value from opposite sides. The cross-code
+spread to OpenMC ($+178$~pcm) is larger than either
+code's offset from experiment and is reported as a
+cross-code diagnostic, not as a deviation from the
+physical benchmark.
+
+On a nine-nuclide thermal PWR pin cell (no physical
+benchmark exists; OpenMC~$0.15.3$ is the independent
+code-to-code reference) the same engine running rank-$5$
+SVD vs its own pointwise table agrees on $k_\infty$ within
+$13$--$47$~pcm on two hardware tiers, and all four
+in-engine providers (CPU table, CPU SVD, GPU pointwise,
+GPU SVD) agree with OpenMC~$0.15.3$ to
+$|\Delta| \le 51$~pcm at ten-seed statistics. A Humlicek-W4
+Faddeeva evaluator, a pure-Rust WMP reader, and a SVD+WMP
+hybrid provider all work end-to-end and agree with the
+ACE+WMP industry baseline within $-26$~pcm at single-seed
+statistics ($\ll 1\sigma_\text{seed}$). A CUDA port of the
+WMP evaluator is bit-exact against the CPU path and
+$7\times$ faster per lookup on a consumer GPU.
 
 At a realistic \emph{off-library} operating temperature,
 the story is more interesting. With a uniform $+150$~K
 offset applied to every nuclide (fuel $900\!\to\!1050$~K,
 moderator $600\!\to\!750$~K), OpenMC-style stochastic
 $T$-picking enabled on the pointwise and hybrid paths, and
-a $3$-point unity Ducru weight scheme on the SVD path
+a three-point unity Ducru weight scheme on the SVD path
 (Sec.~\ref{sec:ducru_puoi}), SVD reproduces $k_\infty$
 within $213$~pcm of ACE+WMP at ten-seed $50\,000$-particle
-$120$-batch statistics --- a small ($\sim\!3.6\sigma$) but
-real systematic, inside the publishable band. SVD is
-$22\%$ smaller than WMP in memory and matches its speed
-within $0.07\%$. This is the result the paper exists to
-report: at a realistic operating temperature a compressed
-SVD representation of ENDF/B-VII.1 cross sections beats
-the industry ACE+WMP baseline on memory, ties it on speed,
-and trails it by a characterisable small systematic on
+$120$-batch statistics ($\sim\!3.6\sigma_\text{seed}$).
+SVD is $22\%$ smaller than ACE+WMP in memory and matches
+its speed within $0.07\%$. At a realistic off-library
+operating temperature a compressed SVD representation of
+ENDF/B-VII.1 cross sections is smaller than the industry
+ACE+WMP baseline, ties it on speed, and trails it by a
+characterisable small systematic on
 $k_\infty$ (Sec.~\ref{sec:off_library_3t}).
 
-Getting there was non-trivial. A naive $2$-point unity Ducru
-leaves a $2094$~pcm kernel-approximation bias at the same
-operating conditions (Sec.~\ref{sec:off_library_2t}); a
-simplex-projected QP that clips the signed Ducru weights
-to non-negativity is \emph{worse} ($5\%$ L2 error on
-U-$238$ capture versus $0.84\%$ for the signed $3$-point
-scheme) because the simplex projection is Euclidean-optimal
-in weight space whereas the raw Ducru weights are
-Euclidean-optimal in the Doppler-kernel norm
-(Sec.~\ref{sec:off_library_qp}). We also found and fixed a
-channel-consistency bug in our stochastic $T$-pick: drawing
-a fresh $\xi$ per partial channel produced non-monotonic
-$k_\infty$-versus-$T$ behaviour that on-library measurements
-cannot detect (Sec.~\ref{sec:off_library_bug}). The
-PHYSOR-style off-library test surfaced it as a byproduct of
-stressing the representation.
+A two-point unity Ducru ablation leaves a $2094$~pcm
+kernel-approximation bias at the same operating conditions
+(Sec.~\ref{sec:off_library_3t}); a simplex-projected QP
+that clips the signed Ducru weights to non-negativity is
+worse ($5\%$ L2 error on U-$238$ capture versus $0.84\%$
+for the signed three-point scheme) because the simplex
+projection is Euclidean-optimal in weight space whereas
+the raw Ducru weights are Euclidean-optimal in the
+Doppler-kernel norm (Sec.~\ref{sec:off_library_qp}).
+Channel-consistent stochastic $T$-picking is required:
+$\xi$ is drawn once per nuclide-collision and shared across
+every partial channel, so the sum of partials stays at a
+single sampled library temperature
+(Sec.~\ref{sec:off_library_bug}); on-library measurements
+do not exercise the pick.
 
-The \emph{performance} story on-library is less one-sided.
+The on-library performance picture is mixed.
 CPU SVD rank-$5$ is $1.37\times$--$1.90\times$ faster than
 the in-engine pointwise table on PWR pin cell
 (hardware-dependent) and $1.43\times$ faster than the table
@@ -91,8 +74,7 @@ The hybrid is $2.06\times$ slower than CPU SVD because
 WMP evaluation is $\sim\!15\times$ more expensive than the
 SVD FMA per lookup.
 
-The \emph{memory} story has two parts that must not be
-conflated. The representation-byte ratio of
+The memory picture has two distinct components. The representation-byte ratio of
 $132.9\times$ (WMP + smooth-SVD vs four-channel
 six-temperature pointwise) is real; the live in-engine
 reduction from the smooth-only SVD rebuild is
@@ -100,56 +82,48 @@ $1.06\times$ ($519.0 \to 487.6$~MB), and the hybrid engine
 is absolutely $4.8$--$5.2\times$ larger than the
 pointwise-table baseline. The discrete-level SVD kernels,
 which WMP does not cover, dominate the engine's working
-set. Reducing those kernels from rank $5$ to rank $1$ ---
-the reviewer's suggestion and a free change because levels
-are weakly $T$-dependent (Sec.~\ref{sec:discrete_rank}) ---
-closes $\approx\!70\%$ of the engine's SVD working set on
-Godiva with no measurable $k_\text{eff}$ shift. This is
+set. Reducing those kernels from rank $5$ to rank $1$ is a
+zero-cost change because levels are weakly $T$-dependent
+(Sec.~\ref{sec:discrete_rank}); it closes $\approx\!70\%$
+of the engine's SVD working set on Godiva with no
+measurable $k_\text{eff}$ shift. This is
 what enables the off-library $22\%$ memory win against
 ACE+WMP referenced above: with discrete-level rank $1$
 applied, the SVD engine is absolutely smaller than the
 two-endpoint stochastic-$T$ pointwise table even before
 the WMP comparison.
 
-The practical takeaway for a reader considering this
-approach: rank-$5$ SVD with $3$-point unity Ducru
-temperature interpolation and discrete-level rank-$1$ is
-correct, reproduces the ICSBEP Godiva experimental
-$k_\text{eff}$ within $+79 \pm 38$~pcm (inside the
-$100$~pcm experimental uncertainty), agrees with OpenMC
-and its own pointwise baseline within
-$\le 3\,\mathrm{SEM}_{10}$ on PWR at on-library $T$,
-and agrees with ACE+WMP within $\sim\!3.6\,\mathrm{SEM}_{10}$
-on PWR at off-library $T$. On memory it wins modestly
-on-library and by $22\%$ off-library; on speed it is
+Rank-$5$ SVD with three-point unity Ducru temperature
+interpolation and discrete-level rank-$1$ reproduces the
+ICSBEP Godiva experimental $k_\text{eff}$ within
+$+79 \pm 38$~pcm (inside the $100$~pcm experimental
+uncertainty), agrees with OpenMC and its own pointwise
+baseline within $\le 3\,\mathrm{SEM}_{10}$ on PWR at
+on-library $T$, and agrees with ACE+WMP within
+$\sim\!3.6\,\mathrm{SEM}_{10}$ on PWR at off-library $T$.
+On memory it is modestly smaller on-library and $22\%$
+smaller off-library; on speed it is
 $1.4\times$--$1.9\times$ faster than pointwise on CPU and
 at parity with ACE+WMP off-library. The $43/47$ rank-one
 reactions and the weakly-$T$-dependent discrete levels
-are real structural properties of ENDF/B-VII.1 cross
-sections, worth exploiting; the raw Ducru weights are
-\emph{not} a partition of unity and must be normalized
-before being applied to a $\log\sigma$ SVD.
+are structural properties of ENDF/B-VII.1 cross sections;
+the raw Ducru weights are not a partition of unity and
+must be normalized before being applied to a $\log\sigma$
+SVD.
 
-We implemented and measured the kernel-Gram QP from
-\cite{ducru2017}~§4 that we initially flagged as future
-work (Sec.~\ref{sec:off_library_qp}) and found a structural
-subtlety worth reporting: at low rank it beats the signed
-unity scheme (U-$238$ MT$=102$ $6.67$~eV peak ratio
-$1.000$ at rank~$3$ vs $0.994$ for signed unity), but at our
-production rank~$5$ it is \emph{worse} ($0.983$ vs $0.990$
-on the same peak). The QP's constrained optimum lies on the
-boundary of the probability simplex --- one weight clips to
-zero, collapsing the $3$-point problem back to a $2$-point
+The kernel-Gram QP from \cite{ducru2017}~§4 has a
+structural subtlety relative to the signed unity scheme:
+at low rank it wins (U-$238$ MT$=102$ $6.67$~eV peak ratio
+$1.000$ at rank~$3$ vs $0.994$ for signed unity), but at
+production rank~$5$ it is worse ($0.983$ vs $0.990$ on the
+same peak). The QP's constrained optimum lies on the
+boundary of the probability simplex --- one weight clips
+to zero, collapsing the three-point problem to a two-point
 one --- and at higher rank the signed unity scheme's
-negative weight on the far-away library column is actively
-useful as a shape-cancellation term. Non-negativity is the
+negative weight on the far-away library column acts as a
+useful shape-cancellation term. Non-negativity is the
 wrong constraint once basis-truncation error stops
-dominating. This is the single highest-leverage piece of
-follow-up work we did not publish in the original version
-of this paper; the result is that signed $3$-point unity
-\emph{is} the right production default at rank~$5$, not
-merely a convenient approximation to the QP ideal. We
-report the positive, mixed, and negative findings together
-so the trade-off is visible.
+dominating; signed three-point unity is the production
+default at rank~$5$.
 
 %% ============================================================

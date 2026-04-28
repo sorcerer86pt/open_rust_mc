@@ -8,22 +8,57 @@ cache-resident reconstruction. The engine reads OpenMC HDF5 nuclear
 data files directly (via `hdf5-pure`, no C dependency) and runs
 eigenvalue simulations end-to-end.
 
+## How to read the numbers below
+
+Every row is tagged with one of:
+
+- `[micro]` = isolated kernel / spectrum / one-nuclide-one-reaction
+  measurement. Often optimistic; does NOT generalize.
+- `[godiva]` = end-to-end Godiva, 3 nuclides, fast spectrum.
+- `[pwr]` = end-to-end PWR pin cell, 9 nuclides, thermal spectrum,
+  S(α,β) on. This is the realistic deployment case.
+- `[projected]` = analytical or extrapolated, never measured at scale.
+  Treat as a hypothesis until a `[pwr]` row replaces it.
+
+A number quoted without scope is a bug. The repeated pattern across
+this project: `[micro]` headline numbers shrink (or invert sign) when
+re-measured under `[pwr]`. Don't quote micro numbers in contexts
+where pwr-scope applies.
+
 ## What We've Proven
 
-### SVD Compression (validated)
-- Singular spectrum decays 5 orders of magnitude across 8 values
-- 47/52 U-235 reactions are rank-1 (machine-epsilon compressible)
-- Bit-exact match with OpenMC's Python API (relative error = 0)
-- Godiva k_eff < 10 pcm deviation at all ranks (fission-only)
-- Godiva k_eff 3.7 pcm with all reactions modified (k=4)
-- PWR pin cell: 60-93 pcm (confirms need for hybrid SVD+WMP)
-- Hybrid SVD(k=2)+WMP: 530x memory reduction (15 KB vs 7.8 MB)
+### SVD compression (spectrum + reconstruction)
+- `[micro]` Singular spectrum decays 5 orders of magnitude across 8 values
+- `[micro]` 47/52 U-235 reactions are rank-1-compressible to machine epsilon.
+  **Caveat:** rank 1 is not a deployable rank for k_eff — production runs use
+  rank 5. The 47 figure does not translate to a deployment win.
+- `[micro]` Bit-exact match with OpenMC's Python API (relative error = 0)
+- `[godiva]` Godiva k_eff < 10 pcm deviation at all ranks (fission-only,
+  pre-coupling correction)
+- `[godiva]` Godiva k_eff 3.7 pcm with all reactions modified (k=4,
+  pre-coupling correction)
+- `[pwr]` PWR pin cell SVD(k=5) vs ACE+WMP: **5 pcm** at on-library 600 K
+  (paper, 100 b × 20 k × 1 seed). Earlier "60–93 pcm" was a partial-physics
+  measurement; replaced.
+- `[pwr]` Hybrid SVD+WMP in-engine memory: 519 MB at rank 5, vs pure SVD
+  518 MB and pointwise Table 103 MB. Hybrid is not a memory win at the
+  engine level on PWR; see paper §hybrid for the per-nuclide
+  representation-byte accounting where the picture differs.
 
-### Performance (validated)
-- CPU: 8-13x faster than table lookup (3-5 ns/pt vs 40 ns/pt)
-- GPU: 2.6-2.8x on RTX A1000 (laptop), expected better on 3080/A100
-- Data loading + SVD decompose: ~6 s for 3 nuclides (with all physics data)
-- Full Godiva eigenvalue (80 batches, 10k particles): 633 ms (rayon parallel)
+### Performance — what micro vs full transport actually says
+- `[micro]` SVD reconstruction kernel only, hot cache: 8–13× faster than
+  pointwise table (3–5 ns/pt vs 40 ns/pt). **Does not survive integration.**
+- `[godiva]` SVD rank-5 vs Table, full transport: 1.37×–1.90× CPU throughput
+  (paper §godiva, 10 seeds × 150 b × 50 k).
+- `[pwr]` SVD rank-5 vs Table, full transport: SVD **0.95× as fast as Table**
+  (sim 46.8 s vs 41.7 s, paper §pwr / `outputs/full_test_run/10_pwr_all_rank5.txt`).
+  The micro 8–13× does not appear here.
+- `[micro]` GPU 2.6–2.8× on RTX A1000 — kernel-only SVD reconstruction vs
+  CPU. **vs single-thread CPU.** Against 20-core rayon CPU, the integration
+  story is GPU SVD **1.3× slower** on Godiva (paper §gpu).
+- `[godiva]` Loading + SVD decompose: ~6 s for 3 nuclides
+- `[godiva]` Eigenvalue 80 b × 10 k: 633 ms (rayon parallel, old run; for current
+  paper-stat numbers see paper §godiva)
 
 ### Cross-isotope sharing (investigated, negative result)
 - Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
@@ -278,26 +313,112 @@ Extract to `data/endfb-vii.1-hdf5/`. Key files:
 - `neutron/c_H_in_H2O.h5` (S(α,β) thermal scattering for H in water)
 - Full library: 444 nuclide files + thermal data, 5.8 GB
 
-## Key Numbers to Remember
+## Rank-vs-memory-vs-precision sweep — what we actually measured
 
-| Metric | Value |
-|--------|-------|
-| U-235 fission σ₂/σ₁ | 7.7e-2 |
-| Reactions that are rank-1 | 47/52 |
-| CPU speedup vs table | 8-13x |
-| GPU speedup vs table | 2.6-2.8x |
-| Hybrid SVD+WMP memory | 15 KB vs 7.8 MB (530x) |
-| Godiva dk (fission SVD k=4) | 6.9 pcm |
-| Godiva dk (all rxn SVD k=4) | 3.7 pcm |
-| PWR pin cell dk (SVD k=5) | 59.7 pcm |
-| ICSBEP HMF-001 (benchmark) | 1.0000 ± 100 pcm (σ_exp) |
-| Our Rust Godiva k_eff (SVD k=5) | 1.00079 ± 0.00038 |
-| **Δ_ICSBEP (pass criterion)** | **+79 pcm, inside σ_exp** |
-| OpenMC 0.15.3 Godiva k_eff (same HDF5) | 0.99901 ± 0.00038 |
-| OpenMC Δ_ICSBEP (cross-check) | −99 pcm, inside σ_exp |
-| Rust-vs-OpenMC (cross-code) | +178 pcm (not a benchmark) |
-| History: const nu-bar | 0.994 (coincidental) |
-| History: + E-dep nu-bar | 1.059 (+6500 pcm) |
-| History: + aniso scatter | 0.965 (-9400 pcm) |
-| History: + data fission | 1.006 (+4100 pcm) |
-| History: + URR + interp | 1.000 (-600 pcm) |
+### Godiva, 3 nuclides, on-library 294 K (`outputs/sweep_svd_wins.csv`)
+80 b × 5 000 p × 3 seeds, `--discrete-rank 1`. Memory is in-engine
+working-set including all reactions and discrete levels.
+
+| rank | SVD mem | Table mem | WMP mem | SVD k_eff | Table k_eff | WMP k_eff | SVD ns/p |
+|-----:|--------:|----------:|--------:|----------:|------------:|----------:|---------:|
+| 1    | 113 MB  | 110 MB    | 107 MB  | 1.00056   | 1.00322     | 1.00372   | 754      |
+| 2    | 126 MB  | 110 MB    | 107 MB  | 1.00601   | 1.00322     | 1.00372   | 844      |
+| 3    | 138 MB  | 110 MB    | 107 MB  | 1.00563   | 1.00322     | 1.00372   | 845      |
+| 5    | 164 MB  | 110 MB    | 107 MB  | 1.00358   | 1.00322     | 1.00372   | 904      |
+| 7    | 176 MB  | 110 MB    | 107 MB  | 1.00202   | 1.00322     | 1.00372   | 3 191    |
+
+**Reading:** SVD memory is *strictly larger than the Table baseline at
+every rank including rank 1*. Memory is monotone in rank. Precision
+gap to ACE+WMP is non-monotone in rank (rank 1 happens to land closest
+on Godiva — but rank 2/3 are unstable, rank 5 is the production choice).
+ns/p is roughly flat 750–905 from rank 1–5, then jumps at rank 7.
+
+### Godiva stochastic 450 K (off-library)
+Same script, `--target-temp 450` (between 294 K and 600 K library cols).
+
+| rank | SVD mem | Table mem | WMP mem | SVD k_eff | Table k_eff | WMP k_eff |
+|-----:|--------:|----------:|--------:|----------:|------------:|----------:|
+| 1    | 113 MB  | 222 MB    | 213 MB  | 0.99699   | 1.00472     | 1.00501   |
+| 2    | 126 MB  | 222 MB    | 213 MB  | 1.00430   | 1.00697     | 1.00501   |
+| 3    | 138 MB  | 222 MB    | 213 MB  | 1.00704   | 1.00282     | 1.00501   |
+| 5    | 164 MB  | 222 MB    | 213 MB  | 1.00372   | 1.00696     | 1.00501   |
+| 7    | 176 MB  | 222 MB    | 213 MB  | 1.00144   | 1.00471     | 1.00501   |
+
+**Reading:** off-library is the only regime where SVD beats Table on
+memory (164 MB vs 222 MB at rank 5 = 1.35× smaller). Table doubles
+because pseudo-interpolation loads two temperature columns; SVD
+reconstructs from one library plus Ducru weights. **This is the
+honest "where SVD wins" headline — off-library, not on-library.**
+
+### PWR pin cell, 9 nuclides, on-library (`outputs/sweep_svd_wins_pwr.csv`)
+80 b × 5 000 p × 3 seeds, sequential run (no other CPU load),
+`--discrete-rank 1`. Same accounting as Godiva: all-reactions,
+all-nuclide engine working set.
+
+| rank | SVD mem | Table mem | WMP mem | SVD k_inf | Table k_inf | WMP k_inf |
+|-----:|--------:|----------:|--------:|----------:|------------:|----------:|
+| 1    | 106 MB  | 103 MB    | 100 MB  | 0.871     | 1.327       | 1.329     |
+| 2    | 118 MB  | 103 MB    | 100 MB  | 1.409     | 1.327       | 1.329     |
+| 3    | 131 MB  | 103 MB    | 100 MB  | 1.321     | 1.327       | 1.329     |
+| 5    | 156 MB  | 103 MB    | 100 MB  | 1.328     | 1.327       | 1.329     |
+| 7    | 169 MB  | 103 MB    | 100 MB  | 1.328     | 1.327       | 1.329     |
+
+**Reading:** rank 1 collapses (no resonance self-shielding,
+46 000 pcm low); rank 2 overshoots (8 000 pcm high); rank 3
+recovers to within 800 pcm of WMP; rank 5 is the deployable
+floor at 170 pcm below WMP and 5 pcm above Table; rank 7
+buys nothing on precision and adds 13 MB. SVD is larger than
+Table at every rank, never wins on memory.
+
+### PWR pin cell, 9 nuclides, off-library +150 K
+Same script, `--target-temp-offset 150`. Table doubles
+because pseudo-interpolation loads two library columns per nuclide.
+
+| rank | SVD mem | Table mem | WMP mem | SVD k_inf | Table k_inf | WMP k_inf |
+|-----:|--------:|----------:|--------:|----------:|------------:|----------:|
+| 1    | 106 MB  | 206 MB    | 200 MB  | 1.547     | 1.322       | 1.329     |
+| 2    | 118 MB  | 206 MB    | 200 MB  | 1.387     | 1.323       | 1.328     |
+| 3    | 131 MB  | 206 MB    | 200 MB  | 1.321     | 1.321       | 1.328     |
+| 5    | 156 MB  | 206 MB    | 200 MB  | 1.324     | 1.324       | 1.328     |
+| 7    | 169 MB  | 206 MB    | 200 MB  | 1.327     | 1.320       | 1.326     |
+
+**Reading:** off-library is the only PWR regime where SVD wins
+on memory (rank 5: 156 MB vs 206 MB = 1.32× smaller). SVD
+matches Table at rank 5 (5 pcm gap) and lands ~460 pcm below
+WMP. Earlier rank 5 single-point measurement that gave SVD
+518 MB was the all-rank build with discrete levels at full
+rank — this sweep uses `--discrete-rank 1` (production
+default), bringing memory back into the 100-200 MB band where
+the Pareto comparison is meaningful.
+
+Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
+
+## Key Numbers to Remember (scope-tagged)
+
+| Metric | Scope | Value |
+|--------|-------|-------|
+| U-235 fission σ₂/σ₁ | `[micro]` | 7.7e-2 |
+| Reactions rank-1 to machine ε | `[micro]` | 47/52 (does not = deployable rank) |
+| Reconstruction kernel speedup vs table | `[micro]` | 8–13× (does NOT survive integration) |
+| GPU SVD reconstruction kernel speedup | `[micro]` | 2.6–2.8× vs single-thread CPU |
+| Godiva SVD k=5 vs Table CPU throughput | `[godiva]` | 1.37×–1.90× (paper §godiva) |
+| PWR SVD k=5 vs Table CPU throughput | `[pwr]` | **0.95×** (SVD slightly slower) |
+| GPU SVD vs GPU pointwise (Godiva) | `[godiva]` | **0.77×** (GPU SVD 1.3× slower; paper §gpu) |
+| Hybrid SVD+WMP throughput vs CPU SVD | `[pwr]` | **0.49×** (2.06× slower; paper §hybrid) |
+| Hybrid in-engine memory vs Table (PWR) | `[pwr]` | **5.2× larger** (519 MB vs 100.6 MB) |
+| Hybrid representation-byte ratio (paper Table 5) | `[micro]` | 132.9× (per-nuclide accounting, NOT engine memory) |
+| Hybrid smooth-only rebuild memory reduction | `[pwr]` | 1.06× (519 → 488 MB) |
+| Godiva dk (fission SVD k=4, pre-coupling) | `[godiva]` | 6.9 pcm |
+| Godiva dk (all rxn SVD k=4, pre-coupling) | `[godiva]` | 3.7 pcm |
+| PWR SVD k=5 vs ACE+WMP gap | `[pwr]` | 5 pcm (paper §pwr, on-library) |
+| ICSBEP HMF-001 (benchmark) | `[godiva]` | 1.0000 ± 100 pcm (σ_exp) |
+| Rust Godiva k_eff (SVD k=5) | `[godiva]` | 1.00079 ± 0.00038 |
+| **Δ_ICSBEP (pass criterion)** | `[godiva]` | **+79 pcm, inside σ_exp** |
+| OpenMC 0.15.3 Godiva k_eff (same HDF5) | `[godiva]` | 0.99901 ± 0.00038 |
+| OpenMC Δ_ICSBEP (cross-check) | `[godiva]` | −99 pcm, inside σ_exp |
+| Rust-vs-OpenMC (cross-code) | `[godiva]` | +178 pcm (not a benchmark) |
+| History: const nu-bar | `[godiva]` | 0.994 (coincidental) |
+| History: + E-dep nu-bar | `[godiva]` | 1.059 (+6500 pcm) |
+| History: + aniso scatter | `[godiva]` | 0.965 (-9400 pcm) |
+| History: + data fission | `[godiva]` | 1.006 (+4100 pcm) |
+| History: + URR + interp | `[godiva]` | 1.000 (-600 pcm) |

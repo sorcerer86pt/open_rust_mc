@@ -91,10 +91,10 @@ formula is well-conditioned at every operating temperature
 we tested in the interval $[250, 2500]$~K. Section~\ref{sec:ducru_puoi}
 describes how we make the subset weights a partition of
 unity; this is essential for resonance-dominated systems
-and is the single change that moves the off-library PWR
-result from RED to GREEN on the verdict semaphore.
+and is the change that brings the off-library PWR result
+into the deployable band against ACE+WMP.
 
-\subsection{Partition-of-unity Ducru for off-library $T$}
+\subsection{Partition-of-unity Ducru for off-library \texorpdfstring{$T$}{T}}
 \label{sec:ducru_puoi}
 
 When Eq.~\ref{eq:ducru} is applied to $V^\top$ columns of a
@@ -161,13 +161,13 @@ norm. Eq.~\ref{eq:ducru_unity} enforces only the first
 constraint and does so as a rescaling rather than a
 projection, so the result is still signed
 ($\tilde w_j$ can be negative). On U-$238$~MT$=102$ held
-out at $900$~K we measured the non-negative simplex
+out at $900$~K, the non-negative simplex
 projection~\cite{duchi2008simplex} of the raw Ducru
-weights; the clip-and-renormalize is worse than the signed
-scheme, not better, raising the L2 reconstruction error
-from $1.5\%$ to $5\%$ (Sec.~\ref{sec:off_library_qp}). The
-fully constrained kernel-QP remains future work; for the
-systems we benchmarked, Eq.~\ref{eq:ducru_unity} suffices.
+weights raises the L2 reconstruction error from $1.5\%$ to
+$5\%$ relative to the signed scheme
+(Sec.~\ref{sec:off_library_qp}). For the benchmarks
+reported here, Eq.~\ref{eq:ducru_unity} suffices; an
+analytic kernel-QP is left to future work.
 
 \subsection{Memory trade-off of truncated SVD}
 \label{sec:svd_tradeoff}

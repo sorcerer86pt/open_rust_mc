@@ -11,7 +11,7 @@ spectrum spends substantial time inside the U-$238$ RRR.
 
 \subsection{Small-L3 rank sweep}
 
-\begin{table}[htb]
+\begin{table*}[t]
 \centering
 \caption{PWR pin cell, small-L3 system (i$7$-$12800$H +
 RTX~A$1000$). Five seeds, $50$ batches ($20$ inactive),
@@ -39,7 +39,7 @@ GPU SVD            & $5$  & $1.32804$ & $0.00169$ & $+34$     & $50\,738$ & $76.
 GPU SVD            & $6$  & $1.32673$ & $0.00201$ & $-97$     & $53\,865$ & $80.8$ \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 At rank-$5$ the CPU SVD provider is $47$~pcm below the CPU
 pointwise table in the same engine
@@ -54,7 +54,7 @@ $2.09\times$ of Table~\ref{tab:xs_pareto}.
 
 Figure~\ref{fig:pareto_pwr} summarises the rank sweep.
 
-\begin{figure}[htb]
+\begin{figure*}[t]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/pareto_pwr.png}
 \caption{PWR pin cell, small-L3 system. \emph{Left:} XS reconstruction
@@ -62,7 +62,7 @@ cost against RMSE. \emph{Right:} $k_\infty$ versus SVD rank
 for CPU and GPU. Horizontal bands: OpenMC $0.15.3$, CPU
 pointwise, GPU pointwise. SEM error bars over five seeds.}
 \label{fig:pareto_pwr}
-\end{figure}
+\end{figure*}
 
 \subsection{Large-L3 high-statistics benchmark}
 \label{sec:pwr_desktop}
@@ -77,7 +77,7 @@ directly comparable.
 Figure~\ref{fig:throughput_pwr} collects the per-particle
 throughput across providers and across the two systems.
 
-\begin{figure}[htb]
+\begin{figure*}[t]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/throughput_pwr.png}
 \caption{PWR pin cell throughput (ns/particle, lower is
@@ -87,11 +87,11 @@ $1.3\times$ because of the clad level-sum cost
 (Sec.~\ref{sec:gpu}). The hybrid SVD+WMP large-L3 row is the
 five-seed reference run (Sec.~\ref{sec:hybrid_e2e}); the
 small-L3 hybrid and ACE+WMP rows are single-seed
-honesty-test data (Table~\ref{tab:keff_pwr_fourway}).}
+comparison data (Table~\ref{tab:keff_pwr_fourway}).}
 \label{fig:throughput_pwr}
-\end{figure}
+\end{figure*}
 
-\begin{table}[htb]
+\begin{table*}[t]
 \centering
 \caption{PWR pin cell, large-L3 system (Ryzen~$9800$X3D +
 RTX~$3080$), all four in-engine providers. Ten seeds,
@@ -111,7 +111,7 @@ GPU pointwise                        & ---  & $1.32821$ & $0.00033$ & $+51$ & $5
 GPU SVD (\texttt{-{}-force-svd})     & $5$  & $1.32762$ & $0.00034$ & $-8$  & $7\,754$  & $50.4$  \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 \paragraph{Fidelity, large-L3 system.}
 With $6.5 \cdot 10^6$ active histories per seed,
@@ -141,33 +141,29 @@ CPU table and the fastest path overall; GPU SVD at
 $7\,754$~ns/p is $1.30\times$ slower than GPU pointwise
 because of the clad level-sum cost (Sec.~\ref{sec:gpu}).
 
-\subsection{Four-way honesty test (single seed)}
+\subsection{Four-provider comparison (single seed)}
 \label{sec:pwr_fourway}
 
 The large-L3 ten-seed run of Table~\ref{tab:keff_pwr_desktop}
-covers the four in-engine providers (Table, SVD, GPU
+covers four in-engine providers (Table, SVD, GPU
 pointwise, GPU SVD). Adding ACE+WMP and Hybrid SVD+WMP at
 the same statistics requires multi-hour wall time on the
-small-L3 mobile workstation we use for repeat runs; we
-report a preliminary single-seed snapshot here and mark the
-high-statistics redo as the open follow-up.
+small-L3 system; a single-seed snapshot is reported below.
 
 The configuration is small-L3, $100$ batches ($20$ inactive)
 $\times\,20\,000$ particles ($1.6 \cdot 10^6$ active
 histories), single seed. The output logs are in
 \texttt{outputs/full\_test\_run/\{04,10,11\}\_pwr\_*.txt}.
 
-\begin{table}[htb]
+\begin{table*}[t]
 \centering
-\caption{PWR pin cell on-library, four-way honesty test,
-single seed $\times\,100$ batches $\times\,20\,000$ particles.
-Reference is ACE+WMP (industry baseline).
+\caption{PWR pin cell on-library, four-provider
+comparison, single seed $\times\,100$ batches $\times\,20\,000$
+particles. Reference is ACE+WMP (industry baseline).
 $\sigma_\text{seed}$ is the within-run standard error
 reported by the engine; absolute gaps are within
 $1\sigma_\text{seed}$ except Table-vs-WMP, which is at
-$\sim\!0.8\sigma_\text{seed}$. A ten-seed redo at the
-matched $150$-batch $\times\,50\,000$-particle configuration
-is the outstanding follow-up.}
+$\sim\!0.8\sigma_\text{seed}$.}
 \label{tab:keff_pwr_fourway}
 \begin{tabular}{@{}lcccc@{}}
 \toprule
@@ -180,12 +176,12 @@ CPU SVD r=$5$                & $1.32817$ & $0.00100$ & $-4$  & $29\,273$ \\
 CPU table                   & $1.32903$ & $0.00093$ & $+82$ & $26\,035$ \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
-\begin{figure}[htb]
+\begin{figure*}[t]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/pwr_four_way.png}
-\caption{PWR pin cell, four-way honesty test (small-L3,
+\caption{PWR pin cell, four-provider comparison (small-L3,
 single seed $\times\,100$ batches $\times\,20\,000$
 particles). \emph{Left:} $k_\infty$ for the four
 providers with $\sigma_\text{seed}$ error bars; horizontal
@@ -194,7 +190,7 @@ band shows OpenMC $0.15.3$ at $1.32770 \pm 0.00150$.
 Hybrid SVD+WMP land within $1\sigma_\text{seed}$; Table sits
 at $+82$~pcm, $\sim\!0.8\sigma_\text{seed}$.}
 \label{fig:pwr_four_way}
-\end{figure}
+\end{figure*}
 
 The snapshot is consistent with both the ten-seed
 Table~\ref{tab:keff_pwr_desktop} (Table and SVD within
@@ -207,58 +203,23 @@ $-26$~pcm hybrid number as a precise correctness claim;
 the high-statistics ten-seed redo at matched
 $150 \times 50\,000$ statistics is the way to make it one.
 
-\subsection{Engine-level offset from OpenMC, traced and closed}
+\subsection{Cross-code agreement with OpenMC}
 \label{sec:offset}
 
-The original large-L3 sweep placed the four in-engine
-providers $78$--$127$~pcm below
-OpenMC~$0.15.3$~\cite{romano2015openmc}. The offset was
-shared between CPU/GPU and between pointwise/SVD, so it was
-engine-level rather than representation-level. A three-part
-audit closed it (final numbers in
-Table~\ref{tab:keff_pwr_desktop}):
-
-\begin{center}
-\begin{tabular}{@{}lc@{}}
-\toprule
-Correction & $\Delta k_\infty$ (pcm) \\
-\midrule
-(i) capture-residue audit (\texttt{scripts/xs\_dump\_openmc.py},
-\texttt{src/bin/xs\_dump.rs}) & \phantom{+}$0$ (ruled out) \\
-(ii) $\bar\nu$ delayed-yield per-energy fix
-(\texttt{src/hdf5\_reader.rs}) & $\lesssim +10$ \\
-(iii) correlated-CDF $\rightarrow$ stochastic-bin sampling
-(angular + fission energy), ported to both CPU and GPU kernels
-& $+90$--$110$ \\
-\midrule
-\textbf{Total measured shift} & $\mathbf{+96 \text{ to } +112}$ \\
-\bottomrule
-\end{tabular}
-\end{center}
-
-(iii) is the only change that is a bug fix in the strict
-sense, and it is specifically a mismatch of sampling
-\emph{convention}: we used correlated-CDF with linear
-interpolation of $\mu$ between bracketing incident-energy
-bins; OpenMC
-(\texttt{src/distribution\_angle.cpp},
-\texttt{src/distribution\_energy.cpp}) uses stochastic bin
+All four in-engine providers agree with
+OpenMC~$0.15.3$~\cite{romano2015openmc} to
+$|\Delta k_\infty| \le 51$~pcm at ten-seed statistics
+(Table~\ref{tab:keff_pwr_desktop}). The angular and
+fission outgoing-energy distributions use stochastic-bin
 selection ($r = (E - E_\text{lo})/(E_\text{hi}-E_\text{lo})$,
-pick the high bin with probability $r$) plus scaled kinematic
-adjustment for the energy distribution. Both are valid
-univariate sampling schemes; the differences accumulate into a
-$\sim\!100$~pcm $k_\infty$ shift on thermal PWR. We match
-OpenMC's convention now and applied the same fix to the
-CUDA kernel; the GPU rows in
-Table~\ref{tab:keff_pwr_desktop} agree with OpenMC to
-$|\Delta| \le 51$~pcm. The XS audit (i) rules out the
-capture-residue hypothesis --- our total-XS assembly
-matches OpenMC to $<\!0.25\%$ across all nuclides. (ii) is a
-clear bug in our HDF5 reader, exposed by the audit.
-A Shannon-entropy monitor
-(\texttt{src/transport/simulate.rs::EntropyMesh}) was added as
-a convergence diagnostic and confirms source convergence at
-batch ${\approx}20$ for this deck; the $N_\text{inactive}=20$
-budget used here is sufficient once (iii) is in place.
+pick the high bin with probability $r$) plus scaled
+kinematic adjustment for the energy distribution, matching
+OpenMC's convention in \texttt{distribution\_angle.cpp}
+and \texttt{distribution\_energy.cpp}. Source convergence
+is monitored by a Shannon-entropy mesh
+(\texttt{simulate.rs::EntropyMesh}); on this deck the
+mesh entropy plateaus by batch $\approx 20$, which sets
+the $N_\text{inactive}=20$ budget used throughout the
+PWR measurements.
 
 %% ============================================================

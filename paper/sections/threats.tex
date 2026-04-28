@@ -6,13 +6,13 @@ Two systems: Godiva (HEU-MET-FAST-$001$, three nuclides,
 fast spectrum, \emph{physical} ICSBEP benchmark with measured
 $k_\text{eff}^\text{exp} = 1.0000 \pm 100$~pcm $1\sigma$) and
 a nine-nuclide thermal PWR pin cell (no physical benchmark;
-we use OpenMC $0.15.3$ as an independent code-to-code
+OpenMC $0.15.3$ is used as an independent code-to-code
 reference). Full-core LWR analyses carry $\gtrsim 200$
 nuclides; the hybrid memory picture scales with the
 reaction-channel mix and could look very different there.
-On Godiva we report $\Delta_\text{exp}$ against ICSBEP as
-the primary validation metric and $\Delta_\text{OMC}$
-against OpenMC only as an independent cross-code check;
+On Godiva $\Delta_\text{exp}$ against ICSBEP is the
+primary validation metric; $\Delta_\text{OMC}$ against
+OpenMC is reported as an independent cross-code check;
 the two codes straddle experiment from opposite sides at
 this statistics, and the cross-code spread ($178$~pcm)
 is larger than either code's offset from the measurement. On PWR,
@@ -26,11 +26,10 @@ Only H in H$_2$O is exercised. D$_2$O, graphite, ZrH, and
 other thermal libraries are not validated.
 
 \paragraph{Sampling convention.}
-Our original correlated-CDF sampling is a valid choice; we
-switched to OpenMC's stochastic-bin convention because that
-is what we were comparing against. A fully independent
-reference (MCNP, Serpent) would reveal whether OpenMC itself
-is biased, which we do not investigate here.
+The angular and fission outgoing-energy distributions use
+stochastic-bin selection, matching OpenMC. A fully
+independent reference (MCNP, Serpent) would reveal whether
+OpenMC itself is biased; this is not investigated here.
 
 \paragraph{Charged-particle absorption.}
 Channels MT$=103$, $107$, first-chance fission

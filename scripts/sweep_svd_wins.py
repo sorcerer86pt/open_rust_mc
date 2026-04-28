@@ -30,7 +30,8 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
-BIN = REPO / "rust_prototype" / "target" / "release" / "godiva.exe"
+BIN_GODIVA = REPO / "rust_prototype" / "target" / "release" / "godiva.exe"
+BIN_PWR = REPO / "rust_prototype" / "target" / "release" / "pwr_pincell.exe"
 DATA = REPO / "data" / "endfb-vii.1-hdf5" / "neutron"
 OUT_DIR = REPO / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
@@ -51,7 +52,7 @@ class Point:
 _RE_BLOCK = re.compile(
     r"^\s{2}(SVD[^:]*|Pointwise Table|ACE\+WMP):\s*$", re.MULTILINE
 )
-_RE_K = re.compile(r"k_eff\s*=\s*([0-9.]+)")
+_RE_K = re.compile(r"k_(?:eff|inf)\s*=\s*([0-9.]+)")
 _RE_NS = re.compile(r"ns/particle\s*=\s*([0-9.]+)")
 _RE_MEM = re.compile(r"XS memory\s*=\s*([0-9.]+)\s*KB")
 
@@ -87,10 +88,11 @@ def parse_output(text: str) -> dict[str, tuple[float, float, float]]:
 
 # ── Driver ────────────────────────────────────────────────────────────
 
-def run_one(rank: int, *, target_temp: float | None, batches: int,
+def run_one(rank: int, *, geometry: str, target_temp: float | None, batches: int,
             inactive: int, particles: int, seeds: int) -> dict[str, tuple[float, float, float]]:
+    binary = BIN_PWR if geometry == "pwr" else BIN_GODIVA
     cmd = [
-        str(BIN),
+        str(binary),
         str(DATA),
         "--mode", "all",
         "--rank", str(rank),
@@ -100,21 +102,27 @@ def run_one(rank: int, *, target_temp: float | None, batches: int,
         "--seeds", str(seeds),
         "--discrete-rank", "1",
     ]
-    if target_temp is not None:
-        cmd += ["--target-temp", str(target_temp)]
+    if geometry == "godiva":
+        if target_temp is not None:
+            cmd += ["--target-temp", str(target_temp)]
+        else:
+            cmd += ["--temp-idx", "2"]  # 294K
     else:
-        cmd += ["--temp-idx", "2"]  # 294K
-    print(f"  > rank={rank}  target_temp={target_temp} ...", flush=True)
+        # pwr_pincell uses per-nuclide library temps; --target-temp-offset
+        # is the appropriate off-library knob.
+        if target_temp is not None:
+            cmd += ["--target-temp-offset", str(target_temp)]
+    print(f"  > [{geometry}] rank={rank}  target_temp={target_temp} ...", flush=True)
     proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
     return parse_output(proc.stdout)
 
 
-def run_scan(*, scenarios, ranks, batches, inactive, particles, seeds) -> list[Point]:
+def run_scan(*, geometry, scenarios, ranks, batches, inactive, particles, seeds) -> list[Point]:
     points: list[Point] = []
     for scen_label, target_t in scenarios:
-        print(f"\n== {scen_label} ==")
+        print(f"\n== [{geometry}] {scen_label} ==")
         for r in ranks:
-            results = run_one(r, target_temp=target_t, batches=batches,
+            results = run_one(r, geometry=geometry, target_temp=target_t, batches=batches,
                               inactive=inactive, particles=particles, seeds=seeds)
             for provider, (k, ns, mem) in results.items():
                 points.append(Point(provider, scen_label, r, ns, mem, k))
@@ -123,7 +131,7 @@ def run_scan(*, scenarios, ranks, batches, inactive, particles, seeds) -> list[P
 
 # ── Plotting ──────────────────────────────────────────────────────────
 
-def plot(points: list[Point], out_path: Path) -> None:
+def plot(points: list[Point], out_path: Path, geometry: str = "godiva") -> None:
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -172,7 +180,9 @@ def plot(points: list[Point], out_path: Path) -> None:
         ax.set_xticks(ranks)
 
     ax_mem.set_ylabel("XS memory  (MB)")
-    ax_mem.set_title("Memory vs rank — Godiva, 3 nuclides")
+    nuclide_label = {"godiva": "Godiva, 3 nuclides",
+                     "pwr": "PWR pin cell, 9 nuclides"}.get(geometry, geometry)
+    ax_mem.set_title(f"Memory vs rank — {nuclide_label}")
     ax_speed.set_ylabel("ns / particle")
     ax_speed.set_title("Transport speed vs rank")
 
@@ -226,11 +236,15 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--quick", action="store_true",
                     help="fast dev settings (30b/3000p/2s)")
+    ap.add_argument("--geometry", choices=["godiva", "pwr"], default="godiva",
+                    help="benchmark geometry (default: godiva)")
+    ap.add_argument("--out-prefix", default=None,
+                    help="CSV/PNG basename (default: sweep_svd_wins_<geom>)")
     args = ap.parse_args()
 
-    if not BIN.exists():
-        print(f"binary not found: {BIN}\nbuild with: cargo build --release --bin godiva",
-              file=sys.stderr)
+    binary = BIN_PWR if args.geometry == "pwr" else BIN_GODIVA
+    if not binary.exists():
+        print(f"binary not found: {binary}", file=sys.stderr)
         return 1
 
     if args.quick:
@@ -238,16 +252,26 @@ def main() -> int:
     else:
         cfg = dict(batches=80, inactive=20, particles=5000, seeds=3)
 
-    scenarios = [
-        ("on-library 294 K", None),
-        ("stochastic 450 K", 450.0),
-    ]
+    if args.geometry == "godiva":
+        scenarios = [
+            ("on-library 294 K", None),
+            ("stochastic 450 K", 450.0),
+        ]
+    else:
+        # PWR pin cell: on-library uses default per-nuclide temps; off-library
+        # is +150 K offset (fuel 900→1050, mod 600→750), the standard
+        # off-library operating point used in paper §off_library.
+        scenarios = [
+            ("on-library default", None),
+            ("off-library +150 K", 150.0),
+        ]
     ranks = [1, 2, 3, 5, 7]
 
-    points = run_scan(scenarios=scenarios, ranks=ranks, **cfg)
+    points = run_scan(geometry=args.geometry, scenarios=scenarios, ranks=ranks, **cfg)
 
-    write_csv(points, OUT_DIR / "sweep_svd_wins.csv")
-    plot(points, OUT_DIR / "sweep_svd_wins.png")
+    prefix = args.out_prefix or f"sweep_svd_wins_{args.geometry}"
+    write_csv(points, OUT_DIR / f"{prefix}.csv")
+    plot(points, OUT_DIR / f"{prefix}.png", geometry=args.geometry)
     return 0
 
 

@@ -1,0 +1,31 @@
+scenario,provider,rank,k_eff,ns_per_p,mem_kb
+on-library default,SVD,1,0.87070,20191.45,105581.2
+on-library default,Table,1,1.32675,26066.48,103064.1
+on-library default,ACE+WMP,1,1.32946,26495.49,100442.2
+on-library default,SVD,2,1.40859,25688.06,118223.9
+on-library default,Table,2,1.32675,26931.26,103064.1
+on-library default,ACE+WMP,2,1.32946,26646.19,100442.2
+on-library default,SVD,3,1.32067,39627.93,130866.6
+on-library default,Table,3,1.32675,44998.37,103064.1
+on-library default,ACE+WMP,3,1.32946,44427.11,100442.2
+on-library default,SVD,5,1.32776,72099.63,156152.0
+on-library default,Table,5,1.32675,58084.70,103064.1
+on-library default,ACE+WMP,5,1.32946,59764.81,100442.2
+on-library default,SVD,7,1.32820,77003.49,168794.7
+on-library default,Table,7,1.32675,57718.11,103064.1
+on-library default,ACE+WMP,7,1.32946,61460.52,100442.2
+off-library +150 K,SVD,1,1.54735,56350.29,105581.2
+off-library +150 K,Table,1,1.32176,60305.75,206128.2
+off-library +150 K,ACE+WMP,1,1.32892,62076.80,199730.5
+off-library +150 K,SVD,2,1.38653,58975.32,118223.9
+off-library +150 K,Table,2,1.32265,57430.26,206128.2
+off-library +150 K,ACE+WMP,2,1.32824,61075.24,199730.5
+off-library +150 K,SVD,3,1.32127,63828.45,130866.6
+off-library +150 K,Table,3,1.32073,62186.87,206128.2
+off-library +150 K,ACE+WMP,3,1.32806,59829.34,199730.5
+off-library +150 K,SVD,5,1.32377,76778.18,156152.0
+off-library +150 K,Table,5,1.32372,60979.99,206128.2
+off-library +150 K,ACE+WMP,5,1.32837,62027.87,199730.5
+off-library +150 K,SVD,7,1.32657,77634.58,168794.7
+off-library +150 K,Table,7,1.32029,60425.23,206128.2
+off-library +150 K,ACE+WMP,7,1.32623,62342.40,199730.5
