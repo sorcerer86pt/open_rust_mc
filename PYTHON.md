@@ -115,7 +115,7 @@ and physics kernels run unchanged across modes.
 
 | Variant | What it does |
 |---|---|
-| `XsMode.Table` | OpenMC-style pointwise tables. Lowest load time, fastest single-temperature lookup, most memory. The industry baseline. |
+| `XsMode.Table` | Pointwise tables (binary search + log-log interpolation). Lowest load time, fastest single-temperature lookup, most memory. The industry baseline. |
 | `XsMode.Svd` | Rank-*k* SVD-compressed kernels. Slower load (SVD decomposition), lower memory at high *k* or multi-temperature. Default rank 5. |
 | `XsMode.HybridTableWmp` | Pointwise tables with Windowed Multipole override inside each nuclide's resolved-resonance window. Industry-baseline accuracy at lower memory than pure tables. |
 | `XsMode.HybridSvdWmp` | SVD outside the RRR window, exact WMP evaluation inside. The intended production-precision mode. Set per-MT ranks to push smooth tails (MT=2/18/102) to rank 1 — WMP handles all the resonance structure. |
