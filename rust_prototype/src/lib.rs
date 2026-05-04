@@ -7,6 +7,7 @@
 //!   - Event-based transport with rayon parallelism
 
 pub mod compare;
+pub mod cp_decompose;
 pub mod decompose;
 pub mod error;
 pub mod geometry;

@@ -146,6 +146,56 @@ The end-to-end Hybrid SVD+WMP $k_\infty = 1.32795 \pm
 the matched $150 \times 50\,000$ statistics; the
 ten-seed redo is not in this paper.
 
+\paragraph{CP/PARAFAC of $\sigma(E, T, \ell)$ — measured,
+deferred.}
+\label{sec:cp_probe}
+The per-level rank-$1$ SVDs we currently store ignore
+cross-$\ell$ correlation. We probed CP/PARAFAC --- a
+joint rank-$R$ decomposition $\sigma_\ell(E,T) \approx
+\sum_{r=1}^R a_r(E)\, b_r(T)\, c_r(\ell)$ --- via greedy
+rank-$1$ deflation (\texttt{src/cp\_decompose.rs}) and
+report results below at $200$ log-spaced energy points
+across the six ENDF/B-VII.1 library temperatures
+(\texttt{outputs/cp\_analysis.txt}).
+
+\begin{tabular}{lrrrrr}
+\toprule
+nuclide & $N_\ell$ & rank-$3$ & rank-$5$ & rank-$8$ & mem ratio \\
+        &          & rel.\ L2 & rel.\ L2 & rel.\ L2 & at rank-$8$ \\
+\midrule
+Zr-$90$ & $10$ & $7.0\%$ & $1.4\%$  & $0.26\%$  & $0.84\times$ \\
+Zr-$91$ & $10$ & $3.6\%$ & $0.78\%$ & $0.046\%$ & $0.84\times$ \\
+Zr-$92$ & $10$ & $8.6\%$ & $2.9\%$  & $0.32\%$  & $0.84\times$ \\
+Zr-$94$ & $13$ & $9.8\%$ & $3.5\%$  & $0.82\%$  & $0.66\times$ \\
+U-$238$ & $41$ & $6.0\%$ & $1.9\%$  & $0.45\%$  & $\mathbf{0.23\times}$ \\
+\bottomrule
+\end{tabular}
+
+\noindent
+The pattern is the predictable one: CP wins as $N_\ell$
+grows because the cost of the $\ell$-mode factor
+($N_\ell$ doubles per rank) is amortised against the
+constant overhead of the $E$-mode and $T$-mode factors.
+For U-$238$ at rank-$8$, CP reaches sub-pcm RMSE while
+storing $4.3\times$ less than the $41$ per-level rank-$1$
+SVDs. For Zr clad with $10$--$13$ levels, CP only barely
+breaks even on memory at the precision we care about.
+
+We do not deploy CP because synthesis $+$ CDF already
+crossed parity with GPU pointwise at the per-particle
+cost, and CP loses that comparison: a rank-$R$ CP
+reconstruction at one $(E_\text{idx}, T)$ costs
+$R(N_\ell + 2)$ FMAs to materialise all levels at once
+($R = 5, N_\ell = 41 \to 215$~FMAs) versus the
+synthesis-plus-CDF hot path's one rank-$5$
+\texttt{svd\_reconstruct} plus one binary CDF search
+($\sim 18$ FMA-equivalents). CP becomes the right pick
+for full-actinide libraries with many high-level
+nuclides (Pu isotopes, minor actinides), and for
+analyses where all $13$--$41$ level cross sections are
+queried in batch (sensitivity tallies, depletion
+chains). Both are out of scope here.
+
 \subsection{Bottom line}
 
 SVD compression of ENDF/B-VII.1 cross sections is the
