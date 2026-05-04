@@ -630,6 +630,12 @@ impl InelasticCdf {
 /// avoids the GPU's 13× svd_reconstruct loop on the inelastic hot path
 /// (paper §gpu engineering item).
 ///
+/// `target_temp` (Some) blends the per-level XS across the nearest
+/// three library temperatures via 3-point unity-normalised Ducru
+/// weights before computing the CDF — same scheme used by the SVD
+/// provider at off-library targets. `None` falls back to picking the
+/// closest library column at `temp_idx` (on-library use).
+///
 /// Returns the synthesized SVD kernel together with an `InelasticCdf`
 /// tensor that lets level selection run as a single binary search
 /// instead of 13× svd_reconstruct (do_inelastic Pass 1 + Pass 2).
@@ -638,6 +644,7 @@ fn synthesize_inelastic_mt4(
     level_mts: &[u32],
     svd_rank: usize,
     temp_idx: usize,
+    target_temp: Option<f64>,
     shared_grid: &Arc<[f64]>,
 ) -> Option<(ReactionKernel, InelasticCdf)> {
     // Read each level's raw xs_per_temp once. Skip levels whose data is
@@ -744,13 +751,45 @@ fn synthesize_inelastic_mt4(
         (lo, alpha)
     };
 
-    // Pre-pick the target temperature column. Mirrors how
-    // build_kernel_from_data Ducru-blends per-temperature SVD coeffs
-    // into a single column at target T. Storing n_t=1 means the GPU
-    // CDF lookup is a single binary search with no extra T-pick.
-    // Off-library targets currently fall back to the closest library
-    // column; full Ducru-blended CDF interpolation is a follow-up.
-    let target_t_col = temp_idx.min(n_t - 1);
+    // Resolve the per-temperature blend strategy.
+    //
+    // `target_temp = Some(T)` engages the same 3-point unity-normalised
+    // Ducru scheme used by the SVD provider for off-library
+    // reconstruction: the nearest three library columns are blended on
+    // the per-level XS arrays before the CDF is computed. At an
+    // on-library temperature the weights collapse to one-hot via the
+    // exact-match shortcut in `kernel::ducru_weights`, so the
+    // on-library result is identical to the closest-column path.
+    //
+    // `target_temp = None` falls back to picking the column at
+    // `temp_idx` directly — kept as a backstop for callers that do
+    // not have a numeric target temperature handy.
+    let chosen_temps: Vec<usize>;
+    let temp_weights: Vec<f64>;
+    if let Some(target) = target_temp {
+        chosen_temps = nearest_k_temps(&reader.temperatures, target, 3);
+        if chosen_temps.is_empty() {
+            // No library temps loaded — degenerate; bail.
+            return None;
+        }
+        let sub: Vec<f64> = chosen_temps
+            .iter()
+            .map(|&i| reader.temperatures[i])
+            .collect();
+        temp_weights = ducru_unity_weights(&sub, target);
+    } else {
+        chosen_temps = vec![temp_idx.min(n_t - 1)];
+        temp_weights = vec![1.0];
+    }
+
+    // Helper: blend σ(E_idx, T_target) from the chosen library columns.
+    let blend_at = |xs_per_temp: &[Vec<f64>], idx: usize| -> f64 {
+        let mut acc = 0.0_f64;
+        for (k, &t_col) in chosen_temps.iter().enumerate() {
+            acc += temp_weights[k] * xs_per_temp[t_col][idx].max(0.0);
+        }
+        acc.max(0.0)
+    };
 
     let mut cdf_flat = vec![0.0_f64; n_e_dec * n_levels];
     for ed in 0..n_e_dec {
@@ -763,11 +802,10 @@ fn synthesize_inelastic_mt4(
         let e = 10f64.powf(log_e);
         let (idx, alpha) = bsearch(e);
         let nxt = (idx + 1).min(union.len() - 1);
-        // Interpolate σ_4 at e (linear in raw xs space — the CDF only
-        // needs ratios, so linear is fine and matches OpenMC's
-        // pointwise-table convention for inelastic).
-        let denom_lo = summed.xs_per_temp[target_t_col][idx].max(0.0);
-        let denom_hi = summed.xs_per_temp[target_t_col][nxt].max(0.0);
+        // Blend σ_4 at e using Ducru weights at target_temp, then
+        // linearly interpolate in E between idx and nxt.
+        let denom_lo = blend_at(&summed.xs_per_temp, idx);
+        let denom_hi = blend_at(&summed.xs_per_temp, nxt);
         let denom = denom_lo + alpha * (denom_hi - denom_lo);
         let row = ed * n_levels;
         if denom <= 1e-30 {
@@ -779,8 +817,8 @@ fn synthesize_inelastic_mt4(
         let inv = 1.0 / denom;
         let mut running = 0.0_f64;
         for (l, d) in per_level.iter().enumerate() {
-            let s_lo = d.xs_per_temp[target_t_col][idx].max(0.0);
-            let s_hi = d.xs_per_temp[target_t_col][nxt].max(0.0);
+            let s_lo = blend_at(&d.xs_per_temp, idx);
+            let s_hi = blend_at(&d.xs_per_temp, nxt);
             let s = s_lo + alpha * (s_hi - s_lo);
             running += s * inv;
             cdf_flat[row + l] = running;
@@ -1033,11 +1071,22 @@ pub fn load_nuclide_with_policy(
                 // so the CDF is currently optional.
                 let level_mts: Vec<u32> =
                     discrete_levels.iter().map(|l| l.info.mt).collect();
+                // load_nuclide_with_policy is the on-library entry
+                // point — pass the library temperature for the
+                // chosen `temp_idx` as the Ducru target so the
+                // 3-point unity weights collapse to one-hot via the
+                // exact-match shortcut and the CDF lands on the
+                // single library column. No off-library data here.
+                let on_lib_target = reader
+                    .temperatures
+                    .get(temp_idx.min(reader.temperatures.len().saturating_sub(1)))
+                    .copied();
                 match synthesize_inelastic_mt4(
                     &reader,
                     &level_mts,
                     policy.rank_for(4),
                     temp_idx,
+                    on_lib_target,
                     &shared_grid,
                 ) {
                     Some((kernel, cdf)) => {
@@ -2001,7 +2050,43 @@ pub fn load_nuclide_at_temp(
         .map(|xs| PointwiseTable::from_shared_grid(Arc::clone(&shared_grid), xs.clone()));
 
     let elastic = build_kernel_at_temp(&reader, 2, svd_rank, target_temp, &shared_grid);
-    let inelastic = build_kernel_at_temp(&reader, 4, svd_rank, target_temp, &shared_grid);
+    let native_inelastic =
+        build_kernel_at_temp(&reader, 4, svd_rank, target_temp, &shared_grid);
+    let (inelastic, inelastic_cdf): (Option<ReactionKernel>, Option<InelasticCdf>) =
+        match native_inelastic {
+            Some(k) => (Some(k), None),
+            None if !discrete_levels.is_empty() => {
+                // Off-library MT=4 synthesis with full Ducru blending —
+                // synth path mirrors the on-library version but the
+                // 3-point unity weights now do real work (target_temp
+                // sits between library columns).
+                let level_mts: Vec<u32> =
+                    discrete_levels.iter().map(|l| l.info.mt).collect();
+                match synthesize_inelastic_mt4(
+                    &reader,
+                    &level_mts,
+                    svd_rank,
+                    aux_temp_idx,
+                    Some(target_temp),
+                    &shared_grid,
+                ) {
+                    Some((kernel, cdf)) => {
+                        println!(
+                            "    MT=4  (inelastic) synthetic rank={} \
+                             (sum + Ducru-blended CDF over {} levels @ \
+                             {:.1} K, CDF={:.1} KB)",
+                            svd_rank,
+                            cdf.n_levels,
+                            target_temp,
+                            cdf.memory_bytes() as f64 / 1024.0
+                        );
+                        (Some(kernel), Some(cdf))
+                    }
+                    None => (None, None),
+                }
+            }
+            None => (None, None),
+        };
     let n2n = build_kernel_at_temp(&reader, 16, svd_rank, target_temp, &shared_grid);
     let n3n = build_kernel_at_temp(&reader, 17, svd_rank, target_temp, &shared_grid);
     let fission = build_kernel_at_temp(&reader, 18, svd_rank, target_temp, &shared_grid);
@@ -2058,9 +2143,8 @@ pub fn load_nuclide_at_temp(
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
         discrete_levels,
-        // load_nuclide_at_temp does not yet implement MT=4 synthesis
-        // (used by off-library binaries; covered by follow-up work).
-        inelastic_cdf: None,
+        // Ducru-blended CDF when MT=4 was synthesised; None otherwise.
+        inelastic_cdf,
         discrete_level_angles,
         has_continuum_inelastic: has_continuum,
         elastic_angle,
