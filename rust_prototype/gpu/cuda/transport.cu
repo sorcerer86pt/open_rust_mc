@@ -153,7 +153,12 @@
 #define P_LEV_ANG_DIST_SZ  94
 #define P_LEV_ANG_LEV_OFF  95
 #define P_LEV_ANG_LEV_NE   96
-#define N_PARAMS          97
+// Per-warp shared-memory cache of (level-sum, per-level XS) keyed on
+// (nuc_idx, e_idx) — closes the GPU SVD vs GPU pointwise gap caused
+// by Zr clad nuclides synthesising MT=4 from 13 discrete-level kernels.
+// Encoded as a scalar int (0 = off, 1 = on) cast through the u64 buffer.
+#define P_WARP_CACHE_ENABLE 97
+#define N_PARAMS          98
 
 // Access helpers — read from the flat u64 params buffer
 // PTR_F removed — all basis data is now f64 (PTR_D)
@@ -892,6 +897,21 @@ __device__ void wmp_eval(
     const double* curvefit,
     double* out_s, double* out_a, double* out_f);
 
+// ── Per-warp level-sum cache (paper §gpu/§threats engineering item) ──
+// Each warp owns one slot of (level-sum, per-level XS[64]) keyed on
+// (nuc_idx, e_idx). After the energy-bin sort, lanes inside a warp
+// share the same energy bucket with high probability, so the level-sum
+// computed once on the first inelastic event can be reused by the
+// other 31 lanes — closing the GPU SVD vs GPU pointwise gap on the
+// Zr clad nuclides that synthesise MT=4 from 13 discrete-level
+// kernels (paper Table~\ref{tab:keff_pwr_desktop}).
+//
+// Sized for BLOCK_SIZE=256 / 32 = 8 warps. lev_cap is hardcoded to 64
+// in the inelastic branch, matching the runtime `min(n_lev, 64)`.
+#define WARP_CACHE_LEV_CAP 64
+#define WARP_CACHE_WARPS_PER_BLOCK 8
+#define WARP_CACHE_SLOT_DOUBLES (1 + WARP_CACHE_LEV_CAP)
+
 extern "C" __global__ void __launch_bounds__(256, 2)
 transport_persistent(
     Params p,
@@ -913,11 +933,28 @@ transport_persistent(
     int* __restrict__ cnt_leak, int* __restrict__ cnt_surf,
     int steps_per_launch)
 {
+    // Per-warp level-sum cache. Statically sized; ptxas places these in
+    // .shared.  Layout per warp: [0]=level-sum, [1..WARP_CACHE_LEV_CAP]=per-level XS.
+    __shared__ double smem_lxs[WARP_CACHE_WARPS_PER_BLOCK * WARP_CACHE_SLOT_DOUBLES];
+    // Cache key per warp: [0]=last_nuc, [1]=last_eidx. -1 = invalid.
+    __shared__ int smem_key[WARP_CACHE_WARPS_PER_BLOCK * 2];
+
+    // Init the warp cache slots under a block-level barrier so it
+    // happens before any lane can return early on `lane >= n_alive`.
+    int warp_id = threadIdx.x >> 5;
+    int lane_id = threadIdx.x & 31;
+    if (lane_id == 0 && warp_id < WARP_CACHE_WARPS_PER_BLOCK) {
+        smem_key[warp_id * 2 + 0] = -1;
+        smem_key[warp_id * 2 + 1] = -1;
+    }
+    __syncthreads();
+
     int lane = blockIdx.x * blockDim.x + threadIdx.x;
     if (lane >= n_alive) return;
     int tid = compact_idx[lane];
     int gt = SCALAR_I(p, P_GEOM_TYPE);
     int rank = SCALAR_I(p, P_RANK);
+    int warp_cache_on = SCALAR_I(p, P_WARP_CACHE_ENABLE);
 
     double px=pos_x[tid], py=pos_y[tid], pz=pos_z[tid];
     double dx=dir_x[tid], dy=dir_y[tid], dz=dir_z[tid];
@@ -1301,25 +1338,116 @@ transport_persistent(
                 double Q=-0.5e6; int selected=0;
                 if (n_lev>0) {
                     // Two-pass single-scan sampling (NVIDIA BPG §10.2: local
-                    // arrays with runtime indexing spill to DRAM). Pass 1
-                    // sums per-level XS; pass 2 re-computes and selects on
-                    // the fly — SVD cost doubles vs the old cached array,
-                    // but registers stay tight and 256-byte stack load
-                    // disappears.
+                    // arrays with runtime indexing spill to DRAM). The naive
+                    // path computes svd_reconstruct() on every active level
+                    // twice (sum, then re-walk to select). For the four Zr
+                    // clad nuclides that synthesise MT=4 from 13 discrete-
+                    // level kernels, that doubles the dominant GPU work.
+                    //
+                    // Per-warp shared-memory cache, keyed on (hit_nuc,
+                    // e_idx) and active when all lanes in the warp's
+                    // active-mask share the same key, eliminates the
+                    // duplicate work. On miss the leader populates the
+                    // slot during Pass 1; on hit Pass 1 is skipped
+                    // entirely. Pass 2 reads from the slot when the
+                    // warp went through the cached path; otherwise it
+                    // re-computes (preserving correctness for divergent
+                    // or heterogeneous warps).
                     double lxs_sum=0.0;
                     int g_off=__ldg(&PTR_I(p, P_GRID_OFFSETS)[hit_nuc]);
                     int n_e=__ldg(&PTR_I(p, P_N_ENERGIES)[hit_nuc]);
                     int e_idx=energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off],n_e,E);
-                    int lev_cap = n_lev < 64 ? n_lev : 64;
-                    #pragma unroll 1
-                    for(int l=0;l<lev_cap;l++){
-                        int gl=lv_off+l;
-                        if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])&&__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
-                            lxs_sum += svd_reconstruct(
-                                &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],e_idx,rank);
+                    int lev_cap = n_lev < WARP_CACHE_LEV_CAP
+                                  ? n_lev : WARP_CACHE_LEV_CAP;
+
+                    // ── Warp-uniformity check ──
+                    unsigned amask = __activemask();
+                    int leader_lane = __ffs(amask) - 1;
+                    int can_cache = warp_cache_on
+                                    && warp_id < WARP_CACHE_WARPS_PER_BLOCK;
+                    int leader_nuc = -1, leader_eidx = -1;
+                    if (can_cache) {
+                        leader_nuc  = __shfl_sync(amask, hit_nuc, leader_lane);
+                        leader_eidx = __shfl_sync(amask, e_idx,   leader_lane);
+                        unsigned same = __ballot_sync(amask,
+                            (hit_nuc == leader_nuc) &&
+                            (e_idx   == leader_eidx));
+                        can_cache = (same == amask);
+                    }
+
+                    double* warp_slot = &smem_lxs[warp_id * WARP_CACHE_SLOT_DOUBLES];
+                    int*    warp_key  = &smem_key[warp_id * 2];
+
+                    int cache_hit = 0;
+                    if (can_cache) {
+                        int slot_nuc = -1, slot_eidx = -1;
+                        if (lane_id == leader_lane) {
+                            slot_nuc  = warp_key[0];
+                            slot_eidx = warp_key[1];
+                        }
+                        slot_nuc  = __shfl_sync(amask, slot_nuc,  leader_lane);
+                        slot_eidx = __shfl_sync(amask, slot_eidx, leader_lane);
+                        cache_hit = (slot_nuc == leader_nuc) &&
+                                    (slot_eidx == leader_eidx);
+                    }
+
+                    // The cache slot stores the *raw* svd_reconstruct value
+                    // per level. svd_reconstruct depends only on
+                    // (basis, coeffs, e_idx) — all warp-uniform when
+                    // can_cache=true. The E-vs-threshold gate is applied
+                    // per-lane on read, because two lanes in the same e_idx
+                    // bin can sit on opposite sides of P_LEVEL_THR (a raw-
+                    // eV value): if the leader stored a gated term, lanes
+                    // straddling the threshold inherit a wrong zero/nonzero
+                    // → systematic k_inf bias. Storing raw and gating on
+                    // read fixes the bias and keeps the cache correct.
+                    if (can_cache && !cache_hit) {
+                        // Leader populates the slot with raw SVD reconstructions.
+                        if (lane_id == leader_lane) {
+                            #pragma unroll 1
+                            for(int l=0;l<lev_cap;l++){
+                                int gl=lv_off+l;
+                                double term_raw = 0.0;
+                                if (__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) {
+                                    term_raw = svd_reconstruct(
+                                        &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                                        &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                        e_idx, rank);
+                                }
+                                warp_slot[1 + l] = term_raw;
+                            }
+                            warp_key[0] = leader_nuc;
+                            warp_key[1] = leader_eidx;
+                        }
+                        __syncwarp(amask);
+                    }
+
+                    // ── Pass 1 (per-lane gated sum) ──
+                    if (can_cache) {
+                        // Cached or just-populated → read raw, apply per-lane gate.
+                        #pragma unroll 1
+                        for(int l=0;l<lev_cap;l++){
+                            int gl=lv_off+l;
+                            if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
+                               && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
+                                lxs_sum += warp_slot[1 + l];
+                            }
+                        }
+                    } else {
+                        // Heterogeneous warp / cache off → original SVD path.
+                        #pragma unroll 1
+                        for(int l=0;l<lev_cap;l++){
+                            int gl=lv_off+l;
+                            if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
+                               && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
+                                lxs_sum += svd_reconstruct(
+                                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                    e_idx, rank);
+                            }
                         }
                     }
+
                     if(lxs_sum>0.0){
                         double xi_l=pcg_uniform(&rng)*lxs_sum;
                         double run=0.0;
@@ -1327,10 +1455,21 @@ transport_persistent(
                         #pragma unroll 1
                         for(int l=0;l<lev_cap;l++){
                             int gl=lv_off+l; double lxs=0.0;
-                            if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])&&__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
-                                lxs=svd_reconstruct(
-                                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],e_idx,rank);
+                            if (can_cache) {
+                                // Read raw cached term, gate per-lane.
+                                if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
+                                   && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
+                                    lxs = warp_slot[1 + l];
+                                }
+                            } else {
+                                // Heterogeneous warp / cache off — re-compute.
+                                if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
+                                   && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
+                                    lxs=svd_reconstruct(
+                                        &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                                        &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                        e_idx, rank);
+                                }
                             }
                             run += lxs;
                             if (xi_l < run) { selected = l; break; }

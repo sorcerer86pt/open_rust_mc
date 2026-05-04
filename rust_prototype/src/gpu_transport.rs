@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 97;
+const N_PARAMS: usize = 98;
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -37,6 +37,10 @@ pub struct GpuTransportContext {
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
     k_transport_persistent: CudaFunction,
+    /// Per-warp level-sum cache toggle (1 = on, 0 = off). Default on.
+    /// Setting to 0 reproduces pre-cache GPU SVD behaviour byte-for-byte
+    /// for A/B testing.
+    warp_cache_enable: i32,
 }
 
 /// SVD data + physics tables uploaded to GPU for all nuclides.
@@ -223,7 +227,15 @@ impl GpuTransportContext {
             k_energy_bin_count,
             k_energy_bin_scatter,
             k_transport_persistent,
+            warp_cache_enable: 1,
         })
+    }
+
+    /// Toggle the per-warp level-sum cache. Default `true`. Setting to
+    /// `false` reproduces the pre-cache GPU SVD path byte-for-byte for
+    /// A/B benchmarking.
+    pub fn set_warp_cache_enable(&mut self, on: bool) {
+        self.warp_cache_enable = on as i32;
     }
 
     /// Debug: sample angular distributions at given (energy, xi) pairs.
@@ -1397,6 +1409,7 @@ impl GpuTransportContext {
             dptr!(&nuc_data.lev_ang_dist_sz),      // 94 P_LEV_ANG_DIST_SZ
             dptr!(&nuc_data.lev_ang_lev_off),      // 95 P_LEV_ANG_LEV_OFF
             dptr!(&nuc_data.lev_ang_lev_ne),       // 96 P_LEV_ANG_LEV_NE
+            self.warp_cache_enable as u64,         // 97 P_WARP_CACHE_ENABLE
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;

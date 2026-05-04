@@ -72,6 +72,16 @@ mod cuda_main {
         /// Windowed-Multipole in the RRR window for nuclides that have WMP data.
         #[arg(short, long, value_enum, default_value_t = GpuMode::Svd)]
         mode: GpuMode,
+        /// Disable the per-warp level-sum cache (paper §gpu engineering item).
+        /// Default off (cache on). Used to A/B-test the cache impact at the
+        /// inelastic discrete-level sampler.
+        #[arg(long, default_value_t = false)]
+        no_warp_cache: bool,
+        /// Run cache-on and cache-off back-to-back, sharing the GPU upload,
+        /// and print a Δ-row with k_inf delta + SEM gate + speedup ratio.
+        /// Implies --force-svd (cache only matters on the SVD path).
+        #[arg(long, default_value_t = false)]
+        cache_compare: bool,
     }
 
     /// WMP filename + target temperature per nuclide, parallel to PWR_NUCLIDES.
@@ -381,7 +391,14 @@ mod cuda_main {
     }
 
     pub fn run() {
-        let args = Args::parse();
+        let mut args = Args::parse();
+        if args.cache_compare && !args.force_svd {
+            println!(
+                "  Note: --cache-compare implies --force-svd (cache only \
+                 matters on the SVD path); enabling automatically."
+            );
+            args.force_svd = true;
+        }
         let inactive = args.inactive.min(args.batches.saturating_sub(1));
         let active_batches = args.batches - inactive;
         let n = args.particles as usize;
@@ -440,13 +457,17 @@ mod cuda_main {
         // ── Initialize GPU ──
         println!("\n── Initializing GPU transport ──");
         let t_gpu = Instant::now();
-        let gpu = match GpuTransportContext::new() {
+        let mut gpu = match GpuTransportContext::new() {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("  Failed: {e}");
                 return;
             }
         };
+        gpu.set_warp_cache_enable(!args.no_warp_cache);
+        if args.no_warp_cache {
+            println!("  Per-warp level-sum cache: DISABLED (--no-warp-cache)");
+        }
 
         let nuc_data = gpu
             .upload_nuclide_data(&kernels, args.rank)
@@ -537,6 +558,64 @@ mod cuda_main {
             GpuMode::Svd => "SVD",
             GpuMode::Hybrid => "Hybrid SVD+WMP",
         };
+
+        // ── Cache-compare mode: run cache-on then cache-off back-to-back
+        //    sharing the same GPU upload (paper §gpu engineering item) ──
+        if args.cache_compare {
+            let mut results: Vec<BenchResult> = Vec::with_capacity(2);
+            for &(cache_on, label_suffix) in &[(true, "cache-on"), (false, "cache-off")] {
+                gpu.set_warp_cache_enable(cache_on);
+                let mut r = run_gpu_seeds(
+                    &gpu,
+                    &nuc_data,
+                    &mat_data,
+                    &sab_data,
+                    &wmp_data,
+                    &format!("GPU {mode_label} {geom_label} [{label_suffix}]"),
+                    n,
+                    args.batches,
+                    inactive,
+                    args.seeds,
+                    geom_type,
+                );
+                r.load_ms = load_ms + gpu_init_ms;
+                results.push(r);
+            }
+            println!("\n{}", "=".repeat(60));
+            println!("CACHE-COMPARE RESULTS - {geom_label}");
+            println!("{}", "=".repeat(60));
+            for r in &results {
+                print_result(r);
+                println!();
+            }
+            // Δ-row: throughput speedup, k_inf delta, SEM_combined gate
+            let on = &results[0];
+            let off = &results[1];
+            let dk_pcm = (on.k_mean() - off.k_mean()) * 1e5;
+            let sem_on = on.k_std() / (on.seed_results.len() as f64).sqrt();
+            let sem_off = off.k_std() / (off.seed_results.len() as f64).sqrt();
+            let sem_comb = (sem_on * sem_on + sem_off * sem_off).sqrt() * 1e5;
+            let speedup = off.ns_mean() / on.ns_mean();
+            println!("  Δ (cache_on − cache_off):");
+            println!(
+                "    Δk_inf       = {:+.1} pcm   (3·SEM_combined gate = {:.1} pcm)",
+                dk_pcm,
+                3.0 * sem_comb
+            );
+            println!(
+                "    speedup      = {:.3}× ({:.1} → {:.1} ns/p)",
+                speedup,
+                off.ns_mean(),
+                on.ns_mean()
+            );
+            let pass_k = dk_pcm.abs() <= 3.0 * sem_comb;
+            println!(
+                "    AC2 (Δk within 3·SEM_combined)            = {}",
+                if pass_k { "PASS" } else { "FAIL" }
+            );
+            return;
+        }
+
         let mut r = run_gpu_seeds(
             &gpu,
             &nuc_data,

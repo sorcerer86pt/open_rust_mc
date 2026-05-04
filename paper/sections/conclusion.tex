@@ -70,8 +70,14 @@ pointwise because four clad nuclides require summing $13$
 discrete-level SVD kernels per lookup, and the
 divergent gather pattern of per-level rank-$1$
 reconstruction does not map well to warp coalescing on
-the geometries tested here. The CPU SVD picture is
-favourable; the GPU SVD picture is not.
+the geometries tested here. We implemented a per-warp
+shared-memory cache keyed on $(n, E_\text{idx})$
+(Sec.~\ref{sec:gpu}) to close this gap; it preserves
+bit-parity within SEM but at the energy-bin sort
+granularity used here activates too rarely to recover
+the throughput, leaving the gap open. The CPU SVD
+picture is favourable; the GPU SVD picture is not, and
+the obvious cache-based fix is insufficient on its own.
 
 \paragraph{Hybrid SVD+WMP throughput.}
 The hybrid is $2.06\times$ slower than CPU SVD because

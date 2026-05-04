@@ -16,11 +16,42 @@ total-inelastic block in the ENDF/B-VII.1 HDF5; their total
 inelastic is synthesised at lookup time by summing
 $13$ discrete-level SVD kernels. On CPU the scalar pipeline
 amortises this; on GPU it dominates the SVD-path runtime.
-A per-warp cache keyed on $(n, E_\text{idx})$ after the
-energy sort would close the gap, and we note this as
-engineering work that the present paper does not cover. As
-measured, GPU SVD on PWR pin cell is \emph{not} a win over
-GPU pointwise.
+
+\paragraph{Per-warp $(n, E_\text{idx})$ cache: implemented, not enough.}
+We implemented the per-warp shared-memory cache flagged in earlier
+drafts as engineering work. The kernel keeps one slot per warp
+($1+64$ doubles for level-sum and per-level XS, plus a $(\text{nuc},
+E_\text{idx})$ key), populated by the warp's leader lane after the
+energy-bin sort (\texttt{transport.cu::transport\_persistent}).
+The slot caches the \emph{raw} \texttt{svd\_reconstruct} value per
+level; the per-lane \mbox{$E\!\geq\!E_\text{thr}$} gate is applied
+on read so that lanes straddling a level threshold (same
+$E_\text{idx}$, opposite sides of the raw-eV threshold) inherit the
+correct gating --- a subtlety that introduced a $+730$~pcm $k_\infty$
+bias in our first attempt. With the corrected gating, a five-seed
+$60$-batch $50\,000$-particle small-L3 run gives bit-parity within
+SEM ($\Delta k_\infty = -18.5$~pcm vs cache-off, three-SEM gate
+$208.8$~pcm) but a throughput ratio of only $1.003\times$
+($23\,508 \to 23\,434$~ns/p). The gap to GPU pointwise is
+\emph{not} closed; the cache is shipped enabled for
+correctness preservation but is, for this geometry, a no-op on
+performance.
+
+\paragraph{Why the cache misses.}
+The persistent kernel sorts particles into $256$ log-energy bins
+spanning $\sim\!17$ decades, so a single bin covers a $\sim\!6\%$
+energy range. After the sort, lanes within a warp share a bin but
+not the per-nuclide $E_\text{idx}$, since the nuclide grids carry
+$\mathrm{O}(10^4)$ points and a $6\%$ window straddles many of them.
+The cache only activates when \emph{all} active lanes share the same
+$(n, E_\text{idx})$, and the check fails on the great majority of
+inelastic events in the energy-sorted PWR distribution. Closing the
+gap likely requires either a finer pre-sort (e.g.\ on the per-nuclide
+$E_\text{idx}$ directly), a per-thread shared cache (memory-budget
+constrained at $\mathtt{launch\_bounds}(256, 2)$), or a different
+representation of the discrete-level sum that does not require
+$13$ reconstructions per inelastic event. As measured, GPU SVD on
+PWR pin cell is \emph{not} a win over GPU pointwise.
 
 \paragraph{Fidelity parity at large-L3 statistics.}
 Post-correction GPU rows: GPU pointwise $k_\infty =

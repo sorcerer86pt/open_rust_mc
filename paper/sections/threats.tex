@@ -53,8 +53,13 @@ engine builder would care about.
 
 \paragraph{GPU SVD.}
 Slower than GPU pointwise on PWR pin cell because of the Zr
-clad level-sum cost. A per-warp level-sum cache would likely
-fix this but is not implemented.
+clad level-sum cost. A per-warp level-sum cache keyed on
+$(n, E_\text{idx})$ is implemented (Sec.~\ref{sec:gpu}) and
+preserves bit-parity within SEM, but at the energy-bin sort
+granularity used here it activates rarely enough that the
+gap to GPU pointwise is not closed. A finer pre-sort or a
+different discrete-level representation is needed; both are
+out of scope for this paper.
 
 \paragraph{GPU hybrid.}
 Only the WMP evaluator itself is validated on GPU; the
