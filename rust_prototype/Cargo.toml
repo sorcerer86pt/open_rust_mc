@@ -9,6 +9,11 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+# Math + data foundation extracted into its own crate
+# (https://github.com/sorcerer86pt/Rust-MC-SimulationLib).
+# Path-dep'd while the two crates co-evolve; switch to a versioned
+# crates.io release once rust-mc-sim is published.
+rust-mc-sim = { path = "../../rust-mc-sim", features = ["parallel"] }
 faer = "0.22"
 hdf5-pure = "0.1"
 rayon = "1"
