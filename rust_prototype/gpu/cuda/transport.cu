@@ -158,7 +158,17 @@
 // by Zr clad nuclides synthesising MT=4 from 13 discrete-level kernels.
 // Encoded as a scalar int (0 = off, 1 = on) cast through the u64 buffer.
 #define P_WARP_CACHE_ENABLE 97
-#define N_PARAMS          98
+// Per-level CDF for inelastic-level sampling (replaces the 13-level
+// walk in do_inelastic with a binary search). Per-nuclide metadata.
+// inel_cdf_off[ni] = -1 means "no CDF, fall through to legacy walk".
+#define P_INEL_CDF_DATA      98
+#define P_INEL_CDF_OFF       99
+#define P_INEL_CDF_N_E      100
+#define P_INEL_CDF_N_T      101
+#define P_INEL_CDF_N_LEV    102
+#define P_INEL_CDF_LOG_EMIN 103
+#define P_INEL_CDF_LOG_EMAX 104
+#define N_PARAMS            105
 
 // Access helpers — read from the flat u64 params buffer
 // PTR_F removed — all basis data is now f64 (PTR_D)
@@ -1336,7 +1346,40 @@ transport_persistent(
                 int lv_off=__ldg(&PTR_I(p, P_LEVEL_OFFSETS)[hit_nuc]);
                 int n_lev=__ldg(&PTR_I(p, P_LEVEL_COUNTS)[hit_nuc]);
                 double Q=-0.5e6; int selected=0;
-                if (n_lev>0) {
+                // ── Fast path: pre-tabulated per-level CDF ──
+                // Replaces the 13-level walk (Pass 1 sum + Pass 2 select)
+                // with a single linear scan over a log-decimated CDF.
+                // Active when `inel_cdf_off >= 0` (set by the loader for
+                // nuclides with synthesized MT=4 — Zr-90/91/92/94, U-238).
+                int cdf_off = __ldg(&PTR_I(p, P_INEL_CDF_OFF)[hit_nuc]);
+                if (cdf_off >= 0 && n_lev > 0) {
+                    int cdf_n_e   = __ldg(&PTR_I(p, P_INEL_CDF_N_E)[hit_nuc]);
+                    int cdf_n_lev = __ldg(&PTR_I(p, P_INEL_CDF_N_LEV)[hit_nuc]);
+                    double log_e_min = __ldg(&PTR_D(p, P_INEL_CDF_LOG_EMIN)[hit_nuc]);
+                    double log_e_max = __ldg(&PTR_D(p, P_INEL_CDF_LOG_EMAX)[hit_nuc]);
+                    double log_e = log10(fmax(E, 1e-12));
+                    double f = (log_e - log_e_min) / (log_e_max - log_e_min);
+                    if (f < 0.0) f = 0.0;
+                    if (f > 1.0) f = 1.0;
+                    double f_idx = f * (double)(cdf_n_e - 1);
+                    int idx = (int)f_idx;
+                    if (idx >= cdf_n_e - 1) idx = cdf_n_e - 2;
+                    if (idx < 0) idx = 0;
+                    double alpha = f_idx - (double)idx;
+                    const double* cdf_base = &PTR_D(p, P_INEL_CDF_DATA)[cdf_off];
+                    double xi_l = pcg_uniform(&rng);
+                    int sampled = cdf_n_lev - 1;
+                    int row_lo = idx       * cdf_n_lev;
+                    int row_hi = (idx + 1) * cdf_n_lev;
+                    #pragma unroll 1
+                    for (int l = 0; l < cdf_n_lev - 1; l++) {
+                        double F = cdf_base[row_lo + l]
+                                 + alpha * (cdf_base[row_hi + l] - cdf_base[row_lo + l]);
+                        if (xi_l <= F) { sampled = l; break; }
+                    }
+                    selected = sampled;
+                    Q = __ldg(&PTR_D(p, P_LEVEL_Q)[lv_off + selected]);
+                } else if (n_lev > 0) {
                     // Two-pass single-scan sampling (NVIDIA BPG §10.2: local
                     // arrays with runtime indexing spill to DRAM). The naive
                     // path computes svd_reconstruct() on every active level

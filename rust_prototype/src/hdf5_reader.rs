@@ -11,6 +11,7 @@ use std::path::Path;
 use crate::error::{Result, SvdError};
 
 /// Cross-section data for a single nuclide extracted from an OpenMC HDF5 file.
+#[derive(Clone)]
 pub struct NuclideData {
     /// Temperatures in Kelvin, sorted ascending.
     pub temperatures: Vec<f64>,

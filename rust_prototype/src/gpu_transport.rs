@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 98;
+const N_PARAMS: usize = 105;
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -114,6 +114,28 @@ pub struct GpuNuclideData {
     pub urr_n_energies: CudaSlice<i32>,
     pub urr_n_bands: CudaSlice<i32>,
     pub urr_multiply_smooth: CudaSlice<i32>,
+    // ── Synthesized MT=4 + per-level CDF for nuclides whose ENDF/B-VII.1
+    //    evaluation omits the total-inelastic block (Zr-90/91/92/94, U-238).
+    //    Replaces the do_inelastic 13-level walk with a single binary
+    //    search in a log-decimated CDF (~200 energy points).
+    /// Flat CDF tensor: cdf[e_dec * n_t * n_lev + t * n_lev + l]
+    /// concatenated across all nuclides; per-nuclide slice located via
+    /// `inel_cdf_offsets`.
+    pub inel_cdf_data: CudaSlice<f64>,
+    /// Per-nuclide offset into `inel_cdf_data`. -1 means "no CDF, use
+    /// the legacy per-level walk in do_inelastic".
+    pub inel_cdf_off: CudaSlice<i32>,
+    /// Per-nuclide number of decimated energy points.
+    pub inel_cdf_n_e: CudaSlice<i32>,
+    /// Per-nuclide number of temperature columns.
+    pub inel_cdf_n_t: CudaSlice<i32>,
+    /// Per-nuclide number of levels in the CDF (parallel to
+    /// `level_counts` when both are non-zero).
+    pub inel_cdf_n_lev: CudaSlice<i32>,
+    /// Per-nuclide log10(E_min) of the decimated grid.
+    pub inel_cdf_log_e_min: CudaSlice<f64>,
+    /// Per-nuclide log10(E_max) of the decimated grid.
+    pub inel_cdf_log_e_max: CudaSlice<f64>,
 }
 
 /// S(α,β) thermal scattering data on GPU (for one temperature).
@@ -622,6 +644,32 @@ impl GpuTransportContext {
             pw_xs_vec.len() as f64 * 8.0 / 1e6
         );
 
+        // ── Pack synthesized MT=4 + per-level CDF (when present) ──
+        // Replaces the do_inelastic 13-level walk with a single binary
+        // search in a log-decimated CDF (~200 energy points). See
+        // xs_provider::InelasticCdf.
+        let mut inel_cdf_data_vec: Vec<f64> = Vec::new();
+        let mut inel_cdf_off_vec: Vec<i32> = vec![-1; n_nuc];
+        let mut inel_cdf_n_e_vec: Vec<i32> = vec![0; n_nuc];
+        let mut inel_cdf_n_t_vec: Vec<i32> = vec![0; n_nuc];
+        let mut inel_cdf_n_lev_vec: Vec<i32> = vec![0; n_nuc];
+        let mut inel_cdf_log_e_min_vec: Vec<f64> = vec![0.0; n_nuc];
+        let mut inel_cdf_log_e_max_vec: Vec<f64> = vec![0.0; n_nuc];
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref cdf) = nuc.inelastic_cdf {
+                inel_cdf_off_vec[nuc_idx] = inel_cdf_data_vec.len() as i32;
+                inel_cdf_n_e_vec[nuc_idx] = cdf.n_energy as i32;
+                inel_cdf_n_t_vec[nuc_idx] = cdf.n_temp as i32;
+                inel_cdf_n_lev_vec[nuc_idx] = cdf.n_levels as i32;
+                inel_cdf_log_e_min_vec[nuc_idx] = cdf.log_e_min;
+                inel_cdf_log_e_max_vec[nuc_idx] = cdf.log_e_max;
+                inel_cdf_data_vec.extend_from_slice(&cdf.cdf_flat);
+            }
+        }
+        if inel_cdf_data_vec.is_empty() {
+            inel_cdf_data_vec.push(0.0);
+        }
+
         // ── Pack discrete inelastic levels (Q-values + SVD basis) ──
         let mut lev_q_vec: Vec<f64> = Vec::new();
         let mut lev_thr_vec: Vec<f64> = Vec::new();
@@ -940,6 +988,13 @@ impl GpuTransportContext {
             urr_n_energies: self.stream.clone_htod(&urr_ne_vec)?,
             urr_n_bands: self.stream.clone_htod(&urr_nb_vec)?,
             urr_multiply_smooth: self.stream.clone_htod(&urr_ms_vec)?,
+            inel_cdf_data: self.stream.clone_htod(&inel_cdf_data_vec)?,
+            inel_cdf_off: self.stream.clone_htod(&inel_cdf_off_vec)?,
+            inel_cdf_n_e: self.stream.clone_htod(&inel_cdf_n_e_vec)?,
+            inel_cdf_n_t: self.stream.clone_htod(&inel_cdf_n_t_vec)?,
+            inel_cdf_n_lev: self.stream.clone_htod(&inel_cdf_n_lev_vec)?,
+            inel_cdf_log_e_min: self.stream.clone_htod(&inel_cdf_log_e_min_vec)?,
+            inel_cdf_log_e_max: self.stream.clone_htod(&inel_cdf_log_e_max_vec)?,
         })
     }
 
@@ -1410,6 +1465,13 @@ impl GpuTransportContext {
             dptr!(&nuc_data.lev_ang_lev_off),      // 95 P_LEV_ANG_LEV_OFF
             dptr!(&nuc_data.lev_ang_lev_ne),       // 96 P_LEV_ANG_LEV_NE
             self.warp_cache_enable as u64,         // 97 P_WARP_CACHE_ENABLE
+            dptr!(&nuc_data.inel_cdf_data),        // 98 P_INEL_CDF_DATA
+            dptr!(&nuc_data.inel_cdf_off),         // 99 P_INEL_CDF_OFF
+            dptr!(&nuc_data.inel_cdf_n_e),         //100 P_INEL_CDF_N_E
+            dptr!(&nuc_data.inel_cdf_n_t),         //101 P_INEL_CDF_N_T
+            dptr!(&nuc_data.inel_cdf_n_lev),       //102 P_INEL_CDF_N_LEV
+            dptr!(&nuc_data.inel_cdf_log_e_min),   //103 P_INEL_CDF_LOG_EMIN
+            dptr!(&nuc_data.inel_cdf_log_e_max),   //104 P_INEL_CDF_LOG_EMAX
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;

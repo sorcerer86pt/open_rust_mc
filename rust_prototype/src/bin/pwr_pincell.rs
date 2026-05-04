@@ -516,6 +516,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 nu_bar_const: nu_bar,
                 nu_bar_table: None,
                 discrete_levels: vec![],
+                inelastic_cdf: None,
                 discrete_level_angles: vec![],
                 has_continuum_inelastic: false,
                 elastic_angle: None,
@@ -719,6 +720,8 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARNING: {} not found", path.display());
+            // NB: NuclideTableData has no inelastic_cdf field (table provider
+            // uses pointwise lookups, not the synth path).
             tables.push(xs_provider::NuclideTableData {
                 elastic: None,
                 total_table: None,
