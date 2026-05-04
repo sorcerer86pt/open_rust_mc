@@ -458,7 +458,21 @@ fn build_kernel_from_reader(
     shared_grid: &Arc<[f64]>,
 ) -> Option<ReactionKernel> {
     let data = reader.read_reaction(mt).ok()?;
+    build_kernel_from_data(&data, svd_rank, temp_idx, shared_grid, &reader.temperatures)
+}
 
+/// Build a ReactionKernel from a (possibly synthetic) NuclideData.
+/// Same pipeline as `build_kernel_from_reader` but works off in-memory data
+/// so the caller can pre-process xs_per_temp (e.g. sum across discrete levels
+/// to synthesize MT=4 for nuclides whose ENDF/B-VII.1 evaluation omits the
+/// total-inelastic block — Zr-90/91/92/94 in this project).
+fn build_kernel_from_data(
+    data: &hdf5_reader::NuclideData,
+    svd_rank: usize,
+    temp_idx: usize,
+    shared_grid: &Arc<[f64]>,
+    temperatures: &[f64],
+) -> Option<ReactionKernel> {
     if data.n_energy() == 0 || data.n_temp() == 0 {
         return None;
     }
@@ -489,14 +503,66 @@ fn build_kernel_from_reader(
 
     // Use Ducru kernel reconstruction if multiple temperatures available,
     // otherwise fall back to direct index lookup.
-    let coeffs = if n_t > 1 && !reader.temperatures.is_empty() {
-        let target_temp = reader.temperatures[temp_idx.min(n_t - 1)];
-        kernel.temp_coeffs_ducru(&reader.temperatures, target_temp)
+    let coeffs = if n_t > 1 && !temperatures.is_empty() {
+        let target_temp = temperatures[temp_idx.min(n_t - 1)];
+        kernel.temp_coeffs_ducru(temperatures, target_temp)
     } else {
         let t_idx = temp_idx.min(n_t - 1);
         kernel.temp_coeffs(t_idx)
     };
     Some(ReactionKernel { kernel, coeffs })
+}
+
+/// Synthesize MT=4 (total inelastic) by summing the raw per-level
+/// HDF5 cross sections across all discrete inelastic MTs (51..91).
+/// Returns `None` if no levels are loadable. Used for Zr-90/91/92/94
+/// and any other nuclide whose ENDF/B-VII.1 evaluation omits MT=4 —
+/// avoids the GPU's 13× svd_reconstruct loop on the inelastic hot path
+/// (paper §gpu engineering item).
+fn synthesize_inelastic_mt4(
+    reader: &NuclideFileReader,
+    level_mts: &[u32],
+    svd_rank: usize,
+    temp_idx: usize,
+    shared_grid: &Arc<[f64]>,
+) -> Option<ReactionKernel> {
+    let mut summed: Option<hdf5_reader::NuclideData> = None;
+    for &mt in level_mts {
+        if mt == 91 {
+            // Continuum inelastic shares the inelastic channel but has its
+            // own kinematics path (evaporation). Including its xs in the
+            // synthetic MT=4 sum is correct for the macroscopic XS — the
+            // sampling-side selection still distinguishes 91 from discrete.
+        }
+        let Ok(data) = reader.read_reaction(mt) else {
+            continue;
+        };
+        if data.n_energy() == 0 || data.n_temp() == 0 {
+            continue;
+        }
+        summed = Some(match summed.take() {
+            None => data,
+            Some(mut acc) => {
+                if acc.n_energy() != data.n_energy() || acc.n_temp() != data.n_temp() {
+                    // Different grids — should not happen within one nuclide
+                    // (per-nuclide union grid is shared across all MTs in
+                    // this loader), but guard anyway.
+                    return None;
+                }
+                for t in 0..acc.n_temp() {
+                    let dst = &mut acc.xs_per_temp[t];
+                    let src = &data.xs_per_temp[t];
+                    for i in 0..dst.len() {
+                        dst[i] += src[i].max(0.0);
+                    }
+                }
+                acc.mt = 4;
+                acc
+            }
+        });
+    }
+    let summed = summed?;
+    build_kernel_from_data(&summed, svd_rank, temp_idx, shared_grid, &reader.temperatures)
 }
 
 /// Load a complete nuclide from HDF5 in a single pass.
@@ -704,14 +770,45 @@ pub fn load_nuclide_with_policy(
     if elastic.is_some() {
         println!("    MT=2  (elastic)  rank={}", policy.rank_for(2));
     }
-    let inelastic =
-        build_kernel_from_reader(&reader, 4, policy.rank_for(4), temp_idx, &shared_grid);
+    let inelastic = build_kernel_from_reader(&reader, 4, policy.rank_for(4), temp_idx, &shared_grid)
+        .or_else(|| {
+            // ENDF/B-VII.1 omits the MT=4 total-inelastic block for some
+            // nuclides (Zr-90/91/92/94 in this project). Synthesize it
+            // by summing the raw per-level HDF5 cross sections across
+            // MT=51..91, then SVD-decompose the result. Eliminates the
+            // 13× svd_reconstruct loop that is the GPU SVD-vs-pointwise
+            // gap driver on PWR (paper §gpu).
+            if discrete_levels.is_empty() {
+                return None;
+            }
+            let level_mts: Vec<u32> = discrete_levels.iter().map(|l| l.info.mt).collect();
+            synthesize_inelastic_mt4(
+                &reader,
+                &level_mts,
+                policy.rank_for(4),
+                temp_idx,
+                &shared_grid,
+            )
+        });
     if inelastic.is_some() {
-        println!("    MT=4  (inelastic) rank={}", policy.rank_for(4));
-    } else if !discrete_levels.is_empty() {
+        let label = if reader.read_reaction(4).is_ok() {
+            "rank"
+        } else {
+            "rank, synthesized from {N} discrete levels"
+        };
         println!(
-            "    MT=4  (inelastic) — synthesized from {} discrete levels",
-            discrete_levels.len()
+            "    MT=4  (inelastic) {}={}{}",
+            if label.contains("synthesized") {
+                "synthetic rank"
+            } else {
+                "rank"
+            },
+            policy.rank_for(4),
+            if label.contains("synthesized") {
+                format!(" (sum over {} levels)", discrete_levels.len())
+            } else {
+                String::new()
+            }
         );
     }
     let n2n = build_kernel_from_reader(&reader, 16, policy.rank_for(16), temp_idx, &shared_grid);
