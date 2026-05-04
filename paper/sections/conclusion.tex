@@ -65,19 +65,24 @@ pointwise table on PWR), but on memory there is no
 on-library rank that wins.
 
 \paragraph{GPU.}
-GPU SVD on PWR is $1.30\times$ \emph{slower} than GPU
-pointwise because four clad nuclides require summing $13$
-discrete-level SVD kernels per lookup, and the
-divergent gather pattern of per-level rank-$1$
-reconstruction does not map well to warp coalescing on
-the geometries tested here. We implemented a per-warp
-shared-memory cache keyed on $(n, E_\text{idx})$
-(Sec.~\ref{sec:gpu}) to close this gap; it preserves
-bit-parity within SEM but at the energy-bin sort
-granularity used here activates too rarely to recover
-the throughput, leaving the gap open. The CPU SVD
-picture is favourable; the GPU SVD picture is not, and
-the obvious cache-based fix is insufficient on its own.
+The earlier headline that GPU SVD was $1.30\times$ slower
+than GPU pointwise on PWR has been retired. The cause was
+the level-sum walk for nuclides whose ENDF/B-VII.1
+evaluation omits MT$=4$ (Zr-$90$/$91$/$92$/$94$, U-$238$).
+A per-warp $(n, E_\text{idx})$ shared-memory cache, named
+in the previous draft as the obvious fix, was implemented
+and falsified ($1.003\times$ measured at five seeds; energy-
+bin sort coherence too low; preserved as a cautionary
+result in §\ref{sec:threats}). The actual fix lives at
+HDF5 load: synthesise MT$=4$ from the discrete-level sum
+and tabulate the per-level CDF on a log-decimated grid.
+Both together collapse the kernel hot path to a single
+rank-$5$ \texttt{svd\_reconstruct} plus a binary CDF
+search. On RTX A$1000$ the synth$+$CDF row at three seeds
+$\times$ $60$ batches $\times$ $50\,000$ particles runs
+$1.0099\times$ \emph{faster} than GPU pointwise on the same
+geometry ($19\,473$ vs $19\,664$~ns/p), with $k_\infty$
+agreeing to $+16$~pcm (well inside SEM).
 
 \paragraph{Hybrid SVD+WMP throughput.}
 The hybrid is $2.06\times$ slower than CPU SVD because

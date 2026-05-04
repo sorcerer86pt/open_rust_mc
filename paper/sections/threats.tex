@@ -51,15 +51,21 @@ density ratio is reported for what it is; the
 $1.06\times$ engine-level reduction is the number an
 engine builder would care about.
 
-\paragraph{GPU SVD.}
-Slower than GPU pointwise on PWR pin cell because of the Zr
-clad level-sum cost. A per-warp level-sum cache keyed on
-$(n, E_\text{idx})$ is implemented (Sec.~\ref{sec:gpu}) and
-preserves bit-parity within SEM, but at the energy-bin sort
-granularity used here it activates rarely enough that the
-gap to GPU pointwise is not closed. A finer pre-sort or a
-different discrete-level representation is needed; both are
-out of scope for this paper.
+\paragraph{GPU SVD: per-warp cache, falsified and removed.}
+Earlier drafts identified a per-warp $(n, E_\text{idx})$
+shared-memory cache as the engineering item that would close the
+GPU SVD vs GPU pointwise gap on PWR. We implemented it, measured
+it on RTX A$1000$ at five seeds $\times$ $60$ batches $\times$
+$50\,000$ particles, and obtained $1.003\times$ throughput with
+bit-parity within SEM --- the cache was correct but inert because
+energy-bin sort granularity ($256$ bins across $17$ decades) does
+not produce warp-level $(n, E_\text{idx})$ uniformity often enough
+to activate the slot. The hypothesis is falsified at this
+geometry. The actual fix turned out to live upstream:
+\emph{synthesise MT$=4$ at HDF5 load and tabulate the per-level
+CDF on a log-decimated grid}, which together remove the
+$13$--$41$-deep level walk entirely (Sec.~\ref{sec:gpu}). The
+cache code has been removed; the falsification is documented here.
 
 \paragraph{GPU hybrid.}
 Only the WMP evaluator itself is validated on GPU; the
