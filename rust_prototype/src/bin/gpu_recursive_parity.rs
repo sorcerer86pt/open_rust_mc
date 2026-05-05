@@ -27,7 +27,7 @@ mod cuda_main {
 
     use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
     use open_rust_mc::geometry::lattice::RectLattice;
-    use open_rust_mc::geometry::ray::find_cell_recursive;
+    use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
     use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
     use open_rust_mc::geometry::universe::{Universe, UniverseId};
     use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
@@ -247,12 +247,155 @@ mod cuda_main {
         println!("GPU↔CPU recursive cell-find parity test\n");
 
         // Test 1: 2×2 lattice (depth 2 stacks).
-        println!("=== Test 1: 2×2 lattice (depth-2 stacks) ===");
+        println!("=== Test 1 (find_cell): 2×2 lattice ===");
         run_one("2×2 lattice", &build_geometry(), n);
 
         // Test 2: 17×17 assembly (depth 2 stacks; matches pwr_assembly).
-        println!("\n=== Test 2: 17×17 PWR assembly (depth-2 stacks, 9 surfaces, 9 cells) ===");
+        println!("\n=== Test 2 (find_cell): 17×17 PWR assembly ===");
         run_one("17×17 assembly", &build_assembly_geometry(), n);
+
+        // Test 3+4: trace_step parity on the same two geometries.
+        println!("\n=== Test 3 (trace_step): 2×2 lattice ===");
+        run_trace("2×2 lattice", &build_geometry(), 50_000);
+        println!("\n=== Test 4 (trace_step): 17×17 PWR assembly ===");
+        run_trace("17×17 assembly", &build_assembly_geometry(), 50_000);
+    }
+
+    fn run_trace(label: &str, geom: &Geometry, n: usize) {
+        println!("  geometry  : {label}");
+        println!(
+            "  surfaces  : {}, cells: {}, universes: {}, lattices: {}",
+            geom.surfaces.len(),
+            geom.cells.len(),
+            geom.universes.len(),
+            geom.lattices.len()
+        );
+        println!("  particles : {n} random (pos, dir) pairs");
+
+        // Sample box from the lattice cell's AABB.
+        let (lo, hi) = geom
+            .cells
+            .iter()
+            .find(|c| matches!(c.fill, CellFill::Lattice(_)))
+            .map(|c| (c.aabb.min, c.aabb.max))
+            .unwrap_or((Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)));
+
+        let mut rng = Pcg64::new(0xBEEF, 0);
+        let mut positions: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+        let mut directions: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+        let mut i = 0;
+        while i < n {
+            let x = lo.x + (hi.x - lo.x) * rng.uniform();
+            let y = lo.y + (hi.y - lo.y) * rng.uniform();
+            let z = lo.z + (hi.z - lo.z) * rng.uniform();
+            // Reject points outside the lattice cell so every history
+            // starts in a depth-2 frame.
+            if find_cell_recursive(Vec3::new(x, y, z), geom)
+                .map(|s| s.len() >= 2)
+                .unwrap_or(false)
+            {
+                let (dx, dy, dz) = rng.isotropic_direction();
+                positions.push((x, y, z));
+                directions.push((dx, dy, dz));
+                i += 1;
+            }
+        }
+
+        // CPU pass.
+        let t0 = Instant::now();
+        let cpu_results: Vec<(f64, i32, i32, i32)> = positions
+            .iter()
+            .zip(directions.iter())
+            .map(|(&(x, y, z), &(dx, dy, dz))| {
+                let stack = match find_cell_recursive(Vec3::new(x, y, z), geom) {
+                    Some(s) => s,
+                    None => return (1e300, -1, 1 /* vacuum */, -1),
+                };
+                let hit = match trace_step_recursive(
+                    &stack,
+                    Vec3::new(x, y, z),
+                    Vec3::new(dx, dy, dz),
+                    geom,
+                ) {
+                    Some(h) => h,
+                    None => return (1e300, -1, 1, -1),
+                };
+                let surf = hit.surface_idx.map(|s| s as i32).unwrap_or(-1);
+                let bc = match hit.bc {
+                    open_rust_mc::geometry::surface::BoundaryCondition::Transmission => 0,
+                    open_rust_mc::geometry::surface::BoundaryCondition::Vacuum => 1,
+                    open_rust_mc::geometry::surface::BoundaryCondition::Reflective => 2,
+                };
+                let next_cell = hit
+                    .next_stack
+                    .as_ref()
+                    .and_then(|s| s.last().map(|c| c.cell_idx as i32))
+                    .unwrap_or(-1);
+                (hit.distance, surf, bc, next_cell)
+            })
+            .collect();
+        let cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "\nCPU trace_step_recursive: {cpu_ms:.1} ms ({:.1} ns/event)",
+            cpu_ms * 1e6 / n as f64
+        );
+
+        // GPU pass.
+        println!("\nBuilding GPU context...");
+        let ctx = GpuRecursiveContext::build(geom, n).expect("gpu context");
+        let t0 = Instant::now();
+        let gpu_results = ctx
+            .trace_step_batch(&positions, &directions)
+            .expect("gpu trace_step_batch");
+        let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "GPU trace_step_batch:    {gpu_ms:.1} ms ({:.1} ns/event)",
+            gpu_ms * 1e6 / n as f64
+        );
+
+        // Compare. Distance: relative tolerance 1e-9 (different
+        // multiplication order between CPU and GPU). Surface idx,
+        // BC, next-cell idx: bit-exact.
+        let mut mismatches: usize = 0;
+        let mut surf_mismatches: usize = 0;
+        let mut bc_mismatches: usize = 0;
+        let mut next_mismatches: usize = 0;
+        let mut max_dist_rel_err: f64 = 0.0;
+        for (cpu, gpu) in cpu_results.iter().zip(gpu_results.iter()) {
+            let rel = ((cpu.0 - gpu.distance).abs() / cpu.0.abs().max(1e-12)).abs();
+            if rel > max_dist_rel_err {
+                max_dist_rel_err = rel;
+            }
+            if rel > 1e-9 {
+                mismatches += 1;
+            }
+            if cpu.1 != gpu.surface_idx {
+                surf_mismatches += 1;
+            }
+            if cpu.2 != gpu.bc {
+                bc_mismatches += 1;
+            }
+            if cpu.3 != gpu.next_deepest_cell {
+                next_mismatches += 1;
+            }
+        }
+        println!("\n  distance max-rel-err   : {max_dist_rel_err:.3e}");
+        println!(
+            "  distance disagree (>1e-9): {mismatches} / {n}  ({:.4}%)",
+            mismatches as f64 / n as f64 * 100.0
+        );
+        println!(
+            "  surface idx disagree   : {surf_mismatches} / {n}  ({:.4}%)",
+            surf_mismatches as f64 / n as f64 * 100.0
+        );
+        println!(
+            "  bc disagree            : {bc_mismatches} / {n}  ({:.4}%)",
+            bc_mismatches as f64 / n as f64 * 100.0
+        );
+        println!(
+            "  next-cell disagree     : {next_mismatches} / {n}  ({:.4}%)",
+            next_mismatches as f64 / n as f64 * 100.0
+        );
     }
 
     fn run_one(label: &str, geom: &Geometry, n: usize) {

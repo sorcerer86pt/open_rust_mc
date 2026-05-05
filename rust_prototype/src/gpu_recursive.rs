@@ -301,6 +301,7 @@ pub struct GpuRecursiveContext {
     _ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
     pub k_find_cell_batch: CudaFunction,
+    pub k_trace_step_batch: CudaFunction,
     // Geometry tables on device.
     surf_type: CudaSlice<i32>,
     surf_params: CudaSlice<f64>,
@@ -371,6 +372,9 @@ impl GpuRecursiveContext {
         let k_find_cell_batch = module
             .load_function("find_cell_batch")
             .map_err(|e| format!("kernel load: {e}"))?;
+        let k_trace_step_batch = module
+            .load_function("trace_step_batch")
+            .map_err(|e| format!("kernel load (trace): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
@@ -457,6 +461,7 @@ impl GpuRecursiveContext {
             _ctx: ctx,
             stream,
             k_find_cell_batch,
+            k_trace_step_batch,
             surf_type,
             surf_params,
             surf_bc,
@@ -568,6 +573,141 @@ impl GpuRecursiveContext {
         let host_out = self.stream.memcpy_dtov(&out).map_err(|e| e.to_string())?;
         let _ = (xs, ys, zs);
         Ok(host_out)
+    }
+}
+
+/// One trace_step result: distance, surface idx (-1 = grid line),
+/// boundary condition (matches the device-side enum), deepest cell
+/// idx of the next stack (-1 = leakage).
+#[derive(Debug, Clone, Copy)]
+pub struct GpuTraceResult {
+    pub distance: f64,
+    pub surface_idx: i32,
+    pub bc: i32,
+    pub next_deepest_cell: i32,
+}
+
+impl GpuRecursiveContext {
+    /// Run `find_cell + trace_step_recursive` on a batch of (pos, dir)
+    /// pairs and return the per-particle event distance, surface
+    /// index, BC, and the deepest cell of the re-resolved next stack.
+    pub fn trace_step_batch(
+        &self,
+        positions: &[(f64, f64, f64)],
+        directions: &[(f64, f64, f64)],
+    ) -> Result<Vec<GpuTraceResult>, String> {
+        let n = positions.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        if n != directions.len() {
+            return Err("position / direction lengths differ".into());
+        }
+        if n > self.n_threads_max {
+            return Err(format!(
+                "batch size {n} exceeds n_threads_max {}",
+                self.n_threads_max
+            ));
+        }
+
+        let xs: Vec<f64> = positions.iter().map(|p| p.0).collect();
+        let ys: Vec<f64> = positions.iter().map(|p| p.1).collect();
+        let zs: Vec<f64> = positions.iter().map(|p| p.2).collect();
+        let dxs: Vec<f64> = directions.iter().map(|d| d.0).collect();
+        let dys: Vec<f64> = directions.iter().map(|d| d.1).collect();
+        let dzs: Vec<f64> = directions.iter().map(|d| d.2).collect();
+        let xs = self.stream.memcpy_stod(&xs).map_err(|e| e.to_string())?;
+        let ys = self.stream.memcpy_stod(&ys).map_err(|e| e.to_string())?;
+        let zs = self.stream.memcpy_stod(&zs).map_err(|e| e.to_string())?;
+        let dxs = self.stream.memcpy_stod(&dxs).map_err(|e| e.to_string())?;
+        let dys = self.stream.memcpy_stod(&dys).map_err(|e| e.to_string())?;
+        let dzs = self.stream.memcpy_stod(&dzs).map_err(|e| e.to_string())?;
+        let mut out_dist = self
+            .stream
+            .alloc_zeros::<f64>(n)
+            .map_err(|e| e.to_string())?;
+        let mut out_surf = self
+            .stream
+            .alloc_zeros::<i32>(n)
+            .map_err(|e| e.to_string())?;
+        let mut out_bc = self
+            .stream
+            .alloc_zeros::<i32>(n)
+            .map_err(|e| e.to_string())?;
+        let mut out_next = self
+            .stream
+            .alloc_zeros::<i32>(n)
+            .map_err(|e| e.to_string())?;
+
+        let block = 128_u32;
+        let grid = (n as u32).div_ceil(block);
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let n_i32 = n as i32;
+        let n_surf = self.n_surfaces;
+        let root = self.root_universe;
+
+        let mut launch = self.stream.launch_builder(&self.k_trace_step_batch);
+        launch
+            .arg(&xs)
+            .arg(&ys)
+            .arg(&zs)
+            .arg(&dxs)
+            .arg(&dys)
+            .arg(&dzs)
+            .arg(&n_i32)
+            .arg(&self.surf_type)
+            .arg(&self.surf_params)
+            .arg(&self.surf_bc)
+            .arg(&n_surf)
+            .arg(&self.cell_region_off)
+            .arg(&self.cell_region_len)
+            .arg(&self.cell_fill_type)
+            .arg(&self.cell_fill_data)
+            .arg(&self.cell_aabb_min)
+            .arg(&self.cell_aabb_max)
+            .arg(&self.region_op)
+            .arg(&self.region_arg)
+            .arg(&self.univ_cells_off)
+            .arg(&self.univ_cells_len)
+            .arg(&self.univ_surfaces_off)
+            .arg(&self.univ_surfaces_len)
+            .arg(&self.univ_cell_indices)
+            .arg(&self.univ_surface_indices)
+            .arg(&root)
+            .arg(&self.lat_origin)
+            .arg(&self.lat_pitch)
+            .arg(&self.lat_shape)
+            .arg(&self.lat_universes_off)
+            .arg(&self.lat_universes)
+            .arg(&self.evals_scratch)
+            .arg(&mut out_dist)
+            .arg(&mut out_surf)
+            .arg(&mut out_bc)
+            .arg(&mut out_next);
+        // SAFETY: kernel signature matches argument list.
+        unsafe {
+            launch.launch(cfg).map_err(|e| e.to_string())?;
+        }
+
+        let dist_h = self.stream.memcpy_dtov(&out_dist).map_err(|e| e.to_string())?;
+        let surf_h = self.stream.memcpy_dtov(&out_surf).map_err(|e| e.to_string())?;
+        let bc_h = self.stream.memcpy_dtov(&out_bc).map_err(|e| e.to_string())?;
+        let next_h = self.stream.memcpy_dtov(&out_next).map_err(|e| e.to_string())?;
+        let _ = (xs, ys, zs, dxs, dys, dzs);
+
+        let out: Vec<GpuTraceResult> = (0..n)
+            .map(|i| GpuTraceResult {
+                distance: dist_h[i],
+                surface_idx: surf_h[i],
+                bc: bc_h[i],
+                next_deepest_cell: next_h[i],
+            })
+            .collect();
+        Ok(out)
     }
 }
 

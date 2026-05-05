@@ -325,4 +325,207 @@ __device__ int gr_find_cell(
     return 0;
 }
 
+// ── Surface distance along a ray ────────────────────────────────────
+
+__device__ __forceinline__ double gr_dist_plane(double p, double d, double x0) {
+    if (fabs(d) < 1e-300) return 1e300;
+    double t = (x0 - p) / d;
+    return (t > 1e-12) ? t : 1e300;
+}
+
+__device__ __forceinline__ double gr_dist_sphere(
+    double px, double py, double pz, double dx, double dy, double dz,
+    double cx, double cy, double cz, double r)
+{
+    double rx = px - cx, ry = py - cy, rz = pz - cz;
+    double a = dx*dx + dy*dy + dz*dz;
+    double b = 2.0 * (rx*dx + ry*dy + rz*dz);
+    double c = rx*rx + ry*ry + rz*rz - r*r;
+    double disc = b*b - 4.0*a*c;
+    if (disc < 0.0) return 1e300;
+    double sq = sqrt(disc);
+    double t1 = (-b - sq) / (2.0 * a);
+    double t2 = (-b + sq) / (2.0 * a);
+    if (t1 > 1e-12) return t1;
+    if (t2 > 1e-12) return t2;
+    return 1e300;
+}
+
+__device__ __forceinline__ double gr_dist_cyl(
+    double p1, double p2, double d1, double d2, double c1, double c2, double r)
+{
+    double r1 = p1 - c1, r2 = p2 - c2;
+    double a = d1*d1 + d2*d2;
+    if (a < 1e-300) return 1e300;
+    double b = 2.0 * (r1*d1 + r2*d2);
+    double c = r1*r1 + r2*r2 - r*r;
+    double disc = b*b - 4.0*a*c;
+    if (disc < 0.0) return 1e300;
+    double sq = sqrt(disc);
+    double t1 = (-b - sq) / (2.0 * a);
+    double t2 = (-b + sq) / (2.0 * a);
+    if (t1 > 1e-12) return t1;
+    if (t2 > 1e-12) return t2;
+    return 1e300;
+}
+
+__device__ __forceinline__ double gr_surf_dist(
+    const GrGeometry* g, int s_idx,
+    double px, double py, double pz,
+    double dx, double dy, double dz)
+{
+    int t = g->surf_type[s_idx];
+    const double* p = g->surf_params + s_idx * 8;
+    switch (t) {
+        case GR_SURF_PLANE_X:        return gr_dist_plane(px, dx, p[0]);
+        case GR_SURF_PLANE_Y:        return gr_dist_plane(py, dy, p[0]);
+        case GR_SURF_PLANE_Z:        return gr_dist_plane(pz, dz, p[0]);
+        case GR_SURF_SPHERE:         return gr_dist_sphere(px, py, pz, dx, dy, dz, p[0], p[1], p[2], p[3]);
+        case GR_SURF_CYL_Z:          return gr_dist_cyl(px, py, dx, dy, p[0], p[1], p[2]);
+        case GR_SURF_CYL_X:          return gr_dist_cyl(py, pz, dy, dz, p[0], p[1], p[2]);
+        case GR_SURF_CYL_Y:          return gr_dist_cyl(px, pz, dx, dz, p[0], p[1], p[2]);
+        case GR_SURF_PLANE_GENERAL: {
+            double denom = p[0]*dx + p[1]*dy + p[2]*dz;
+            if (fabs(denom) < 1e-300) return 1e300;
+            double t_val = (p[3] - (p[0]*px + p[1]*py + p[2]*pz)) / denom;
+            return (t_val > 1e-12) ? t_val : 1e300;
+        }
+        default: return 1e300;
+    }
+}
+
+// ── Lattice grid distance ───────────────────────────────────────────
+
+__device__ double gr_lattice_distance_to_grid(
+    const GrGeometry* g, int lat_id,
+    double px, double py, double pz,
+    double dx, double dy, double dz,
+    int ix, int iy, int iz)
+{
+    const double* org = g->lat_origin + lat_id * 3;
+    const double* pit = g->lat_pitch  + lat_id * 3;
+    int idx[3] = {ix, iy, iz};
+    double pos[3] = {px - org[0], py - org[1], pz - org[2]};
+    double dir[3] = {dx, dy, dz};
+    double best = 1e300;
+    for (int axis = 0; axis < 3; ++axis) {
+        double d = dir[axis];
+        if (d == 0.0) continue;
+        double pitch = pit[axis];
+        double target = (d > 0.0)
+            ? ((double)(idx[axis] + 1)) * pitch
+            : ((double)idx[axis]) * pitch;
+        double t = (target - pos[axis]) / d;
+        if (t <= 0.0) {
+            double next_target = (d > 0.0)
+                ? ((double)(idx[axis] + 2)) * pitch
+                : ((double)(idx[axis] - 1)) * pitch;
+            t = (next_target - pos[axis]) / d;
+        }
+        if (t > 0.0 && t < best) best = t;
+    }
+    return best;
+}
+
+// ── Recursive trace step ────────────────────────────────────────────
+//
+// Output:
+//   *out_distance      — distance to next event along world_dir
+//   *out_surface_idx   — global surface index hit, -1 if grid crossing
+//   *out_bc            — boundary condition (matches GR_BC_*)
+//   *out_next_stack    — re-resolved stack at the new world_pos
+//   *out_next_depth    — depth of that stack (0 = leakage)
+//
+// Returns 1 on success (got an event), 0 if no event found (1e300
+// distance — also leakage).
+
+__device__ int gr_trace_step(
+    const GrGeometry* g,
+    const GrCoord* stack, int depth,
+    double world_x, double world_y, double world_z,
+    double world_dx, double world_dy, double world_dz,
+    double* out_distance, int* out_surface_idx, int* out_bc,
+    GrCoord* out_next_stack, int* out_next_depth)
+{
+    // Per-frame local positions (rotation is identity in v1 — the GPU
+    // port doesn't yet implement Mat3 cascades).
+    double locals_x[GR_MAX_DEPTH], locals_y[GR_MAX_DEPTH], locals_z[GR_MAX_DEPTH];
+    {
+        double lx = world_x, ly = world_y, lz = world_z;
+        for (int i = 0; i < depth; ++i) {
+            lx -= stack[i].offx;
+            ly -= stack[i].offy;
+            lz -= stack[i].offz;
+            locals_x[i] = lx; locals_y[i] = ly; locals_z[i] = lz;
+        }
+    }
+
+    double best_dist = 1e300;
+    int best_surface = -1;
+
+    // Source 1+2: every cell on the stack contributes its surfaces.
+    for (int d = 0; d < depth; ++d) {
+        int cell_idx = stack[d].cell_idx;
+        int r_off = g->cell_region_off[cell_idx];
+        int r_len = g->cell_region_len[cell_idx];
+        // Walk region opcodes; for HALFSPACE_* the arg is a global
+        // surface index — try its distance.
+        double lx = locals_x[d], ly = locals_y[d], lz = locals_z[d];
+        for (int i = 0; i < r_len; ++i) {
+            int op  = g->region_op[r_off + i];
+            int arg = g->region_arg[r_off + i];
+            if (op == GR_REGION_HALFSPACE_POS || op == GR_REGION_HALFSPACE_NEG) {
+                double t = gr_surf_dist(g, arg, lx, ly, lz, world_dx, world_dy, world_dz);
+                if (t < best_dist) {
+                    best_dist = t;
+                    best_surface = arg;
+                }
+            }
+        }
+    }
+
+    // Source 3: lattice grid lines, evaluated in the parent frame.
+    const double COINCIDENCE_TOL_GRID = 1e-9;
+    for (int d = 0; d < depth; ++d) {
+        if (!stack[d].has_lattice) continue;
+        int lat_id = stack[d].lattice_id;
+        double px, py, pz;
+        if (d == 0) {
+            px = world_x; py = world_y; pz = world_z;
+        } else {
+            px = locals_x[d - 1]; py = locals_y[d - 1]; pz = locals_z[d - 1];
+        }
+        double t = gr_lattice_distance_to_grid(
+            g, lat_id, px, py, pz,
+            world_dx, world_dy, world_dz,
+            stack[d].lat_ix, stack[d].lat_iy, stack[d].lat_iz);
+        if (t + COINCIDENCE_TOL_GRID < best_dist) {
+            best_dist = t;
+            best_surface = -1;
+        }
+    }
+
+    if (best_dist >= 1e299) {
+        *out_distance = 1e300;
+        *out_surface_idx = -1;
+        *out_bc = GR_BC_VACUUM;
+        *out_next_depth = 0;
+        return 0;
+    }
+
+    *out_distance = best_dist;
+    *out_surface_idx = best_surface;
+    *out_bc = (best_surface >= 0) ? g->surf_bc[best_surface] : GR_BC_TRANSMISSION;
+
+    // Re-resolve the stack at the new world position (offset by a
+    // small nudge along world_dir).
+    const double NUDGE = 1e-10;
+    double nx = world_x + world_dx * (best_dist + NUDGE);
+    double ny = world_y + world_dy * (best_dist + NUDGE);
+    double nz = world_z + world_dz * (best_dist + NUDGE);
+    int next_depth = gr_find_cell(g, nx, ny, nz, out_next_stack);
+    *out_next_depth = next_depth;
+    return 1;
+}
+
 #endif // GEOM_RECURSIVE_CU
