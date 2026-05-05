@@ -522,6 +522,144 @@ impl GpuTransportContext {
         &self.stream
     }
 
+    /// Expose the CUDA context so callers (e.g. `GpuRecursiveContext`)
+    /// can share the same primary context and reuse already-uploaded
+    /// device buffers without re-allocating.
+    pub fn ctx(&self) -> &Arc<CudaContext> {
+        &self._ctx
+    }
+
+    /// Build the 104-slot packed `TransportParams` buffer that
+    /// `transport_persistent` and `transport_recursive_persistent` both
+    /// read. Centralised here so the recursive kernel does not duplicate
+    /// the slot layout. `geom_type` is written into the P_GEOM_TYPE slot
+    /// — irrelevant for the recursive kernel (which uses its own
+    /// geometry tables) but kept so the buffer round-trips through the
+    /// existing `transport_persistent` debug entry points.
+    pub fn build_transport_params_vec(
+        &self,
+        nuc_data: &GpuNuclideData,
+        mat_data: &GpuMaterialData,
+        sab_data: &GpuSabData,
+        wmp_data: &GpuWmpData,
+        geom_type: i32,
+    ) -> Vec<u64> {
+        macro_rules! dptr {
+            ($slice:expr) => {{
+                let (ptr, _guard) = $slice.device_ptr(&self.stream);
+                ptr
+            }};
+        }
+        let v: Vec<u64> = vec![
+            dptr!(&nuc_data.all_basis),
+            dptr!(&nuc_data.all_coeffs),
+            dptr!(&nuc_data.all_energy_grids),
+            dptr!(&nuc_data.basis_offsets),
+            dptr!(&nuc_data.grid_offsets),
+            dptr!(&nuc_data.n_energies),
+            dptr!(&nuc_data.has_reaction),
+            dptr!(&nuc_data.coeffs_offsets),
+            nuc_data.rank as u64,
+            dptr!(&mat_data.mat_n_nuclides),
+            dptr!(&mat_data.mat_nuclide_idx),
+            dptr!(&mat_data.mat_atom_density),
+            dptr!(&mat_data.awr_table),
+            dptr!(&mat_data.nu_bar_const),
+            dptr!(&nuc_data.nu_bar_energies),
+            dptr!(&nuc_data.nu_bar_values),
+            dptr!(&nuc_data.nu_bar_offsets),
+            dptr!(&nuc_data.nu_bar_sizes),
+            dptr!(&nuc_data.fis_inc_energies),
+            dptr!(&nuc_data.fis_dist_offsets),
+            dptr!(&nuc_data.fis_dist_sizes),
+            dptr!(&nuc_data.fis_e_out),
+            dptr!(&nuc_data.fis_cdf),
+            dptr!(&nuc_data.fis_nuc_offsets),
+            dptr!(&nuc_data.fis_nuc_n_inc),
+            dptr!(&nuc_data.level_q_values),
+            dptr!(&nuc_data.level_thresholds),
+            dptr!(&nuc_data.level_offsets),
+            dptr!(&nuc_data.level_counts),
+            dptr!(&nuc_data.level_basis),
+            dptr!(&nuc_data.level_coeffs),
+            dptr!(&nuc_data.level_basis_offsets),
+            dptr!(&nuc_data.level_coeffs_offsets),
+            dptr!(&nuc_data.level_has_kernel),
+            dptr!(&nuc_data.level_mt),
+            dptr!(&nuc_data.ang_energies),
+            dptr!(&nuc_data.ang_mu),
+            dptr!(&nuc_data.ang_cdf),
+            dptr!(&nuc_data.ang_dist_offsets),
+            dptr!(&nuc_data.ang_dist_sizes),
+            dptr!(&nuc_data.ang_nuc_offsets),
+            dptr!(&nuc_data.ang_nuc_n_energies),
+            dptr!(&nuc_data.ang_is_cm),
+            dptr!(&sab_data.inc_energies),
+            sab_data.n_inc as u64,
+            dptr!(&sab_data.eout_offsets),
+            dptr!(&sab_data.eout_sizes),
+            dptr!(&sab_data.e_out),
+            dptr!(&sab_data.cdf_e),
+            dptr!(&sab_data.mu_offsets),
+            dptr!(&sab_data.mu_sizes),
+            dptr!(&sab_data.mu),
+            dptr!(&sab_data.cdf_mu),
+            dptr!(&sab_data.xs),
+            sab_data.energy_max.to_bits(),
+            dptr!(&sab_data.pdf_e),
+            dptr!(&nuc_data.urr_energies),
+            dptr!(&nuc_data.urr_cum_prob),
+            dptr!(&nuc_data.urr_total_f),
+            dptr!(&nuc_data.urr_elastic_f),
+            dptr!(&nuc_data.urr_fission_f),
+            dptr!(&nuc_data.urr_capture_f),
+            dptr!(&nuc_data.urr_offsets),
+            dptr!(&nuc_data.urr_n_energies),
+            dptr!(&nuc_data.urr_n_bands),
+            dptr!(&nuc_data.urr_multiply_smooth),
+            geom_type as u64,
+            dptr!(&nuc_data.total_xs),
+            dptr!(&nuc_data.total_xs_offsets),
+            dptr!(&nuc_data.has_total_xs),
+            dptr!(&nuc_data.pointwise_xs),
+            dptr!(&nuc_data.pw_offsets),
+            dptr!(&nuc_data.has_pw),
+            dptr!(&wmp_data.has),
+            dptr!(&wmp_data.e_min),
+            dptr!(&wmp_data.e_max),
+            dptr!(&wmp_data.spacing),
+            dptr!(&wmp_data.sqrt_awr),
+            dptr!(&wmp_data.t_kelvin),
+            dptr!(&wmp_data.fit_order),
+            dptr!(&wmp_data.n_windows),
+            dptr!(&wmp_data.fissionable),
+            dptr!(&wmp_data.poles),
+            dptr!(&wmp_data.pole_offsets),
+            dptr!(&wmp_data.windows),
+            dptr!(&wmp_data.window_offsets),
+            dptr!(&wmp_data.broaden),
+            dptr!(&wmp_data.broaden_offsets),
+            dptr!(&wmp_data.curvefit),
+            dptr!(&wmp_data.curvefit_offsets),
+            dptr!(&nuc_data.lev_ang_energies),
+            dptr!(&nuc_data.lev_ang_mu),
+            dptr!(&nuc_data.lev_ang_cdf),
+            dptr!(&nuc_data.lev_ang_dist_off),
+            dptr!(&nuc_data.lev_ang_dist_sz),
+            dptr!(&nuc_data.lev_ang_lev_off),
+            dptr!(&nuc_data.lev_ang_lev_ne),
+            dptr!(&nuc_data.inel_cdf_data),
+            dptr!(&nuc_data.inel_cdf_off),
+            dptr!(&nuc_data.inel_cdf_n_e),
+            dptr!(&nuc_data.inel_cdf_n_t),
+            dptr!(&nuc_data.inel_cdf_n_lev),
+            dptr!(&nuc_data.inel_cdf_log_e_min),
+            dptr!(&nuc_data.inel_cdf_log_e_max),
+        ];
+        debug_assert_eq!(v.len(), N_PARAMS);
+        v
+    }
+
     /// Upload SVD nuclide data to GPU.
     pub fn upload_nuclide_data(
         &self,

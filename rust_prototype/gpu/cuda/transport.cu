@@ -1470,20 +1470,20 @@ transport_persistent(
     energy[tid]=E; cell_idx[tid]=cell; alive[tid]=is_alive;
     rng_state_arr[tid]=rng.state; rng_inc_arr[tid]=rng.inc;
 
-    // Warp-level reduction
-    unsigned mask = __activemask();
-    for(int off=16;off>0;off/=2){
-        lcnt_coll+=__shfl_down_sync(mask,lcnt_coll,off);
-        lcnt_fis+=__shfl_down_sync(mask,lcnt_fis,off);
-        lcnt_leak+=__shfl_down_sync(mask,lcnt_leak,off);
-        lcnt_surf+=__shfl_down_sync(mask,lcnt_surf,off);
-    }
-    if((threadIdx.x&31)==0){
-        if(lcnt_coll>0)atomicAdd(cnt_coll,lcnt_coll);
-        if(lcnt_fis>0)atomicAdd(cnt_fis,lcnt_fis);
-        if(lcnt_leak>0)atomicAdd(cnt_leak,lcnt_leak);
-        if(lcnt_surf>0)atomicAdd(cnt_surf,lcnt_surf);
-    }
+    // Per-thread atomicAdd. The earlier warp-reduction-then-lane-0
+    // path was correct for full warps, but with the persistent kernel's
+    // multi-launch compaction the trailing warp is partially populated
+    // every launch — the `__activemask`-driven reduction returns the
+    // surviving lanes' partial sums to lane 0, but in practice we saw
+    // ~26× under-reporting on Godiva (4207 collisions for 50 000
+    // particles vs the ~110 000 the recursive kernel sees on the same
+    // workload). Direct per-thread atomics dodge the corner case for
+    // the cost of a few extra atomics per launch — the counter
+    // contention is trivial compared to the XS evaluation work.
+    if (lcnt_coll > 0) atomicAdd(cnt_coll, lcnt_coll);
+    if (lcnt_fis  > 0) atomicAdd(cnt_fis,  lcnt_fis);
+    if (lcnt_leak > 0) atomicAdd(cnt_leak, lcnt_leak);
+    if (lcnt_surf > 0) atomicAdd(cnt_surf, lcnt_surf);
 }
 
 // ═══════════════════════════════════════════════════════════════════════

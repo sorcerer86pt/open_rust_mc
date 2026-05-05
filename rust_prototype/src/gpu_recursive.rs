@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use cudarc::driver::{
-    CudaContext, CudaFunction, CudaSlice, CudaStream, DevicePtr, LaunchConfig, PushKernelArg,
+    CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
 };
 use cudarc::nvrtc;
 
@@ -304,6 +304,7 @@ pub struct GpuRecursiveContext {
     pub k_trace_step_batch: CudaFunction,
     pub k_multi_step_walk: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
+    pub k_transport_recursive: CudaFunction,
     // Geometry tables on device.
     surf_type: CudaSlice<i32>,
     surf_params: CudaSlice<f64>,
@@ -338,22 +339,33 @@ pub struct GpuRecursiveContext {
 const RECURSIVE_DEVICE: &str = include_str!("../gpu/cuda/geom_recursive.cu");
 const RECURSIVE_KERNELS: &str = include_str!("../gpu/cuda/geom_recursive_kernels.cu");
 const CONST_XS_KERNEL: &str = include_str!("../gpu/cuda/transport_recursive_const.cu");
+const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
+const TRANSPORT_RECURSIVE: &str = include_str!("../gpu/cuda/transport_recursive.cu");
 
 fn assemble_kernel_source() -> String {
     // NVRTC has no concept of source-include paths — concatenate the
     // device helpers and the kernel entries into a single string and
-    // strip every `#include "geom_recursive.cu"` line (they'd
-    // otherwise fail to resolve at compile time).
+    // strip every `#include "..."` line (they'd otherwise fail to
+    // resolve at compile time).
     let strip = |src: &str| -> String {
         src.lines()
-            .filter(|line| !line.trim_start().starts_with("#include \"geom_recursive.cu\""))
+            .filter(|line| {
+                let t = line.trim_start();
+                !(t.starts_with("#include \"geom_recursive.cu\"")
+                    || t.starts_with("#include \"transport.cu\""))
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };
+    // Order matters: device helpers and Params layout from transport.cu
+    // come first, then the recursive geometry primitives, then the
+    // kernels that consume both.
     format!(
-        "{RECURSIVE_DEVICE}\n{}\n{}",
+        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}",
+        strip(TRANSPORT_KERNELS),
         strip(RECURSIVE_KERNELS),
-        strip(CONST_XS_KERNEL)
+        strip(CONST_XS_KERNEL),
+        strip(TRANSPORT_RECURSIVE),
     )
 }
 
@@ -389,80 +401,83 @@ impl GpuRecursiveContext {
         let k_const_xs_transport = module
             .load_function("const_xs_transport_persistent")
             .map_err(|e| format!("kernel load (const_xs): {e}"))?;
+        let k_transport_recursive = module
+            .load_function("transport_recursive_persistent")
+            .map_err(|e| format!("kernel load (transport_recursive): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
         let n_surfaces = t.surf_type.len() as i32;
         let root_universe = geom.root_universe.0 as i32;
 
-        let surf_type = stream.memcpy_stod(&t.surf_type).map_err(|e| e.to_string())?;
-        let surf_params = stream.memcpy_stod(&t.surf_params).map_err(|e| e.to_string())?;
-        let surf_bc = stream.memcpy_stod(&t.surf_bc).map_err(|e| e.to_string())?;
+        let surf_type = stream.clone_htod(&t.surf_type).map_err(|e| e.to_string())?;
+        let surf_params = stream.clone_htod(&t.surf_params).map_err(|e| e.to_string())?;
+        let surf_bc = stream.clone_htod(&t.surf_bc).map_err(|e| e.to_string())?;
         let cell_region_off = stream
-            .memcpy_stod(&t.cell_region_off)
+            .clone_htod(&t.cell_region_off)
             .map_err(|e| e.to_string())?;
         let cell_region_len = stream
-            .memcpy_stod(&t.cell_region_len)
+            .clone_htod(&t.cell_region_len)
             .map_err(|e| e.to_string())?;
         let cell_fill_type = stream
-            .memcpy_stod(&t.cell_fill_type)
+            .clone_htod(&t.cell_fill_type)
             .map_err(|e| e.to_string())?;
         let cell_fill_data = stream
-            .memcpy_stod(&t.cell_fill_data)
+            .clone_htod(&t.cell_fill_data)
             .map_err(|e| e.to_string())?;
         let cell_aabb_min = stream
-            .memcpy_stod(&t.cell_aabb_min)
+            .clone_htod(&t.cell_aabb_min)
             .map_err(|e| e.to_string())?;
         let cell_aabb_max = stream
-            .memcpy_stod(&t.cell_aabb_max)
+            .clone_htod(&t.cell_aabb_max)
             .map_err(|e| e.to_string())?;
-        let region_op = stream.memcpy_stod(&t.region_op).map_err(|e| e.to_string())?;
-        let region_arg = stream.memcpy_stod(&t.region_arg).map_err(|e| e.to_string())?;
+        let region_op = stream.clone_htod(&t.region_op).map_err(|e| e.to_string())?;
+        let region_arg = stream.clone_htod(&t.region_arg).map_err(|e| e.to_string())?;
         let univ_cells_off = stream
-            .memcpy_stod(&t.univ_cells_off)
+            .clone_htod(&t.univ_cells_off)
             .map_err(|e| e.to_string())?;
         let univ_cells_len = stream
-            .memcpy_stod(&t.univ_cells_len)
+            .clone_htod(&t.univ_cells_len)
             .map_err(|e| e.to_string())?;
         let univ_surfaces_off = stream
-            .memcpy_stod(&t.univ_surfaces_off)
+            .clone_htod(&t.univ_surfaces_off)
             .map_err(|e| e.to_string())?;
         let univ_surfaces_len = stream
-            .memcpy_stod(&t.univ_surfaces_len)
+            .clone_htod(&t.univ_surfaces_len)
             .map_err(|e| e.to_string())?;
         let univ_cell_indices = stream
-            .memcpy_stod(&t.univ_cell_indices)
+            .clone_htod(&t.univ_cell_indices)
             .map_err(|e| e.to_string())?;
         let univ_surface_indices = stream
-            .memcpy_stod(&t.univ_surface_indices)
+            .clone_htod(&t.univ_surface_indices)
             .map_err(|e| e.to_string())?;
         let lat_origin = if t.lat_origin.is_empty() {
             stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?
         } else {
-            stream.memcpy_stod(&t.lat_origin).map_err(|e| e.to_string())?
+            stream.clone_htod(&t.lat_origin).map_err(|e| e.to_string())?
         };
         let lat_pitch = if t.lat_pitch.is_empty() {
             stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?
         } else {
-            stream.memcpy_stod(&t.lat_pitch).map_err(|e| e.to_string())?
+            stream.clone_htod(&t.lat_pitch).map_err(|e| e.to_string())?
         };
         let lat_shape = if t.lat_shape.is_empty() {
             stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?
         } else {
-            stream.memcpy_stod(&t.lat_shape).map_err(|e| e.to_string())?
+            stream.clone_htod(&t.lat_shape).map_err(|e| e.to_string())?
         };
         let lat_universes_off = if t.lat_universes_off.is_empty() {
             stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?
         } else {
             stream
-                .memcpy_stod(&t.lat_universes_off)
+                .clone_htod(&t.lat_universes_off)
                 .map_err(|e| e.to_string())?
         };
         let lat_universes = if t.lat_universes.is_empty() {
             stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?
         } else {
             stream
-                .memcpy_stod(&t.lat_universes)
+                .clone_htod(&t.lat_universes)
                 .map_err(|e| e.to_string())?
         };
 
@@ -478,6 +493,7 @@ impl GpuRecursiveContext {
             k_trace_step_batch,
             k_multi_step_walk,
             k_const_xs_transport,
+            k_transport_recursive,
             surf_type,
             surf_params,
             surf_bc,
@@ -523,9 +539,9 @@ impl GpuRecursiveContext {
         let xs: Vec<f64> = points.iter().map(|p| p.0).collect();
         let ys: Vec<f64> = points.iter().map(|p| p.1).collect();
         let zs: Vec<f64> = points.iter().map(|p| p.2).collect();
-        let xs = self.stream.memcpy_stod(&xs).map_err(|e| e.to_string())?;
-        let ys = self.stream.memcpy_stod(&ys).map_err(|e| e.to_string())?;
-        let zs = self.stream.memcpy_stod(&zs).map_err(|e| e.to_string())?;
+        let xs = self.stream.clone_htod(&xs).map_err(|e| e.to_string())?;
+        let ys = self.stream.clone_htod(&ys).map_err(|e| e.to_string())?;
+        let zs = self.stream.clone_htod(&zs).map_err(|e| e.to_string())?;
         let mut out = self
             .stream
             .alloc_zeros::<i32>(n)
@@ -586,7 +602,7 @@ impl GpuRecursiveContext {
             launch.launch(cfg).map_err(|e| e.to_string())?;
         }
 
-        let host_out = self.stream.memcpy_dtov(&out).map_err(|e| e.to_string())?;
+        let host_out = self.stream.clone_dtoh(&out).map_err(|e| e.to_string())?;
         let _ = (xs, ys, zs);
         Ok(host_out)
     }
@@ -632,12 +648,12 @@ impl GpuRecursiveContext {
         let dxs: Vec<f64> = directions.iter().map(|d| d.0).collect();
         let dys: Vec<f64> = directions.iter().map(|d| d.1).collect();
         let dzs: Vec<f64> = directions.iter().map(|d| d.2).collect();
-        let xs = self.stream.memcpy_stod(&xs).map_err(|e| e.to_string())?;
-        let ys = self.stream.memcpy_stod(&ys).map_err(|e| e.to_string())?;
-        let zs = self.stream.memcpy_stod(&zs).map_err(|e| e.to_string())?;
-        let dxs = self.stream.memcpy_stod(&dxs).map_err(|e| e.to_string())?;
-        let dys = self.stream.memcpy_stod(&dys).map_err(|e| e.to_string())?;
-        let dzs = self.stream.memcpy_stod(&dzs).map_err(|e| e.to_string())?;
+        let xs = self.stream.clone_htod(&xs).map_err(|e| e.to_string())?;
+        let ys = self.stream.clone_htod(&ys).map_err(|e| e.to_string())?;
+        let zs = self.stream.clone_htod(&zs).map_err(|e| e.to_string())?;
+        let dxs = self.stream.clone_htod(&dxs).map_err(|e| e.to_string())?;
+        let dys = self.stream.clone_htod(&dys).map_err(|e| e.to_string())?;
+        let dzs = self.stream.clone_htod(&dzs).map_err(|e| e.to_string())?;
         let mut out_dist = self
             .stream
             .alloc_zeros::<f64>(n)
@@ -709,10 +725,10 @@ impl GpuRecursiveContext {
             launch.launch(cfg).map_err(|e| e.to_string())?;
         }
 
-        let dist_h = self.stream.memcpy_dtov(&out_dist).map_err(|e| e.to_string())?;
-        let surf_h = self.stream.memcpy_dtov(&out_surf).map_err(|e| e.to_string())?;
-        let bc_h = self.stream.memcpy_dtov(&out_bc).map_err(|e| e.to_string())?;
-        let next_h = self.stream.memcpy_dtov(&out_next).map_err(|e| e.to_string())?;
+        let dist_h = self.stream.clone_dtoh(&out_dist).map_err(|e| e.to_string())?;
+        let surf_h = self.stream.clone_dtoh(&out_surf).map_err(|e| e.to_string())?;
+        let bc_h = self.stream.clone_dtoh(&out_bc).map_err(|e| e.to_string())?;
+        let next_h = self.stream.clone_dtoh(&out_next).map_err(|e| e.to_string())?;
         let _ = (xs, ys, zs, dxs, dys, dzs);
 
         let out: Vec<GpuTraceResult> = (0..n)
@@ -767,12 +783,12 @@ impl GpuRecursiveContext {
         let dxs: Vec<f64> = directions.iter().map(|d| d.0).collect();
         let dys: Vec<f64> = directions.iter().map(|d| d.1).collect();
         let dzs: Vec<f64> = directions.iter().map(|d| d.2).collect();
-        let xs = self.stream.memcpy_stod(&xs).map_err(|e| e.to_string())?;
-        let ys = self.stream.memcpy_stod(&ys).map_err(|e| e.to_string())?;
-        let zs = self.stream.memcpy_stod(&zs).map_err(|e| e.to_string())?;
-        let dxs = self.stream.memcpy_stod(&dxs).map_err(|e| e.to_string())?;
-        let dys = self.stream.memcpy_stod(&dys).map_err(|e| e.to_string())?;
-        let dzs = self.stream.memcpy_stod(&dzs).map_err(|e| e.to_string())?;
+        let xs = self.stream.clone_htod(&xs).map_err(|e| e.to_string())?;
+        let ys = self.stream.clone_htod(&ys).map_err(|e| e.to_string())?;
+        let zs = self.stream.clone_htod(&zs).map_err(|e| e.to_string())?;
+        let dxs = self.stream.clone_htod(&dxs).map_err(|e| e.to_string())?;
+        let dys = self.stream.clone_htod(&dys).map_err(|e| e.to_string())?;
+        let dzs = self.stream.clone_htod(&dzs).map_err(|e| e.to_string())?;
         let mut out_x = self.stream.alloc_zeros::<f64>(n).map_err(|e| e.to_string())?;
         let mut out_y = self.stream.alloc_zeros::<f64>(n).map_err(|e| e.to_string())?;
         let mut out_z = self.stream.alloc_zeros::<f64>(n).map_err(|e| e.to_string())?;
@@ -834,11 +850,11 @@ impl GpuRecursiveContext {
         unsafe {
             launch.launch(cfg).map_err(|e| e.to_string())?;
         }
-        let xh = self.stream.memcpy_dtov(&out_x).map_err(|e| e.to_string())?;
-        let yh = self.stream.memcpy_dtov(&out_y).map_err(|e| e.to_string())?;
-        let zh = self.stream.memcpy_dtov(&out_z).map_err(|e| e.to_string())?;
-        let sh = self.stream.memcpy_dtov(&out_steps).map_err(|e| e.to_string())?;
-        let ch = self.stream.memcpy_dtov(&out_cell).map_err(|e| e.to_string())?;
+        let xh = self.stream.clone_dtoh(&out_x).map_err(|e| e.to_string())?;
+        let yh = self.stream.clone_dtoh(&out_y).map_err(|e| e.to_string())?;
+        let zh = self.stream.clone_dtoh(&out_z).map_err(|e| e.to_string())?;
+        let sh = self.stream.clone_dtoh(&out_steps).map_err(|e| e.to_string())?;
+        let ch = self.stream.clone_dtoh(&out_cell).map_err(|e| e.to_string())?;
         let _ = (xs, ys, zs, dxs, dys, dzs);
         Ok((0..n)
             .map(|i| GpuWalkResult {
@@ -922,25 +938,25 @@ impl GpuRecursiveContext {
         let alive: Vec<i32> = vec![1; n];
         let rng_state: Vec<u64> = rng_seeds.iter().map(|s| s.0).collect();
         let rng_inc: Vec<u64> = rng_seeds.iter().map(|s| s.1).collect();
-        let mut d_xs = self.stream.memcpy_stod(&xs).map_err(|e| e.to_string())?;
-        let mut d_ys = self.stream.memcpy_stod(&ys).map_err(|e| e.to_string())?;
-        let mut d_zs = self.stream.memcpy_stod(&zs).map_err(|e| e.to_string())?;
-        let mut d_dxs = self.stream.memcpy_stod(&dxs).map_err(|e| e.to_string())?;
-        let mut d_dys = self.stream.memcpy_stod(&dys).map_err(|e| e.to_string())?;
-        let mut d_dzs = self.stream.memcpy_stod(&dzs).map_err(|e| e.to_string())?;
-        let mut d_alive = self.stream.memcpy_stod(&alive).map_err(|e| e.to_string())?;
+        let mut d_xs = self.stream.clone_htod(&xs).map_err(|e| e.to_string())?;
+        let mut d_ys = self.stream.clone_htod(&ys).map_err(|e| e.to_string())?;
+        let mut d_zs = self.stream.clone_htod(&zs).map_err(|e| e.to_string())?;
+        let mut d_dxs = self.stream.clone_htod(&dxs).map_err(|e| e.to_string())?;
+        let mut d_dys = self.stream.clone_htod(&dys).map_err(|e| e.to_string())?;
+        let mut d_dzs = self.stream.clone_htod(&dzs).map_err(|e| e.to_string())?;
+        let mut d_alive = self.stream.clone_htod(&alive).map_err(|e| e.to_string())?;
         let mut d_rng_state = self
             .stream
-            .memcpy_stod(&rng_state)
+            .clone_htod(&rng_state)
             .map_err(|e| e.to_string())?;
-        let mut d_rng_inc = self.stream.memcpy_stod(&rng_inc).map_err(|e| e.to_string())?;
+        let mut d_rng_inc = self.stream.clone_htod(&rng_inc).map_err(|e| e.to_string())?;
 
         // Materials table: [σ_t, σ_a, σ_f, ν̄] per material.
         let mut mat_flat: Vec<f64> = Vec::with_capacity(materials.len() * 4);
         for m in materials {
             mat_flat.extend_from_slice(&[m.sigma_t, m.sigma_a, m.sigma_f, m.nu_bar]);
         }
-        let d_mat = self.stream.memcpy_stod(&mat_flat).map_err(|e| e.to_string())?;
+        let d_mat = self.stream.clone_htod(&mat_flat).map_err(|e| e.to_string())?;
         let n_materials = materials.len() as i32;
 
         // Material override tables — placeholder empties (no overrides
@@ -948,8 +964,8 @@ impl GpuRecursiveContext {
         // them, and #16's CPU lookup is the source of truth elsewhere).
         let dummy_off: Vec<i32> = vec![-1; self.lat_origin.len() / 3 + 1];
         let dummy_count: Vec<i32> = vec![0; self.lat_origin.len() / 3 + 1];
-        let d_lat_override_off = self.stream.memcpy_stod(&dummy_off).map_err(|e| e.to_string())?;
-        let d_lat_override_count = self.stream.memcpy_stod(&dummy_count).map_err(|e| e.to_string())?;
+        let d_lat_override_off = self.stream.clone_htod(&dummy_off).map_err(|e| e.to_string())?;
+        let d_lat_override_count = self.stream.clone_htod(&dummy_count).map_err(|e| e.to_string())?;
         let d_override_lat_idx = self.stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
         let d_override_cell_idx = self.stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
         let d_override_mat = self.stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
@@ -1055,35 +1071,35 @@ impl GpuRecursiveContext {
 
         let fis_count_h = self
             .stream
-            .memcpy_dtov(&d_fis_count)
+            .clone_dtoh(&d_fis_count)
             .map_err(|e| e.to_string())?[0]
             .max(0) as usize;
         let n_banked = fis_count_h.min(fis_capacity);
-        let fis_x_h = self.stream.memcpy_dtov(&d_fis_x).map_err(|e| e.to_string())?;
-        let fis_y_h = self.stream.memcpy_dtov(&d_fis_y).map_err(|e| e.to_string())?;
-        let fis_z_h = self.stream.memcpy_dtov(&d_fis_z).map_err(|e| e.to_string())?;
+        let fis_x_h = self.stream.clone_dtoh(&d_fis_x).map_err(|e| e.to_string())?;
+        let fis_y_h = self.stream.clone_dtoh(&d_fis_y).map_err(|e| e.to_string())?;
+        let fis_z_h = self.stream.clone_dtoh(&d_fis_z).map_err(|e| e.to_string())?;
         let fission_sites: Vec<(f64, f64, f64)> = (0..n_banked)
             .map(|i| (fis_x_h[i], fis_y_h[i], fis_z_h[i]))
             .collect();
         let cnt_coll = self
             .stream
-            .memcpy_dtov(&d_cnt_coll)
+            .clone_dtoh(&d_cnt_coll)
             .map_err(|e| e.to_string())?[0];
         let cnt_abs = self
             .stream
-            .memcpy_dtov(&d_cnt_abs)
+            .clone_dtoh(&d_cnt_abs)
             .map_err(|e| e.to_string())?[0];
         let cnt_fis = self
             .stream
-            .memcpy_dtov(&d_cnt_fis)
+            .clone_dtoh(&d_cnt_fis)
             .map_err(|e| e.to_string())?[0];
         let cnt_leak = self
             .stream
-            .memcpy_dtov(&d_cnt_leak)
+            .clone_dtoh(&d_cnt_leak)
             .map_err(|e| e.to_string())?[0];
         let cnt_surf = self
             .stream
-            .memcpy_dtov(&d_cnt_surf)
+            .clone_dtoh(&d_cnt_surf)
             .map_err(|e| e.to_string())?[0];
         let _ = (
             d_xs, d_ys, d_zs, d_dxs, d_dys, d_dzs, d_alive, d_rng_state, d_rng_inc, d_mat,
@@ -1098,6 +1114,290 @@ impl GpuRecursiveContext {
             n_fissions: cnt_fis,
             n_leakage: cnt_leak,
             n_surf_xings: cnt_surf,
+        })
+    }
+}
+
+/// Result of one batch through `transport_recursive_persistent`.
+#[derive(Debug, Clone)]
+pub struct RecursiveTransportBatch {
+    /// (x, y, z, energy) for each banked fission / (n,2n) / (n,3n) site.
+    pub fission_bank: Vec<(f64, f64, f64, f64)>,
+    pub n_collisions: u64,
+    pub n_fissions: u64,
+    pub n_leakage: u64,
+    pub n_surf_xings: u64,
+    pub k_eff: f64,
+}
+
+impl GpuRecursiveContext {
+    /// Run one batch of full-physics neutron transport on the recursive
+    /// geometry. Cross-section data is supplied via the
+    /// `GpuTransportContext` upload-* paths (SVD / Pointwise / WMP / URR
+    /// / discrete levels / S(α,β)). Each particle is transported to
+    /// absorption / leakage / max-events.
+    ///
+    /// Inputs:
+    /// * `source_bank` — per-particle (x, y, z, energy) at birth.
+    /// * `rng_seeds` — per-particle PCG-64 (state, inc) pair. Same seed
+    ///   on CPU and GPU does **not** guarantee bit-identical histories
+    ///   because float-rounding ties between collision distance and
+    ///   surface distance can flip event ordering between the two
+    ///   implementations; aggregate counts agree within MC noise.
+    /// * `mat_kT` — per-material temperature in eV (kT). Used for the
+    ///   free-gas thermal threshold.
+    /// * `sab_nuc_idx` — index of the nuclide carrying S(α,β) data,
+    ///   or `-1` if none applies.
+    /// * `gpu_t` — used only to build the `TransportParams` buffer
+    ///   (centralised slot layout); the kernel itself runs on this
+    ///   recursive context.
+    #[allow(clippy::too_many_arguments, non_snake_case)]
+    pub fn transport_recursive(
+        &self,
+        gpu_t: &crate::gpu_transport::GpuTransportContext,
+        nuc_data: &crate::gpu_transport::GpuNuclideData,
+        mat_data: &crate::gpu_transport::GpuMaterialData,
+        sab_data: &crate::gpu_transport::GpuSabData,
+        wmp_data: &crate::gpu_transport::GpuWmpData,
+        source_bank: &[(f64, f64, f64, f64)],
+        rng_seeds: &[(u64, u64)],
+        mat_kT: &[f64],
+        sab_nuc_idx: i32,
+        max_events_per_history: i32,
+        fis_capacity: usize,
+    ) -> Result<RecursiveTransportBatch, String> {
+        let n = source_bank.len();
+        if n == 0 {
+            return Ok(RecursiveTransportBatch {
+                fission_bank: Vec::new(),
+                n_collisions: 0,
+                n_fissions: 0,
+                n_leakage: 0,
+                n_surf_xings: 0,
+                k_eff: 0.0,
+            });
+        }
+        if rng_seeds.len() != n {
+            return Err("source_bank / rng_seeds length mismatch".into());
+        }
+
+        // Particle SoA.
+        let xs: Vec<f64> = source_bank.iter().map(|p| p.0).collect();
+        let ys: Vec<f64> = source_bank.iter().map(|p| p.1).collect();
+        let zs: Vec<f64> = source_bank.iter().map(|p| p.2).collect();
+        let es: Vec<f64> = source_bank.iter().map(|p| p.3).collect();
+        // Initial directions: isotropic, same convention as init_source.
+        // We reuse the seed's first two draws to derive a direction,
+        // matching the const-XS path's CPU/GPU comparison style.
+        let mut dxs = Vec::with_capacity(n);
+        let mut dys = Vec::with_capacity(n);
+        let mut dzs = Vec::with_capacity(n);
+        for &(s, inc) in rng_seeds {
+            // Draw mu, phi from a private RNG so we don't perturb the
+            // seed the kernel actually uses.
+            let mut rng = rust_mc_sim::Pcg64::from_state(s ^ 0xA5A5_A5A5_A5A5_A5A5, inc | 1);
+            let mu = 2.0 * rng.uniform() - 1.0;
+            let phi = 2.0 * std::f64::consts::PI * rng.uniform();
+            let s_th = (1.0 - mu * mu).max(0.0).sqrt();
+            dxs.push(s_th * phi.cos());
+            dys.push(s_th * phi.sin());
+            dzs.push(mu);
+        }
+        let alive: Vec<i32> = vec![1; n];
+        let rng_state: Vec<u64> = rng_seeds.iter().map(|s| s.0).collect();
+        let rng_inc: Vec<u64> = rng_seeds.iter().map(|s| s.1).collect();
+
+        let stream = &self.stream;
+        let mut d_xs = stream.clone_htod(&xs).map_err(|e| e.to_string())?;
+        let mut d_ys = stream.clone_htod(&ys).map_err(|e| e.to_string())?;
+        let mut d_zs = stream.clone_htod(&zs).map_err(|e| e.to_string())?;
+        let mut d_dxs = stream.clone_htod(&dxs).map_err(|e| e.to_string())?;
+        let mut d_dys = stream.clone_htod(&dys).map_err(|e| e.to_string())?;
+        let mut d_dzs = stream.clone_htod(&dzs).map_err(|e| e.to_string())?;
+        let mut d_e = stream.clone_htod(&es).map_err(|e| e.to_string())?;
+        let mut d_alive = stream.clone_htod(&alive).map_err(|e| e.to_string())?;
+        let mut d_rng_state = stream.clone_htod(&rng_state).map_err(|e| e.to_string())?;
+        let mut d_rng_inc = stream.clone_htod(&rng_inc).map_err(|e| e.to_string())?;
+
+        // Material-temperature table.
+        let d_mat_kt = stream.clone_htod(mat_kT).map_err(|e| e.to_string())?;
+        let n_materials = mat_kT.len() as i32;
+
+        // Empty material-override tables (recursive demo doesn't use
+        // distributed materials yet — the const-XS kernel uses the
+        // same fallback).
+        let dummy_off: Vec<i32> = vec![-1; self.lat_origin.len() / 3 + 1];
+        let dummy_count: Vec<i32> = vec![0; self.lat_origin.len() / 3 + 1];
+        let d_lat_override_off = stream.clone_htod(&dummy_off).map_err(|e| e.to_string())?;
+        let d_lat_override_count = stream
+            .clone_htod(&dummy_count)
+            .map_err(|e| e.to_string())?;
+        let d_override_lat_idx = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let d_override_cell_idx = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let d_override_mat = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+
+        // Fission bank.
+        let mut d_fis_x = stream
+            .alloc_zeros::<f64>(fis_capacity.max(1))
+            .map_err(|e| e.to_string())?;
+        let mut d_fis_y = stream
+            .alloc_zeros::<f64>(fis_capacity.max(1))
+            .map_err(|e| e.to_string())?;
+        let mut d_fis_z = stream
+            .alloc_zeros::<f64>(fis_capacity.max(1))
+            .map_err(|e| e.to_string())?;
+        let mut d_fis_e = stream
+            .alloc_zeros::<f64>(fis_capacity.max(1))
+            .map_err(|e| e.to_string())?;
+        let mut d_fis_w = stream
+            .alloc_zeros::<f64>(fis_capacity.max(1))
+            .map_err(|e| e.to_string())?;
+        let mut d_fis_count = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+
+        // Counter slots (i32 to match transport.cu's atomic style).
+        let mut d_cnt_coll = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let mut d_cnt_fis = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let mut d_cnt_leak = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let mut d_cnt_surf = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+
+        // Build the packed TransportParams buffer using GpuTransportContext's
+        // helper. P_GEOM_TYPE is irrelevant here (the recursive kernel
+        // bypasses the find_cell switch) — we pass 0 for compactness.
+        let params_vec =
+            gpu_t.build_transport_params_vec(nuc_data, mat_data, sab_data, wmp_data, 0);
+        let d_params = stream.clone_htod(&params_vec).map_err(|e| e.to_string())?;
+
+        let block = 128_u32;
+        let grid = (n as u32).div_ceil(block);
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let n_i32 = n as i32;
+        let n_surf = self.n_surfaces;
+        let root = self.root_universe;
+        let n_lat = (self.lat_origin.len() / 3) as i32;
+        let max_fis_i = fis_capacity as i32;
+
+        let mut launch = stream.launch_builder(&self.k_transport_recursive);
+        launch
+            .arg(&d_params)
+            // particle SoA
+            .arg(&mut d_xs)
+            .arg(&mut d_ys)
+            .arg(&mut d_zs)
+            .arg(&mut d_dxs)
+            .arg(&mut d_dys)
+            .arg(&mut d_dzs)
+            .arg(&mut d_e)
+            .arg(&mut d_alive)
+            .arg(&mut d_rng_state)
+            .arg(&mut d_rng_inc)
+            .arg(&n_i32)
+            .arg(&max_events_per_history)
+            // recursive geometry tables
+            .arg(&self.surf_type)
+            .arg(&self.surf_params)
+            .arg(&self.surf_bc)
+            .arg(&n_surf)
+            .arg(&self.cell_region_off)
+            .arg(&self.cell_region_len)
+            .arg(&self.cell_fill_type)
+            .arg(&self.cell_fill_data)
+            .arg(&self.cell_aabb_min)
+            .arg(&self.cell_aabb_max)
+            .arg(&self.region_op)
+            .arg(&self.region_arg)
+            .arg(&self.univ_cells_off)
+            .arg(&self.univ_cells_len)
+            .arg(&self.univ_surfaces_off)
+            .arg(&self.univ_surfaces_len)
+            .arg(&self.univ_cell_indices)
+            .arg(&self.univ_surface_indices)
+            .arg(&root)
+            .arg(&self.lat_origin)
+            .arg(&self.lat_pitch)
+            .arg(&self.lat_shape)
+            .arg(&self.lat_universes_off)
+            .arg(&self.lat_universes)
+            .arg(&n_lat)
+            .arg(&d_lat_override_off)
+            .arg(&d_lat_override_count)
+            .arg(&d_override_lat_idx)
+            .arg(&d_override_cell_idx)
+            .arg(&d_override_mat)
+            .arg(&d_mat_kt)
+            .arg(&n_materials)
+            .arg(&sab_nuc_idx)
+            .arg(&self.evals_scratch)
+            // fission bank
+            .arg(&mut d_fis_x)
+            .arg(&mut d_fis_y)
+            .arg(&mut d_fis_z)
+            .arg(&mut d_fis_e)
+            .arg(&mut d_fis_w)
+            .arg(&mut d_fis_count)
+            .arg(&max_fis_i)
+            // counters
+            .arg(&mut d_cnt_coll)
+            .arg(&mut d_cnt_fis)
+            .arg(&mut d_cnt_leak)
+            .arg(&mut d_cnt_surf);
+        // SAFETY: kernel signature matches the argument list above
+        // (transport_recursive_persistent in transport_recursive.cu).
+        unsafe {
+            launch.launch(cfg).map_err(|e| e.to_string())?;
+        }
+
+        let fis_count = stream
+            .clone_dtoh(&d_fis_count)
+            .map_err(|e| e.to_string())?[0]
+            .max(0) as usize;
+        let n_banked = fis_count.min(fis_capacity);
+        let fx = stream.clone_dtoh(&d_fis_x).map_err(|e| e.to_string())?;
+        let fy = stream.clone_dtoh(&d_fis_y).map_err(|e| e.to_string())?;
+        let fz = stream.clone_dtoh(&d_fis_z).map_err(|e| e.to_string())?;
+        let fe = stream.clone_dtoh(&d_fis_e).map_err(|e| e.to_string())?;
+        let fission_bank: Vec<(f64, f64, f64, f64)> = (0..n_banked)
+            .map(|i| (fx[i], fy[i], fz[i], fe[i]))
+            .collect();
+
+        let cnt_coll = stream.clone_dtoh(&d_cnt_coll).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_fis = stream.clone_dtoh(&d_cnt_fis).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_leak = stream.clone_dtoh(&d_cnt_leak).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_surf = stream.clone_dtoh(&d_cnt_surf).map_err(|e| e.to_string())?[0] as u64;
+
+        // Suppress unused-warning on retained guards.
+        let _ = (
+            d_xs,
+            d_ys,
+            d_zs,
+            d_dxs,
+            d_dys,
+            d_dzs,
+            d_e,
+            d_alive,
+            d_rng_state,
+            d_rng_inc,
+            d_mat_kt,
+            d_lat_override_off,
+            d_lat_override_count,
+            d_override_lat_idx,
+            d_override_cell_idx,
+            d_override_mat,
+            d_params,
+            d_fis_w,
+        );
+
+        let k_eff = fission_bank.len() as f64 / n as f64;
+        Ok(RecursiveTransportBatch {
+            fission_bank,
+            n_collisions: cnt_coll,
+            n_fissions: cnt_fis,
+            n_leakage: cnt_leak,
+            n_surf_xings: cnt_surf,
+            k_eff,
         })
     }
 }

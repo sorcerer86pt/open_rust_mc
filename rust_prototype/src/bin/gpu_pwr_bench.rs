@@ -72,6 +72,11 @@ mod cuda_main {
         /// Windowed-Multipole in the RRR window for nuclides that have WMP data.
         #[arg(short, long, value_enum, default_value_t = GpuMode::Svd)]
         mode: GpuMode,
+        /// Disable S(α,β) thermal scattering even if the HDF5 file is present.
+        /// Diagnostic — compare against CPU pwr_pincell to bracket the
+        /// CPU↔GPU k_inf gap.
+        #[arg(long, default_value_t = false)]
+        no_sab: bool,
     }
 
     /// WMP filename + target temperature per nuclide, parallel to PWR_NUCLIDES.
@@ -463,7 +468,10 @@ mod cuda_main {
             .expect("upload material data");
 
         let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
-        let sab_data = if !is_godiva && h2o_path.exists() {
+        let sab_data = if args.no_sab {
+            println!("  S(a,b): disabled by --no-sab flag");
+            gpu.upload_sab_data_empty().expect("empty S(a,b)")
+        } else if !is_godiva && h2o_path.exists() {
             match open_rust_mc::hdf5_reader::load_thermal_scattering(&h2o_path) {
                 Ok(tsl) => {
                     let t_idx = tsl.select_temperature(600.0, 0.5);

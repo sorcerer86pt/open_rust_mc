@@ -168,7 +168,6 @@ mod cuda_main {
                             Some(h) => h,
                             None => {
                                 n_leak += 1;
-                                alive = false;
                                 break;
                             }
                         };
@@ -209,7 +208,6 @@ mod cuda_main {
                 let m = materials[mat_idx];
                 if m.sigma_t <= 0.0 {
                     n_leak += 1;
-                    alive = false;
                     break;
                 }
                 let d_collide = rng.exponential(m.sigma_t);
@@ -217,7 +215,6 @@ mod cuda_main {
                     Some(h) => h,
                     None => {
                         n_leak += 1;
-                        alive = false;
                         break;
                     }
                 };
@@ -241,7 +238,6 @@ mod cuda_main {
                                 }
                             }
                         }
-                        alive = false;
                         break;
                     } else {
                         // scatter — isotropic
@@ -254,7 +250,6 @@ mod cuda_main {
                         BoundaryCondition::Vacuum => {
                             pos = pos + dir * hit.distance;
                             n_leak += 1;
-                            alive = false;
                             break;
                         }
                         BoundaryCondition::Reflective => {
@@ -277,7 +272,6 @@ mod cuda_main {
                                 }
                                 None => {
                                     n_leak += 1;
-                                    alive = false;
                                     break;
                                 }
                             }

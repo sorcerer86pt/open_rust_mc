@@ -90,6 +90,17 @@ required-features = ["cuda"]
 name = "gpu_const_xs_keff"
 required-features = ["cuda"]
 
+[[bin]]
+name = "gpu_recursive_keff"
+required-features = ["cuda"]
+
+[[bin]]
+name = "gpu_assembly_keff"
+required-features = ["cuda"]
+
+[[bin]]
+name = "xs_provider_diff"
+
 [[bench]]
 name = "reconstruction"
 harness = false
