@@ -170,6 +170,379 @@ impl RectLattice {
     }
 }
 
+// ── Hexagonal lattice ──────────────────────────────────────────────
+
+/// Orientation of a hex lattice. Matches OpenMC's convention:
+/// `Y` = flat-top hexagons (top/bottom edges horizontal), used by
+/// VVER-1000 and most water-cooled hex reactors. `X` = pointy-top
+/// hexagons (vertex at top), used by some sodium-cooled fast
+/// reactors and matches the standard "Red Blob Games" pointy-top
+/// orientation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HexOrientation {
+    Y,
+    X,
+}
+
+/// A hexagonal lattice of universes.
+///
+/// Internally indexed by axial coordinates `(q, r, z)` with the
+/// constraint `q + r + s = 0` (the third cube coordinate `s` is
+/// implicit). The valid axial range is `|q|, |r|, |s| ≤ n_rings`.
+/// Universes are stored row-major over a doubled `(2*n_rings+1) ×
+/// (2*n_rings+1)` grid per axial layer; the corner cells outside the
+/// hex (where ring > n_rings) carry an arbitrary `UniverseId(0)`
+/// placeholder that never gets queried.
+#[derive(Debug, Clone)]
+pub struct HexLattice {
+    /// Centre of the hex lattice (in world frame, before this
+    /// lattice's own offset is subtracted).
+    pub center: Vec3,
+    /// Centre-to-centre distance to any of the 6 in-plane neighbours.
+    /// For a flat-top hex (`Y`) this equals √3 × side_length.
+    pub pitch_xy: f64,
+    /// Axial pitch (centre-to-centre between z layers).
+    pub pitch_z: f64,
+    /// Number of hex rings (ring 0 = centre only, ring N = 6N
+    /// elements). Total in-plane elements = `1 + 3*N*(N+1)`.
+    pub n_rings: usize,
+    /// Number of axial layers.
+    pub n_axial: usize,
+    pub orientation: HexOrientation,
+    /// Universe at each `(q, r, z)`, stored row-major over the
+    /// doubled axial grid.
+    pub universes: Vec<UniverseId>,
+    /// Optional per-element material overrides, same convention as
+    /// `RectLattice`.
+    pub material_overrides: Option<Vec<MaterialOverrideMap>>,
+}
+
+impl HexLattice {
+    /// Total in-plane elements for an N-ring lattice.
+    #[inline]
+    pub fn elements_per_slice(n_rings: usize) -> usize {
+        1 + 3 * n_rings * (n_rings + 1)
+    }
+
+    /// Hex side length: `pitch_xy / √3` for both orientations
+    /// (centre-to-centre distance equals √3 × side_length whether
+    /// the hex is pointy-top or flat-top).
+    #[inline]
+    pub fn side_length(&self) -> f64 {
+        self.pitch_xy / 3.0_f64.sqrt()
+    }
+
+    /// Linear index into the doubled-axial `universes` Vec.
+    #[inline]
+    pub fn axial_index(&self, q: i32, r: i32, z: i32) -> Option<usize> {
+        let n = self.n_rings as i32;
+        if q < -n || q > n || r < -n || r > n {
+            return None;
+        }
+        if z < 0 || z >= self.n_axial as i32 {
+            return None;
+        }
+        let qi = (q + n) as usize;
+        let ri = (r + n) as usize;
+        let zi = z as usize;
+        let stride = (2 * self.n_rings + 1) * (2 * self.n_rings + 1);
+        Some(zi * stride + ri * (2 * self.n_rings + 1) + qi)
+    }
+
+    /// Cartesian centre of element `(q, r)` in the lattice frame
+    /// (relative to `self.center`).
+    pub fn element_center_local(&self, q: i32, r: i32) -> Vec3 {
+        let s = self.side_length();
+        let (q, r) = (q as f64, r as f64);
+        match self.orientation {
+            // Flat-top: q-axis along world x; r-axis tilted up-right.
+            // Centre offsets follow Red Blob Games' flat-top axial
+            // convention (size = side length s):
+            //   x = 1.5 * s * q
+            //   y = √3 * s * (r + q/2)
+            HexOrientation::Y => Vec3::new(
+                1.5 * s * q,
+                3.0_f64.sqrt() * s * (r + q * 0.5),
+                0.0,
+            ),
+            // Pointy-top: q-axis tilted right, r-axis along world y.
+            //   x = √3 * s * (q + r/2)
+            //   y = 1.5 * s * r
+            HexOrientation::X => Vec3::new(
+                3.0_f64.sqrt() * s * (q + r * 0.5),
+                1.5 * s * r,
+                0.0,
+            ),
+        }
+    }
+
+    /// Find which element contains `world_pos`. Uses the standard
+    /// pixel-to-hex round via cube coordinates.
+    pub fn find_element(&self, world_pos: Vec3) -> Option<(i32, i32, i32)> {
+        let p = world_pos - self.center;
+        let s = self.side_length();
+
+        // Cartesian → fractional axial.
+        let (qf, rf) = match self.orientation {
+            HexOrientation::Y => {
+                // Flat-top inverse:
+                //   q = (2/3 * x) / s
+                //   r = (-x/3 + √3/3 * y) / s
+                let q = (2.0 / 3.0 * p.x) / s;
+                let r = (-p.x / 3.0 + (3.0_f64.sqrt() / 3.0) * p.y) / s;
+                (q, r)
+            }
+            HexOrientation::X => {
+                // Pointy-top inverse:
+                //   q = (√3/3 * x - y/3) / s
+                //   r = (2/3 * y) / s
+                let q = ((3.0_f64.sqrt() / 3.0) * p.x - p.y / 3.0) / s;
+                let r = (2.0 / 3.0 * p.y) / s;
+                (q, r)
+            }
+        };
+
+        // Cube rounding.
+        let xf = qf;
+        let zf = rf;
+        let yf = -xf - zf;
+        let (mut x, mut y, mut z) = (xf.round(), yf.round(), zf.round());
+        let (xd, yd, zd) = ((x - xf).abs(), (y - yf).abs(), (z - zf).abs());
+        if xd > yd && xd > zd {
+            x = -y - z;
+        } else if yd > zd {
+            y = -x - z;
+        } else {
+            z = -x - y;
+        }
+        let _ = y;
+        let q = x as i32;
+        let r = z as i32;
+
+        // Bounds check via cube ring radius.
+        let cube_s = -q - r;
+        let ring = q.unsigned_abs().max(r.unsigned_abs()).max(cube_s.unsigned_abs()) as usize;
+        if ring > self.n_rings {
+            return None;
+        }
+
+        // z layer: lattice z range is `[-n_axial/2, +n_axial/2) * pitch_z`
+        // around `center.z`; index 0 is the lowest layer.
+        let dz = p.z / self.pitch_z + (self.n_axial as f64) * 0.5;
+        let zi = dz.floor() as i32;
+        if zi < 0 || zi >= self.n_axial as i32 {
+            return None;
+        }
+
+        Some((q, r, zi))
+    }
+
+    /// Get the universe at axial coordinate `(q, r, z)`.
+    pub fn universe_at(&self, q: i32, r: i32, z: i32) -> UniverseId {
+        let idx = self
+            .axial_index(q, r, z)
+            .expect("axial index out of range");
+        self.universes[idx]
+    }
+
+    /// Lattice-frame local position of `world_pos` within element
+    /// `(q, r, z)`: subtracts the element centre. Useful for the
+    /// recursive descent's offset calculation.
+    pub fn local_position(&self, world_pos: Vec3, q: i32, r: i32, z: i32) -> Vec3 {
+        let centre_xy = self.element_center_local(q, r);
+        let centre_z =
+            (z as f64 - (self.n_axial as f64) * 0.5 + 0.5) * self.pitch_z;
+        let world_local = world_pos - self.center;
+        Vec3::new(
+            world_local.x - centre_xy.x,
+            world_local.y - centre_xy.y,
+            world_local.z - centre_z,
+        )
+    }
+
+    /// Distance along `local_dir` from `local_pos` (in lattice frame)
+    /// until the particle crosses out of element `current`. Six in-plane
+    /// edges plus the two axial planes; min positive is reported.
+    pub fn distance_to_grid(
+        &self,
+        local_pos: Vec3,
+        local_dir: Vec3,
+        current: [i32; 3],
+    ) -> f64 {
+        let d_perp = self.pitch_xy * 0.5;
+        let elem_center = self.element_center_local(current[0], current[1]);
+        let pos_rel = Vec3::new(
+            local_pos.x - elem_center.x,
+            local_pos.y - elem_center.y,
+            0.0,
+        );
+
+        // Six outward edge normals (unit vectors). For flat-top (Y),
+        // edges are perpendicular to angles 30°/90°/150°/210°/270°/330°.
+        // For pointy-top (X), 0°/60°/120°/180°/240°/300°.
+        let sqrt3_2 = 3.0_f64.sqrt() * 0.5;
+        let normals: [Vec3; 6] = match self.orientation {
+            HexOrientation::Y => [
+                Vec3::new(sqrt3_2, 0.5, 0.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(-sqrt3_2, 0.5, 0.0),
+                Vec3::new(-sqrt3_2, -0.5, 0.0),
+                Vec3::new(0.0, -1.0, 0.0),
+                Vec3::new(sqrt3_2, -0.5, 0.0),
+            ],
+            HexOrientation::X => [
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.5, sqrt3_2, 0.0),
+                Vec3::new(-0.5, sqrt3_2, 0.0),
+                Vec3::new(-1.0, 0.0, 0.0),
+                Vec3::new(-0.5, -sqrt3_2, 0.0),
+                Vec3::new(0.5, -sqrt3_2, 0.0),
+            ],
+        };
+
+        let mut best = f64::INFINITY;
+        for n in &normals {
+            let denom = n.x * local_dir.x + n.y * local_dir.y;
+            if denom <= 0.0 {
+                continue;
+            }
+            let projection = n.x * pos_rel.x + n.y * pos_rel.y;
+            let t = (d_perp - projection) / denom;
+            if t > 0.0 && t < best {
+                best = t;
+            }
+        }
+
+        // Axial planes.
+        if local_dir.z.abs() > 0.0 {
+            let centre_z =
+                (current[2] as f64 - (self.n_axial as f64) * 0.5 + 0.5) * self.pitch_z;
+            let half_z = self.pitch_z * 0.5;
+            let target_z = if local_dir.z > 0.0 {
+                centre_z + half_z
+            } else {
+                centre_z - half_z
+            };
+            let t = (target_z - local_pos.z) / local_dir.z;
+            if t > 0.0 && t < best {
+                best = t;
+            }
+        }
+
+        best
+    }
+
+    /// Look up the overriding material for `cell_idx` at hex element
+    /// `[q, r, z]`. `None` if no override applies.
+    #[inline]
+    pub fn material_override(&self, element: [i32; 3], cell_idx: usize) -> Option<u32> {
+        let overrides = self.material_overrides.as_ref()?;
+        let idx = self.axial_index(element[0], element[1], element[2])?;
+        let elem_overrides = overrides.get(idx)?;
+        elem_overrides.get(&cell_idx).copied()
+    }
+}
+
+#[cfg(test)]
+mod hex_tests {
+    use super::*;
+
+    fn unit_lattice(orientation: HexOrientation) -> HexLattice {
+        let n_rings = 2;
+        let n_axial = 1;
+        let stride = (2 * n_rings + 1) * (2 * n_rings + 1);
+        HexLattice {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            pitch_xy: 1.0,
+            pitch_z: 100.0,
+            n_rings,
+            n_axial,
+            orientation,
+            universes: vec![UniverseId(0); stride * n_axial],
+            material_overrides: None,
+        }
+    }
+
+    #[test]
+    fn elements_per_slice_matches_ring_formula() {
+        assert_eq!(HexLattice::elements_per_slice(0), 1);
+        assert_eq!(HexLattice::elements_per_slice(1), 7);
+        assert_eq!(HexLattice::elements_per_slice(2), 19);
+        assert_eq!(HexLattice::elements_per_slice(8), 1 + 3 * 8 * 9); // 217
+    }
+
+    #[test]
+    fn round_trip_element_center_flat_top() {
+        let lat = unit_lattice(HexOrientation::Y);
+        for &(q, r) in &[(0, 0), (1, 0), (-1, 1), (2, -1), (0, 2), (-2, 0)] {
+            let centre = lat.element_center_local(q, r);
+            let world = centre + lat.center;
+            let elem = lat.find_element(world).expect("inside");
+            assert_eq!((elem.0, elem.1), (q, r), "flat-top centre ({q},{r})");
+        }
+    }
+
+    #[test]
+    fn round_trip_element_center_pointy_top() {
+        let lat = unit_lattice(HexOrientation::X);
+        for &(q, r) in &[(0, 0), (1, 0), (-1, 1), (2, -1), (0, 2), (-2, 0)] {
+            let centre = lat.element_center_local(q, r);
+            let world = centre + lat.center;
+            let elem = lat.find_element(world).expect("inside");
+            assert_eq!((elem.0, elem.1), (q, r), "pointy-top centre ({q},{r})");
+        }
+    }
+
+    #[test]
+    fn distance_to_grid_centre_along_edge_normal() {
+        // Particle at the centre of element (0,0,0) heading toward
+        // an edge normal direction. For flat-top, edge normals are
+        // at 30°/90°/etc. Heading +y (90°) for flat-top should cross
+        // the top edge at distance pitch/2.
+        let lat = unit_lattice(HexOrientation::Y);
+        let d = lat.distance_to_grid(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), [0, 0, 0]);
+        assert!(
+            (d - lat.pitch_xy * 0.5).abs() < 1e-12,
+            "expected pitch/2 = {}, got {}",
+            lat.pitch_xy * 0.5,
+            d
+        );
+
+        // For pointy-top, edge normal at 0° (+x), heading +x crosses
+        // right edge at distance pitch/2.
+        let lat = unit_lattice(HexOrientation::X);
+        let d = lat.distance_to_grid(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), [0, 0, 0]);
+        assert!(
+            (d - lat.pitch_xy * 0.5).abs() < 1e-12,
+            "expected pitch/2 = {}, got {}",
+            lat.pitch_xy * 0.5,
+            d
+        );
+    }
+
+    #[test]
+    fn find_element_inside_first_ring_flat_top() {
+        // For flat-top with pitch 1.0, the +x neighbour of (0,0,0)
+        // sits at (1.5*s, √3*s/2) where s = 1/√3, i.e.
+        // (√3/2, 0.5). World point at that position should land in
+        // element (1, 0, 0).
+        let lat = unit_lattice(HexOrientation::Y);
+        let s = lat.side_length();
+        let neighbour = Vec3::new(1.5 * s, 3.0_f64.sqrt() * s * 0.5, 0.0);
+        let elem = lat.find_element(neighbour).expect("inside");
+        assert_eq!((elem.0, elem.1), (1, 0));
+    }
+
+    #[test]
+    fn find_element_outside_returns_none() {
+        let lat = unit_lattice(HexOrientation::Y);
+        // A point far from the lattice (ring 10).
+        let s = lat.side_length();
+        let far = Vec3::new(20.0 * s, 0.0, 0.0);
+        assert!(lat.find_element(far).is_none());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
