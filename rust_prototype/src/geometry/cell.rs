@@ -8,7 +8,7 @@
 //!
 //! This is stored as an algebraic data type (enum), not a class hierarchy.
 
-use super::Aabb;
+use super::{Aabb, Mat3};
 
 /// Unique identifier for a cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -87,6 +87,12 @@ pub struct Cell {
     pub temperature: f64,
     /// Pre-computed bounding box.
     pub aabb: Aabb,
+    /// Optional rotation applied when descending into this cell's
+    /// fill (`CellFill::Universe` or `CellFill::Lattice`). The
+    /// rotation acts on the parent-frame coordinates *after* the
+    /// translation step. `None` is equivalent to identity. Has no
+    /// effect on `CellFill::Material` / `CellFill::Void` cells.
+    pub rotation: Option<Mat3>,
 }
 
 impl Cell {
@@ -98,6 +104,7 @@ impl Cell {
             fill,
             temperature: 293.6,   // default room temperature
             aabb: Aabb::INFINITE, // will be computed later
+            rotation: None,
         }
     }
 
@@ -110,6 +117,13 @@ impl Cell {
     /// Set the bounding box.
     pub fn with_aabb(mut self, aabb: Aabb) -> Self {
         self.aabb = aabb;
+        self
+    }
+
+    /// Set the rotation applied when descending into this cell's
+    /// fill universe / lattice. `None` (the default) means identity.
+    pub fn with_rotation(mut self, rotation: Mat3) -> Self {
+        self.rotation = Some(rotation);
         self
     }
 

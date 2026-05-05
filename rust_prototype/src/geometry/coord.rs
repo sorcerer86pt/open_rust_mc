@@ -12,15 +12,21 @@
 //! changes but the call sites don't.
 
 use super::cell::CellFill;
-use super::{Cell, LatticeId, UniverseId, Vec3};
+use super::{Cell, LatticeId, Mat3, UniverseId, Vec3};
 use smallvec::SmallVec;
 
 /// One frame in a particle's coordinate stack.
 ///
 /// A frame names which universe and which cell of that universe the
 /// particle is in, optionally records the lattice element that hosted
-/// the universe, and stores the translation from the parent frame's
-/// local coordinates to this frame's local coordinates.
+/// the universe, and stores the translation + rotation from the
+/// parent frame's local coordinates to this frame's local coordinates:
+///
+///   `this_local = rotation * (parent_local - offset)`
+///   `this_local_dir = rotation * parent_local_dir`
+///
+/// When `rotation` is `None` (the common case) the math reduces to the
+/// pure-translation form `this_local = parent_local - offset`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coord {
     pub universe: UniverseId,
@@ -29,18 +35,22 @@ pub struct Coord {
     /// `Some((lattice_id, [ix, iy, iz]))` if this frame is inside a lattice
     /// element (i.e. the parent cell's fill was `CellFill::Lattice`).
     pub lattice: Option<(LatticeId, [i32; 3])>,
-    /// Translation from parent local frame: `this_local = parent_local - offset`.
+    /// Translation from parent local frame: applied *before* `rotation`.
     pub offset: Vec3,
+    /// Rotation from parent local frame to this frame. `None` is
+    /// equivalent to `Some(Mat3::IDENTITY)` but cheaper.
+    pub rotation: Option<Mat3>,
 }
 
 impl Coord {
-    /// Build a root-universe frame with no offset and no lattice.
+    /// Build a root-universe frame with no offset, no rotation, and no lattice.
     pub fn root(universe: UniverseId, cell_idx: u32) -> Self {
         Self {
             universe,
             cell_idx,
             lattice: None,
             offset: Vec3::new(0.0, 0.0, 0.0),
+            rotation: None,
         }
     }
 }
@@ -94,15 +104,22 @@ impl CoordStackExt for CoordStack {
         let mut local = world_pos;
         for frame in self {
             local = local - frame.offset;
+            if let Some(r) = frame.rotation {
+                local = r.transform(local);
+            }
         }
         local
     }
 
     #[inline]
     fn local_dir(&self, world_dir: Vec3) -> Vec3 {
-        // No rotations in v1; direction passes through unchanged. Once
-        // task #15 lands, fold rotations across the stack here.
-        world_dir
+        let mut dir = world_dir;
+        for frame in self {
+            if let Some(r) = frame.rotation {
+                dir = r.transform(dir);
+            }
+        }
+        dir
     }
 }
 
@@ -130,12 +147,14 @@ mod tests {
                 cell_idx: 1,
                 lattice: Some((LatticeId(0), [1, 0, 0])),
                 offset: Vec3::new(1.0, 2.0, 3.0),
+                rotation: None,
             },
             Coord {
                 universe: UniverseId(2),
                 cell_idx: 2,
                 lattice: None,
                 offset: Vec3::new(10.0, 0.0, 0.0),
+                rotation: None,
             },
         ];
 
@@ -146,10 +165,38 @@ mod tests {
     }
 
     #[test]
-    fn local_dir_is_identity_in_v1() {
+    fn local_dir_is_identity_when_no_rotation() {
         let stack: CoordStack = smallvec![Coord::root(UniverseId(0), 0)];
         let dir = Vec3::new(0.6, 0.8, 0.0);
         assert_eq!(stack.local_dir(dir), dir);
+    }
+
+    #[test]
+    fn local_pos_applies_rotation_after_offset() {
+        // 90° z rotation on the deeper frame. Root has no offset/rotation.
+        // Particle at world (1, 0, 0), child frame offset (0, 0, 0) and
+        // rotation 90° z. Expected local: rotate (1, 0, 0) → (0, 1, 0).
+        let r = crate::geometry::Mat3::rotation_z(std::f64::consts::FRAC_PI_2);
+        let stack: CoordStack = smallvec![
+            Coord::root(UniverseId(0), 0),
+            Coord {
+                universe: UniverseId(1),
+                cell_idx: 1,
+                lattice: None,
+                offset: Vec3::new(0.0, 0.0, 0.0),
+                rotation: Some(r),
+            },
+        ];
+        let world = Vec3::new(1.0, 0.0, 0.0);
+        let local = stack.local_pos(world);
+        assert!((local.x - 0.0).abs() < 1e-12);
+        assert!((local.y - 1.0).abs() < 1e-12);
+        assert!(local.z.abs() < 1e-12);
+
+        let dir = Vec3::new(1.0, 0.0, 0.0);
+        let local_dir = stack.local_dir(dir);
+        assert!((local_dir.x - 0.0).abs() < 1e-12);
+        assert!((local_dir.y - 1.0).abs() < 1e-12);
     }
 
     #[test]

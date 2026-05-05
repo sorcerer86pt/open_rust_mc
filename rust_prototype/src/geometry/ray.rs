@@ -7,7 +7,7 @@
 use super::cell::CellFill;
 use super::coord::{Coord, CoordStack};
 use super::surface::BoundaryCondition;
-use super::{Cell, Geometry, LatticeId, Surface, UniverseId, Vec3};
+use super::{Cell, Geometry, LatticeId, Mat3, Surface, UniverseId, Vec3};
 use smallvec::SmallVec;
 
 /// A ray: position + direction.
@@ -111,6 +111,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
     let mut stack = CoordStack::new();
     let mut current_universe = geom.root_universe;
     let mut next_offset = Vec3::new(0.0, 0.0, 0.0);
+    let mut next_rotation: Option<Mat3> = None;
     let mut next_lattice: Option<(LatticeId, [i32; 3])> = None;
     let mut local_pos = world_pos;
 
@@ -124,9 +125,13 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
             return None;
         }
 
-        // Apply this frame's offset to move from the parent's local frame
-        // into our own.
+        // Apply this frame's offset (translation), then rotation, to
+        // transform from parent local coords to this frame's local
+        // coords: `this_local = R · (parent_local − offset)`.
         local_pos = local_pos - next_offset;
+        if let Some(r) = next_rotation {
+            local_pos = r.transform(local_pos);
+        }
 
         // Refresh only the surface evaluations relevant to this universe.
         // Cells in this universe's `cell_indices` only ever reference
@@ -156,6 +161,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
             cell_idx: cell_idx as u32,
             lattice: next_lattice,
             offset: next_offset,
+            rotation: next_rotation,
         });
 
         match geom.cells[cell_idx].fill {
@@ -163,6 +169,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
             CellFill::Universe(u) => {
                 current_universe = UniverseId(u);
                 next_offset = Vec3::new(0.0, 0.0, 0.0);
+                next_rotation = geom.cells[cell_idx].rotation;
                 next_lattice = None;
             }
             CellFill::Lattice(l) => {
@@ -175,6 +182,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
 
                 current_universe = element_universe;
                 next_offset = element_offset;
+                next_rotation = geom.cells[cell_idx].rotation;
                 next_lattice = Some((lattice_id, [ix as i32, iy as i32, iz as i32]));
             }
         }
@@ -198,13 +206,31 @@ pub struct RecursiveHit {
 }
 
 /// Compute the local position of the particle at every frame on the
-/// stack. `out[i]` is `world_pos` shifted into frame `i`'s local
-/// coordinates; the deepest frame is `out.last()`.
+/// stack. `out[i]` is `world_pos` transformed into frame `i`'s local
+/// coordinates by walking offsets and rotations from the root down;
+/// the deepest frame is `out.last()`.
 fn local_positions(stack: &CoordStack, world_pos: Vec3) -> SmallVec<[Vec3; 4]> {
     let mut acc = world_pos;
     let mut out: SmallVec<[Vec3; 4]> = SmallVec::new();
     for frame in stack {
         acc = acc - frame.offset;
+        if let Some(r) = frame.rotation {
+            acc = r.transform(acc);
+        }
+        out.push(acc);
+    }
+    out
+}
+
+/// Same idea as `local_positions` but for the direction vector. Only
+/// the rotation cascade applies — translations don't affect direction.
+fn local_directions(stack: &CoordStack, world_dir: Vec3) -> SmallVec<[Vec3; 4]> {
+    let mut acc = world_dir;
+    let mut out: SmallVec<[Vec3; 4]> = SmallVec::new();
+    for frame in stack {
+        if let Some(r) = frame.rotation {
+            acc = r.transform(acc);
+        }
         out.push(acc);
     }
     out
@@ -236,16 +262,23 @@ pub fn trace_step_recursive(
     }
 
     let locals = local_positions(stack, world_pos);
-    // V1: no rotations — direction passes through every frame unchanged.
-    let local_dir = world_dir;
+    // Fast path: when no frame on the stack carries a rotation, every
+    // frame's local_dir equals world_dir and we can skip the per-frame
+    // direction-cascade entirely. Rotation-free geometries (Godiva,
+    // PWR pin-cell, the 17×17 assembly demo) take this path.
+    let any_rotation = stack.iter().any(|c| c.rotation.is_some());
+    let local_dirs = if any_rotation {
+        Some(local_directions(stack, world_dir))
+    } else {
+        None
+    };
 
     let mut best_dist = f64::INFINITY;
     let mut best_surface: Option<usize> = None;
 
     // Source (1) + (2): every cell on the stack contributes its surface
-    // boundaries. Deepest cell tells us when the particle leaves its own
-    // region; parent cells tell us when the particle leaves the
-    // sub-universe entirely.
+    // boundaries, evaluated in that cell's own local frame (so
+    // rotations on parent cells correctly transform the ray).
     for (depth, coord) in stack.iter().enumerate() {
         let cell = &geom.cells[coord.cell_idx as usize];
         let mut surface_indices = Vec::new();
@@ -254,8 +287,9 @@ pub fn trace_step_recursive(
         surface_indices.dedup();
 
         let local_pos = locals[depth];
+        let local_dir_d = local_dirs.as_ref().map(|v| v[depth]).unwrap_or(world_dir);
         if let Some(hit) =
-            find_nearest_surface(local_pos, local_dir, &geom.surfaces, &surface_indices)
+            find_nearest_surface(local_pos, local_dir_d, &geom.surfaces, &surface_indices)
         {
             if hit.distance < best_dist {
                 best_dist = hit.distance;
@@ -274,17 +308,22 @@ pub fn trace_step_recursive(
     const COINCIDENCE_TOL: f64 = 1e-9;
     for (depth, coord) in stack.iter().enumerate() {
         if let Some((lattice_id, current)) = coord.lattice {
-            // Lattice grid lives in the *parent* universe's frame —
-            // depth-1 in our locals, or world coords if depth == 0
-            // (which would mean a lattice at the root, no parent
-            // offsets).
-            let parent_local = if depth == 0 {
-                world_pos
+            // Lattice grid lives in the parent universe's frame —
+            // depth-1 in our locals/local_dirs (or world coords if
+            // depth == 0).
+            let (parent_local, parent_dir) = if depth == 0 {
+                (world_pos, world_dir)
             } else {
-                locals[depth - 1]
+                (
+                    locals[depth - 1],
+                    local_dirs
+                        .as_ref()
+                        .map(|v| v[depth - 1])
+                        .unwrap_or(world_dir),
+                )
             };
             let lattice = geom.lattice(lattice_id);
-            let d = lattice.distance_to_grid(parent_local, local_dir, current);
+            let d = lattice.distance_to_grid(parent_local, parent_dir, current);
             if d + COINCIDENCE_TOL < best_dist {
                 best_dist = d;
                 best_surface = None;
@@ -796,6 +835,134 @@ mod tests {
         assert_eq!(next_stack.len(), 2);
         // After the grid crossing we should be in element (1,0).
         assert_eq!(next_stack[1].lattice.expect("lattice").1, [1, 0, 0]);
+    }
+
+    #[test]
+    fn cell_rotation_rotates_universe_fill() {
+        // Pin universe contains a fuel cylinder centered at pin-local
+        // (1, 0, 0) with R=0.3. Two scenes share the pin universe but
+        // differ in whether the parent cell carries a 90° rotation
+        // around z when descending into the pin.
+        //
+        // No rotation: world point (1.0, 0.0, 0.0) lands inside the
+        // fuel; (0.0, -1.0, 0.0) misses (it'd map to pin-local
+        // (0, -1, 0), distance √2 from the cylinder centre).
+        //
+        // 90° rotation around z (R · (1,0,0) = (0,1,0)): the world
+        // point that *now* maps to pin-local (1, 0, 0) is the one
+        // satisfying R · world = (1,0,0), i.e. world (0, -1, 0). So
+        // the previously-outside point is now in fuel and vice versa.
+        let surfaces = vec![
+            // 0: pin-local cylinder at (1,0) R=0.3
+            Surface::CylinderZ {
+                center_x: 1.0,
+                center_y: 0.0,
+                radius: 0.3,
+                bc: BoundaryCondition::Transmission,
+            },
+            // 1..4: world bounding box at ±2
+            Surface::PlaneX {
+                x0: -2.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneX {
+                x0: 2.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: -2.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: 2.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+
+        let make_geometry = |rotation: Option<crate::geometry::Mat3>| {
+            let cells = vec![
+                // 0 pin fuel
+                Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+                // 1 pin water
+                Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+                // 2 root cell — bounding box, fills with pin universe
+                {
+                    let mut c = Cell::new(
+                        CellId(2),
+                        cell::intersect_all(vec![
+                            cell::outside(1),
+                            cell::inside(2),
+                            cell::outside(3),
+                            cell::inside(4),
+                        ]),
+                        CellFill::Universe(1),
+                    );
+                    if let Some(r) = rotation {
+                        c = c.with_rotation(r);
+                    }
+                    c
+                },
+                // 3 outside the box
+                Cell::new(
+                    CellId(3),
+                    cell::Region::Union(
+                        Box::new(cell::Region::Union(
+                            Box::new(cell::inside(1)),
+                            Box::new(cell::outside(2)),
+                        )),
+                        Box::new(cell::Region::Union(
+                            Box::new(cell::inside(3)),
+                            Box::new(cell::outside(4)),
+                        )),
+                    ),
+                    CellFill::Void,
+                ),
+            ];
+            let universes = vec![
+                Universe::new(UniverseId(0), vec![2, 3]),
+                Universe::new(UniverseId(1), vec![0, 1]),
+            ];
+            Geometry::new(surfaces.clone(), cells, universes, Vec::new(), UniverseId(0))
+                .expect("geometry")
+        };
+
+        // Without rotation: (1, 0, 0) → pin-local (1, 0, 0) → fuel.
+        let no_rot = make_geometry(None);
+        let stack = find_cell_recursive(Vec3::new(1.0, 0.0, 0.0), &no_rot).expect("found");
+        assert_eq!(
+            stack.last().expect("non-empty").cell_idx,
+            0,
+            "no-rotation: (1,0,0) should be in fuel"
+        );
+        let stack = find_cell_recursive(Vec3::new(0.0, -1.0, 0.0), &no_rot).expect("found");
+        assert_eq!(
+            stack.last().expect("non-empty").cell_idx,
+            1,
+            "no-rotation: (0,-1,0) should be in water"
+        );
+
+        // 90° rotation around z: (0,-1,0) → pin-local (1,0,0) → fuel.
+        // (1,0,0) → pin-local (0,1,0) → water.
+        let r = crate::geometry::Mat3::rotation_z(std::f64::consts::FRAC_PI_2);
+        let rot = make_geometry(Some(r));
+        let stack = find_cell_recursive(Vec3::new(0.0, -1.0, 0.0), &rot).expect("found");
+        assert_eq!(
+            stack.last().expect("non-empty").cell_idx,
+            0,
+            "rotated: (0,-1,0) should now be in fuel"
+        );
+        let stack = find_cell_recursive(Vec3::new(1.0, 0.0, 0.0), &rot).expect("found");
+        assert_eq!(
+            stack.last().expect("non-empty").cell_idx,
+            1,
+            "rotated: (1,0,0) should now be in water"
+        );
+
+        // The deepest Coord must record the rotation so subsequent
+        // trace_step_recursive calls can transform direction vectors.
+        let stack = find_cell_recursive(Vec3::new(0.0, -1.0, 0.0), &rot).expect("found");
+        let deepest = stack.last().expect("non-empty");
+        assert!(deepest.rotation.is_some(), "rotation propagated to coord");
     }
 
     #[test]

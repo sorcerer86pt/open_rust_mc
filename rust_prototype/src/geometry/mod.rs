@@ -137,3 +137,173 @@ impl std::ops::Neg for Vec3 {
         }
     }
 }
+
+/// 3×3 matrix used for universe / lattice-element rotations.
+///
+/// Stored row-major: `rows[i].x/y/z` is the i-th row's
+/// x/y/z component. A `Mat3` representing a rotation matrix is
+/// orthogonal — its transpose equals its inverse — so applying
+/// `transpose()` is a cheap way to undo a rotation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mat3 {
+    pub rows: [Vec3; 3],
+}
+
+impl Mat3 {
+    pub const IDENTITY: Self = Self {
+        rows: [
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ],
+    };
+
+    /// Rotation around the Z axis by `angle_rad` (right-hand rule).
+    /// `rotation_z(π/2)` maps `+x` to `+y`.
+    #[inline]
+    pub fn rotation_z(angle_rad: f64) -> Self {
+        let c = angle_rad.cos();
+        let s = angle_rad.sin();
+        Self {
+            rows: [
+                Vec3::new(c, -s, 0.0),
+                Vec3::new(s, c, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+            ],
+        }
+    }
+
+    /// Rotation around the Y axis by `angle_rad` (right-hand rule).
+    #[inline]
+    pub fn rotation_y(angle_rad: f64) -> Self {
+        let c = angle_rad.cos();
+        let s = angle_rad.sin();
+        Self {
+            rows: [
+                Vec3::new(c, 0.0, s),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::new(-s, 0.0, c),
+            ],
+        }
+    }
+
+    /// Rotation around the X axis by `angle_rad` (right-hand rule).
+    #[inline]
+    pub fn rotation_x(angle_rad: f64) -> Self {
+        let c = angle_rad.cos();
+        let s = angle_rad.sin();
+        Self {
+            rows: [
+                Vec3::new(1.0, 0.0, 0.0),
+                Vec3::new(0.0, c, -s),
+                Vec3::new(0.0, s, c),
+            ],
+        }
+    }
+
+    /// Transpose. For an orthogonal matrix this is also the inverse.
+    #[inline]
+    pub fn transpose(&self) -> Self {
+        let r = &self.rows;
+        Self {
+            rows: [
+                Vec3::new(r[0].x, r[1].x, r[2].x),
+                Vec3::new(r[0].y, r[1].y, r[2].y),
+                Vec3::new(r[0].z, r[1].z, r[2].z),
+            ],
+        }
+    }
+
+    /// Apply this matrix to a column vector: `M · v`.
+    #[inline]
+    pub fn transform(&self, v: Vec3) -> Vec3 {
+        Vec3::new(
+            self.rows[0].dot(v),
+            self.rows[1].dot(v),
+            self.rows[2].dot(v),
+        )
+    }
+
+    /// Matrix-matrix product. `self * other` is "apply `other` first,
+    /// then `self`" — same convention as `transform` on column vectors.
+    #[inline]
+    pub fn mul(&self, other: &Self) -> Self {
+        let other_t = other.transpose();
+        Self {
+            rows: [
+                Vec3::new(
+                    self.rows[0].dot(other_t.rows[0]),
+                    self.rows[0].dot(other_t.rows[1]),
+                    self.rows[0].dot(other_t.rows[2]),
+                ),
+                Vec3::new(
+                    self.rows[1].dot(other_t.rows[0]),
+                    self.rows[1].dot(other_t.rows[1]),
+                    self.rows[1].dot(other_t.rows[2]),
+                ),
+                Vec3::new(
+                    self.rows[2].dot(other_t.rows[0]),
+                    self.rows[2].dot(other_t.rows[1]),
+                    self.rows[2].dot(other_t.rows[2]),
+                ),
+            ],
+        }
+    }
+}
+
+impl Default for Mat3 {
+    #[inline]
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+#[cfg(test)]
+mod mat3_tests {
+    use super::*;
+
+    fn approx(a: Vec3, b: Vec3, tol: f64) -> bool {
+        (a.x - b.x).abs() < tol && (a.y - b.y).abs() < tol && (a.z - b.z).abs() < tol
+    }
+
+    #[test]
+    fn identity_is_a_noop() {
+        let v = Vec3::new(0.7, -1.3, 4.2);
+        assert_eq!(Mat3::IDENTITY.transform(v), v);
+    }
+
+    #[test]
+    fn rotation_z_pi_over_two_sends_x_to_y() {
+        let r = Mat3::rotation_z(std::f64::consts::FRAC_PI_2);
+        assert!(approx(r.transform(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(0.0, 1.0, 0.0), 1e-12));
+        assert!(approx(r.transform(Vec3::new(0.0, 1.0, 0.0)), Vec3::new(-1.0, 0.0, 0.0), 1e-12));
+        assert!(approx(r.transform(Vec3::new(0.0, 0.0, 1.0)), Vec3::new(0.0, 0.0, 1.0), 1e-12));
+    }
+
+    #[test]
+    fn rotation_z_60_degrees_round_trip() {
+        let theta = std::f64::consts::PI / 3.0;
+        let fwd = Mat3::rotation_z(theta);
+        let back = Mat3::rotation_z(-theta);
+        let v = Vec3::new(0.6, -0.4, 0.2);
+        assert!(approx(back.transform(fwd.transform(v)), v, 1e-12));
+    }
+
+    #[test]
+    fn transpose_inverts_rotation() {
+        let r = Mat3::rotation_y(0.7);
+        let v = Vec3::new(1.0, 2.0, 3.0);
+        let round = r.transpose().transform(r.transform(v));
+        assert!(approx(round, v, 1e-12));
+    }
+
+    #[test]
+    fn matmul_composes_rotations() {
+        let a = Mat3::rotation_z(0.4);
+        let b = Mat3::rotation_z(0.3);
+        let composed = a.mul(&b);
+        let direct = Mat3::rotation_z(0.7);
+        let v = Vec3::new(0.3, 0.7, -0.2);
+        assert!(approx(composed.transform(v), direct.transform(v), 1e-12));
+    }
+}
