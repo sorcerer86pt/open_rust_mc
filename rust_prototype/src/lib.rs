@@ -15,6 +15,8 @@ pub mod geometry;
 pub mod gpu;
 #[cfg(feature = "cuda")]
 pub mod gpu_transport;
+#[cfg(feature = "cuda")]
+pub mod gpu_recursive;
 pub mod hdf5_reader;
 pub mod kernel;
 pub mod loader;

@@ -557,7 +557,7 @@ impl GpuTransportContext {
                 .or(nuc.n3n.as_ref());
 
             if let Some(rk) = any_kernel {
-                all_grids_vec.extend_from_slice(&rk.kernel.energies);
+                all_grids_vec.extend_from_slice(rk.kernel.energies());
                 n_energies_vec[nuc_idx] = rk.kernel.n_energy() as i32;
             }
 

@@ -82,6 +82,10 @@ required-features = ["cuda"]
 name = "gpu_wmp_validate"
 required-features = ["cuda"]
 
+[[bin]]
+name = "gpu_recursive_parity"
+required-features = ["cuda"]
+
 [[bench]]
 name = "reconstruction"
 harness = false
