@@ -5,6 +5,7 @@
 //! cache-friendliness; `Geometry` is the construction-time owner that
 //! validates the structure and hands those slices out via accessors.
 
+use super::bvh::Bvh;
 use super::cell::CellFill;
 use super::{Cell, LatticeId, RectLattice, Surface, Universe, UniverseId};
 
@@ -53,6 +54,16 @@ pub enum GeometryError {
 /// at a material, void, another universe (`CellFill::Universe`), or a
 /// lattice (`CellFill::Lattice`). `universes` partition cells into
 /// reusable groups; `lattices` are regular tilings of universes.
+///
+/// Two pre-computed acceleration structures are derived from the rest
+/// at construction time:
+///   * `universe_surfaces[u]` — sorted, deduped list of every surface
+///     index referenced by any cell in universe `u`. Lets
+///     `find_cell_recursive` evaluate only relevant surfaces per
+///     descent level instead of every global surface.
+///   * `universe_bvhs[u]` — `Some(Bvh)` over the universe's cells if
+///     every referenced cell has a finite AABB; `None` otherwise.
+///     Falls back to linear scan when `None`.
 #[derive(Debug, Clone)]
 pub struct Geometry {
     pub surfaces: Vec<Surface>,
@@ -60,6 +71,8 @@ pub struct Geometry {
     pub universes: Vec<Universe>,
     pub lattices: Vec<RectLattice>,
     pub root_universe: UniverseId,
+    pub universe_surfaces: Vec<Vec<usize>>,
+    pub universe_bvhs: Vec<Option<Bvh>>,
 }
 
 impl Geometry {
@@ -156,12 +169,55 @@ impl Geometry {
             }
         }
 
+        // Per-universe surface index lists — restricts
+        // find_cell_recursive's surface evaluation loop to surfaces
+        // actually referenced by cells in the current universe. Big
+        // win for nested geometries where each universe references a
+        // small subset of the global surface list.
+        let mut universe_surfaces: Vec<Vec<usize>> = Vec::with_capacity(universes.len());
+        for universe in &universes {
+            let mut tmp: Vec<usize> = Vec::new();
+            for &cell_idx in &universe.cell_indices {
+                if let Some(cell) = cells.get(cell_idx) {
+                    cell.region.surface_indices(&mut tmp);
+                }
+            }
+            tmp.sort_unstable();
+            tmp.dedup();
+            universe_surfaces.push(tmp);
+        }
+
+        // Per-universe BVH — built only when every cell in the
+        // universe has a finite AABB AND the universe is big enough
+        // to amortise the BVH-traversal overhead. For small universes
+        // (≤ MIN_CELLS_FOR_BVH cells) a flat linear scan over a
+        // contiguous Vec wins on cache behaviour; the BVH only pays
+        // off once the cell count grows past O(10).
+        const MIN_CELLS_FOR_BVH: usize = 8;
+        let mut universe_bvhs: Vec<Option<Bvh>> = Vec::with_capacity(universes.len());
+        for universe in &universes {
+            let all_finite = !universe.cell_indices.is_empty()
+                && universe.cell_indices.iter().all(|&i| {
+                    cells
+                        .get(i)
+                        .map(|c| c.aabb.surface_area().is_finite())
+                        .unwrap_or(false)
+                });
+            if all_finite && universe.cell_indices.len() >= MIN_CELLS_FOR_BVH {
+                universe_bvhs.push(Some(Bvh::build_subset(&cells, &universe.cell_indices)));
+            } else {
+                universe_bvhs.push(None);
+            }
+        }
+
         Ok(Self {
             surfaces,
             cells,
             universes,
             lattices,
             root_universe,
+            universe_surfaces,
+            universe_bvhs,
         })
     }
 

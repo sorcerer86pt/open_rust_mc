@@ -128,18 +128,28 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
         // into our own.
         local_pos = local_pos - next_offset;
 
-        // Refresh surface evaluations at this new local point.
-        for (i, s) in geom.surfaces.iter().enumerate() {
-            evals[i] = s.evaluate(local_pos);
+        // Refresh only the surface evaluations relevant to this universe.
+        // Cells in this universe's `cell_indices` only ever reference
+        // surfaces in `universe_surfaces[u]`, so stale entries for
+        // surfaces in other universes are harmless. For nested
+        // geometries this is typically a 2–10x reduction in surface
+        // evaluations per descent.
+        let u_idx = current_universe.0 as usize;
+        for &s_idx in &geom.universe_surfaces[u_idx] {
+            evals[s_idx] = geom.surfaces[s_idx].evaluate(local_pos);
         }
 
-        // Linear scan over this universe's cells. Per-universe BVH
-        // acceleration is task #14.
-        let universe = geom.universe(current_universe);
-        let cell_idx = universe.cell_indices.iter().copied().find(|&idx| {
-            let cell = &geom.cells[idx];
-            cell.aabb.contains(local_pos) && cell.contains(&evals)
-        })?;
+        // Cell-find: BVH if this universe has finite AABBs on all its
+        // cells; linear scan otherwise.
+        let universe = &geom.universes[u_idx];
+        let cell_idx = if let Some(bvh) = &geom.universe_bvhs[u_idx] {
+            bvh.find_cell_with_evals(local_pos, &evals, &geom.cells)?
+        } else {
+            universe.cell_indices.iter().copied().find(|&idx| {
+                let cell = &geom.cells[idx];
+                cell.aabb.contains(local_pos) && cell.contains(&evals)
+            })?
+        };
 
         stack.push(Coord {
             universe: current_universe,
