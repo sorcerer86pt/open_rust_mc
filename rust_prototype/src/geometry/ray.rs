@@ -254,7 +254,14 @@ pub fn trace_step_recursive(
         }
     }
 
-    // Source (3): lattice grid planes.
+    // Source (3): lattice grid planes. Surfaces win ties — if a grid
+    // line coincides with a reflective surface (common when a 2x2
+    // lattice sits inside a reflective box at the same world
+    // coordinates), float rounding may put the grid distance an ULP
+    // below the surface distance, and treating that as a Transmission
+    // grid crossing instead of a Reflective surface hit silently leaks
+    // the particle. The COINCIDENCE_TOL break here picks the surface.
+    const COINCIDENCE_TOL: f64 = 1e-9;
     for (depth, coord) in stack.iter().enumerate() {
         if let Some((lattice_id, current)) = coord.lattice {
             // Lattice grid lives in the *parent* universe's frame —
@@ -268,7 +275,7 @@ pub fn trace_step_recursive(
             };
             let lattice = geom.lattice(lattice_id);
             let d = lattice.distance_to_grid(parent_local, local_dir, current);
-            if d < best_dist {
+            if d + COINCIDENCE_TOL < best_dist {
                 best_dist = d;
                 best_surface = None;
             }

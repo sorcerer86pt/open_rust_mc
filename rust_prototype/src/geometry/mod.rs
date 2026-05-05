@@ -12,6 +12,8 @@ pub mod cell;
 pub mod coord;
 pub mod lattice;
 pub mod ray;
+#[cfg(test)]
+mod recursive_smoke;
 pub mod scene;
 pub mod surface;
 pub mod universe;
