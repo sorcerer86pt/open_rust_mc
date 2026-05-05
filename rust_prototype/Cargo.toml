@@ -21,6 +21,7 @@ ndarray = "0.16"
 ndarray-npy = "0.9"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
+smallvec = { version = "1", features = ["const_generics", "union"] }
 cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "cublas", "nccl"] }
 
 [features]

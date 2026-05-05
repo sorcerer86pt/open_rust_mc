@@ -632,7 +632,8 @@ fn transport_particle<XS: XsProvider>(
                         }
                     }
                 }
-                CellFill::Universe(_) => {
+                CellFill::Universe(_) | CellFill::Lattice(_) => {
+                    // Recursive geometry not yet wired into transport — treat as leakage.
                     particle.kill();
                     result.leakage += 1;
                     break;
@@ -1145,7 +1146,8 @@ fn transport_particle_delta<XS: XsProvider>(
                         }
                     }
                 }
-                CellFill::Universe(_) => {
+                CellFill::Universe(_) | CellFill::Lattice(_) => {
+                    // Recursive geometry not yet wired into transport — treat as leakage.
                     particle.kill();
                     result.leakage += 1;
                     break;

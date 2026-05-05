@@ -379,8 +379,8 @@ fn transport_one_csg(
         let material: Option<&PhotonMaterial> = match cells[cell_idx].fill {
             CellFill::Material(m) => materials.get(m as usize).and_then(|o| o.as_ref()),
             CellFill::Void => None,
-            CellFill::Universe(_) => {
-                // Nested universes not yet supported on the photon path.
+            CellFill::Universe(_) | CellFill::Lattice(_) => {
+                // Recursive geometry not yet wired into the photon path.
                 result.energy_escaped += energy;
                 return;
             }

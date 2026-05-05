@@ -9,14 +9,19 @@
 pub mod aabb;
 pub mod bvh;
 pub mod cell;
+pub mod coord;
 pub mod lattice;
 pub mod ray;
+pub mod scene;
 pub mod surface;
 pub mod universe;
 
 pub use aabb::Aabb;
 pub use cell::{Cell, CellId};
+pub use coord::{Coord, CoordStack, CoordStackExt};
+pub use lattice::{LatticeId, RectLattice};
 pub use ray::{Ray, RayHit};
+pub use scene::{Geometry, GeometryError};
 pub use surface::{Surface, SurfaceId};
 pub use universe::{Universe, UniverseId};
 

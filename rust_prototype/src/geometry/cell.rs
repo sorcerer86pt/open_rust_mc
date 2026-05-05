@@ -14,13 +14,15 @@ use super::Aabb;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CellId(pub u32);
 
-/// Material filling a cell — either a material index or another universe.
+/// Material filling a cell — either a material index, another universe, or a lattice.
 #[derive(Debug, Clone, Copy)]
 pub enum CellFill {
     /// Index into the materials array.
     Material(u32),
     /// Index into the universes array (for nested geometry).
     Universe(u32),
+    /// Index into the lattices array (for repeated geometry).
+    Lattice(u32),
     /// Void (no material).
     Void,
 }

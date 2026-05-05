@@ -4,7 +4,11 @@
 //! position and direction, find how far it can travel before hitting
 //! a surface, and which cell it enters on the other side.
 
-use super::{Cell, Surface, Vec3};
+use super::cell::CellFill;
+use super::coord::{Coord, CoordStack};
+use super::surface::BoundaryCondition;
+use super::{Cell, Geometry, LatticeId, Surface, UniverseId, Vec3};
+use smallvec::SmallVec;
 
 /// A ray: position + direction.
 #[derive(Debug, Clone, Copy)]
@@ -88,6 +92,210 @@ pub fn find_cell(pos: Vec3, surfaces: &[Surface], cells: &[Cell]) -> Option<usiz
     None
 }
 
+/// Maximum CoordStack depth before `find_cell_recursive` gives up.
+/// Real-world geometries top out around 4–5; the limit catches infinite
+/// recursion bugs (a Universe-fill cell whose universe contains itself).
+pub const MAX_COORD_DEPTH: usize = 16;
+
+/// Resolve a world-space point into a full coordinate stack through
+/// the recursive geometry.
+///
+/// Walks down from the root universe, picking the cell that contains
+/// the point at each level, and recursing through `CellFill::Universe`
+/// or `CellFill::Lattice` until a `Material` or `Void` cell is reached.
+///
+/// Returns `None` if no cell in the root (or any descended) universe
+/// contains the point — i.e. the particle has leaked out of the
+/// geometry.
+pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStack> {
+    let mut stack = CoordStack::new();
+    let mut current_universe = geom.root_universe;
+    let mut next_offset = Vec3::new(0.0, 0.0, 0.0);
+    let mut next_lattice: Option<(LatticeId, [i32; 3])> = None;
+    let mut local_pos = world_pos;
+
+    // Pre-allocate a single evals buffer shared across descents — surfaces
+    // re-evaluate at each new local_pos, but we keep the Vec around to
+    // avoid per-iteration allocs.
+    let mut evals: Vec<f64> = vec![0.0; geom.surfaces.len()];
+
+    loop {
+        if stack.len() >= MAX_COORD_DEPTH {
+            return None;
+        }
+
+        // Apply this frame's offset to move from the parent's local frame
+        // into our own.
+        local_pos = local_pos - next_offset;
+
+        // Refresh surface evaluations at this new local point.
+        for (i, s) in geom.surfaces.iter().enumerate() {
+            evals[i] = s.evaluate(local_pos);
+        }
+
+        // Linear scan over this universe's cells. Per-universe BVH
+        // acceleration is task #14.
+        let universe = geom.universe(current_universe);
+        let cell_idx = universe.cell_indices.iter().copied().find(|&idx| {
+            let cell = &geom.cells[idx];
+            cell.aabb.contains(local_pos) && cell.contains(&evals)
+        })?;
+
+        stack.push(Coord {
+            universe: current_universe,
+            cell_idx: cell_idx as u32,
+            lattice: next_lattice,
+            offset: next_offset,
+        });
+
+        match geom.cells[cell_idx].fill {
+            CellFill::Material(_) | CellFill::Void => return Some(stack),
+            CellFill::Universe(u) => {
+                current_universe = UniverseId(u);
+                next_offset = Vec3::new(0.0, 0.0, 0.0);
+                next_lattice = None;
+            }
+            CellFill::Lattice(l) => {
+                let lattice_id = LatticeId(l);
+                let lattice = geom.lattice(lattice_id);
+                let (ix, iy, iz) = lattice.find_element(local_pos)?;
+                let element_universe = lattice.universe_at(ix, iy, iz);
+                let local_in_element = lattice.local_position(local_pos, ix, iy, iz);
+                let element_offset = local_pos - local_in_element;
+
+                current_universe = element_universe;
+                next_offset = element_offset;
+                next_lattice = Some((lattice_id, [ix as i32, iy as i32, iz as i32]));
+            }
+        }
+    }
+}
+
+/// Outcome of a recursive ray-trace step: distance, optional surface,
+/// re-resolved coordinate stack at the new position, and the boundary
+/// condition of the surface hit (if any).
+///
+/// `next_stack` is `None` if the particle leaks out of the geometry
+/// after the step (no cell contains the new world position).
+#[derive(Debug, Clone)]
+pub struct RecursiveHit {
+    pub distance: f64,
+    /// Surface that was crossed; `None` if the crossing was a lattice
+    /// grid line.
+    pub surface_idx: Option<usize>,
+    pub next_stack: Option<CoordStack>,
+    pub bc: BoundaryCondition,
+}
+
+/// Compute the local position of the particle at every frame on the
+/// stack. `out[i]` is `world_pos` shifted into frame `i`'s local
+/// coordinates; the deepest frame is `out.last()`.
+fn local_positions(stack: &CoordStack, world_pos: Vec3) -> SmallVec<[Vec3; 4]> {
+    let mut acc = world_pos;
+    let mut out: SmallVec<[Vec3; 4]> = SmallVec::new();
+    for frame in stack {
+        acc = acc - frame.offset;
+        out.push(acc);
+    }
+    out
+}
+
+/// Recursive ray-trace step.
+///
+/// Considers three sources of crossings:
+///   1. Surfaces bounding the deepest cell's region (in deepest local
+///      frame).
+///   2. Surfaces bounding any *parent* cell's region — these let the
+///      particle leave a sub-universe via the parent's boundary.
+///   3. Grid planes of any lattice frame on the stack — when the
+///      particle moves between lattice elements.
+///
+/// Takes the minimum positive distance, advances `world_pos` by that
+/// plus a small nudge, and calls `find_cell_recursive` to resolve the
+/// new coordinate stack at the new world position.
+///
+/// `world_dir` must be unit-length.
+pub fn trace_step_recursive(
+    stack: &CoordStack,
+    world_pos: Vec3,
+    world_dir: Vec3,
+    geom: &Geometry,
+) -> Option<RecursiveHit> {
+    if stack.is_empty() {
+        return None;
+    }
+
+    let locals = local_positions(stack, world_pos);
+    // V1: no rotations — direction passes through every frame unchanged.
+    let local_dir = world_dir;
+
+    let mut best_dist = f64::INFINITY;
+    let mut best_surface: Option<usize> = None;
+
+    // Source (1) + (2): every cell on the stack contributes its surface
+    // boundaries. Deepest cell tells us when the particle leaves its own
+    // region; parent cells tell us when the particle leaves the
+    // sub-universe entirely.
+    for (depth, coord) in stack.iter().enumerate() {
+        let cell = &geom.cells[coord.cell_idx as usize];
+        let mut surface_indices = Vec::new();
+        cell.region.surface_indices(&mut surface_indices);
+        surface_indices.sort_unstable();
+        surface_indices.dedup();
+
+        let local_pos = locals[depth];
+        if let Some(hit) =
+            find_nearest_surface(local_pos, local_dir, &geom.surfaces, &surface_indices)
+        {
+            if hit.distance < best_dist {
+                best_dist = hit.distance;
+                best_surface = Some(hit.surface_idx);
+            }
+        }
+    }
+
+    // Source (3): lattice grid planes.
+    for (depth, coord) in stack.iter().enumerate() {
+        if let Some((lattice_id, current)) = coord.lattice {
+            // Lattice grid lives in the *parent* universe's frame —
+            // depth-1 in our locals, or world coords if depth == 0
+            // (which would mean a lattice at the root, no parent
+            // offsets).
+            let parent_local = if depth == 0 {
+                world_pos
+            } else {
+                locals[depth - 1]
+            };
+            let lattice = geom.lattice(lattice_id);
+            let d = lattice.distance_to_grid(parent_local, local_dir, current);
+            if d < best_dist {
+                best_dist = d;
+                best_surface = None;
+            }
+        }
+    }
+
+    if !best_dist.is_finite() {
+        return None;
+    }
+
+    // Advance and re-resolve.
+    let nudge = 1e-10;
+    let new_world = world_pos + world_dir * (best_dist + nudge);
+    let next_stack = find_cell_recursive(new_world, geom);
+
+    let bc = best_surface
+        .map(|idx| geom.surfaces[idx].boundary_condition())
+        .unwrap_or(BoundaryCondition::Transmission);
+
+    Some(RecursiveHit {
+        distance: best_dist,
+        surface_idx: best_surface,
+        next_stack,
+        bc,
+    })
+}
+
 /// Full ray trace step: find distance to nearest surface and next cell.
 ///
 /// This is the complete geometry step in particle transport:
@@ -124,7 +332,10 @@ pub fn trace_step(
 mod tests {
     use super::*;
     use crate::geometry::cell::{self, CellFill, CellId};
+    use crate::geometry::coord::CoordStackExt;
+    use crate::geometry::lattice::RectLattice;
     use crate::geometry::surface::BoundaryCondition;
+    use crate::geometry::universe::{Universe, UniverseId};
 
     #[test]
     fn trace_godiva() {
@@ -219,5 +430,441 @@ mod tests {
             trace_step(pos, Vec3::new(1.0, 0.0, 0.0), 0, &surfaces, &cells).expect("should hit");
         assert!((hit.distance - 0.4096).abs() < 1e-8);
         assert_eq!(hit.next_cell_idx, Some(1)); // enters water
+    }
+
+    #[test]
+    fn flat_godiva_unchanged_under_recursive_find() {
+        // The recursive path on a single-universe geometry must agree
+        // with the existing flat find_cell.
+        let surfaces = vec![Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 8.7407,
+            bc: BoundaryCondition::Vacuum,
+        }];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            Cell::new(CellId(1), cell::outside(0), CellFill::Void),
+        ];
+        let geom = Geometry::flat(surfaces, cells).expect("flat construction");
+
+        // Inside: depth 1 stack ending at cell 0 (fuel).
+        let stack =
+            find_cell_recursive(Vec3::new(0.0, 0.0, 0.0), &geom).expect("origin is in fuel");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.deepest_cell_idx(), 0);
+        assert_eq!(stack.deepest().universe, geom.root_universe);
+
+        // Outside: depth 1 stack ending at cell 1 (void).
+        let stack = find_cell_recursive(Vec3::new(20.0, 0.0, 0.0), &geom).expect("outside is void");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack.deepest_cell_idx(), 1);
+    }
+
+    #[test]
+    fn one_pin_in_universe() {
+        // Root universe holds a bounding box cell whose fill is a pin
+        // universe. The pin universe is a fuel cylinder + water.
+        // Surfaces (in their own frame, not pin-universe-shifted because
+        // the pin universe sits at the root with zero offset):
+        //   0: fuel cylinder R=0.4 around z-axis
+        //   1..4: bounding box at +/- 1 in x and y (root cell)
+        let surfaces = vec![
+            Surface::CylinderZ {
+                center_x: 0.0,
+                center_y: 0.0,
+                radius: 0.4,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::PlaneX {
+                x0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneX {
+                x0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+
+        let cells = vec![
+            // 0: pin-universe fuel (inside cylinder)
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            // 1: pin-universe water (outside cylinder)
+            Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+            // 2: root bounding box, filled with pin universe (universe id 1)
+            Cell::new(
+                CellId(2),
+                cell::intersect_all(vec![
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                ]),
+                CellFill::Universe(1),
+            ),
+            // 3: outside the box (root level void)
+            Cell::new(
+                CellId(3),
+                cell::Region::Union(
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(1)),
+                        Box::new(cell::outside(2)),
+                    )),
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(3)),
+                        Box::new(cell::outside(4)),
+                    )),
+                ),
+                CellFill::Void,
+            ),
+        ];
+
+        let universes = vec![
+            Universe::new(UniverseId(0), vec![2, 3]), // root: bounding-box cell + outside
+            Universe::new(UniverseId(1), vec![0, 1]), // pin: fuel + water
+        ];
+
+        let geom = Geometry::new(surfaces, cells, universes, Vec::new(), UniverseId(0))
+            .expect("geometry construction");
+
+        // (0,0,0): inside box, inside cylinder -> fuel.
+        let stack = find_cell_recursive(Vec3::new(0.0, 0.0, 0.0), &geom).expect("found");
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].cell_idx, 2); // root bounding box
+        assert_eq!(stack[0].universe, UniverseId(0));
+        assert_eq!(stack[1].cell_idx, 0); // pin fuel
+        assert_eq!(stack[1].universe, UniverseId(1));
+
+        // (0.6, 0, 0): inside box, outside cylinder -> water.
+        let stack = find_cell_recursive(Vec3::new(0.6, 0.0, 0.0), &geom).expect("found");
+        assert_eq!(stack.len(), 2);
+        assert_eq!(stack[0].cell_idx, 2);
+        assert_eq!(stack[1].cell_idx, 1); // pin water
+
+        // (5, 0, 0): outside the bounding box -> void at root.
+        let stack = find_cell_recursive(Vec3::new(5.0, 0.0, 0.0), &geom).expect("found");
+        assert_eq!(stack.len(), 1);
+        assert_eq!(stack[0].cell_idx, 3); // root void
+    }
+
+    #[test]
+    fn two_by_two_lattice() {
+        // Root cell holds a 2×2 RectLattice. Lattice has two pin
+        // universes — A (fissile) and B (moderator) — alternating in
+        // columns: A in col 0, B in col 1.
+        //
+        // Lattice origin at (-1, -1, -big), pitch 1.0 — so the four
+        // elements occupy [-1,0)×[-1,0), [0,1)×[-1,0), [-1,0)×[0,1),
+        // [0,1)×[0,1) in the xy plane. Cylinders are centered at
+        // pin-universe origin (0.5, 0.5) so the pin sits at each
+        // element's center.
+        let surfaces = vec![
+            // 0: cylinder R=0.3 at element-local (0.5, 0.5)
+            Surface::CylinderZ {
+                center_x: 0.5,
+                center_y: 0.5,
+                radius: 0.3,
+                bc: BoundaryCondition::Transmission,
+            },
+            // 1..4: root bounding box at +/- 1
+            Surface::PlaneX {
+                x0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneX {
+                x0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+
+        let cells = vec![
+            // 0: pin-A fuel (inside cylinder) -> material 0
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            // 1: pin-A water (outside cylinder) -> material 1
+            Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+            // 2: pin-B "fuel slot" (inside cylinder) -> material 1 (water; this universe is moderator-only)
+            Cell::new(CellId(2), cell::inside(0), CellFill::Material(1)),
+            // 3: pin-B water -> material 1
+            Cell::new(CellId(3), cell::outside(0), CellFill::Material(1)),
+            // 4: root cell holding the lattice
+            Cell::new(
+                CellId(4),
+                cell::intersect_all(vec![
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                ]),
+                CellFill::Lattice(0),
+            ),
+            // 5: root void (outside the box)
+            Cell::new(
+                CellId(5),
+                cell::Region::Union(
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(1)),
+                        Box::new(cell::outside(2)),
+                    )),
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(3)),
+                        Box::new(cell::outside(4)),
+                    )),
+                ),
+                CellFill::Void,
+            ),
+        ];
+
+        let universes = vec![
+            Universe::new(UniverseId(0), vec![4, 5]), // root
+            Universe::new(UniverseId(1), vec![0, 1]), // pin A (fissile)
+            Universe::new(UniverseId(2), vec![2, 3]), // pin B (moderator)
+        ];
+
+        let lattices = vec![RectLattice {
+            origin: Vec3::new(-1.0, -1.0, -1e6),
+            pitch: Vec3::new(1.0, 1.0, 2e6),
+            shape: [2, 2, 1],
+            // row-major: [(0,0,0), (1,0,0), (0,1,0), (1,1,0)]
+            // col 0 = A, col 1 = B → [A, B, A, B]
+            universes: vec![UniverseId(1), UniverseId(2), UniverseId(1), UniverseId(2)],
+        }];
+
+        let geom = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
+            .expect("geometry construction");
+
+        // Helper: assert (lattice_index, deepest_cell, deepest_material).
+        let cells_ref = &geom.cells;
+        let assert_at = |x: f64, y: f64, lattice_xy: [i32; 2], deep_cell: u32, mat: u32| {
+            let stack = find_cell_recursive(Vec3::new(x, y, 0.0), &geom)
+                .unwrap_or_else(|| panic!("({x},{y}) not found"));
+            assert_eq!(stack.len(), 2, "({x},{y}) stack depth");
+            assert_eq!(stack[0].cell_idx, 4, "({x},{y}) parent");
+            assert_eq!(stack[1].cell_idx, deep_cell, "({x},{y}) deepest cell");
+            let (_, idxs) = stack[1].lattice.expect("({x},{y}) should be in a lattice");
+            assert_eq!(
+                [idxs[0], idxs[1]],
+                lattice_xy,
+                "({x},{y}) lattice element"
+            );
+            assert_eq!(stack.material_idx(cells_ref), Some(mat), "({x},{y}) material");
+        };
+
+        // Element (0,0): A pin centered at world (-0.5, -0.5).
+        // (-0.5,-0.5) → element-local (0.5, 0.5) = pin center → fuel (cell 0, mat 0).
+        assert_at(-0.5, -0.5, [0, 0], 0, 0);
+        // (-0.9,-0.9) → element-local (0.1,0.1), distance from (0.5,0.5) ~ 0.566 > 0.3 → A water (cell 1, mat 1).
+        assert_at(-0.9, -0.9, [0, 0], 1, 1);
+
+        // Element (1,0): B pin centered at world (0.5, -0.5).
+        // (0.5,-0.5) → element-local (0.5, 0.5) → "fuel slot" (cell 2, mat 1 — water).
+        assert_at(0.5, -0.5, [1, 0], 2, 1);
+        // (0.9,-0.9) → element-local (0.9, 0.1), out of cylinder → B water (cell 3, mat 1).
+        assert_at(0.9, -0.9, [1, 0], 3, 1);
+
+        // Element (0,1): A pin centered at world (-0.5, 0.5).
+        assert_at(-0.5, 0.5, [0, 1], 0, 0);
+
+        // Element (1,1): B pin centered at world (0.5, 0.5).
+        assert_at(0.5, 0.5, [1, 1], 2, 1);
+    }
+
+    #[test]
+    fn trace_recursive_through_lattice_grid() {
+        // 2x2 lattice, pin universes share a single fuel cylinder R=0.3
+        // centered at element-local (0.5, 0.5). Particle starts at
+        // (0.1, -0.5, 0) heading +x. It should:
+        //   1. Cross out of element (0,0) at x=0 (lattice grid).
+        //   2. Land in element (1,0).
+        let surfaces = vec![
+            Surface::CylinderZ {
+                center_x: 0.5,
+                center_y: 0.5,
+                radius: 0.3,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::PlaneX {
+                x0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneX {
+                x0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+            Cell::new(
+                CellId(2),
+                cell::intersect_all(vec![
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                ]),
+                CellFill::Lattice(0),
+            ),
+            Cell::new(
+                CellId(3),
+                cell::Region::Union(
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(1)),
+                        Box::new(cell::outside(2)),
+                    )),
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(3)),
+                        Box::new(cell::outside(4)),
+                    )),
+                ),
+                CellFill::Void,
+            ),
+        ];
+        let universes = vec![
+            Universe::new(UniverseId(0), vec![2, 3]),
+            Universe::new(UniverseId(1), vec![0, 1]),
+        ];
+        let lattices = vec![RectLattice {
+            origin: Vec3::new(-1.0, -1.0, -1e6),
+            pitch: Vec3::new(1.0, 1.0, 2e6),
+            shape: [2, 2, 1],
+            universes: vec![UniverseId(1); 4],
+        }];
+        let geom = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
+            .expect("geometry");
+
+        // Start at world (-0.9, -0.9, 0): element-local (0.1, 0.1).
+        // Cylinder at (0.5, 0.5) R=0.3; ray heading +x at y=0.1 misses
+        // the cylinder (closest approach distance 0.4 > 0.3).
+        let pos0 = Vec3::new(-0.9, -0.9, 0.0);
+        let dir = Vec3::new(1.0, 0.0, 0.0);
+
+        let stack0 = find_cell_recursive(pos0, &geom).expect("start");
+        // No surface crossing on this ray; the only crossing is the
+        // x=0 lattice grid plane at distance 0.9.
+        let hit = trace_step_recursive(&stack0, pos0, dir, &geom).expect("hit");
+        assert!(
+            (hit.distance - 0.9).abs() < 1e-8,
+            "expected grid crossing at d=0.9, got {}",
+            hit.distance
+        );
+        assert!(
+            hit.surface_idx.is_none(),
+            "grid crossing should not report a surface"
+        );
+
+        let next_stack = hit.next_stack.expect("re-resolved");
+        assert_eq!(next_stack.len(), 2);
+        // After the grid crossing we should be in element (1,0).
+        assert_eq!(next_stack[1].lattice.expect("lattice").1, [1, 0, 0]);
+    }
+
+    #[test]
+    fn trace_recursive_hits_pin_cylinder() {
+        // 2x2 lattice as before. Particle at element (0,0) center
+        // (-0.5, -0.5) heading +x. It's inside the fuel cylinder; first
+        // crossing should be the cylinder surface.
+        let surfaces = vec![
+            Surface::CylinderZ {
+                center_x: 0.5,
+                center_y: 0.5,
+                radius: 0.3,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::PlaneX {
+                x0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneX {
+                x0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: -1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: 1.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+            Cell::new(
+                CellId(2),
+                cell::intersect_all(vec![
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                ]),
+                CellFill::Lattice(0),
+            ),
+            Cell::new(
+                CellId(3),
+                cell::Region::Union(
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(1)),
+                        Box::new(cell::outside(2)),
+                    )),
+                    Box::new(cell::Region::Union(
+                        Box::new(cell::inside(3)),
+                        Box::new(cell::outside(4)),
+                    )),
+                ),
+                CellFill::Void,
+            ),
+        ];
+        let universes = vec![
+            Universe::new(UniverseId(0), vec![2, 3]),
+            Universe::new(UniverseId(1), vec![0, 1]),
+        ];
+        let lattices = vec![RectLattice {
+            origin: Vec3::new(-1.0, -1.0, -1e6),
+            pitch: Vec3::new(1.0, 1.0, 2e6),
+            shape: [2, 2, 1],
+            universes: vec![UniverseId(1); 4],
+        }];
+        let geom = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
+            .expect("geometry");
+
+        let pos0 = Vec3::new(-0.5, -0.5, 0.0); // element (0,0) center → cylinder center → fuel
+        let dir = Vec3::new(1.0, 0.0, 0.0);
+
+        let stack0 = find_cell_recursive(pos0, &geom).expect("start");
+        assert_eq!(stack0[1].cell_idx, 0); // fuel cell
+        let hit = trace_step_recursive(&stack0, pos0, dir, &geom).expect("hit");
+        assert!(
+            (hit.distance - 0.3).abs() < 1e-8,
+            "cylinder edge at d=0.3, got {}",
+            hit.distance
+        );
+        assert!(hit.surface_idx == Some(0), "should report cylinder surface");
+
+        let next = hit.next_stack.expect("re-resolved");
+        assert_eq!(next[1].cell_idx, 1); // pin water cell
     }
 }

@@ -1126,6 +1126,7 @@ dependencies = [
  "ndarray-npy",
  "rayon",
  "rust-mc-sim",
+ "smallvec",
  "thiserror 2.0.18",
 ]
 
