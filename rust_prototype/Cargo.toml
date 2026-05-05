@@ -86,6 +86,10 @@ required-features = ["cuda"]
 name = "gpu_recursive_parity"
 required-features = ["cuda"]
 
+[[bin]]
+name = "gpu_const_xs_keff"
+required-features = ["cuda"]
+
 [[bench]]
 name = "reconstruction"
 harness = false
