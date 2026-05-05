@@ -53,39 +53,41 @@ exact match to 5 decimals).
 
 The original phase-1 plan kept a "depth-1 fast path" that would
 short-circuit the recursive primitives for single-universe
-geometries. The data says it's not needed.
+geometries. The data says it's not needed — and depth-3 is much
+closer to depth-1 than I initially thought when *the physics is
+matched*.
 
-| Geometry        | Stack depth | Phys. complexity         | Pre-refactor ns/p | Post-recursive ns/p |
-|-----------------|-------------|--------------------------|-------------------|---------------------|
-| Godiva          | 1           | 3 nuclides, fast         | 1057              | 1015                |
-| PWR pin-cell    | 1           | 9 nuclides, S(α,β), URR  | ~1300             | ~1300               |
-| 17×17 assembly  | 3           | 9 nuclides, S(α,β), URR  | infeasible        | 21 037              |
+| Geometry        | Depth | Physics                  | Pre-refactor ns/p | Post-recursive ns/p |
+|-----------------|-------|--------------------------|-------------------|---------------------|
+| Godiva          | 1     | 3 nuclides, fast         | 1057              | 1015                |
+| PWR pin-cell    | 1     | 9 nuclides, S(α,β), URR  | ~27 000           | 25 684 ± 683 (SVD)  |
+| 17×17 assembly  | 3     | 9 nuclides, S(α,β), URR  | infeasible        | 27 361              |
 
-Depth-1 throughput is within noise of the pre-refactor
-flat-geometry path. Per-seed k_eff is bit-identical, which
-forecloses the "subtle physics drift" argument for keeping a
-parallel fast-path implementation. **Decision: drop the fast
-path.** The recursive primitives are the only path going forward.
+Two things follow:
 
-What the table also says, separately from the fast-path question:
-the *depth-3* path costs **~16× per particle** vs depth-1 with the
-same physics. That isn't a fast-path issue — it's the cost of
-walking three levels of cell-find and trace-step on every event.
-Future wins live in:
+  1. **Depth-1 is bit-identical and equal-throughput** to the
+     pre-refactor flat path. Per-seed k_eff matches to 5
+     decimals (Godiva: 0.99422 / 0.99481 / 0.99412 / 0.99462 /
+     0.99429 across 5 seeds, exact match). No fast path needed.
+     **Decision: drop it. The recursive primitives are the only
+     geometry path going forward.**
+  2. **Depth-3 is 1.07× slower than depth-1 with matched
+     physics** — the recursive descent (3 levels instead of 1)
+     adds essentially zero overhead per particle once you
+     compare workloads with the same nuclide set and thermal
+     scattering. The physics work dominates the geometry walk
+     by an order of magnitude.
 
-  * Cache layout of the descent (currently each frame walks a
-    `Universe.cell_indices: Vec<usize>` indirection plus a
-    `Geometry.universe_surfaces[u]` indirection).
-  * Eliminating per-trace_step `Vec` and `SmallVec` allocations
-    (`surface_indices`, `locals`).
-  * A specialised depth-3-inline trace_step for the common
-    assembly / core case.
-
-None of those require a different code path for depth-1; they
-make the unified recursive path faster everywhere. They're
-deferred behind tasks #19 (GPU port — moves the hot-loop off the
-CPU entirely) and #20 (AP1000 core — exposes the next set of
-bottlenecks).
+Earlier writeups in this file flagged a "16× per-particle depth
+penalty"; that was apples-to-oranges (Godiva's 1 ns/p fast
+spectrum vs assembly thermal physics). Corrected: **the depth
+penalty per se is in single-digit percent**. Future per-particle
+wins live in algorithmic / data-layout work (cache layout,
+allocation removal in trace_step) but the size of that prize
+is small. The big remaining lever is **GPU** (task #19, moves
+the per-particle workload off the CPU loop entirely) and
+**larger geometries** (task #20, AP1000) where new bottlenecks
+will surface.
 
 # Full electron transport + GPU photon kernels + Python API — 2026-04-27
 
