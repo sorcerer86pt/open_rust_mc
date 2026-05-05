@@ -1,3 +1,92 @@
+# Universe-recursive geometry — phase 1 + depth-N profile — 2026-05-05
+
+## TL;DR
+
+Recursive geometry shipped end-to-end on CPU. The 17×17 PWR
+assembly demo runs through depth-3 stacks (root → assembly lattice
+→ pin/GT cell), produces **k_inf = 1.14958 ± 0.00318**, and was
+literally inexpressible before this work — the previous flat-cell
+representation could only handle Godiva and PWR pin-cell.
+
+Acceleration / feature layers since the last writeup:
+
+1. **CoordStack + recursive primitives**
+   `find_cell_recursive(world_pos)` and
+   `trace_step_recursive(stack, pos, dir)` thread a
+   `SmallVec<[Coord; 4]>` through every transport call. The
+   coordinate stack walks offsets and rotations from root down,
+   cell-finds within each universe, and re-resolves from world
+   after every crossing.
+2. **Per-universe surface restriction + opt-in BVH**
+   Each universe pre-computes its own surface index list at
+   construction time so descent only re-evaluates surfaces that
+   cells in *that* universe actually reference. **3.0×** assembly
+   speedup (70 857 → 23 999 ns/p) by itself. Per-universe BVH is
+   built when a universe has ≥ 8 cells with finite AABBs; tiny
+   universes (Godiva: 2, PWR pin-cell: 4) keep the linear scan
+   for cache reasons.
+3. **Mat3 rotations on Coord**
+   `Cell.rotation: Option<Mat3>` propagates through the descent so
+   a universe / lattice can be placed at an arbitrary orientation.
+   `Coord` carries the per-frame rotation; trace_step's per-frame
+   `local_dir` cascade is gated on "any frame rotated?" so
+   rotation-free geometries pay zero cost.
+4. **Distributed materials**
+   `RectLattice.material_overrides` rebinds individual cells to
+   different materials at specific lattice elements. Lets one pin
+   universe be reused across an assembly with different
+   enrichments / burnup tiers without duplicating geometry.
+5. **HexLattice math**
+   `find_element` (cube-coord rounding from Cartesian) and
+   `distance_to_grid` (six edge normals + axial planes,
+   closed-form). Both flat-top (`Y`, VVER convention) and
+   pointy-top (`X`) orientations. Math-only; the
+   `find_cell_recursive` wiring lands when the VVER core demo
+   needs it.
+
+198 lib tests green (up from 184 pre-refactor), Godiva and PWR
+pin-cell run bit-identical k_eff vs the flat-geometry baseline
+(0.99422 / 0.99481 / 0.99412 / 0.99462 / 0.99429 across 5 seeds —
+exact match to 5 decimals).
+
+## Depth-1 fast-path decision (task #18)
+
+The original phase-1 plan kept a "depth-1 fast path" that would
+short-circuit the recursive primitives for single-universe
+geometries. The data says it's not needed.
+
+| Geometry        | Stack depth | Phys. complexity         | Pre-refactor ns/p | Post-recursive ns/p |
+|-----------------|-------------|--------------------------|-------------------|---------------------|
+| Godiva          | 1           | 3 nuclides, fast         | 1057              | 1015                |
+| PWR pin-cell    | 1           | 9 nuclides, S(α,β), URR  | ~1300             | ~1300               |
+| 17×17 assembly  | 3           | 9 nuclides, S(α,β), URR  | infeasible        | 21 037              |
+
+Depth-1 throughput is within noise of the pre-refactor
+flat-geometry path. Per-seed k_eff is bit-identical, which
+forecloses the "subtle physics drift" argument for keeping a
+parallel fast-path implementation. **Decision: drop the fast
+path.** The recursive primitives are the only path going forward.
+
+What the table also says, separately from the fast-path question:
+the *depth-3* path costs **~16× per particle** vs depth-1 with the
+same physics. That isn't a fast-path issue — it's the cost of
+walking three levels of cell-find and trace-step on every event.
+Future wins live in:
+
+  * Cache layout of the descent (currently each frame walks a
+    `Universe.cell_indices: Vec<usize>` indirection plus a
+    `Geometry.universe_surfaces[u]` indirection).
+  * Eliminating per-trace_step `Vec` and `SmallVec` allocations
+    (`surface_indices`, `locals`).
+  * A specialised depth-3-inline trace_step for the common
+    assembly / core case.
+
+None of those require a different code path for depth-1; they
+make the unified recursive path faster everywhere. They're
+deferred behind tasks #19 (GPU port — moves the hot-loop off the
+CPU entirely) and #20 (AP1000 core — exposes the next set of
+bottlenecks).
+
 # Full electron transport + GPU photon kernels + Python API — 2026-04-27
 
 ## TL;DR
