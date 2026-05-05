@@ -534,6 +534,7 @@ fn transport_particle<XS: XsProvider>(
     site: &FissionSite,
     batch: u64,
     particle_idx: u64,
+    geometry: &crate::geometry::Geometry,
     surfaces: &[Surface],
     cells: &[Cell],
     materials: &[Material],
@@ -555,8 +556,14 @@ fn transport_particle<XS: XsProvider>(
     let (u, v, w) = rng.isotropic_direction();
     let dir = Vec3::new(u, v, w);
 
-    let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
-    let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
+    let mut particle = match geometry::ray::find_cell_recursive(site.pos, geometry) {
+        Some(stack) => Particle::with_stack(site.pos, dir, site.energy, stack),
+        None => {
+            // Source point outside the geometry — bank as leakage.
+            result.leakage += 1;
+            return result;
+        }
+    };
 
     // Current-generation secondary neutrons emitted by (n,2n)/(n,3n).
     // Drained in an outer loop: after the primary finishes transport,
@@ -587,19 +594,16 @@ fn transport_particle<XS: XsProvider>(
                         result.leakage += 1;
                         break;
                     }
-                    let trace = geometry::ray::trace_step(
+                    let trace = geometry::ray::trace_step_recursive(
+                        &particle.coord_stack,
                         particle.pos,
                         particle.dir,
-                        particle.cell_idx,
-                        surfaces,
-                        cells,
+                        geometry,
                     );
                     match trace {
                         Some(hit) => {
-                            // Nudge proportional to distance — ensures clean surface crossing
                             let nudge = (hit.distance * 1e-8).max(1e-8);
-                            let bc = surfaces[hit.surface_idx].boundary_condition();
-                            match bc {
+                            match hit.bc {
                                 BoundaryCondition::Vacuum => {
                                     particle.advance(hit.distance);
                                     particle.kill();
@@ -607,19 +611,27 @@ fn transport_particle<XS: XsProvider>(
                                     break;
                                 }
                                 BoundaryCondition::Reflective => {
+                                    let surf_idx = hit.surface_idx.unwrap_or(0);
                                     particle.advance(hit.distance);
-                                    let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                                    let n = surfaces[surf_idx].normal_at(particle.pos);
                                     let d = particle.dir;
                                     particle.dir = d - n * (2.0 * d.dot(n));
                                 }
                                 BoundaryCondition::Transmission => {
                                     particle.advance(hit.distance + nudge);
-                                    if let Some(next) = hit.next_cell_idx {
-                                        particle.cell_idx = next;
-                                    } else {
-                                        particle.kill();
-                                        result.leakage += 1;
-                                        break;
+                                    match hit.next_stack {
+                                        Some(stack) => {
+                                            particle.cell_idx = stack
+                                                .last()
+                                                .map(|c| c.cell_idx as usize)
+                                                .unwrap_or(0);
+                                            particle.coord_stack = stack;
+                                        }
+                                        None => {
+                                            particle.kill();
+                                            result.leakage += 1;
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -633,7 +645,9 @@ fn transport_particle<XS: XsProvider>(
                     }
                 }
                 CellFill::Universe(_) | CellFill::Lattice(_) => {
-                    // Recursive geometry not yet wired into transport — treat as leakage.
+                    // Should never appear: find_cell_recursive descends through
+                    // these to a Material/Void leaf.
+                    debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
                     particle.kill();
                     result.leakage += 1;
                     break;
@@ -690,41 +704,43 @@ fn transport_particle<XS: XsProvider>(
 
             let dist_collision = rng.exponential(macro_total);
 
-            let trace = geometry::ray::trace_step(
+            let trace = geometry::ray::trace_step_recursive(
+                &particle.coord_stack,
                 particle.pos,
                 particle.dir,
-                particle.cell_idx,
-                surfaces,
-                cells,
+                geometry,
             );
 
             match trace {
                 Some(hit) if hit.distance < dist_collision => {
                     result.surface_crossings += 1;
-                    let bc = surfaces[hit.surface_idx].boundary_condition();
-                    match bc {
+                    match hit.bc {
                         BoundaryCondition::Vacuum => {
                             particle.advance(hit.distance);
                             particle.kill();
                             result.leakage += 1;
                         }
                         BoundaryCondition::Reflective => {
-                            // Advance exactly to the surface (no overshoot), then reflect.
-                            // COINCIDENCE_TOL in Surface::distance() filters the t≈0
-                            // re-intersection, preventing infinite bounce loops.
+                            let surf_idx = hit.surface_idx.unwrap_or(0);
                             particle.advance(hit.distance);
-                            let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                            let n = surfaces[surf_idx].normal_at(particle.pos);
                             let d = particle.dir;
                             particle.dir = d - n * (2.0 * d.dot(n));
                         }
                         BoundaryCondition::Transmission => {
-                            // Overshoot slightly to land clearly inside the next cell.
                             particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
-                            if let Some(next) = hit.next_cell_idx {
-                                particle.cell_idx = next;
-                            } else {
-                                particle.kill();
-                                result.leakage += 1;
+                            match hit.next_stack {
+                                Some(stack) => {
+                                    particle.cell_idx = stack
+                                        .last()
+                                        .map(|c| c.cell_idx as usize)
+                                        .unwrap_or(0);
+                                    particle.coord_stack = stack;
+                                }
+                                None => {
+                                    particle.kill();
+                                    result.leakage += 1;
+                                }
                             }
                         }
                     }
@@ -1000,6 +1016,7 @@ fn transport_particle_delta<XS: XsProvider>(
     site: &FissionSite,
     batch: u64,
     particle_idx: u64,
+    geometry: &crate::geometry::Geometry,
     surfaces: &[Surface],
     cells: &[Cell],
     materials: &[Material],
@@ -1021,8 +1038,13 @@ fn transport_particle_delta<XS: XsProvider>(
 
     let (u, v, w) = rng.isotropic_direction();
     let dir = Vec3::new(u, v, w);
-    let cell_idx = geometry::ray::find_cell(site.pos, surfaces, cells).unwrap_or(0);
-    let mut particle = Particle::new(site.pos, dir, site.energy, cell_idx);
+    let mut particle = match geometry::ray::find_cell_recursive(site.pos, geometry) {
+        Some(stack) => Particle::with_stack(site.pos, dir, site.energy, stack),
+        None => {
+            result.leakage += 1;
+            return result;
+        }
+    };
 
     let mut pending: Vec<Particle> = Vec::new();
 
@@ -1043,36 +1065,40 @@ fn transport_particle_delta<XS: XsProvider>(
             let d_collision = rng.exponential(sigma_maj);
 
             // Check for vacuum/reflective boundaries before advancing
-            let trace = geometry::ray::trace_step(
+            let trace = geometry::ray::trace_step_recursive(
+                &particle.coord_stack,
                 particle.pos,
                 particle.dir,
-                particle.cell_idx,
-                surfaces,
-                cells,
+                geometry,
             );
 
             match trace {
                 Some(hit) if hit.distance < d_collision => {
-                    let bc = surfaces[hit.surface_idx].boundary_condition();
-                    match bc {
+                    match hit.bc {
                         BoundaryCondition::Vacuum => {
                             particle.kill();
                             result.leakage += 1;
                             break;
                         }
                         BoundaryCondition::Reflective => {
+                            let surf_idx = hit.surface_idx.unwrap_or(0);
                             particle.advance(hit.distance);
-                            let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                            let n = surfaces[surf_idx].normal_at(particle.pos);
                             let d = particle.dir;
                             particle.dir = d - n * (2.0 * d.dot(n));
                             continue;
                         }
                         BoundaryCondition::Transmission => {
-                            // Delta tracking: skip transmission boundaries, just advance
+                            // Delta tracking: skip transmission boundaries, just advance.
                             particle.advance(d_collision);
-                            // Find which cell we ended up in
-                            match geometry::ray::find_cell(particle.pos, surfaces, cells) {
-                                Some(idx) => particle.cell_idx = idx,
+                            match geometry::ray::find_cell_recursive(particle.pos, geometry) {
+                                Some(stack) => {
+                                    particle.cell_idx = stack
+                                        .last()
+                                        .map(|c| c.cell_idx as usize)
+                                        .unwrap_or(0);
+                                    particle.coord_stack = stack;
+                                }
                                 None => {
                                     particle.kill();
                                     result.leakage += 1;
@@ -1083,15 +1109,19 @@ fn transport_particle_delta<XS: XsProvider>(
                     }
                 }
                 _ => {
-                    // No boundary before collision distance — advance freely
+                    // No boundary before collision distance — advance freely.
                     particle.advance(d_collision);
-                    // Verify we're still in a valid cell
-                    if let Some(idx) = geometry::ray::find_cell(particle.pos, surfaces, cells) {
-                        particle.cell_idx = idx;
-                    } else {
-                        particle.kill();
-                        result.leakage += 1;
-                        break;
+                    match geometry::ray::find_cell_recursive(particle.pos, geometry) {
+                        Some(stack) => {
+                            particle.cell_idx =
+                                stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                            particle.coord_stack = stack;
+                        }
+                        None => {
+                            particle.kill();
+                            result.leakage += 1;
+                            break;
+                        }
                     }
                 }
             }
@@ -1101,18 +1131,16 @@ fn transport_particle_delta<XS: XsProvider>(
             let mat_idx = match cell.fill {
                 CellFill::Material(m) => m as usize,
                 CellFill::Void => {
-                    // Void region — free-stream to next surface
-                    let trace = geometry::ray::trace_step(
+                    // Void region — free-stream to next surface.
+                    let trace = geometry::ray::trace_step_recursive(
+                        &particle.coord_stack,
                         particle.pos,
                         particle.dir,
-                        particle.cell_idx,
-                        surfaces,
-                        cells,
+                        geometry,
                     );
                     match trace {
                         Some(hit) => {
-                            let bc = surfaces[hit.surface_idx].boundary_condition();
-                            match bc {
+                            match hit.bc {
                                 BoundaryCondition::Vacuum => {
                                     particle.advance(hit.distance);
                                     particle.kill();
@@ -1120,20 +1148,28 @@ fn transport_particle_delta<XS: XsProvider>(
                                     break;
                                 }
                                 BoundaryCondition::Reflective => {
+                                    let surf_idx = hit.surface_idx.unwrap_or(0);
                                     particle.advance(hit.distance);
-                                    let n = surfaces[hit.surface_idx].normal_at(particle.pos);
+                                    let n = surfaces[surf_idx].normal_at(particle.pos);
                                     let d = particle.dir;
                                     particle.dir = d - n * (2.0 * d.dot(n));
                                 }
                                 BoundaryCondition::Transmission => {
                                     particle
                                         .advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
-                                    if let Some(next) = hit.next_cell_idx {
-                                        particle.cell_idx = next;
-                                    } else {
-                                        particle.kill();
-                                        result.leakage += 1;
-                                        break;
+                                    match hit.next_stack {
+                                        Some(stack) => {
+                                            particle.cell_idx = stack
+                                                .last()
+                                                .map(|c| c.cell_idx as usize)
+                                                .unwrap_or(0);
+                                            particle.coord_stack = stack;
+                                        }
+                                        None => {
+                                            particle.kill();
+                                            result.leakage += 1;
+                                            break;
+                                        }
                                     }
                                 }
                             }
@@ -1147,7 +1183,9 @@ fn transport_particle_delta<XS: XsProvider>(
                     }
                 }
                 CellFill::Universe(_) | CellFill::Lattice(_) => {
-                    // Recursive geometry not yet wired into transport — treat as leakage.
+                    // Should never appear: find_cell_recursive descends through
+                    // these to a Material/Void leaf.
+                    debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
                     particle.kill();
                     result.leakage += 1;
                     break;
@@ -1301,8 +1339,16 @@ pub fn run_eigenvalue<XS: XsProvider>(
     // Auto-detect optimal tracking algorithm
     let tracking = detect_tracking_mode(cells, materials, xs_provider, config.verbose);
 
+    // Build a flat-geometry wrapper for the recursive primitives. Existing
+    // binaries call run_eigenvalue with surfaces+cells slices; we clone
+    // them once here. Nested-geometry callers should construct the
+    // Geometry themselves and call a future run_eigenvalue_recursive that
+    // takes &Geometry directly.
+    let geometry = crate::geometry::Geometry::from_slices(surfaces, cells)
+        .expect("geometry must validate");
+
     let seed = config.seed;
-    let mut source_bank = initial_source(n, surfaces, cells, seed);
+    let mut source_bank = initial_source(n, &geometry, cells, seed);
 
     // Build the Shannon-entropy mesh from the AABB of the first fissile cell.
     let aabb = cells
@@ -1342,6 +1388,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
                 site,
                 batch_seed,
                 i as u64,
+                &geometry,
                 surfaces,
                 cells,
                 materials,
@@ -1351,6 +1398,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
                 site,
                 batch_seed,
                 i as u64,
+                &geometry,
                 surfaces,
                 cells,
                 materials,
@@ -1473,11 +1521,21 @@ pub fn run_eigenvalue<XS: XsProvider>(
 /// only those that land inside a cell containing material. For Godiva, this
 /// is the single fuel sphere. For PWR pin cell, this is the cylindrical
 /// fuel region (rejects corners of the bounding box that fall in gap/clad/water).
-fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> Vec<FissionSite> {
+fn initial_source(
+    n: usize,
+    geometry: &crate::geometry::Geometry,
+    cells: &[Cell],
+    seed: u64,
+) -> Vec<FissionSite> {
     let mut rng = Rng::new(seed * 100_000, 0);
     let mut sites = Vec::with_capacity(n);
 
-    // Find the first material cell (assumed fissile for eigenvalue problems)
+    // Find the first material cell (assumed fissile for eigenvalue problems).
+    // For recursive geometries, the deepest leaf will be a Material cell —
+    // we accept any leaf hit as a fission site (good for nested fuel
+    // assemblies). Falls back to the AABB-rejection scheme on flat
+    // geometry by checking that the deepest cell index matches the first
+    // Material cell.
     let target_idx = cells
         .iter()
         .position(|c| matches!(c.fill, CellFill::Material(_)));
@@ -1494,16 +1552,24 @@ fn initial_source(n: usize, surfaces: &[Surface], cells: &[Cell], seed: u64) -> 
         let z = aabb.min.z + rng.uniform() * (aabb.max.z - aabb.min.z);
         let pos = Vec3::new(x, y, z);
 
-        // Only accept if the point is actually in the target cell
-        // (rejects points in the AABB corners that are outside the cylinder)
-        if let Some(idx) = geometry::ray::find_cell(pos, surfaces, cells)
-            && Some(idx) == target_idx
-        {
-            sites.push(FissionSite {
-                pos,
-                energy: 1.0e6,
-                weight: 1.0,
-            });
+        if let Some(stack) = geometry::ray::find_cell_recursive(pos, geometry) {
+            let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+            // Accept if the leaf is the target Material cell (flat case)
+            // OR any Material cell (nested case where the leaf is inside
+            // a universe/lattice fill).
+            let accept = match cells.get(deepest).map(|c| c.fill) {
+                Some(CellFill::Material(_)) => Some(deepest) == target_idx
+                    || target_idx.is_none()
+                    || stack.len() > 1,
+                _ => false,
+            };
+            if accept {
+                sites.push(FissionSite {
+                    pos,
+                    energy: 1.0e6,
+                    weight: 1.0,
+                });
+            }
         }
     }
 

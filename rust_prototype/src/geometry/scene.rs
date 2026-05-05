@@ -173,6 +173,13 @@ impl Geometry {
         Self::new(surfaces, cells, universes, Vec::new(), UniverseId(0))
     }
 
+    /// Same as [`Self::flat`] but takes slices and clones — useful at
+    /// transport entry points that have `&[Surface]` / `&[Cell]` from
+    /// existing APIs.
+    pub fn from_slices(surfaces: &[Surface], cells: &[Cell]) -> Result<Self, GeometryError> {
+        Self::flat(surfaces.to_vec(), cells.to_vec())
+    }
+
     #[inline]
     pub fn universe(&self, id: UniverseId) -> &Universe {
         &self.universes[id.0 as usize]

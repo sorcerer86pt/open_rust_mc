@@ -311,26 +311,35 @@ pub fn transport_history_csg(
         electrons: Vec::new(),
     };
 
-    // Find starting cell; if the source is outside the model the
+    // Build a flat-geometry wrapper for the recursive primitives.
+    let geometry = match crate::geometry::Geometry::from_slices(surfaces, cells) {
+        Ok(g) => g,
+        Err(_) => {
+            result.energy_escaped += source_energy;
+            return result;
+        }
+    };
+
+    // Find starting stack; if the source is outside the model the
     // photon is born already leaked and its energy escapes.
-    let Some(start_cell) = geometry::ray::find_cell(source_pos, surfaces, cells) else {
+    let Some(start_stack) = geometry::ray::find_cell_recursive(source_pos, &geometry) else {
         result.energy_escaped += source_energy;
         return result;
     };
 
-    // (position, direction, energy, cell_idx). Secondaries are
+    // (position, direction, energy, coord_stack). Secondaries are
     // spawned at a collision site inside the current cell, so they
-    // inherit that cell; we re-resolve only when we cannot trust the
-    // inherited index (e.g. on the very first step).
-    let mut bank: Vec<(Vec3, Vec3, f64, usize)> =
-        vec![(source_pos, source_dir, source_energy, start_cell)];
+    // inherit that cell's stack.
+    let mut bank: Vec<(Vec3, Vec3, f64, crate::geometry::coord::CoordStack)> =
+        vec![(source_pos, source_dir, source_energy, start_stack)];
 
-    while let Some((pos, dir, energy, cell_idx)) = bank.pop() {
+    while let Some((pos, dir, energy, coord_stack)) = bank.pop() {
         transport_one_csg(
             pos,
             dir,
             energy,
-            cell_idx,
+            coord_stack,
+            &geometry,
             surfaces,
             cells,
             materials,
@@ -349,19 +358,24 @@ fn transport_one_csg(
     start_pos: Vec3,
     start_dir: Vec3,
     start_energy: f64,
-    start_cell: usize,
+    start_stack: crate::geometry::coord::CoordStack,
+    geometry: &crate::geometry::Geometry,
     surfaces: &[Surface],
     cells: &[Cell],
     materials: &[Option<PhotonMaterial>],
     energy_cutoff_ev: f64,
     rng: &mut Rng,
-    bank: &mut Vec<(Vec3, Vec3, f64, usize)>,
+    bank: &mut Vec<(Vec3, Vec3, f64, crate::geometry::coord::CoordStack)>,
     result: &mut HistoryResult,
 ) {
     let mut pos = start_pos;
     let mut dir = start_dir;
     let mut energy = start_energy;
-    let mut cell_idx = start_cell;
+    let mut coord_stack = start_stack;
+    let mut cell_idx = coord_stack
+        .last()
+        .map(|c| c.cell_idx as usize)
+        .unwrap_or(0);
 
     // Shared cap across collisions + surface crossings. A stuck photon
     // (pathological geometry, grazing reflection loop) is terminated
@@ -380,14 +394,16 @@ fn transport_one_csg(
             CellFill::Material(m) => materials.get(m as usize).and_then(|o| o.as_ref()),
             CellFill::Void => None,
             CellFill::Universe(_) | CellFill::Lattice(_) => {
-                // Recursive geometry not yet wired into the photon path.
+                // Should never appear: find_cell_recursive descends through
+                // these to a Material/Void leaf.
+                debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
                 result.energy_escaped += energy;
                 return;
             }
         };
 
-        // Distance to the next surface in the current cell, if any.
-        let trace = geometry::ray::trace_step(pos, dir, cell_idx, surfaces, cells);
+        // Distance to the next geometric event (surface or grid line).
+        let trace = geometry::ray::trace_step_recursive(&coord_stack, pos, dir, geometry);
 
         let sigma_tot = material.map(|m| m.macro_total(energy)).unwrap_or(0.0);
 
@@ -408,6 +424,7 @@ fn transport_one_csg(
                 &mut pos,
                 &mut dir,
                 &mut cell_idx,
+                &mut coord_stack,
                 &mut energy,
                 result,
             ) {
@@ -427,6 +444,7 @@ fn transport_one_csg(
                     &mut pos,
                     &mut dir,
                     &mut cell_idx,
+                    &mut coord_stack,
                     &mut energy,
                     result,
                 ) {
@@ -471,7 +489,7 @@ fn transport_one_csg(
                         });
                         for ep in out.fluorescence_photons {
                             let (dx, dy, dz) = rng.isotropic_direction();
-                            bank.push((pos, Vec3::new(dx, dy, dz), ep, cell_idx));
+                            bank.push((pos, Vec3::new(dx, dy, dz), ep, coord_stack.clone()));
                         }
                         return;
                     }
@@ -493,8 +511,13 @@ fn transport_one_csg(
                             });
                             let (dx, dy, dz) = rng.isotropic_direction();
                             let ann_dir = Vec3::new(dx, dy, dz);
-                            bank.push((pos, ann_dir, ANNIHILATION_ENERGY_EV, cell_idx));
-                            bank.push((pos, -ann_dir, ANNIHILATION_ENERGY_EV, cell_idx));
+                            bank.push((pos, ann_dir, ANNIHILATION_ENERGY_EV, coord_stack.clone()));
+                            bank.push((
+                                pos,
+                                -ann_dir,
+                                ANNIHILATION_ENERGY_EV,
+                                coord_stack.clone(),
+                            ));
                         } else {
                             result.energy_deposited += energy;
                             result.deposits.push((pos, energy));
@@ -515,24 +538,25 @@ fn transport_one_csg(
 /// photon should continue (reflected or entered a new cell).
 #[inline]
 fn handle_boundary(
-    hit: crate::geometry::RayHit,
+    hit: crate::geometry::ray::RecursiveHit,
     surfaces: &[Surface],
     pos: &mut Vec3,
     dir: &mut Vec3,
     cell_idx: &mut usize,
+    coord_stack: &mut crate::geometry::coord::CoordStack,
     energy: &mut f64,
     result: &mut HistoryResult,
 ) -> bool {
-    let bc = surfaces[hit.surface_idx].boundary_condition();
-    match bc {
+    match hit.bc {
         BoundaryCondition::Vacuum => {
             *pos = *pos + *dir * hit.distance;
             result.energy_escaped += *energy;
             false
         }
         BoundaryCondition::Reflective => {
+            let surf_idx = hit.surface_idx.unwrap_or(0);
             *pos = *pos + *dir * hit.distance;
-            let n = surfaces[hit.surface_idx].normal_at(*pos);
+            let n = surfaces[surf_idx].normal_at(*pos);
             let d = *dir;
             *dir = d - n * (2.0 * d.dot(n));
             true
@@ -540,9 +564,10 @@ fn handle_boundary(
         BoundaryCondition::Transmission => {
             let nudge = (hit.distance * 1e-8).max(1e-8);
             *pos = *pos + *dir * (hit.distance + nudge);
-            match hit.next_cell_idx {
-                Some(next) => {
-                    *cell_idx = next;
+            match hit.next_stack {
+                Some(stack) => {
+                    *cell_idx = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                    *coord_stack = stack;
                     true
                 }
                 None => {
