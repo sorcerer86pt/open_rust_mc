@@ -583,9 +583,14 @@ fn transport_particle<XS: XsProvider>(
             total_events += 1;
             let cell = &cells[particle.cell_idx];
 
-            let mat_idx = match cell.fill {
-                CellFill::Material(m) => m as usize,
-                CellFill::Void => {
+            // Effective fill: lattice override (if any) wins over the
+            // cell's static `cell.fill`. Lets the same pin universe
+            // be reused at many lattice positions with different
+            // materials (different enrichments, burnup tiers, etc.).
+            let effective = geometry.effective_material_idx(&particle.coord_stack);
+            let mat_idx = match effective {
+                crate::geometry::EffectiveFill::Material(m) => m as usize,
+                crate::geometry::EffectiveFill::Void => {
                     // Void region — free-stream to next surface (no interactions).
                     // Safety limit prevents infinite loops in degenerate geometries.
                     void_crossings += 1;
@@ -643,14 +648,6 @@ fn transport_particle<XS: XsProvider>(
                             break;
                         }
                     }
-                }
-                CellFill::Universe(_) | CellFill::Lattice(_) => {
-                    // Should never appear: find_cell_recursive descends through
-                    // these to a Material/Void leaf.
-                    debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
-                    particle.kill();
-                    result.leakage += 1;
-                    break;
                 }
             };
 
@@ -1124,11 +1121,14 @@ fn transport_particle_delta<XS: XsProvider>(
                 }
             }
 
-            // Get current material — handle void by free-streaming
+            // Get current material — handle void by free-streaming.
+            // Effective fill applies any per-lattice-element override.
             let cell = &cells[particle.cell_idx];
-            let mat_idx = match cell.fill {
-                CellFill::Material(m) => m as usize,
-                CellFill::Void => {
+            let _ = cell; // silence unused while we drop the static-fill match
+            let effective = geometry.effective_material_idx(&particle.coord_stack);
+            let mat_idx = match effective {
+                crate::geometry::EffectiveFill::Material(m) => m as usize,
+                crate::geometry::EffectiveFill::Void => {
                     // Void region — free-stream to next surface.
                     let trace = geometry::ray::trace_step_recursive(
                         &particle.coord_stack,
@@ -1179,14 +1179,6 @@ fn transport_particle_delta<XS: XsProvider>(
                             break;
                         }
                     }
-                }
-                CellFill::Universe(_) | CellFill::Lattice(_) => {
-                    // Should never appear: find_cell_recursive descends through
-                    // these to a Material/Void leaf.
-                    debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
-                    particle.kill();
-                    result.leakage += 1;
-                    break;
                 }
             };
             if mat_idx >= materials.len() {

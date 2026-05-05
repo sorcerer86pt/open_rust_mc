@@ -3,11 +3,21 @@
 //! Rectangular and hexagonal lattices for repeated geometry (e.g., fuel
 //! assemblies in a reactor core). Stub for Phase 2.
 
+use std::collections::HashMap;
+
 use super::{UniverseId, Vec3};
 
 /// Unique identifier for a lattice within a `Geometry`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LatticeId(pub u32);
+
+/// Per-element override of a cell's static material fill.
+///
+/// Map from global cell index (into `Geometry::cells`) to the
+/// overriding material index. When a particle's deepest stack frame
+/// is in this lattice element, transport uses the overriding
+/// material in place of `cell.fill`.
+pub type MaterialOverrideMap = HashMap<usize, u32>;
 
 /// A rectangular lattice of universes.
 #[derive(Debug, Clone)]
@@ -20,6 +30,15 @@ pub struct RectLattice {
     pub shape: [usize; 3],
     /// Universe IDs filling each lattice position, row-major.
     pub universes: Vec<UniverseId>,
+    /// Optional per-element material overrides. When `Some`, the Vec
+    /// has length `shape[0] * shape[1] * shape[2]`, addressed in the
+    /// same row-major order as `universes`. The map at each element
+    /// rebinds specific cells (by global cell index) to a different
+    /// material index, letting one pin universe be reused at many
+    /// lattice positions with different enrichments / burnup tiers.
+    /// `None` means no overrides anywhere in the lattice (the common
+    /// case; checked once in the hot path and short-circuited).
+    pub material_overrides: Option<Vec<MaterialOverrideMap>>,
 }
 
 impl RectLattice {
@@ -44,6 +63,41 @@ impl RectLattice {
     pub fn universe_at(&self, ix: usize, iy: usize, iz: usize) -> UniverseId {
         let idx = iz * self.shape[1] * self.shape[0] + iy * self.shape[0] + ix;
         self.universes[idx]
+    }
+
+    /// Row-major linear index for an element. Use with `universes` and
+    /// `material_overrides` indexing.
+    #[inline]
+    pub fn linear_index(&self, ix: usize, iy: usize, iz: usize) -> usize {
+        iz * self.shape[1] * self.shape[0] + iy * self.shape[0] + ix
+    }
+
+    /// Resolve an element from a signed `[ix, iy, iz]` (the form
+    /// stored on `Coord.lattice`) to its linear index. Returns
+    /// `None` if any axis is out of range — should not happen for a
+    /// well-formed `Coord` produced by `find_cell_recursive`.
+    #[inline]
+    pub fn linear_index_signed(&self, ix: i32, iy: i32, iz: i32) -> Option<usize> {
+        if ix < 0 || iy < 0 || iz < 0 {
+            return None;
+        }
+        let (ix, iy, iz) = (ix as usize, iy as usize, iz as usize);
+        if ix >= self.shape[0] || iy >= self.shape[1] || iz >= self.shape[2] {
+            return None;
+        }
+        Some(self.linear_index(ix, iy, iz))
+    }
+
+    /// Look up the overriding material for `cell_idx` at lattice
+    /// element `[ix, iy, iz]`, if any. Returns `None` when this
+    /// lattice has no overrides at all, the element index is out of
+    /// range, or the element has no override for this cell.
+    #[inline]
+    pub fn material_override(&self, element: [i32; 3], cell_idx: usize) -> Option<u32> {
+        let overrides = self.material_overrides.as_ref()?;
+        let idx = self.linear_index_signed(element[0], element[1], element[2])?;
+        let elem_overrides = overrides.get(idx)?;
+        elem_overrides.get(&cell_idx).copied()
     }
 
     /// Get the local coordinate within a lattice element.
@@ -126,6 +180,7 @@ mod tests {
             pitch: Vec3::new(1.0, 1.0, 1.0),
             shape: [2, 2, 1],
             universes: vec![UniverseId(0); 4],
+            material_overrides: None,
         }
     }
 

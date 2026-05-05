@@ -23,7 +23,7 @@ pub use cell::{Cell, CellId};
 pub use coord::{Coord, CoordStack, CoordStackExt};
 pub use lattice::{LatticeId, RectLattice};
 pub use ray::{Ray, RayHit};
-pub use scene::{Geometry, GeometryError};
+pub use scene::{EffectiveFill, Geometry, GeometryError};
 pub use surface::{Surface, SurfaceId};
 pub use universe::{Universe, UniverseId};
 

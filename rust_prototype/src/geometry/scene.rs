@@ -250,6 +250,49 @@ impl Geometry {
     pub fn root(&self) -> &Universe {
         self.universe(self.root_universe)
     }
+
+    /// Resolve the effective material index for a particle's deepest
+    /// cell, applying any per-lattice-element override.
+    ///
+    /// Returns `Some(material_idx)` when the deepest cell is a
+    /// `Material` cell (or a cell whose static fill the user
+    /// rebound via `RectLattice::material_overrides`). Returns
+    /// `None` for `Void` cells. Falls through to the static fill
+    /// when the deepest stack frame isn't inside a lattice or when
+    /// the lattice has no override for this cell.
+    pub fn effective_material_idx(
+        &self,
+        stack: &super::coord::CoordStack,
+    ) -> EffectiveFill {
+        let Some(deepest) = stack.last() else {
+            return EffectiveFill::Void;
+        };
+        let cell_idx = deepest.cell_idx as usize;
+
+        if let Some((lattice_id, element)) = deepest.lattice {
+            let lattice = self.lattice(lattice_id);
+            if let Some(mat) = lattice.material_override(element, cell_idx) {
+                return EffectiveFill::Material(mat);
+            }
+        }
+
+        match self.cells.get(cell_idx).map(|c| c.fill) {
+            Some(CellFill::Material(m)) => EffectiveFill::Material(m),
+            Some(CellFill::Void) => EffectiveFill::Void,
+            // Universe / Lattice should never be the deepest cell —
+            // find_cell_recursive descends through them. Treat as
+            // void leakage if it does happen.
+            _ => EffectiveFill::Void,
+        }
+    }
+}
+
+/// What `Geometry::effective_material_idx` resolves to: a material
+/// index (with any lattice override applied) or void.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffectiveFill {
+    Material(u32),
+    Void,
 }
 
 #[cfg(test)]
@@ -354,6 +397,145 @@ mod tests {
     }
 
     #[test]
+    fn material_override_resolves_per_lattice_element() {
+        use crate::geometry::coord::CoordStack;
+        use crate::geometry::lattice::MaterialOverrideMap;
+        use std::collections::HashMap;
+
+        // Geometry: 2×2 lattice of a single pin universe. Cell 0 of
+        // the pin universe is fuel (static fill = Material(0)).
+        // Element (0,0) and (1,1) override cell 0 to Material(2);
+        // the other two elements use the static fill.
+        //
+        // Without the override, a particle whose deepest stack frame
+        // is "lattice element X, cell 0" should resolve to material 0.
+        // With the override applied, elements (0,0) and (1,1) should
+        // resolve to material 2; (1,0) and (0,1) stay at material 0.
+        let surfaces = vec![
+            // 0: pin cylinder at element-local (0.5, 0.5) R=0.3
+            Surface::CylinderZ {
+                center_x: 0.5,
+                center_y: 0.5,
+                radius: 0.3,
+                bc: BoundaryCondition::Transmission,
+            },
+            // 1..4: outer box at +/- 1
+            Surface::PlaneX {
+                x0: -1.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneX {
+                x0: 1.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: -1.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: 1.0,
+                bc: BoundaryCondition::Reflective,
+            },
+        ];
+        let cells = vec![
+            // 0: fuel (static fill = Material 0)
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            // 1: water (static fill = Material 1)
+            Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+            // 2: root cell — lattice fill
+            Cell::new(
+                CellId(2),
+                cell::intersect_all(vec![
+                    cell::outside(1),
+                    cell::inside(2),
+                    cell::outside(3),
+                    cell::inside(4),
+                ]),
+                CellFill::Lattice(0),
+            ),
+        ];
+        let universes = vec![
+            Universe::new(UniverseId(0), vec![2]),    // root
+            Universe::new(UniverseId(1), vec![0, 1]), // pin
+        ];
+
+        // Per-element override maps: element (0,0) and (1,1) override
+        // cell 0 → material 2.
+        let mut e00 = MaterialOverrideMap::new();
+        e00.insert(0, 2);
+        let mut e10 = MaterialOverrideMap::new();
+        let mut e01 = MaterialOverrideMap::new();
+        let mut e11 = MaterialOverrideMap::new();
+        e11.insert(0, 2);
+        // Empty maps for elements without overrides — explicit so the
+        // Vec aligns with the row-major layout.
+        let _ = (&mut e10, &mut e01);
+
+        let lattice = RectLattice {
+            origin: Vec3::new(-1.0, -1.0, -1e6),
+            pitch: Vec3::new(1.0, 1.0, 2e6),
+            shape: [2, 2, 1],
+            universes: vec![UniverseId(1); 4],
+            material_overrides: Some(vec![
+                e00,
+                HashMap::new(),
+                HashMap::new(),
+                e11,
+            ]),
+        };
+
+        let geom = Geometry::new(
+            surfaces,
+            cells,
+            universes,
+            vec![lattice],
+            UniverseId(0),
+        )
+        .expect("geometry");
+
+        let lookup_at = |element: [i32; 3], cell_idx: u32| -> EffectiveFill {
+            use crate::geometry::Coord;
+            let stack: CoordStack = smallvec::smallvec![
+                Coord::root(UniverseId(0), 2),
+                Coord {
+                    universe: UniverseId(1),
+                    cell_idx,
+                    lattice: Some((LatticeId(0), element)),
+                    offset: Vec3::new(0.0, 0.0, 0.0),
+                    rotation: None,
+                },
+            ];
+            geom.effective_material_idx(&stack)
+        };
+
+        // Cell 0 (fuel) lookup at every element.
+        assert_eq!(
+            lookup_at([0, 0, 0], 0),
+            EffectiveFill::Material(2),
+            "(0,0): override cell 0 → mat 2"
+        );
+        assert_eq!(
+            lookup_at([1, 0, 0], 0),
+            EffectiveFill::Material(0),
+            "(1,0): no override → static fill mat 0"
+        );
+        assert_eq!(
+            lookup_at([0, 1, 0], 0),
+            EffectiveFill::Material(0),
+            "(0,1): no override → static fill mat 0"
+        );
+        assert_eq!(
+            lookup_at([1, 1, 0], 0),
+            EffectiveFill::Material(2),
+            "(1,1): override cell 0 → mat 2"
+        );
+
+        // Cell 1 (water) — never overridden, always material 1.
+        assert_eq!(lookup_at([0, 0, 0], 1), EffectiveFill::Material(1));
+        assert_eq!(lookup_at([1, 1, 0], 1), EffectiveFill::Material(1));
+    }
+
+    #[test]
     fn rejects_lattice_referring_to_missing_universe() {
         let surfaces = vec![Surface::Sphere {
             center: Vec3::new(0.0, 0.0, 0.0),
@@ -372,6 +554,7 @@ mod tests {
                 UniverseId(0),
                 UniverseId(99),
             ],
+            material_overrides: None,
         }];
         let err = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
             .expect_err("should reject");

@@ -490,6 +490,7 @@ fn lattice_unit_cell_2x2() -> Geometry {
         pitch: Vec3::new(1.0, 1.0, 2e6),
         shape: [2, 2, 1],
         universes: vec![UniverseId(1); 4],
+        material_overrides: None,
     }];
     Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
         .expect("lattice 2x2")

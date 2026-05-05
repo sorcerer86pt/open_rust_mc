@@ -283,6 +283,7 @@ fn setup_geometry(reflective_z: bool) -> Geometry {
         pitch: Vec3::new(PITCH, PITCH, 2.0 * z_half),
         shape: [SHAPE, SHAPE, 1],
         universes: lattice_universes,
+        material_overrides: None,
     }];
 
     Geometry::new(surfaces, cells, universes, lattices, UniverseId(U_ROOT))
