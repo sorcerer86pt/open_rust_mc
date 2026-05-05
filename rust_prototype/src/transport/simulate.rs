@@ -1332,21 +1332,34 @@ pub fn run_eigenvalue<XS: XsProvider>(
     materials: &[Material],
     xs_provider: &XS,
 ) -> (Vec<BatchResult>, f64) {
-    let n = config.particles_per_batch as usize;
-
-    // Auto-detect optimal tracking algorithm
-    let tracking = detect_tracking_mode(cells, materials, xs_provider, config.verbose);
-
-    // Build a flat-geometry wrapper for the recursive primitives. Existing
-    // binaries call run_eigenvalue with surfaces+cells slices; we clone
-    // them once here. Nested-geometry callers should construct the
-    // Geometry themselves and call a future run_eigenvalue_recursive that
-    // takes &Geometry directly.
+    // Wrap the flat surfaces+cells in a single-universe Geometry, then
+    // delegate to the geometry-aware variant. Existing binaries that
+    // pass slices keep working unchanged.
     let geometry = crate::geometry::Geometry::from_slices(surfaces, cells)
         .expect("geometry must validate");
+    run_eigenvalue_with_geometry(config, &geometry, materials, xs_provider)
+}
+
+/// Run a k-eigenvalue simulation with an explicit recursive `Geometry`.
+///
+/// Use this entry point for problems with nested universes or
+/// lattices. Flat-geometry callers should keep using `run_eigenvalue`,
+/// which wraps slices into a single-universe Geometry and then calls
+/// this function.
+pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
+    config: &SimConfig,
+    geometry: &crate::geometry::Geometry,
+    materials: &[Material],
+    xs_provider: &XS,
+) -> (Vec<BatchResult>, f64) {
+    let n = config.particles_per_batch as usize;
+    let surfaces = geometry.surfaces.as_slice();
+    let cells = geometry.cells.as_slice();
+
+    let tracking = detect_tracking_mode(cells, materials, xs_provider, config.verbose);
 
     let seed = config.seed;
-    let mut source_bank = initial_source(n, &geometry, cells, seed);
+    let mut source_bank = initial_source(n, geometry, cells, seed);
 
     // Build the Shannon-entropy mesh from the AABB of the first fissile cell.
     let aabb = cells
@@ -1386,7 +1399,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
                 site,
                 batch_seed,
                 i as u64,
-                &geometry,
+                geometry,
                 surfaces,
                 cells,
                 materials,
@@ -1396,7 +1409,7 @@ pub fn run_eigenvalue<XS: XsProvider>(
                 site,
                 batch_seed,
                 i as u64,
-                &geometry,
+                geometry,
                 surfaces,
                 cells,
                 materials,
@@ -1529,22 +1542,39 @@ fn initial_source(
     let mut sites = Vec::with_capacity(n);
 
     // Find the first material cell (assumed fissile for eigenvalue problems).
-    // For recursive geometries, the deepest leaf will be a Material cell —
-    // we accept any leaf hit as a fission site (good for nested fuel
-    // assemblies). Falls back to the AABB-rejection scheme on flat
-    // geometry by checking that the deepest cell index matches the first
-    // Material cell.
     let target_idx = cells
         .iter()
         .position(|c| matches!(c.fill, CellFill::Material(_)));
-    let aabb = target_idx
-        .map(|i| cells[i].aabb)
-        .unwrap_or(crate::geometry::Aabb::new(
+
+    // Sampling AABB. For flat geometries the target Material cell
+    // typically has a tight AABB (set by the caller) and we use that.
+    // For nested geometries the Material cell lives in element-local
+    // coords — its AABB is meaningless in world coords. In that case
+    // fall back to the union of every cell that has a finite world
+    // AABB; that's the smallest world-coord box guaranteed to contain
+    // the geometry.
+    let target_aabb = target_idx.map(|i| cells[i].aabb);
+    let aabb = match target_aabb {
+        Some(a) if a.surface_area().is_finite() && a.surface_area() > 0.0 => a,
+        _ => union_finite_world_aabbs(cells).unwrap_or(crate::geometry::Aabb::new(
             Vec3::new(-10.0, -10.0, -10.0),
             Vec3::new(10.0, 10.0, 10.0),
-        ));
+        )),
+    };
+
+    let mut attempts: u64 = 0;
+    let max_attempts: u64 = (n as u64).saturating_mul(10_000).max(1_000_000);
 
     while sites.len() < n {
+        attempts += 1;
+        if attempts > max_attempts {
+            panic!(
+                "initial_source: rejection sampling failed to find {} fissile points \
+                 in {} attempts inside AABB {:?}. Either the geometry has no Material \
+                 cells, or the target AABB doesn't intersect any fissile region.",
+                n, max_attempts, aabb
+            );
+        }
         let x = aabb.min.x + rng.uniform() * (aabb.max.x - aabb.min.x);
         let y = aabb.min.y + rng.uniform() * (aabb.max.y - aabb.min.y);
         let z = aabb.min.z + rng.uniform() * (aabb.max.z - aabb.min.z);
@@ -1572,6 +1602,19 @@ fn initial_source(
     }
 
     sites
+}
+
+/// Union of every cell's AABB that's finite (i.e. set by the caller —
+/// the default `Aabb::INFINITE` is excluded). Used as a sampling-box
+/// fallback in `initial_source` for nested geometries where the
+/// fissile cell's AABB is element-local and meaningless in world
+/// coordinates.
+fn union_finite_world_aabbs(cells: &[Cell]) -> Option<crate::geometry::Aabb> {
+    cells
+        .iter()
+        .map(|c| c.aabb)
+        .filter(|a| a.surface_area().is_finite() && a.surface_area() > 0.0)
+        .reduce(crate::geometry::Aabb::union)
 }
 
 /// Normalize fission bank to N particles for the next generation.
