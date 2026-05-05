@@ -31,7 +31,7 @@ mod cuda_main {
     use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
     use open_rust_mc::geometry::universe::{Universe, UniverseId};
     use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
-    use open_rust_mc::gpu_recursive::GpuRecursiveContext;
+    use open_rust_mc::gpu_recursive::{GpuRecursiveContext, GpuWalkResult};
     use rust_mc_sim::Pcg64;
 
     /// Build the same 2×2 lattice the CPU smoke test uses: pin
@@ -259,6 +259,170 @@ mod cuda_main {
         run_trace("2×2 lattice", &build_geometry(), 50_000);
         println!("\n=== Test 4 (trace_step): 17×17 PWR assembly ===");
         run_trace("17×17 assembly", &build_assembly_geometry(), 50_000);
+
+        // Test 5+6: multi-step pure-geometry walk parity.
+        println!("\n=== Test 5 (multi-step walk, 50 steps): 2×2 lattice ===");
+        run_walk("2×2 lattice", &build_geometry(), 20_000, 50);
+        println!("\n=== Test 6 (multi-step walk, 50 steps): 17×17 PWR assembly ===");
+        run_walk("17×17 assembly", &build_assembly_geometry(), 20_000, 50);
+    }
+
+    /// CPU reference walker that mirrors the device-side multi_step_walk.
+    /// Same axis-aligned reflective handling, same nudge.
+    fn cpu_walk(
+        geom: &Geometry,
+        pos0: (f64, f64, f64),
+        dir0: (f64, f64, f64),
+        max_steps: i32,
+    ) -> ((f64, f64, f64), i32, i32) {
+        let mut pos = Vec3::new(pos0.0, pos0.1, pos0.2);
+        let mut dir = Vec3::new(dir0.0, dir0.1, dir0.2);
+        let mut stack = match find_cell_recursive(pos, geom) {
+            Some(s) => s,
+            None => return ((pos.x, pos.y, pos.z), 0, -1),
+        };
+        let mut final_cell = stack.last().map(|c| c.cell_idx as i32).unwrap_or(-1);
+        let mut steps = 0_i32;
+        for _ in 0..max_steps {
+            let hit = match trace_step_recursive(&stack, pos, dir, geom) {
+                Some(h) => h,
+                None => break,
+            };
+            steps += 1;
+            match hit.bc {
+                open_rust_mc::geometry::surface::BoundaryCondition::Vacuum => {
+                    pos = pos + dir * hit.distance;
+                    final_cell = -1;
+                    break;
+                }
+                open_rust_mc::geometry::surface::BoundaryCondition::Reflective => {
+                    pos = pos + dir * hit.distance;
+                    if let Some(s) = hit.surface_idx {
+                        match geom.surfaces[s] {
+                            Surface::PlaneX { .. } => dir = Vec3::new(-dir.x, dir.y, dir.z),
+                            Surface::PlaneY { .. } => dir = Vec3::new(dir.x, -dir.y, dir.z),
+                            Surface::PlaneZ { .. } => dir = Vec3::new(dir.x, dir.y, -dir.z),
+                            _ => {}
+                        }
+                    }
+                }
+                open_rust_mc::geometry::surface::BoundaryCondition::Transmission => {
+                    let nudge = 1e-10;
+                    pos = pos + dir * (hit.distance + nudge);
+                    match hit.next_stack {
+                        Some(s) => {
+                            final_cell = s.last().map(|c| c.cell_idx as i32).unwrap_or(-1);
+                            stack = s;
+                        }
+                        None => {
+                            final_cell = -1;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        ((pos.x, pos.y, pos.z), steps, final_cell)
+    }
+
+    fn run_walk(label: &str, geom: &Geometry, n: usize, max_steps: i32) {
+        println!("  geometry  : {label}");
+        println!("  particles : {n}, max_steps: {max_steps}");
+
+        let (lo, hi) = geom
+            .cells
+            .iter()
+            .find(|c| matches!(c.fill, CellFill::Lattice(_)))
+            .map(|c| (c.aabb.min, c.aabb.max))
+            .unwrap_or((Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)));
+
+        let mut rng = Pcg64::new(0x5057, 0);
+        let mut positions: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+        let mut directions: Vec<(f64, f64, f64)> = Vec::with_capacity(n);
+        let mut i = 0;
+        while i < n {
+            let x = lo.x + (hi.x - lo.x) * rng.uniform();
+            let y = lo.y + (hi.y - lo.y) * rng.uniform();
+            let z = lo.z + (hi.z - lo.z) * rng.uniform();
+            if find_cell_recursive(Vec3::new(x, y, z), geom)
+                .map(|s| s.len() >= 2)
+                .unwrap_or(false)
+            {
+                let (dx, dy, dz) = rng.isotropic_direction();
+                positions.push((x, y, z));
+                directions.push((dx, dy, dz));
+                i += 1;
+            }
+        }
+
+        // CPU reference.
+        let t0 = Instant::now();
+        let cpu: Vec<((f64, f64, f64), i32, i32)> = positions
+            .iter()
+            .zip(directions.iter())
+            .map(|(&p, &d)| cpu_walk(geom, p, d, max_steps))
+            .collect();
+        let cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let cpu_total_steps: i64 = cpu.iter().map(|r| r.1 as i64).sum();
+        println!(
+            "\nCPU multi_step_walk: {cpu_ms:.1} ms ({:.1} ns/step)",
+            cpu_ms * 1e6 / cpu_total_steps.max(1) as f64
+        );
+
+        // GPU pass.
+        println!("\nBuilding GPU context...");
+        let ctx = GpuRecursiveContext::build(geom, n).expect("gpu context");
+        let t0 = Instant::now();
+        let gpu: Vec<GpuWalkResult> = ctx
+            .multi_step_walk(&positions, &directions, max_steps)
+            .expect("gpu multi_step_walk");
+        let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        let gpu_total_steps: i64 = gpu.iter().map(|r| r.n_steps as i64).sum();
+        println!(
+            "GPU multi_step_walk: {gpu_ms:.1} ms ({:.1} ns/step)",
+            gpu_ms * 1e6 / gpu_total_steps.max(1) as f64
+        );
+        println!("  total steps: CPU {cpu_total_steps}, GPU {gpu_total_steps}");
+
+        // Compare. Position: relative tolerance 1e-9; step count and
+        // final cell: bit-exact.
+        let mut mismatches: usize = 0;
+        let mut step_mismatches: usize = 0;
+        let mut cell_mismatches: usize = 0;
+        let mut max_pos_rel_err: f64 = 0.0;
+        for (c, g) in cpu.iter().zip(gpu.iter()) {
+            let dx = c.0 .0 - g.final_pos.0;
+            let dy = c.0 .1 - g.final_pos.1;
+            let dz = c.0 .2 - g.final_pos.2;
+            let r = (dx * dx + dy * dy + dz * dz).sqrt();
+            let scale = (c.0 .0.abs() + c.0 .1.abs() + c.0 .2.abs()).max(1e-12);
+            let rel = r / scale;
+            if rel > max_pos_rel_err {
+                max_pos_rel_err = rel;
+            }
+            if rel > 1e-9 {
+                mismatches += 1;
+            }
+            if c.1 != g.n_steps {
+                step_mismatches += 1;
+            }
+            if c.2 != g.final_cell {
+                cell_mismatches += 1;
+            }
+        }
+        println!("\n  pos max-rel-err          : {max_pos_rel_err:.3e}");
+        println!(
+            "  pos disagree (>1e-9)     : {mismatches} / {n}  ({:.4}%)",
+            mismatches as f64 / n as f64 * 100.0
+        );
+        println!(
+            "  step-count disagree      : {step_mismatches} / {n}  ({:.4}%)",
+            step_mismatches as f64 / n as f64 * 100.0
+        );
+        println!(
+            "  final-cell disagree      : {cell_mismatches} / {n}  ({:.4}%)",
+            cell_mismatches as f64 / n as f64 * 100.0
+        );
     }
 
     fn run_trace(label: &str, geom: &Geometry, n: usize) {

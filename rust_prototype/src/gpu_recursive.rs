@@ -302,6 +302,7 @@ pub struct GpuRecursiveContext {
     pub stream: Arc<CudaStream>,
     pub k_find_cell_batch: CudaFunction,
     pub k_trace_step_batch: CudaFunction,
+    pub k_multi_step_walk: CudaFunction,
     // Geometry tables on device.
     surf_type: CudaSlice<i32>,
     surf_params: CudaSlice<f64>,
@@ -375,6 +376,9 @@ impl GpuRecursiveContext {
         let k_trace_step_batch = module
             .load_function("trace_step_batch")
             .map_err(|e| format!("kernel load (trace): {e}"))?;
+        let k_multi_step_walk = module
+            .load_function("multi_step_walk")
+            .map_err(|e| format!("kernel load (walk): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
@@ -462,6 +466,7 @@ impl GpuRecursiveContext {
             stream,
             k_find_cell_batch,
             k_trace_step_batch,
+            k_multi_step_walk,
             surf_type,
             surf_params,
             surf_bc,
@@ -708,6 +713,129 @@ impl GpuRecursiveContext {
             })
             .collect();
         Ok(out)
+    }
+}
+
+/// Output of one K-step walk per particle.
+#[derive(Debug, Clone, Copy)]
+pub struct GpuWalkResult {
+    pub final_pos: (f64, f64, f64),
+    pub n_steps: i32,
+    pub final_cell: i32,
+}
+
+impl GpuRecursiveContext {
+    /// Run a deterministic K-step pure-geometry walk per particle.
+    /// At every step the kernel takes the next event distance from
+    /// `gr_trace_step`, advances, and on a reflective surface flips
+    /// the corresponding axis-aligned direction component. No
+    /// physics — just geometry traversal. Used to validate the
+    /// recursive-geometry-in-transport-context plumbing end-to-end.
+    pub fn multi_step_walk(
+        &self,
+        positions: &[(f64, f64, f64)],
+        directions: &[(f64, f64, f64)],
+        max_steps: i32,
+    ) -> Result<Vec<GpuWalkResult>, String> {
+        let n = positions.len();
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        if n != directions.len() {
+            return Err("position / direction lengths differ".into());
+        }
+        if n > self.n_threads_max {
+            return Err(format!(
+                "batch size {n} exceeds n_threads_max {}",
+                self.n_threads_max
+            ));
+        }
+        let xs: Vec<f64> = positions.iter().map(|p| p.0).collect();
+        let ys: Vec<f64> = positions.iter().map(|p| p.1).collect();
+        let zs: Vec<f64> = positions.iter().map(|p| p.2).collect();
+        let dxs: Vec<f64> = directions.iter().map(|d| d.0).collect();
+        let dys: Vec<f64> = directions.iter().map(|d| d.1).collect();
+        let dzs: Vec<f64> = directions.iter().map(|d| d.2).collect();
+        let xs = self.stream.memcpy_stod(&xs).map_err(|e| e.to_string())?;
+        let ys = self.stream.memcpy_stod(&ys).map_err(|e| e.to_string())?;
+        let zs = self.stream.memcpy_stod(&zs).map_err(|e| e.to_string())?;
+        let dxs = self.stream.memcpy_stod(&dxs).map_err(|e| e.to_string())?;
+        let dys = self.stream.memcpy_stod(&dys).map_err(|e| e.to_string())?;
+        let dzs = self.stream.memcpy_stod(&dzs).map_err(|e| e.to_string())?;
+        let mut out_x = self.stream.alloc_zeros::<f64>(n).map_err(|e| e.to_string())?;
+        let mut out_y = self.stream.alloc_zeros::<f64>(n).map_err(|e| e.to_string())?;
+        let mut out_z = self.stream.alloc_zeros::<f64>(n).map_err(|e| e.to_string())?;
+        let mut out_steps = self.stream.alloc_zeros::<i32>(n).map_err(|e| e.to_string())?;
+        let mut out_cell = self.stream.alloc_zeros::<i32>(n).map_err(|e| e.to_string())?;
+
+        let block = 128_u32;
+        let grid = (n as u32).div_ceil(block);
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let n_i32 = n as i32;
+        let n_surf = self.n_surfaces;
+        let root = self.root_universe;
+
+        let mut launch = self.stream.launch_builder(&self.k_multi_step_walk);
+        launch
+            .arg(&xs)
+            .arg(&ys)
+            .arg(&zs)
+            .arg(&dxs)
+            .arg(&dys)
+            .arg(&dzs)
+            .arg(&n_i32)
+            .arg(&max_steps)
+            .arg(&self.surf_type)
+            .arg(&self.surf_params)
+            .arg(&self.surf_bc)
+            .arg(&n_surf)
+            .arg(&self.cell_region_off)
+            .arg(&self.cell_region_len)
+            .arg(&self.cell_fill_type)
+            .arg(&self.cell_fill_data)
+            .arg(&self.cell_aabb_min)
+            .arg(&self.cell_aabb_max)
+            .arg(&self.region_op)
+            .arg(&self.region_arg)
+            .arg(&self.univ_cells_off)
+            .arg(&self.univ_cells_len)
+            .arg(&self.univ_surfaces_off)
+            .arg(&self.univ_surfaces_len)
+            .arg(&self.univ_cell_indices)
+            .arg(&self.univ_surface_indices)
+            .arg(&root)
+            .arg(&self.lat_origin)
+            .arg(&self.lat_pitch)
+            .arg(&self.lat_shape)
+            .arg(&self.lat_universes_off)
+            .arg(&self.lat_universes)
+            .arg(&self.evals_scratch)
+            .arg(&mut out_x)
+            .arg(&mut out_y)
+            .arg(&mut out_z)
+            .arg(&mut out_steps)
+            .arg(&mut out_cell);
+        // SAFETY: kernel signature matches argument list.
+        unsafe {
+            launch.launch(cfg).map_err(|e| e.to_string())?;
+        }
+        let xh = self.stream.memcpy_dtov(&out_x).map_err(|e| e.to_string())?;
+        let yh = self.stream.memcpy_dtov(&out_y).map_err(|e| e.to_string())?;
+        let zh = self.stream.memcpy_dtov(&out_z).map_err(|e| e.to_string())?;
+        let sh = self.stream.memcpy_dtov(&out_steps).map_err(|e| e.to_string())?;
+        let ch = self.stream.memcpy_dtov(&out_cell).map_err(|e| e.to_string())?;
+        let _ = (xs, ys, zs, dxs, dys, dzs);
+        Ok((0..n)
+            .map(|i| GpuWalkResult {
+                final_pos: (xh[i], yh[i], zh[i]),
+                n_steps: sh[i],
+                final_cell: ch[i],
+            })
+            .collect())
     }
 }
 
