@@ -558,11 +558,11 @@ fn transport_particle<XS: XsProvider>(
 
     let mut particle = match geometry::ray::find_cell_recursive(site.pos, geometry) {
         Some(stack) => Particle::with_stack(site.pos, dir, site.energy, stack),
-        None => {
-            // Source point outside the geometry — bank as leakage.
-            result.leakage += 1;
-            return result;
-        }
+        // Match legacy behavior: if a fission site lands exactly on a
+        // surface (float precision boundary case), default to cell 0
+        // and let the transport loop sort it out. The OLD `find_cell`
+        // call site used `.unwrap_or(0)` here.
+        None => Particle::new(site.pos, dir, site.energy, 0),
     };
 
     // Current-generation secondary neutrons emitted by (n,2n)/(n,3n).
@@ -1040,10 +1040,8 @@ fn transport_particle_delta<XS: XsProvider>(
     let dir = Vec3::new(u, v, w);
     let mut particle = match geometry::ray::find_cell_recursive(site.pos, geometry) {
         Some(stack) => Particle::with_stack(site.pos, dir, site.energy, stack),
-        None => {
-            result.leakage += 1;
-            return result;
-        }
+        // Match legacy `unwrap_or(0)` behavior — see transport_particle.
+        None => Particle::new(site.pos, dir, site.energy, 0),
     };
 
     let mut pending: Vec<Particle> = Vec::new();
