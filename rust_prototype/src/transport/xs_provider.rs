@@ -321,9 +321,32 @@ impl XsProvider for SvdXsProvider {
             // already searched for the SVD reactions — reuse `idx` instead
             // of doing a second binary/hash search here. `lookup_at_idx`
             // produces bit-identical output to `lookup(energy)`.
+            //
+            // Earlier we overrode `capture = total - elastic - …` here to
+            // absorb the "missing channels" (n,α, n,p, etc.) into the
+            // capture cross-section. That forced any SVD reconstruction
+            // error in `elastic` to flow 1:1 into `capture`, where the
+            // absolute error became a *huge* relative error wherever
+            // capture is small but elastic is large — between U-238
+            // resonances at ~1 keV the elastic SVD error of 0.04 b
+            // (0.2 % of elastic) blew up into a 21 % error on a 0.20-b
+            // capture, dragging on-library PWR k_inf by ~19 000 pcm vs
+            // the pointwise-table provider.
+            //
+            // We now keep the SVD-reconstructed capture, and only top
+            // it up by the "missing channels" residual when that
+            // residual is large enough that the SVD-elastic noise is
+            // dominated by genuine missing-channel content. The
+            // threshold (0.5 % of total) is loose enough to keep the
+            // (n,α)/(n,p) thresholded contributions but tight enough to
+            // not propagate per-nuclide elastic noise into capture.
             Some(t) => {
                 let tot = t.lookup_at_idx(energy, idx);
-                capture = (tot - elastic - inelastic - n2n - n3n - fission).max(0.0);
+                let partials = elastic + inelastic + n2n + n3n + fission + capture;
+                let residual = tot - partials;
+                if residual > 0.005 * tot {
+                    capture += residual;
+                }
                 tot
             }
             None => elastic + inelastic + n2n + n3n + fission + capture,
@@ -505,7 +528,19 @@ fn build_kernel_from_data(
         }
     }
 
-    let kernel = SvdKernel::new(basis, vt_coeffs, Arc::clone(shared_grid), rank, n_e, n_t);
+    let mut kernel = SvdKernel::new(basis, vt_coeffs, Arc::clone(shared_grid), rank, n_e, n_t);
+    // Build the log-uniform hash index. Without it `row_index` falls
+    // back to `row_index_binary`, which returns the **upper** bracket
+    // (binary_search Err insertion point) — yet `lookup`/
+    // `reconstruct_interp` in this provider treat the returned index
+    // as the **lower** bracket. The mismatch silently turned every
+    // off-grid SVD lookup into a step function at the upper bracket
+    // (log_frac clamps to 0). On U-235 thermal capture this dragged
+    // CPU SVD k_inf by ~19 000 pcm vs the pointwise-table provider.
+    // Building the hash forces `LogHashIndex::lookup` (lower-bracket
+    // semantics, matches `PointwiseTable::lookup`) and restores the
+    // proper log-log interpolation between adjacent union-grid points.
+    kernel.build_hash(8192);
 
     // Use Ducru kernel reconstruction if multiple temperatures available,
     // otherwise fall back to direct index lookup.
@@ -2415,4 +2450,170 @@ fn load_photon_products(
         }
     }
     out
+}
+
+// ── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Build a single-reaction `ReactionKernel` for a synthetic 1/√E
+    /// law on a known log-spaced grid, single temperature column. With
+    /// `n_t = 1` the SVD is rank-1 and the reconstruction at on-grid
+    /// rows is exact, so any deviation is a lookup-mechanics bug rather
+    /// than a truncation effect.
+    ///
+    /// The 1/√E law has σ(E) = K/√E ⇒ log10(σ) = log10(K) − 0.5·log10(E),
+    /// i.e. exactly linear in log10(E). Log-log interpolation between
+    /// any two grid points therefore reconstructs the true value to
+    /// machine precision; a step-function lookup deviates by the
+    /// per-decade slope (a factor of √10 ≈ 3.16 across one decade).
+    fn make_inv_sqrt_kernel(grid: Vec<f64>, k: f64) -> ReactionKernel {
+        let n_e = grid.len();
+        // σ(E) = k / √E  ⇒  log10(σ) = log10(k) − 0.5·log10(E)
+        let log_sigma: Vec<f64> = grid
+            .iter()
+            .map(|&e| k.log10() - 0.5 * e.log10())
+            .collect();
+
+        // n_t = 1, rank = 1: single column, basis stores `log10(σ)`
+        // directly with the trivial Vᵀ = [1.0]. This bypasses the
+        // SVD decomposition entirely and gives an exact rank-1
+        // reconstruction.
+        let energies: Arc<[f64]> = grid.into();
+        let mut kernel = SvdKernel::new(
+            log_sigma.clone(),
+            vec![1.0],
+            Arc::clone(&energies),
+            1, // rank
+            n_e,
+            1, // n_t
+        );
+        // Production code (`build_kernel_from_data`) builds the hash so
+        // `row_index` returns the lower bracket; mirror that here so
+        // the test exercises the same lookup path the eigenvalue
+        // simulation hits.
+        kernel.build_hash(8192);
+        let coeffs = vec![1.0];
+        ReactionKernel { kernel, coeffs }
+    }
+
+    /// Compute the lookup index + log_frac the way `SvdXsProvider::lookup`
+    /// does. Mirrors the production path so the test reflects what the
+    /// transport loop actually sees.
+    fn lookup_idx_and_frac(rxn: &ReactionKernel, energy: f64) -> (usize, f64) {
+        let idx = rxn.kernel.energy_index(energy);
+        let grid = rxn.kernel.energies();
+        let frac = if idx + 1 < grid.len() && grid[idx] > 0.0 && grid[idx + 1] > grid[idx] {
+            let log_e = energy.ln();
+            let log_lo = grid[idx].ln();
+            let log_hi = grid[idx + 1].ln();
+            ((log_e - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (idx, frac)
+    }
+
+    /// On-grid lookup must return the exact tabulated σ — no interp,
+    /// no rounding beyond machine precision. This guards against any
+    /// future change to the index-mapping path that would silently
+    /// shift on-grid results by one row.
+    #[test]
+    fn svd_lookup_on_grid_is_exact() {
+        let grid = vec![0.001_f64, 0.01, 0.1, 1.0, 10.0];
+        let rxn = make_inv_sqrt_kernel(grid.clone(), 10.0);
+        for &e in &grid {
+            let (idx, frac) = lookup_idx_and_frac(&rxn, e);
+            let sigma = rxn.reconstruct_interp(idx, frac);
+            let expected = 10.0_f64 / e.sqrt();
+            assert!(
+                (sigma - expected).abs() / expected < 1e-12,
+                "on-grid σ({e}) = {sigma}, expected {expected}",
+            );
+        }
+    }
+
+    /// Off-grid lookup must do log-log interpolation between adjacent
+    /// grid points, **not** snap to either endpoint. This is the
+    /// regression test for the silent step-function bug we hit on
+    /// CPU SVD: when `SvdKernel` was constructed without a hash,
+    /// `row_index` fell back to `binary_search`'s `Err(insertion_point)`
+    /// — the *upper* bracket. The lookup code then computed
+    /// `log_frac` against the upper bracket as if it were the lower
+    /// bracket, the fraction came out negative, got clamped to 0,
+    /// and the kernel silently returned σ at the upper grid point —
+    /// a step function. On U-235 thermal capture this dragged k_inf
+    /// by ~19 000 pcm.
+    ///
+    /// The 1/√E law makes the deviation easy to bound: log10(σ)
+    /// is exactly linear in log10(E), so log-log interpolation is
+    /// machine-precision exact, and a step-function lookup deviates
+    /// by 10^(0.5 · |Δlog10(E)|) — a factor of ≈ 3.16 per decade
+    /// between adjacent grid points.
+    #[test]
+    fn svd_lookup_off_grid_is_log_log_interpolated() {
+        let grid = vec![0.001_f64, 0.01, 0.1, 1.0, 10.0];
+        let rxn = make_inv_sqrt_kernel(grid.clone(), 10.0);
+
+        for win in grid.windows(2) {
+            let e_lo = win[0];
+            let e_hi = win[1];
+            // Geometric midpoint in log10 space.
+            let e_mid = (e_lo * e_hi).sqrt();
+
+            let (idx, frac) = lookup_idx_and_frac(&rxn, e_mid);
+            let sigma = rxn.reconstruct_interp(idx, frac);
+            let expected = 10.0_f64 / e_mid.sqrt();
+
+            // Log-log linear interp on a log-log linear law is exact
+            // up to machine precision.
+            assert!(
+                (sigma - expected).abs() / expected < 1e-10,
+                "log-mid σ({e_mid}) = {sigma}, expected {expected} (idx={idx}, frac={frac})",
+            );
+
+            // Sanity bound: the bug would have returned σ(e_lo) or
+            // σ(e_hi). σ(e_lo)/σ(e_mid) = √10, σ(e_hi)/σ(e_mid) = 1/√10.
+            // The interpolated value must therefore be strictly
+            // between σ_lo and σ_hi (with small ULP slack).
+            let sigma_lo = 10.0_f64 / e_lo.sqrt();
+            let sigma_hi = 10.0_f64 / e_hi.sqrt();
+            assert!(
+                sigma < sigma_lo * (1.0 + 1e-9),
+                "σ at log-midpoint should be ≤ σ at lower grid point",
+            );
+            assert!(
+                sigma > sigma_hi * (1.0 - 1e-9),
+                "σ at log-midpoint should be ≥ σ at upper grid point",
+            );
+        }
+    }
+
+    /// `energy_index` (via `LogHashIndex`, which `build_hash` installs)
+    /// must return the *lower* bracket. Direct check on the index
+    /// contract — this is the layer that actually broke and produced
+    /// the 19 000 pcm CPU SVD vs Table k_inf gap. Keeps a regression
+    /// fence at the index-mapping boundary independent of the
+    /// reconstruction-path tests above.
+    #[test]
+    fn svd_kernel_energy_index_is_lower_bracket() {
+        let grid = vec![0.001_f64, 0.01, 0.1, 1.0, 10.0];
+        let rxn = make_inv_sqrt_kernel(grid.clone(), 1.0);
+        for win in grid.windows(2).enumerate() {
+            let (i, w) = win;
+            let e_mid = (w[0] * w[1]).sqrt();
+            let idx = rxn.kernel.energy_index(e_mid);
+            assert_eq!(
+                idx, i,
+                "energy {e_mid} between grid[{i}]={} and grid[{}]={} should resolve \
+                 to lower-bracket idx {i}, got {idx}",
+                w[0],
+                i + 1,
+                w[1],
+            );
+        }
+    }
 }
