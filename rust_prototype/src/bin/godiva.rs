@@ -118,6 +118,13 @@ struct Args {
     /// to OFF so analog runs stay bit-comparable to legacy results.
     #[arg(long, default_value_t = false)]
     survival_biasing: bool,
+
+    /// Resume from a previously-written statepoint. The source bank in
+    /// the file is used as the batch-1 source; settle / inactive count
+    /// can usually be lowered since the source is already converged.
+    /// Only applied to the FIRST seed (others get fresh initial source).
+    #[arg(long)]
+    restart_from: Option<PathBuf>,
 }
 
 const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
@@ -255,6 +262,16 @@ fn run_multi_seed<XS: XsProvider>(
     let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
     let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
+    // Optional restart: load the source bank from a previous
+    // statepoint. Pre-converged source typically lets you drop most
+    // of the inactive batches.
+    let restart_bank = args.restart_from.as_ref().map(|path| {
+        let bank = open_rust_mc::transport::statepoint::read_source_bank(path)
+            .unwrap_or_else(|e| panic!("failed to load restart bank from {path:?}: {e}"));
+        println!("  Resuming from {} ({} sites)", path.display(), bank.len());
+        bank
+    });
+
     // When --statepoint is set, attach a 4×4×4 mesh flux tally over
     // a cube enclosing the Godiva sphere and a surface current tally
     // on the outer vacuum sphere (leakage current). Both helpers are
@@ -288,6 +305,11 @@ fn run_multi_seed<XS: XsProvider>(
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
             survival_biasing: if args.survival_biasing {
                 Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
+            } else {
+                None
+            },
+            initial_source_bank: if seed == 0 {
+                restart_bank.clone()
             } else {
                 None
             },

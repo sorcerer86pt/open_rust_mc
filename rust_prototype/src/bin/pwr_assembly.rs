@@ -564,6 +564,7 @@ fn main() {
             tallies: Default::default(),
             statepoint_path: None,
             survival_biasing: None,
+            initial_source_bank: None,
         };
 
         if args.seeds > 1 {

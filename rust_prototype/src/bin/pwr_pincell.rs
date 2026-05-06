@@ -128,6 +128,11 @@ struct Args {
     /// so analog runs stay bit-comparable to legacy results.
     #[arg(long, default_value_t = false)]
     survival_biasing: bool,
+
+    /// Resume from a previously-written statepoint. Loaded only on
+    /// the first seed; later seeds get fresh initial source.
+    #[arg(long)]
+    restart_from: Option<PathBuf>,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
@@ -236,6 +241,14 @@ fn run_multi_seed<XS: XsProvider>(
     let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
     let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
+    // Optional restart: load source bank from a previous statepoint.
+    let restart_bank = args.restart_from.as_ref().map(|path| {
+        let bank = open_rust_mc::transport::statepoint::read_source_bank(path)
+            .unwrap_or_else(|e| panic!("failed to load restart bank from {path:?}: {e}"));
+        println!("  Resuming from {} ({} sites)", path.display(), bank.len());
+        bank
+    });
+
     // When --statepoint is set, attach a 4×4×1 mesh flux tally over
     // the pin-cell bounding box and a surface current tally on every
     // reflective surface. Both come from library helpers so the same
@@ -268,6 +281,11 @@ fn run_multi_seed<XS: XsProvider>(
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
             survival_biasing: if args.survival_biasing {
                 Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
+            } else {
+                None
+            },
+            initial_source_bank: if seed == 0 {
+                restart_bank.clone()
             } else {
                 None
             },

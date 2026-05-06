@@ -73,6 +73,13 @@ pub struct SimConfig {
     /// collision branch only; thermal-scattering and delta-tracking
     /// paths fall back to analog regardless of this setting.
     pub survival_biasing: Option<SurvivalBiasing>,
+    /// Optional initial source bank to resume from. When `None`, the
+    /// engine rejection-samples a uniform initial source from the
+    /// fissile cells (the default behavior). When `Some(bank)`, the
+    /// bank is used as the source for batch 1 — typically loaded from
+    /// a statepoint via `transport::statepoint::read_source_bank` to
+    /// continue an earlier run.
+    pub initial_source_bank: Option<Vec<FissionSite>>,
 }
 
 /// Implicit-capture + Russian-roulette settings.
@@ -111,6 +118,7 @@ impl Default for SimConfig {
             tallies: Tallies::default(),
             statepoint_path: None,
             survival_biasing: None,
+            initial_source_bank: None,
         }
     }
 }
@@ -1581,7 +1589,21 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
     let tracking = detect_tracking_mode(cells, materials, xs_provider, config.verbose);
 
     let seed = config.seed;
-    let mut source_bank = initial_source(n, geometry, cells, seed);
+    let mut source_bank = match config.initial_source_bank.as_ref() {
+        Some(bank) if !bank.is_empty() => {
+            // Resume mode: use the provided bank as the source for
+            // batch 1. Resample (with replacement) to the requested
+            // particles_per_batch so the population size is consistent.
+            let mut rng = Rng::new(seed * 100_000, 1);
+            (0..n)
+                .map(|_| {
+                    let idx = (rng.uniform() * bank.len() as f64) as usize;
+                    bank[idx.min(bank.len() - 1)].clone()
+                })
+                .collect()
+        }
+        _ => initial_source(n, geometry, cells, seed),
+    };
 
     // Build the Shannon-entropy mesh from the AABB of the first fissile cell.
     let aabb = cells
@@ -2142,6 +2164,7 @@ mod tests {
             tallies: Default::default(),
             statepoint_path: None,
             survival_biasing: None,
+            initial_source_bank: None,
         };
 
         let (results, k_final) =
@@ -2258,6 +2281,7 @@ mod tests {
             tallies: Default::default(),
             statepoint_path: None,
             survival_biasing: None,
+            initial_source_bank: None,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -2420,6 +2444,7 @@ mod tests {
             tallies: Default::default(),
             statepoint_path: None,
             survival_biasing: None,
+            initial_source_bank: None,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -2432,6 +2457,7 @@ mod tests {
             tallies: Default::default(),
             statepoint_path: None,
             survival_biasing: None,
+            initial_source_bank: None,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);

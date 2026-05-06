@@ -970,6 +970,7 @@ fn run_gamma_heating(
         tallies: Default::default(),
         statepoint_path: None,
         survival_biasing: None,
+        initial_source_bank: None,
     };
     let t_neu = std::time::Instant::now();
     let (batch_results, k_running) = py.allow_threads(|| {
@@ -1617,6 +1618,7 @@ fn run_eigenvalue(
         tallies: Default::default(),
         statepoint_path: None,
         survival_biasing: None,
+        initial_source_bank: None,
     };
     let t_sim_start = std::time::Instant::now();
     let (batch_results, _k_running, xs_memory_bytes) = match scene.xs_mode {

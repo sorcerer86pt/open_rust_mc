@@ -20,6 +20,7 @@ use std::path::Path;
 
 use hdf5_pure::{AttrValue, FileBuilder};
 
+use crate::geometry::Vec3;
 use crate::transport::particle::FissionSite;
 use crate::transport::simulate::BatchResult;
 
@@ -48,6 +49,99 @@ pub fn write_statepoint(path: &Path, sp: &StatepointInputs<'_>) -> std::io::Resu
         )
     })?;
     std::fs::write(path, bytes)
+}
+
+/// Header metadata read back from a statepoint, alongside the source
+/// bank that's the actual restart payload.
+#[derive(Debug, Clone)]
+pub struct StatepointHeader {
+    pub n_batches: u64,
+    pub n_active: u64,
+    pub particles_per_batch: u64,
+    pub seed: u64,
+    pub k_eff_mean: f64,
+    pub n_surface_bins: u64,
+    pub n_mesh_voxels: u64,
+}
+
+/// Read just the source bank from a statepoint file. Cheaper than
+/// `read_statepoint` when only the restart payload is needed.
+pub fn read_source_bank(path: &Path) -> std::io::Result<Vec<FissionSite>> {
+    let file = open_statepoint(path)?;
+    let pos = read_dataset_f64(&file, "source_bank_positions")?;
+    let energy = read_dataset_f64(&file, "source_bank_energies")?;
+    let weight = read_dataset_f64(&file, "source_bank_weights")?;
+    if pos.len() != 3 * energy.len() || energy.len() != weight.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "source_bank shape mismatch: pos={}, energy={}, weight={}",
+                pos.len(),
+                energy.len(),
+                weight.len()
+            ),
+        ));
+    }
+    let mut bank = Vec::with_capacity(energy.len());
+    for i in 0..energy.len() {
+        bank.push(FissionSite {
+            pos: Vec3::new(pos[3 * i], pos[3 * i + 1], pos[3 * i + 2]),
+            energy: energy[i],
+            weight: weight[i],
+        });
+    }
+    Ok(bank)
+}
+
+/// Read a statepoint header (scalar metadata only). Pair with
+/// `read_source_bank` when you only need the restart payload.
+pub fn read_header(path: &Path) -> std::io::Result<StatepointHeader> {
+    let file = open_statepoint(path)?;
+    let attrs = file.root().attrs().map_err(io_err)?;
+    let u64_attr = |name: &str| -> std::io::Result<u64> {
+        match attrs.get(name) {
+            Some(AttrValue::U64(v)) => Ok(*v),
+            Some(AttrValue::I64(v)) => Ok(*v as u64),
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("attr `{name}` missing or wrong type: {other:?}"),
+            )),
+        }
+    };
+    let f64_attr = |name: &str| -> std::io::Result<f64> {
+        match attrs.get(name) {
+            Some(AttrValue::F64(v)) => Ok(*v),
+            other => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("attr `{name}` missing or wrong type: {other:?}"),
+            )),
+        }
+    };
+    Ok(StatepointHeader {
+        n_batches: u64_attr("n_batches")?,
+        n_active: u64_attr("n_active")?,
+        particles_per_batch: u64_attr("particles_per_batch")?,
+        seed: u64_attr("seed")?,
+        k_eff_mean: f64_attr("k_eff_mean")?,
+        n_surface_bins: u64_attr("n_surface_bins")?,
+        n_mesh_voxels: u64_attr("n_mesh_voxels")?,
+    })
+}
+
+fn open_statepoint(path: &Path) -> std::io::Result<hdf5_pure::File> {
+    let bytes = std::fs::read(path)?;
+    hdf5_pure::File::from_bytes(bytes).map_err(io_err)
+}
+
+fn read_dataset_f64(file: &hdf5_pure::File, name: &str) -> std::io::Result<Vec<f64>> {
+    file.dataset(name)
+        .map_err(io_err)?
+        .read_f64()
+        .map_err(io_err)
+}
+
+fn io_err<E: std::fmt::Debug>(e: E) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, format!("hdf5: {e:?}"))
 }
 
 /// Build the HDF5 byte stream for a statepoint without touching disk.
@@ -227,6 +321,50 @@ mod tests {
         assert_eq!(pos.len(), 6);
         assert!((pos[0] - 0.1).abs() < 1e-12);
         assert!((pos[5] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn read_header_and_source_bank_via_disk_roundtrip() {
+        let batches = vec![dummy_batch(1, 1.0, 0, 0)];
+        let bank = vec![
+            FissionSite {
+                pos: Vec3::new(1.0, 2.0, 3.0),
+                energy: 1e6,
+                weight: 1.0,
+            },
+            FissionSite {
+                pos: Vec3::new(-1.5, 0.0, 2.5),
+                energy: 5e5,
+                weight: 0.5,
+            },
+        ];
+        let sp = StatepointInputs {
+            batches: &batches,
+            source_bank: &bank,
+            n_active: 1,
+            particles_per_batch: 100,
+            seed: 7,
+            k_eff_mean: 0.99,
+            n_surface_bins: 0,
+            n_mesh_voxels: 0,
+        };
+        let path = std::env::temp_dir().join("orm_statepoint_roundtrip.h5");
+        write_statepoint(&path, &sp).expect("write");
+
+        let header = read_header(&path).expect("read header");
+        assert_eq!(header.n_batches, 1);
+        assert_eq!(header.particles_per_batch, 100);
+        assert_eq!(header.seed, 7);
+        assert!((header.k_eff_mean - 0.99).abs() < 1e-12);
+
+        let loaded = read_source_bank(&path).expect("read bank");
+        assert_eq!(loaded.len(), 2);
+        assert!((loaded[0].pos.x - 1.0).abs() < 1e-12);
+        assert!((loaded[0].energy - 1e6).abs() < 1e-12);
+        assert!((loaded[1].pos.z - 2.5).abs() < 1e-12);
+        assert!((loaded[1].weight - 0.5).abs() < 1e-12);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
