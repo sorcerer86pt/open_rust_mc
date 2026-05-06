@@ -12,7 +12,7 @@
 //! changes but the call sites don't.
 
 use super::cell::CellFill;
-use super::{Cell, LatticeId, Mat3, UniverseId, Vec3};
+use super::{Cell, HexLatticeId, LatticeId, Mat3, UniverseId, Vec3};
 use smallvec::SmallVec;
 
 /// One frame in a particle's coordinate stack.
@@ -32,9 +32,14 @@ pub struct Coord {
     pub universe: UniverseId,
     /// Index into the global `Geometry::cells` array.
     pub cell_idx: u32,
-    /// `Some((lattice_id, [ix, iy, iz]))` if this frame is inside a lattice
-    /// element (i.e. the parent cell's fill was `CellFill::Lattice`).
+    /// `Some((lattice_id, [ix, iy, iz]))` if this frame is inside a
+    /// rectangular lattice element. Mutually exclusive with `hex_lattice`.
     pub lattice: Option<(LatticeId, [i32; 3])>,
+    /// `Some((hex_lattice_id, [q, r, z]))` if this frame is inside a
+    /// hex-grid lattice element. Mutually exclusive with `lattice`.
+    /// `q, r` are axial coords (cube `s = -q-r`); `z` is the axial
+    /// layer index (0-based).
+    pub hex_lattice: Option<(HexLatticeId, [i32; 3])>,
     /// Translation from parent local frame: applied *before* `rotation`.
     pub offset: Vec3,
     /// Rotation from parent local frame to this frame. `None` is
@@ -49,6 +54,7 @@ impl Coord {
             universe,
             cell_idx,
             lattice: None,
+            hex_lattice: None,
             offset: Vec3::new(0.0, 0.0, 0.0),
             rotation: None,
         }
@@ -146,6 +152,7 @@ mod tests {
                 universe: UniverseId(1),
                 cell_idx: 1,
                 lattice: Some((LatticeId(0), [1, 0, 0])),
+                hex_lattice: None,
                 offset: Vec3::new(1.0, 2.0, 3.0),
                 rotation: None,
             },
@@ -153,6 +160,7 @@ mod tests {
                 universe: UniverseId(2),
                 cell_idx: 2,
                 lattice: None,
+                hex_lattice: None,
                 offset: Vec3::new(10.0, 0.0, 0.0),
                 rotation: None,
             },
@@ -183,6 +191,7 @@ mod tests {
                 universe: UniverseId(1),
                 cell_idx: 1,
                 lattice: None,
+                hex_lattice: None,
                 offset: Vec3::new(0.0, 0.0, 0.0),
                 rotation: Some(r),
             },

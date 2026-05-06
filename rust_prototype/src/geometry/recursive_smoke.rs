@@ -19,7 +19,7 @@
 
 use crate::geometry::cell::{self, Cell, CellFill, CellId, Region};
 use crate::geometry::coord::CoordStackExt;
-use crate::geometry::lattice::RectLattice;
+use crate::geometry::lattice::{HexLattice, HexOrientation, RectLattice};
 use crate::geometry::ray::{find_cell, find_cell_recursive, trace_step, trace_step_recursive};
 use crate::geometry::surface::BoundaryCondition;
 use crate::geometry::universe::{Universe, UniverseId};
@@ -580,6 +580,176 @@ fn flat_recursive_matches_flat_old_bit_for_bit() {
     // and trace decisions in the same order.
     assert_eq!(k_old, k_new, "depth-1 recursive must equal flat exactly");
     assert_eq!(se_old, se_new);
+}
+
+/// Build a 1-ring (7 elements) hex lattice of identical fissile pins
+/// inside an outer reflective box. Ring 0 = centre + 6 ring-1 hexes.
+/// All elements use the same pin universe.
+fn hex_unit_cell_ring1() -> Geometry {
+    let pitch = 1.0_f64;
+    // The hex lattice covers a hexagonal area of "radius" 2*pitch in
+    // the centre-to-centre direction. The outer reflective box is a
+    // square that comfortably contains the lattice — hex doesn't fit
+    // a square exactly, but reflective walls just bounce particles
+    // back into the (uniform) source so it's still a meaningful test
+    // of the descent + grid-distance dispatch.
+    let half = 2.0_f64;
+    let surfaces = vec![
+        // 0: pin cylinder centered in element (element-local origin
+        // because hex.local_position centres at the hex centre).
+        Surface::CylinderZ {
+            center_x: 0.0,
+            center_y: 0.0,
+            radius: 0.3,
+            bc: BoundaryCondition::Transmission,
+        },
+        // 1..4: outer reflective box
+        Surface::PlaneX {
+            x0: -half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneX {
+            x0: half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneY {
+            y0: -half,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneY {
+            y0: half,
+            bc: BoundaryCondition::Reflective,
+        },
+        // 5..6: z reflective
+        Surface::PlaneZ {
+            z0: -10.0,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneZ {
+            z0: 10.0,
+            bc: BoundaryCondition::Reflective,
+        },
+    ];
+    let cells = vec![
+        // Pin universe cells (element-local frame, centre-anchored).
+        Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)), // fuel
+        Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)), // water
+        // Root cell: outer box → hex lattice.
+        Cell::new(
+            CellId(2),
+            cell::intersect_all(vec![
+                cell::outside(1),
+                cell::inside(2),
+                cell::outside(3),
+                cell::inside(4),
+                cell::outside(5),
+                cell::inside(6),
+            ]),
+            CellFill::HexLattice(0),
+        ),
+        // Outside-box cell for partition completeness.
+        Cell::new(
+            CellId(3),
+            Region::Union(
+                Box::new(Region::Union(
+                    Box::new(cell::inside(1)),
+                    Box::new(cell::outside(2)),
+                )),
+                Box::new(Region::Union(
+                    Box::new(cell::inside(3)),
+                    Box::new(cell::outside(4)),
+                )),
+            ),
+            CellFill::Void,
+        ),
+    ];
+    let universes = vec![
+        Universe::new(UniverseId(0), vec![2, 3]), // root
+        Universe::new(UniverseId(1), vec![0, 1]), // pin
+    ];
+
+    // 1 ring → (2*1+1)² = 9 axial slots per layer, 1 layer total.
+    let n_axial = 1usize;
+    let stride = 9; // (2 * n_rings + 1)²
+    let mut hex_universes = vec![UniverseId(0); stride * n_axial];
+    // The hex-grid valid (q, r) cells inside ring radius 1 are
+    // exactly: (0,0) + the 6 surrounding hexes. Stamp Universe(1) into
+    // those slots; the off-grid placeholders stay UniverseId(0).
+    for &(q, r) in &[
+        (0_i32, 0_i32),
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, -1),
+        (-1, 1),
+    ] {
+        let qi = (q + 1) as usize;
+        let ri = (r + 1) as usize;
+        hex_universes[ri * 3 + qi] = UniverseId(1);
+    }
+    let hex = HexLattice {
+        center: Vec3::new(0.0, 0.0, 0.0),
+        pitch_xy: pitch,
+        pitch_z: 20.0, // wide single layer
+        n_rings: 1,
+        n_axial: 1,
+        orientation: HexOrientation::Y,
+        universes: hex_universes,
+        material_overrides: None,
+    };
+
+    Geometry::new(surfaces, cells, universes, vec![], UniverseId(0))
+        .expect("hex unit cell")
+        .with_hex_lattices(vec![hex])
+        .expect("hex lattices validated")
+}
+
+#[test]
+fn hex_lattice_descent_and_trace_smoke() {
+    // Exercises both find_cell_recursive's HexLattice descent and
+    // trace_step_recursive's hex distance_to_grid dispatch. Particle
+    // starts in the centre hex moving in +x — must traverse into the
+    // (q=1, r=0) ring-1 hex at the expected pitch, with the
+    // CoordStack carrying the new (q, r, z) on the deepest frame.
+    let geom = hex_unit_cell_ring1();
+    let stack = find_cell_recursive(Vec3::new(0.0, 0.0, 0.0), &geom)
+        .expect("centre hex must resolve");
+    assert!(stack.len() >= 2, "hex descent should produce ≥ 2 frames");
+    let deepest = stack.last().unwrap();
+    assert_eq!(deepest.universe.0, 1, "deepest frame is the pin universe");
+    assert_eq!(deepest.lattice, None, "rect lattice slot must stay None");
+    let (_, qrz) = deepest.hex_lattice.expect("hex frame populated");
+    assert_eq!(qrz, [0, 0, 0], "centre hex coords are (0,0,0)");
+
+    // Trace one step in +y. For a flat-top hex (HexOrientation::Y)
+    // the N neighbour at (q=0, r=1) sits directly above the centre,
+    // sharing an edge perpendicular to +y at y = pitch_xy/2 = 0.5
+    // (the inradius for a hex of circumradius 1/√3). Start outside
+    // the centre pin (r=0.3) at (0, 0.4) so the first event is the
+    // grid edge — distance 0.1 cm.
+    let pos = Vec3::new(0.0, 0.4, 0.0);
+    let outer_stack = find_cell_recursive(pos, &geom).expect("outside-pin position resolves");
+    let hit = trace_step_recursive(
+        &outer_stack,
+        pos,
+        Vec3::new(0.0, 1.0, 0.0),
+        &geom,
+    )
+    .expect("hex trace must succeed");
+    let expected_edge = 0.1_f64;
+    assert!(
+        (hit.distance - expected_edge).abs() < 5e-3,
+        "hex grid distance = {:.6}, expected ~{expected_edge}",
+        hit.distance
+    );
+    let next = hit.next_stack.expect("crossing must re-resolve");
+    let next_deep = next.last().unwrap();
+    let (_, qrz_next) = next_deep
+        .hex_lattice
+        .expect("post-step deepest frame still in hex lattice");
+    assert_eq!(qrz_next[1], 1, "should land in the +r neighbour (N hex)");
+    assert_eq!(qrz_next[0], 0);
 }
 
 #[test]

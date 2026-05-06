@@ -7,9 +7,15 @@ use std::collections::HashMap;
 
 use super::{UniverseId, Vec3};
 
-/// Unique identifier for a lattice within a `Geometry`.
+/// Unique identifier for a (rectangular) lattice within a `Geometry`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LatticeId(pub u32);
+
+/// Unique identifier for a hex lattice within a `Geometry`.
+/// Distinct from `LatticeId` so the type system catches mixing rect
+/// and hex coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct HexLatticeId(pub u32);
 
 /// Per-element override of a cell's static material fill.
 ///

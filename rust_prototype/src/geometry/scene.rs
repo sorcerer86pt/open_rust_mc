@@ -280,6 +280,14 @@ impl Geometry {
     }
 
     #[inline]
+    pub fn hex_lattice(
+        &self,
+        id: crate::geometry::HexLatticeId,
+    ) -> &crate::geometry::lattice::HexLattice {
+        &self.hex_lattices[id.0 as usize]
+    }
+
+    #[inline]
     pub fn root(&self) -> &Universe {
         self.universe(self.root_universe)
     }
@@ -534,6 +542,7 @@ mod tests {
                     universe: UniverseId(1),
                     cell_idx,
                     lattice: Some((LatticeId(0), element)),
+                    hex_lattice: None,
                     offset: Vec3::new(0.0, 0.0, 0.0),
                     rotation: None,
                 },

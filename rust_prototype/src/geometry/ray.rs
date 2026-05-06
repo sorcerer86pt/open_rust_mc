@@ -113,6 +113,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
     let mut next_offset = Vec3::new(0.0, 0.0, 0.0);
     let mut next_rotation: Option<Mat3> = None;
     let mut next_lattice: Option<(LatticeId, [i32; 3])> = None;
+    let mut next_hex_lattice: Option<(crate::geometry::HexLatticeId, [i32; 3])> = None;
     let mut local_pos = world_pos;
 
     // Pre-allocate a single evals buffer shared across descents — surfaces
@@ -160,6 +161,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
             universe: current_universe,
             cell_idx: cell_idx as u32,
             lattice: next_lattice,
+            hex_lattice: next_hex_lattice,
             offset: next_offset,
             rotation: next_rotation,
         });
@@ -171,6 +173,7 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
                 next_offset = Vec3::new(0.0, 0.0, 0.0);
                 next_rotation = geom.cells[cell_idx].rotation;
                 next_lattice = None;
+                next_hex_lattice = None;
             }
             CellFill::Lattice(l) => {
                 let lattice_id = LatticeId(l);
@@ -184,17 +187,22 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
                 next_offset = element_offset;
                 next_rotation = geom.cells[cell_idx].rotation;
                 next_lattice = Some((lattice_id, [ix as i32, iy as i32, iz as i32]));
+                next_hex_lattice = None;
             }
-            // HexLattice transport descent + distance-to-grid wiring is
-            // deferred — the math is in `lattice::HexLattice` but the
-            // CoordStack would need a parallel `hex_lattice` field and
-            // `trace_step_recursive` needs a hex `distance_to_grid`
-            // dispatch. Schema is in place (CellFill variant, Geometry
-            // field, validation in `with_hex_lattices`); transport
-            // through hex lattices is the next increment. Until then,
-            // refuse to descend so a misconfigured geometry fails
-            // loudly instead of silently mis-tracking.
-            CellFill::HexLattice(_) => return None,
+            CellFill::HexLattice(h) => {
+                let hex_id = crate::geometry::HexLatticeId(h);
+                let hex = geom.hex_lattice(hex_id);
+                let (q, r, z) = hex.find_element(local_pos)?;
+                let element_universe = hex.universe_at(q, r, z);
+                let local_in_element = hex.local_position(local_pos, q, r, z);
+                let element_offset = local_pos - local_in_element;
+
+                current_universe = element_universe;
+                next_offset = element_offset;
+                next_rotation = geom.cells[cell_idx].rotation;
+                next_lattice = None;
+                next_hex_lattice = Some((hex_id, [q, r, z]));
+            }
         }
     }
 }
@@ -317,11 +325,10 @@ pub fn trace_step_recursive(
     // the particle. The COINCIDENCE_TOL break here picks the surface.
     const COINCIDENCE_TOL: f64 = 1e-9;
     for (depth, coord) in stack.iter().enumerate() {
-        if let Some((lattice_id, current)) = coord.lattice {
-            // Lattice grid lives in the parent universe's frame —
-            // depth-1 in our locals/local_dirs (or world coords if
-            // depth == 0).
-            let (parent_local, parent_dir) = if depth == 0 {
+        // Parent-frame coordinates: depth==0 → world, otherwise the
+        // depth-1 entry in the precomputed locals/local_dirs.
+        let parent_xy = || -> (Vec3, Vec3) {
+            if depth == 0 {
                 (world_pos, world_dir)
             } else {
                 (
@@ -331,9 +338,21 @@ pub fn trace_step_recursive(
                         .map(|v| v[depth - 1])
                         .unwrap_or(world_dir),
                 )
-            };
+            }
+        };
+        if let Some((lattice_id, current)) = coord.lattice {
+            let (parent_local, parent_dir) = parent_xy();
             let lattice = geom.lattice(lattice_id);
             let d = lattice.distance_to_grid(parent_local, parent_dir, current);
+            if d + COINCIDENCE_TOL < best_dist {
+                best_dist = d;
+                best_surface = None;
+            }
+        }
+        if let Some((hex_id, current)) = coord.hex_lattice {
+            let (parent_local, parent_dir) = parent_xy();
+            let hex = geom.hex_lattice(hex_id);
+            let d = hex.distance_to_grid(parent_local, parent_dir, current);
             if d + COINCIDENCE_TOL < best_dist {
                 best_dist = d;
                 best_surface = None;
