@@ -1,0 +1,263 @@
+//! HDF5 statepoint — per-batch results + final source bank.
+//!
+//! The statepoint is an end-of-run snapshot capturing everything an
+//! analysis or restart pass needs:
+//!
+//! - `/header`: scalar metadata (n_batches, n_active, particles, seed, …)
+//! - `/k_eff`: per-batch collision-estimator k, plus the active-batch mean
+//! - `/k_track`: per-batch track-length-estimator k
+//! - `/source_bank/{positions,energies,weights}`: the post-normalize
+//!   fission source for the *next* batch — feed it back into `run_eigenvalue`
+//!   to continue the calculation
+//! - `/tallies/surface_current_pos|neg` (`[n_batches, n_bins]`),
+//!   `/tallies/mesh_flux` (`[n_batches, n_voxels]`): flattened tally
+//!   arrays
+//!
+//! Roundtrip is tested with `hdf5_pure::File::from_bytes`. The file is
+//! a standard HDF5 — readable by h5py, OpenMC's tools, etc.
+
+use std::path::Path;
+
+use hdf5_pure::{AttrValue, FileBuilder};
+
+use crate::transport::particle::FissionSite;
+use crate::transport::simulate::BatchResult;
+
+/// Inputs to `write_statepoint`. The caller passes an immutable view
+/// of the run results plus the final source bank.
+pub struct StatepointInputs<'a> {
+    pub batches: &'a [BatchResult],
+    pub source_bank: &'a [FissionSite],
+    pub n_active: u32,
+    pub particles_per_batch: u32,
+    pub seed: u64,
+    pub k_eff_mean: f64,
+    /// Surface tally bin count (0 if disabled). Determines the second
+    /// dimension of the surface-current arrays.
+    pub n_surface_bins: usize,
+    /// Mesh tally voxel count (0 if disabled).
+    pub n_mesh_voxels: usize,
+}
+
+/// Write an HDF5 statepoint to `path`. Overwrites any existing file.
+pub fn write_statepoint(path: &Path, sp: &StatepointInputs<'_>) -> std::io::Result<()> {
+    let bytes = build_statepoint(sp).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("hdf5 build failed: {e:?}"),
+        )
+    })?;
+    std::fs::write(path, bytes)
+}
+
+/// Build the HDF5 byte stream for a statepoint without touching disk.
+/// Useful for tests and in-memory consumers.
+pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure::Error> {
+    let mut fb = FileBuilder::new();
+
+    // Header attributes
+    fb.set_attr("n_batches", AttrValue::U64(sp.batches.len() as u64));
+    fb.set_attr("n_active", AttrValue::U64(sp.n_active as u64));
+    fb.set_attr(
+        "particles_per_batch",
+        AttrValue::U64(sp.particles_per_batch as u64),
+    );
+    fb.set_attr("seed", AttrValue::U64(sp.seed));
+    fb.set_attr("k_eff_mean", AttrValue::F64(sp.k_eff_mean));
+    fb.set_attr("n_surface_bins", AttrValue::U64(sp.n_surface_bins as u64));
+    fb.set_attr("n_mesh_voxels", AttrValue::U64(sp.n_mesh_voxels as u64));
+
+    let n_b = sp.batches.len();
+
+    // Per-batch scalars
+    let k_collision: Vec<f64> = sp.batches.iter().map(|b| b.k_eff).collect();
+    let k_track: Vec<f64> = sp.batches.iter().map(|b| b.k_track).collect();
+    let entropy: Vec<f64> = sp.batches.iter().map(|b| b.shannon_entropy).collect();
+    let active_flag: Vec<i64> = sp
+        .batches
+        .iter()
+        .map(|b| if b.active { 1 } else { 0 })
+        .collect();
+
+    fb.create_dataset("k_collision_per_batch")
+        .with_f64_data(&k_collision)
+        .with_shape(&[n_b as u64]);
+    fb.create_dataset("k_track_per_batch")
+        .with_f64_data(&k_track)
+        .with_shape(&[n_b as u64]);
+    fb.create_dataset("shannon_entropy_per_batch")
+        .with_f64_data(&entropy)
+        .with_shape(&[n_b as u64]);
+    fb.create_dataset("active_per_batch")
+        .with_i64_data(&active_flag)
+        .with_shape(&[n_b as u64]);
+
+    // Source bank
+    let n_src = sp.source_bank.len();
+    let mut positions: Vec<f64> = Vec::with_capacity(3 * n_src);
+    let mut energies: Vec<f64> = Vec::with_capacity(n_src);
+    let mut weights: Vec<f64> = Vec::with_capacity(n_src);
+    for site in sp.source_bank {
+        positions.push(site.pos.x);
+        positions.push(site.pos.y);
+        positions.push(site.pos.z);
+        energies.push(site.energy);
+        weights.push(site.weight);
+    }
+    fb.create_dataset("source_bank_positions")
+        .with_f64_data(&positions)
+        .with_shape(&[n_src as u64, 3]);
+    fb.create_dataset("source_bank_energies")
+        .with_f64_data(&energies)
+        .with_shape(&[n_src as u64]);
+    fb.create_dataset("source_bank_weights")
+        .with_f64_data(&weights)
+        .with_shape(&[n_src as u64]);
+
+    // Surface current tallies (only if enabled)
+    if sp.n_surface_bins > 0 {
+        let total = n_b * sp.n_surface_bins;
+        let mut pos_flat = Vec::with_capacity(total);
+        let mut neg_flat = Vec::with_capacity(total);
+        for b in sp.batches {
+            // Pad short rows with zeros (defensive; well-formed runs
+            // always emit the right length).
+            for i in 0..sp.n_surface_bins {
+                pos_flat.push(*b.surface_current_pos.get(i).unwrap_or(&0.0));
+                neg_flat.push(*b.surface_current_neg.get(i).unwrap_or(&0.0));
+            }
+        }
+        fb.create_dataset("surface_current_pos")
+            .with_f64_data(&pos_flat)
+            .with_shape(&[n_b as u64, sp.n_surface_bins as u64]);
+        fb.create_dataset("surface_current_neg")
+            .with_f64_data(&neg_flat)
+            .with_shape(&[n_b as u64, sp.n_surface_bins as u64]);
+    }
+
+    // Mesh flux tally (only if enabled)
+    if sp.n_mesh_voxels > 0 {
+        let total = n_b * sp.n_mesh_voxels;
+        let mut flux_flat = Vec::with_capacity(total);
+        for b in sp.batches {
+            for i in 0..sp.n_mesh_voxels {
+                flux_flat.push(*b.mesh_flux.get(i).unwrap_or(&0.0));
+            }
+        }
+        fb.create_dataset("mesh_flux")
+            .with_f64_data(&flux_flat)
+            .with_shape(&[n_b as u64, sp.n_mesh_voxels as u64]);
+    }
+
+    fb.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::geometry::Vec3;
+    use crate::transport::simulate::PhotonSourceEvent;
+
+    fn dummy_batch(batch: u32, k: f64, n_surf: usize, n_vox: usize) -> BatchResult {
+        BatchResult {
+            batch,
+            k_eff: k,
+            leakage: 0,
+            absorptions: 0,
+            fissions: 0,
+            collisions: 0,
+            thermal_scatters: 0,
+            surface_crossings: 0,
+            shannon_entropy: 7.95,
+            active: true,
+            captures_by_cell: vec![],
+            photon_events: Vec::<PhotonSourceEvent>::new(),
+            k_track: k - 0.001,
+            surface_current_pos: vec![0.5; n_surf],
+            surface_current_neg: vec![0.3; n_surf],
+            mesh_flux: vec![1.25; n_vox],
+        }
+    }
+
+    #[test]
+    fn statepoint_roundtrip_minimal() {
+        let batches = vec![
+            dummy_batch(1, 0.999, 0, 0),
+            dummy_batch(2, 1.001, 0, 0),
+            dummy_batch(3, 1.000, 0, 0),
+        ];
+        let bank = vec![
+            FissionSite {
+                pos: Vec3::new(0.1, 0.2, 0.3),
+                energy: 1e6,
+                weight: 1.0,
+            },
+            FissionSite {
+                pos: Vec3::new(-0.1, 0.0, 0.5),
+                energy: 2e6,
+                weight: 1.0,
+            },
+        ];
+        let sp = StatepointInputs {
+            batches: &batches,
+            source_bank: &bank,
+            n_active: 2,
+            particles_per_batch: 5000,
+            seed: 42,
+            k_eff_mean: 1.000,
+            n_surface_bins: 0,
+            n_mesh_voxels: 0,
+        };
+        let bytes = build_statepoint(&sp).expect("build");
+        let f = hdf5_pure::File::from_bytes(bytes).expect("read");
+
+        let k = f.dataset("k_collision_per_batch").unwrap().read_f64().unwrap();
+        assert_eq!(k.len(), 3);
+        assert!((k[0] - 0.999).abs() < 1e-12);
+        assert!((k[2] - 1.000).abs() < 1e-12);
+
+        let kt = f.dataset("k_track_per_batch").unwrap().read_f64().unwrap();
+        assert!((kt[0] - 0.998).abs() < 1e-12);
+
+        let pos = f
+            .dataset("source_bank_positions")
+            .unwrap()
+            .read_f64()
+            .unwrap();
+        assert_eq!(pos.len(), 6);
+        assert!((pos[0] - 0.1).abs() < 1e-12);
+        assert!((pos[5] - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn statepoint_roundtrip_with_tallies() {
+        let n_surf = 2;
+        let n_vox = 4;
+        let batches = vec![dummy_batch(1, 0.99, n_surf, n_vox), dummy_batch(2, 1.01, n_surf, n_vox)];
+        let sp = StatepointInputs {
+            batches: &batches,
+            source_bank: &[],
+            n_active: 2,
+            particles_per_batch: 1000,
+            seed: 1,
+            k_eff_mean: 1.0,
+            n_surface_bins: n_surf,
+            n_mesh_voxels: n_vox,
+        };
+        let bytes = build_statepoint(&sp).expect("build");
+        let f = hdf5_pure::File::from_bytes(bytes).expect("read");
+
+        let pos = f.dataset("surface_current_pos").unwrap().read_f64().unwrap();
+        assert_eq!(pos.len(), 2 * n_surf);
+        // Every dummy batch wrote 0.5 into every bin.
+        for v in &pos {
+            assert!((v - 0.5).abs() < 1e-12);
+        }
+
+        let mesh = f.dataset("mesh_flux").unwrap().read_f64().unwrap();
+        assert_eq!(mesh.len(), 2 * n_vox);
+        for v in &mesh {
+            assert!((v - 1.25).abs() < 1e-12);
+        }
+    }
+}

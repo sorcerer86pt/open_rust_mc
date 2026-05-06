@@ -561,6 +561,8 @@ fn main() {
             auto_inactive: None,
             verbose: true,
             parallel: true,
+            tallies: Default::default(),
+            statepoint_path: None,
         };
 
         if args.seeds > 1 {

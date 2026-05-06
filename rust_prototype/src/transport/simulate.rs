@@ -21,6 +21,7 @@ use crate::thermal::ThermalScatteringData;
 use crate::transport::material::Material;
 use crate::transport::particle::{FissionBank, FissionSite, Particle};
 use crate::transport::rng::Rng;
+use crate::transport::tally::{ParticleTallies, Tallies};
 
 /// Maximum nuclides per material for stack-allocated XS buffers.
 /// Godiva has 3, most materials have < 8. Avoids per-collision heap allocation.
@@ -56,6 +57,14 @@ pub struct SimConfig {
     /// which on Windows can deadlock against Python's loader lock
     /// when called from a PyO3 extension.
     pub parallel: bool,
+    /// Optional tallies (surface currents, mesh flux). When `None`,
+    /// the transport loop's tally hooks are no-ops — zero hot-path
+    /// cost. See `transport::tally` for shapes.
+    pub tallies: Tallies,
+    /// When set, write an HDF5 statepoint at the end of the run:
+    /// per-batch arrays, tally arrays, and the post-normalize source
+    /// bank ready for restart. See `transport::statepoint`.
+    pub statepoint_path: Option<std::path::PathBuf>,
 }
 
 impl Default for SimConfig {
@@ -68,6 +77,8 @@ impl Default for SimConfig {
             auto_inactive: None,
             verbose: true,
             parallel: true,
+            tallies: Tallies::default(),
+            statepoint_path: None,
         }
     }
 }
@@ -387,6 +398,17 @@ pub struct BatchResult {
     /// Surface-tracking only — under delta tracking the path crosses
     /// material boundaries silently, so this field stays 0.
     pub k_track: f64,
+    /// Per-bin J+ (forward) surface current — sum of `particle.weight`
+    /// over crossings with `dir · normal ≥ 0`. Length matches the
+    /// `SimConfig.tallies.surface_current` bin count, or empty when
+    /// the tally is disabled. Net current = `pos - neg`; total = `pos + neg`.
+    pub surface_current_pos: Vec<f64>,
+    /// Per-bin J- (backward) surface current — `dir · normal < 0`.
+    pub surface_current_neg: Vec<f64>,
+    /// Per-voxel track-length flux: Σ_segments w · d (cm·source⁻¹).
+    /// Length = `SimConfig.tallies.mesh_flux.n_voxels()`, or empty
+    /// when the mesh tally is disabled.
+    pub mesh_flux: Vec<f64>,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -500,6 +522,10 @@ struct ParticleResult {
     /// bearing material. Reduced into `BatchResult::k_track` as
     /// `total / N_source` after the batch completes.
     track_length_nu_sigf: f64,
+    /// Per-particle tally accumulators (surface currents, mesh flux).
+    /// Sized once at particle birth from the active `Tallies` config;
+    /// empty Vec when the corresponding tally is disabled.
+    tallies: ParticleTallies,
 }
 
 /// Sample photon products for a given reaction (MT) at the current
@@ -544,6 +570,7 @@ const ABSORPTION_PHOTON_MTS: &[u32] = &[102, 103, 107];
 const FISSION_PHOTON_MTS: &[u32] = &[18];
 
 /// Transport a single particle to completion.
+#[allow(clippy::too_many_arguments)]
 fn transport_particle<XS: XsProvider>(
     site: &FissionSite,
     batch: u64,
@@ -553,6 +580,7 @@ fn transport_particle<XS: XsProvider>(
     cells: &[Cell],
     materials: &[Material],
     xs_provider: &XS,
+    tallies: &Tallies,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
@@ -566,6 +594,7 @@ fn transport_particle<XS: XsProvider>(
         capture_cells: Vec::new(),
         photon_events: Vec::new(),
         track_length_nu_sigf: 0.0,
+        tallies: ParticleTallies::new(tallies),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -743,10 +772,35 @@ fn transport_particle<XS: XsProvider>(
                 result.track_length_nu_sigf +=
                     particle.weight * advance_dist * macro_nu_sigma_f;
             }
+            // Mesh flux tally: deposit w · d into every voxel the
+            // segment intersects. Skipped when the tally is disabled.
+            if let Some(mesh) = tallies.mesh_flux.as_ref() {
+                mesh.deposit(
+                    particle.pos,
+                    particle.dir,
+                    advance_dist,
+                    particle.weight,
+                    &mut result.tallies.mesh_flux,
+                );
+            }
 
             match trace {
                 Some(hit) if hit.distance < dist_collision => {
                     result.surface_crossings += 1;
+                    // Surface current tally: split forward / backward
+                    // crossings by sign(particle.dir · surface_normal).
+                    if let (Some(sct), Some(surf_idx)) =
+                        (tallies.surface_current.as_ref(), hit.surface_idx)
+                        && let Some(bin) = sct.bin_for(surf_idx)
+                    {
+                        let crossing_pos = particle.pos + particle.dir * hit.distance;
+                        let n = surfaces[surf_idx].normal_at(crossing_pos);
+                        if particle.dir.dot(n) >= 0.0 {
+                            result.tallies.surface_current_pos[bin] += particle.weight;
+                        } else {
+                            result.tallies.surface_current_neg[bin] += particle.weight;
+                        }
+                    }
                     match hit.bc {
                         BoundaryCondition::Vacuum => {
                             particle.advance(hit.distance);
@@ -1055,6 +1109,7 @@ fn transport_particle_delta<XS: XsProvider>(
     materials: &[Material],
     xs_provider: &XS,
     majorant: &MajorantTable,
+    tallies: &Tallies,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
@@ -1068,6 +1123,7 @@ fn transport_particle_delta<XS: XsProvider>(
         capture_cells: Vec::new(),
         photon_events: Vec::new(),
         track_length_nu_sigf: 0.0,
+        tallies: ParticleTallies::new(tallies),
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -1433,6 +1489,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 cells,
                 materials,
                 xs_provider,
+                &config.tallies,
             ),
             TrackingMode::Delta(majorant) => transport_particle_delta(
                 site,
@@ -1444,6 +1501,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 materials,
                 xs_provider,
                 majorant,
+                &config.tallies,
             ),
         };
         let particle_results: Vec<ParticleResult> = if config.parallel {
@@ -1467,6 +1525,11 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         let mut captures_by_cell = vec![0.0_f64; cells.len()];
         let mut photon_events: Vec<PhotonSourceEvent> = Vec::new();
         let mut track_length_sum = 0.0_f64;
+        let n_surf_bins = config.tallies.n_surface_bins();
+        let n_mesh_voxels = config.tallies.n_mesh_voxels();
+        let mut surface_current_pos = vec![0.0_f64; n_surf_bins];
+        let mut surface_current_neg = vec![0.0_f64; n_surf_bins];
+        let mut mesh_flux = vec![0.0_f64; n_mesh_voxels];
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1483,6 +1546,23 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 }
             }
             photon_events.extend(pr.photon_events);
+            // Reduce per-particle tallies into batch totals. When the
+            // tally is disabled both vecs are empty so `zip` is a no-op.
+            for (b, v) in surface_current_pos
+                .iter_mut()
+                .zip(pr.tallies.surface_current_pos.iter())
+            {
+                *b += v;
+            }
+            for (b, v) in surface_current_neg
+                .iter_mut()
+                .zip(pr.tallies.surface_current_neg.iter())
+            {
+                *b += v;
+            }
+            for (b, v) in mesh_flux.iter_mut().zip(pr.tallies.mesh_flux.iter()) {
+                *b += v;
+            }
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -1503,6 +1583,9 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             captures_by_cell,
             photon_events,
             k_track,
+            surface_current_pos,
+            surface_current_neg,
+            mesh_flux,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
@@ -1556,6 +1639,30 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
     } else {
         0.0
     };
+
+    // Optional statepoint write at end of run.
+    if let Some(path) = config.statepoint_path.as_ref() {
+        let n_active = results.iter().filter(|r| r.active).count() as u32;
+        let inputs = crate::transport::statepoint::StatepointInputs {
+            batches: &results,
+            source_bank: &source_bank,
+            n_active,
+            particles_per_batch: config.particles_per_batch,
+            seed: config.seed,
+            k_eff_mean: k_final,
+            n_surface_bins: config.tallies.n_surface_bins(),
+            n_mesh_voxels: config.tallies.n_mesh_voxels(),
+        };
+        match crate::transport::statepoint::write_statepoint(path, &inputs) {
+            Ok(()) => {
+                if config.verbose {
+                    println!("  Statepoint written: {}", path.display());
+                }
+            }
+            Err(e) => eprintln!("  Statepoint write FAILED: {e}"),
+        }
+    }
+
     (results, k_final)
 }
 
@@ -1893,6 +2000,8 @@ mod tests {
             auto_inactive: None,
             verbose: false,
             parallel: false,
+            tallies: Default::default(),
+            statepoint_path: None,
         };
 
         let (results, k_final) =
@@ -2006,6 +2115,8 @@ mod tests {
             auto_inactive: None,
             verbose: false,
             parallel: false,
+            tallies: Default::default(),
+            statepoint_path: None,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -2165,6 +2276,8 @@ mod tests {
             auto_inactive: None,
             verbose: false,
             parallel: false,
+            tallies: Default::default(),
+            statepoint_path: None,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -2174,6 +2287,8 @@ mod tests {
             auto_inactive: None,
             verbose: false,
             parallel: false,
+            tallies: Default::default(),
+            statepoint_path: None,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);

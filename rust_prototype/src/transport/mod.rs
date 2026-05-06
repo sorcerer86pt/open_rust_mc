@@ -5,4 +5,6 @@ pub mod material;
 pub mod particle;
 pub mod rng;
 pub mod simulate;
+pub mod statepoint;
+pub mod tally;
 pub mod xs_provider;

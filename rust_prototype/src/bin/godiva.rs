@@ -104,6 +104,13 @@ struct Args {
     /// (bounded by the policy's [20, 200] min/max inactive).
     #[arg(long, default_value_t = false)]
     auto_inactive: bool,
+
+    /// When set, write an HDF5 statepoint at the end of the FIRST seed:
+    /// per-batch k_collision / k_track / Shannon entropy / surface-current
+    /// + mesh-flux tally arrays (when active), plus the full source bank
+    /// for restart. Path is interpreted relative to the cwd.
+    #[arg(long)]
+    statepoint: Option<PathBuf>,
 }
 
 const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
@@ -254,6 +261,8 @@ fn run_multi_seed<XS: XsProvider>(
             },
             verbose: true,
             parallel: true,
+            tallies: Default::default(),
+            statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
         };
 
         if args.seeds > 1 {

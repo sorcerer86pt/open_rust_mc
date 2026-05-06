@@ -218,6 +218,8 @@ fn main() -> ExitCode {
         auto_inactive: None,
         verbose: true,
         parallel: true,
+        tallies: Default::default(),
+        statepoint_path: None,
     };
     let t1 = Instant::now();
     let (batch_results, k_eff) =

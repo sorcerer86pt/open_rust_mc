@@ -25,6 +25,7 @@ use open_rust_mc::thermal::ThermalScatteringData;
 use open_rust_mc::transport::hybrid_xs::{HybridSvdWmpXsProvider, HybridTableWmpXsProvider};
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
+use open_rust_mc::transport::tally::{MeshFluxTally, SurfaceCurrentTally, Tallies};
 use open_rust_mc::transport::xs_provider;
 use open_rust_mc::wmp::WindowedMultipole;
 
@@ -114,6 +115,13 @@ struct Args {
     /// (MT=51-91). rank=1 captures them (weak T-dependence).
     #[arg(long)]
     discrete_rank: Option<usize>,
+
+    /// HDF5 statepoint output path (writes after the FIRST seed).
+    /// When this flag is set, also enables a 4×4×1 Cartesian mesh flux
+    /// tally over the pin-cell box and a surface current tally on the
+    /// outer reflective box, so the file has non-trivial tally arrays.
+    #[arg(long)]
+    statepoint: Option<PathBuf>,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
@@ -222,6 +230,22 @@ fn run_multi_seed<XS: XsProvider>(
     let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
     let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
+    // When --statepoint is set, attach a 4×4×1 mesh flux tally over
+    // the pin-cell box and a surface current tally on the outer
+    // reflective box (surface ids 3..=8). The mesh edge length comes
+    // from the geometry pitch so this stays valid for the default
+    // 1.26 cm pin cell — change here if the geometry pitch changes.
+    let half = 0.63_f64;
+    let mut shared_tallies = Tallies::default();
+    if args.statepoint.is_some() {
+        shared_tallies.mesh_flux = Some(MeshFluxTally::new(
+            [-half, -half, -half],
+            [half / 2.0, half / 2.0, 2.0 * half],
+            [4, 4, 1],
+        ));
+        shared_tallies.surface_current = Some(SurfaceCurrentTally::new(vec![3, 4, 5, 6, 7, 8]));
+    }
+
     for seed in 0..args.seeds {
         let config = SimConfig {
             batches: args.batches,
@@ -235,6 +259,8 @@ fn run_multi_seed<XS: XsProvider>(
             },
             verbose: true,
             parallel: true,
+            tallies: shared_tallies.clone(),
+            statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
         };
 
         if args.seeds > 1 {
