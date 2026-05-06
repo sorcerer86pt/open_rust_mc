@@ -127,6 +127,12 @@ struct SeedResult {
     seed: u32,
     k_mean: f64,
     k_std: f64,
+    /// Track-length k-eff estimator mean over active batches. Same
+    /// expectation as `k_mean` but lower variance — every flight
+    /// segment contributes, not just collisions.
+    k_track_mean: f64,
+    /// Standard error of `k_track_mean` over active batches.
+    k_track_std: f64,
     sim_ms: f64,
     total_histories: u64,
 }
@@ -161,6 +167,30 @@ impl BenchmarkResult {
             .seed_results
             .iter()
             .map(|r| (r.k_mean - mean).powi(2))
+            .sum::<f64>()
+            / (n - 1.0);
+        var.sqrt()
+    }
+
+    fn k_track_mean(&self) -> f64 {
+        let n = self.seed_results.len() as f64;
+        self.seed_results
+            .iter()
+            .map(|r| r.k_track_mean)
+            .sum::<f64>()
+            / n
+    }
+
+    fn k_track_std(&self) -> f64 {
+        if self.seed_results.len() < 2 {
+            return self.seed_results[0].k_track_std;
+        }
+        let mean = self.k_track_mean();
+        let n = self.seed_results.len() as f64;
+        let var = self
+            .seed_results
+            .iter()
+            .map(|r| (r.k_track_mean - mean).powi(2))
             .sum::<f64>()
             / (n - 1.0);
         var.sqrt()
@@ -243,22 +273,37 @@ fn run_multi_seed<XS: XsProvider>(
             .filter(|r| r.active)
             .map(|r| r.k_eff)
             .collect();
+        let active_track: Vec<f64> = results
+            .iter()
+            .filter(|r| r.active)
+            .map(|r| r.k_track)
+            .collect();
         let n = active.len() as f64;
         let k_mean = active.iter().sum::<f64>() / n;
         let k_var = active.iter().map(|&k| (k - k_mean).powi(2)).sum::<f64>() / (n * (n - 1.0));
         let k_std = k_var.sqrt();
+        let k_track_mean = active_track.iter().sum::<f64>() / n;
+        let k_track_var = active_track
+            .iter()
+            .map(|&k| (k - k_track_mean).powi(2))
+            .sum::<f64>()
+            / (n * (n - 1.0));
+        let k_track_std = k_track_var.sqrt();
 
         let sr = SeedResult {
             seed,
             k_mean,
             k_std,
+            k_track_mean,
+            k_track_std,
             sim_ms,
             total_histories,
         };
 
         if args.seeds > 1 {
             println!(
-                "k={k_mean:.5} +/- {k_std:.5}  {sim_ms:.0}ms  ({:.1} ns/particle)",
+                "k={k_mean:.5} +/- {k_std:.5}  k_track={k_track_mean:.5} +/- {k_track_std:.5}  \
+                 {sim_ms:.0}ms  ({:.1} ns/particle)",
                 sr.ns_per_particle()
             );
         }
@@ -493,17 +538,24 @@ fn print_benchmark(r: &BenchmarkResult, _particles: u32) {
 
     println!("  {}:", r.label);
     println!(
-        "    k_eff            = {:.5} +/- {:.5}",
+        "    k_eff (collision) = {:.5} +/- {:.5}",
         r.k_eff_mean(),
         r.k_eff_std()
+    );
+    println!(
+        "    k_eff (track-len) = {:.5} +/- {:.5}",
+        r.k_track_mean(),
+        r.k_track_std()
     );
     if n_seeds > 1 {
         for sr in &r.seed_results {
             println!(
-                "      seed {}: k={:.5} +/- {:.5}  ({:.1} ns/p)",
+                "      seed {}: k_c={:.5} +/- {:.5}  k_t={:.5} +/- {:.5}  ({:.1} ns/p)",
                 sr.seed,
                 sr.k_mean,
                 sr.k_std,
+                sr.k_track_mean,
+                sr.k_track_std,
                 sr.ns_per_particle()
             );
         }

@@ -378,6 +378,15 @@ pub struct BatchResult {
     /// — the photon driver consumes this directly as a fixed source.
     /// Empty when the XS provider has no photon-product data loaded.
     pub photon_events: Vec<PhotonSourceEvent>,
+    /// Track-length k-eff estimator for this batch:
+    ///   k_track = (1/N) Σ_segments  w · d · Σ_νf(E)
+    /// summed across every flight segment of every particle, divided
+    /// by the source size N. Equivalent in expectation to the
+    /// fission-bank (collision) estimator `k_eff` but lower variance
+    /// because every step contributes, not just collisions.
+    /// Surface-tracking only — under delta tracking the path crosses
+    /// material boundaries silently, so this field stays 0.
+    pub k_track: f64,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -486,6 +495,11 @@ struct ParticleResult {
     /// Photon emission events sampled at each reaction site (capture,
     /// fission, inelastic). Reduced into `BatchResult::photon_events`.
     photon_events: Vec<PhotonSourceEvent>,
+    /// Track-length tally accumulator: Σ_segments w · d · Σ_νf(E),
+    /// summed over every advance the particle made through fuel-
+    /// bearing material. Reduced into `BatchResult::k_track` as
+    /// `total / N_source` after the batch completes.
+    track_length_nu_sigf: f64,
 }
 
 /// Sample photon products for a given reaction (MT) at the current
@@ -551,6 +565,7 @@ fn transport_particle<XS: XsProvider>(
         surface_crossings: 0,
         capture_cells: Vec::new(),
         photon_events: Vec::new(),
+        track_length_nu_sigf: 0.0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -699,6 +714,15 @@ fn transport_particle<XS: XsProvider>(
                 break;
             }
 
+            // Macroscopic ν·Σ_f for the track-length k-eff estimator.
+            // Zero outside fuel; computed from the same MicroXs we just
+            // looked up, so no extra XS evaluation.
+            let mut macro_nu_sigma_f = 0.0_f64;
+            for (i, nuc) in material.nuclides.iter().enumerate() {
+                macro_nu_sigma_f +=
+                    nuc.atom_density * micro_xs[i].nu_bar * micro_xs[i].fission;
+            }
+
             let dist_collision = rng.exponential(macro_total);
 
             let trace = geometry::ray::trace_step_recursive(
@@ -707,6 +731,18 @@ fn transport_particle<XS: XsProvider>(
                 particle.dir,
                 geometry,
             );
+
+            // Tally track-length over the actual flight before any cell
+            // change. The segment is straight-line through one cell, so
+            // ν·Σ_f is constant along it.
+            let advance_dist = match &trace {
+                Some(hit) if hit.distance < dist_collision => hit.distance,
+                _ => dist_collision,
+            };
+            if macro_nu_sigma_f > 0.0 {
+                result.track_length_nu_sigf +=
+                    particle.weight * advance_dist * macro_nu_sigma_f;
+            }
 
             match trace {
                 Some(hit) if hit.distance < dist_collision => {
@@ -1031,6 +1067,7 @@ fn transport_particle_delta<XS: XsProvider>(
         surface_crossings: 0,
         capture_cells: Vec::new(),
         photon_events: Vec::new(),
+        track_length_nu_sigf: 0.0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -1429,6 +1466,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         let mut surface_crossings = 0_u32;
         let mut captures_by_cell = vec![0.0_f64; cells.len()];
         let mut photon_events: Vec<PhotonSourceEvent> = Vec::new();
+        let mut track_length_sum = 0.0_f64;
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1438,6 +1476,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             collisions += pr.collisions;
             thermal_scatters += pr.thermal_scatters;
             surface_crossings += pr.surface_crossings;
+            track_length_sum += pr.track_length_nu_sigf;
             for c in pr.capture_cells {
                 if c < captures_by_cell.len() {
                     captures_by_cell[c] += 1.0;
@@ -1447,6 +1486,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
+        let k_track = track_length_sum / n as f64;
         let entropy = entropy_mesh.entropy(&fission_bank.sites);
 
         let mut result = BatchResult {
@@ -1462,6 +1502,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             active: false,
             captures_by_cell,
             photon_events,
+            k_track,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
@@ -1498,7 +1539,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         if config.verbose {
             let active_str = if is_active { " *" } else { "" };
             println!(
-                "  Batch {batch:>4}: k={k_batch:.5}  H={entropy:.4}  \
+                "  Batch {batch:>4}: k={k_batch:.5}  k_t={k_track:.5}  H={entropy:.4}  \
                  coll={collisions}  fiss={fissions}  leak={leakage}  \
                  therm={thermal_scatters}  surf={surface_crossings}{active_str}"
             );
