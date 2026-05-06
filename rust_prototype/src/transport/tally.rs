@@ -12,7 +12,8 @@
 //!   the final mean and standard error can be derived over active
 //!   batches.
 
-use crate::geometry::Vec3;
+use crate::geometry::surface::{BoundaryCondition, Surface};
+use crate::geometry::{Aabb, Vec3};
 
 /// Surface current tally over a user-tagged set of surface indices.
 #[derive(Debug, Clone)]
@@ -25,6 +26,41 @@ pub struct SurfaceCurrentTally {
 impl SurfaceCurrentTally {
     pub fn new(surfaces: Vec<usize>) -> Self {
         Self { surfaces }
+    }
+
+    /// Build a tally over every reflective-BC surface in the slice.
+    /// Common case: outer pin / assembly box where the user wants
+    /// J+/J- on every face. Surfaces are tagged in slice order.
+    pub fn for_reflective_surfaces(surfaces: &[Surface]) -> Self {
+        Self::for_bc_matching(surfaces, |bc| bc == BoundaryCondition::Reflective)
+    }
+
+    /// Build a tally over every non-Transmission surface — i.e. every
+    /// surface that bounds the physical problem (`Reflective` or
+    /// `Vacuum`). Use this for leakage / outflow currents on vacuum
+    /// boundaries (e.g. Godiva sphere) and reflective faces (pin cell).
+    pub fn for_boundary_surfaces(surfaces: &[Surface]) -> Self {
+        Self::for_bc_matching(surfaces, |bc| {
+            bc == BoundaryCondition::Reflective || bc == BoundaryCondition::Vacuum
+        })
+    }
+
+    fn for_bc_matching<F>(surfaces: &[Surface], pred: F) -> Self
+    where
+        F: Fn(BoundaryCondition) -> bool,
+    {
+        let indices = surfaces
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                if pred(s.boundary_condition()) {
+                    Some(i)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        Self { surfaces: indices }
     }
 
     /// Return the tally bin for a crossed surface, or `None` if that
@@ -50,6 +86,24 @@ pub struct MeshFluxTally {
 
 impl MeshFluxTally {
     pub fn new(origin: [f64; 3], spacing: [f64; 3], n: [usize; 3]) -> Self {
+        Self {
+            origin,
+            spacing,
+            n,
+        }
+    }
+
+    /// Build a mesh that covers `aabb` exactly with `n[i]` voxels along
+    /// axis i. Spacing per axis is the AABB extent divided by `n[i]`.
+    /// Useful default for "tally flux throughout the geometry's
+    /// fissile box" — the typical pin / assembly use case.
+    pub fn from_aabb(aabb: &Aabb, n: [usize; 3]) -> Self {
+        let origin = [aabb.min.x, aabb.min.y, aabb.min.z];
+        let spacing = [
+            (aabb.max.x - aabb.min.x) / n[0].max(1) as f64,
+            (aabb.max.y - aabb.min.y) / n[1].max(1) as f64,
+            (aabb.max.z - aabb.min.z) / n[2].max(1) as f64,
+        ];
         Self {
             origin,
             spacing,
@@ -198,6 +252,51 @@ mod tests {
         assert_eq!(t.bin_for(3), Some(0));
         assert_eq!(t.bin_for(11), Some(2));
         assert_eq!(t.bin_for(5), None);
+    }
+
+    #[test]
+    fn surface_tally_picks_only_reflective_bcs() {
+        use crate::geometry::surface::{BoundaryCondition, Surface};
+        let surfaces = vec![
+            Surface::PlaneX {
+                x0: 0.0,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::PlaneX {
+                x0: 1.0,
+                bc: BoundaryCondition::Reflective,
+            },
+            Surface::PlaneY {
+                y0: 0.0,
+                bc: BoundaryCondition::Vacuum,
+            },
+            Surface::PlaneY {
+                y0: 1.0,
+                bc: BoundaryCondition::Reflective,
+            },
+        ];
+        let t = SurfaceCurrentTally::for_reflective_surfaces(&surfaces);
+        assert_eq!(t.surfaces, vec![1, 3]);
+    }
+
+    #[test]
+    fn mesh_from_aabb_covers_exactly() {
+        use crate::geometry::Aabb;
+        let aabb = Aabb::new(Vec3::new(-2.0, -1.0, 0.0), Vec3::new(2.0, 1.0, 4.0));
+        let mesh = MeshFluxTally::from_aabb(&aabb, [4, 2, 8]);
+        assert_eq!(mesh.origin, [-2.0, -1.0, 0.0]);
+        assert!((mesh.spacing[0] - 1.0).abs() < 1e-12);
+        assert!((mesh.spacing[1] - 1.0).abs() < 1e-12);
+        assert!((mesh.spacing[2] - 0.5).abs() < 1e-12);
+        assert_eq!(mesh.n_voxels(), 4 * 2 * 8);
+
+        // A diagonal segment fully inside aabb should deposit weight ×
+        // length even though it crosses many voxel boundaries.
+        let mut acc = vec![0.0; mesh.n_voxels()];
+        let dir = Vec3::new(1.0, 0.0, 0.0);
+        mesh.deposit(Vec3::new(-1.5, 0.0, 1.0), dir, 3.0, 1.5, &mut acc);
+        let total: f64 = acc.iter().sum();
+        assert!((total - 4.5).abs() < 1e-9, "total={total}");
     }
 
     #[test]

@@ -25,6 +25,7 @@ use open_rust_mc::geometry::{Aabb, Vec3};
 use open_rust_mc::transport::hybrid_xs::HybridTableWmpXsProvider;
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
+use open_rust_mc::transport::tally::{MeshFluxTally, SurfaceCurrentTally, Tallies};
 use open_rust_mc::transport::xs_provider;
 use open_rust_mc::wmp::WindowedMultipole;
 
@@ -254,6 +255,22 @@ fn run_multi_seed<XS: XsProvider>(
     let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
     let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
+    // When --statepoint is set, attach a 4×4×4 mesh flux tally over
+    // a cube enclosing the Godiva sphere and a surface current tally
+    // on the outer vacuum sphere (leakage current). Both helpers are
+    // library-grade and reusable across binaries.
+    let mut shared_tallies = Tallies::default();
+    if args.statepoint.is_some() {
+        let r = 8.7407_f64;
+        let outer_aabb = open_rust_mc::geometry::Aabb::new(
+            Vec3::new(-r, -r, -r),
+            Vec3::new(r, r, r),
+        );
+        shared_tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&outer_aabb, [4, 4, 4]));
+        shared_tallies.surface_current =
+            Some(SurfaceCurrentTally::for_boundary_surfaces(surfaces));
+    }
+
     for seed in 0..args.seeds {
         let config = SimConfig {
             batches: args.batches,
@@ -267,7 +284,7 @@ fn run_multi_seed<XS: XsProvider>(
             },
             verbose: true,
             parallel: true,
-            tallies: Default::default(),
+            tallies: shared_tallies.clone(),
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
             survival_biasing: if args.survival_biasing {
                 Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
