@@ -128,6 +128,13 @@ struct Args {
     /// Number of z-bins for the CADIS-lite importance map.
     #[arg(long, default_value_t = 50)]
     cadis_z_bins: usize,
+
+    /// Persist the calibration importance map to a JSON file. The
+    /// next-step CADIS WW translator (`WeightWindow::from_flux` over
+    /// a 1×1×n_z voxel mesh) will ingest this file. Schema:
+    ///   {"thickness_cm": ..., "n_z_bins": ..., "counts": [...]}
+    #[arg(long)]
+    cadis_save: Option<PathBuf>,
 }
 
 const N_A: f64 = 6.022_140_76e23;
@@ -382,6 +389,47 @@ fn main() -> Result<(), String> {
         println!("  with high ψ̂* (near z=T) get roulette to keep the");
         println!("  computational budget concentrated where it matters.");
         println!();
+
+        // Optional persistence of the importance map for downstream
+        // CADIS WW translation. Schema is the bare minimum needed by
+        // the next-step `WeightWindow::from_flux` builder; extending
+        // to xyz mesh / multi-energy is a follow-on.
+        if let Some(path) = &args.cadis_save {
+            let json = format!(
+                "{{\"thickness_cm\":{},\"n_z_bins\":{},\"counts\":[{}]}}",
+                args.thickness_cm,
+                args.cadis_z_bins,
+                counts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","),
+            );
+            std::fs::write(path, json)
+                .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+            println!("  importance map saved to {}", path.display());
+            println!();
+        }
+
+        // === Next-step CADIS roadmap (in-source TODO) ===========
+        // 1. Translate `counts` → `WeightWindow` via
+        //    `WeightWindow::from_flux(aabb, [1,1,n_z], flux,
+        //                             w_ref=1.0, ratio=5.0, floor=1e-3)`
+        //    — the existing infrastructure already does the
+        //    `w_target ∝ φ_max / φ` math; pass the calibration
+        //    counts as the `flux` argument.
+        // 2. Add a `weight: f64` field to the photon state in
+        //    `photon::transport::transport_one_csg`. Initialise to
+        //    1.0 at source; thread through the bank entries and
+        //    secondaries so daughters inherit it.
+        // 3. After each free-flight in `transport_one_csg`, query
+        //    the WW for the new voxel: split if `weight > w_upper`
+        //    (push N copies into the bank with weight w/N), roulette
+        //    if `weight < w_lower` (kill with prob 1−w/w_survive
+        //    else restore to w_survive).
+        // 4. The transmission tally accumulates `result.energy_escaped`
+        //    weighted by `weight` instead of unit-weight.
+        // 5. Re-run shield_slab with --cadis-load <map.json>
+        //    --use-cadis-ww and measure FOM gain on the existing
+        //    analog 348/s baseline. Wagner-Haghighat 2003 reports
+        //    50-1000× FOM gain for slab problems of this depth.
+        // ========================================================
     }
     // Born just inside the slab so the find_cell_recursive lookup
     // sees us in cell 0 unambiguously.
