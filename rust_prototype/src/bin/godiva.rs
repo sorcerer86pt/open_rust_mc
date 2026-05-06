@@ -126,6 +126,14 @@ struct Args {
     #[arg(long)]
     restart_from: Option<PathBuf>,
 
+    /// Run a short calibration pass (this many batches) with a
+    /// 4×4×4 mesh flux tally over the sphere, then build a
+    /// flux-weighted weight window via `WeightWindow::from_flux` and
+    /// use it for the main run. Variance reduction without manual
+    /// bound tuning. 0 disables.
+    #[arg(long, default_value_t = 0)]
+    ww_bootstrap_batches: u32,
+
     /// Enable a uniform weight window over a 4×4×4 mesh covering the
     /// Godiva sphere. Bounds default to (0.25, 4.0) — wide enough that
     /// well-behaved analog histories rarely cross the threshold (a
@@ -288,16 +296,76 @@ fn run_multi_seed<XS: XsProvider>(
         bank
     });
 
-    // Optional weight window (uniform 4×4×4 mesh over the sphere).
-    let weight_window_cfg = if args.weight_window {
-        let r = 8.7407_f64;
-        let aabb = open_rust_mc::geometry::Aabb::new(
-            Vec3::new(-r, -r, -r),
-            Vec3::new(r, r, r),
+    // Weight window: priority order
+    //   1. --ww-bootstrap-batches N → calibration run with mesh
+    //      flux, then `WeightWindow::from_flux`.
+    //   2. --weight-window           → uniform bounds.
+    //   3. otherwise                 → no weight window.
+    let r = 8.7407_f64;
+    let ww_aabb = open_rust_mc::geometry::Aabb::new(
+        Vec3::new(-r, -r, -r),
+        Vec3::new(r, r, r),
+    );
+    let ww_dims = [4_usize, 4, 4];
+    let weight_window_cfg = if args.ww_bootstrap_batches > 0 {
+        println!(
+            "\n── WW bootstrap calibration: {} batches × {} particles, mesh {ww_dims:?} ──",
+            args.ww_bootstrap_batches, args.particles
         );
+        let mut tallies = Tallies::default();
+        tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&ww_aabb, ww_dims));
+        let calib_inactive =
+            (args.ww_bootstrap_batches / 4).max(1).min(args.ww_bootstrap_batches.saturating_sub(1));
+        let calib_config = SimConfig {
+            batches: args.ww_bootstrap_batches,
+            inactive: calib_inactive,
+            particles_per_batch: args.particles,
+            seed: 0,
+            auto_inactive: None,
+            verbose: false,
+            parallel: true,
+            tallies,
+            statepoint_path: None,
+            survival_biasing: None,
+            initial_source_bank: None,
+            weight_window: None,
+        };
+        let t_calib = Instant::now();
+        let (calib_results, _) =
+            simulate::run_eigenvalue(&calib_config, surfaces, cells, materials, xs_provider);
+        let n_vox: usize = ww_dims.iter().product();
+        let mut flux = vec![0.0_f64; n_vox];
+        let mut n_active_calib = 0_u32;
+        for r in &calib_results {
+            if !r.active {
+                continue;
+            }
+            n_active_calib += 1;
+            for (b, v) in flux.iter_mut().zip(r.mesh_flux.iter()) {
+                *b += v;
+            }
+        }
+        let calib_ms = t_calib.elapsed().as_secs_f64() * 1000.0;
+        let phi_max = flux.iter().cloned().fold(0.0_f64, f64::max);
+        let phi_mean = flux.iter().sum::<f64>() / n_vox as f64;
+        println!(
+            "  calibration: {n_active_calib} active batches in {calib_ms:.0} ms, \
+             φ_max = {phi_max:.2e}, φ_mean = {phi_mean:.2e}"
+        );
+        Some(
+            open_rust_mc::transport::weight_window::WeightWindow::from_flux(
+                &ww_aabb,
+                ww_dims,
+                &flux,
+                1.0,    // w_ref
+                5.0,    // ratio (w_upper / w_lower)
+                1e-3,   // floor: voxels below 0.1% of φ_max are inactive
+            ),
+        )
+    } else if args.weight_window {
         Some(open_rust_mc::transport::weight_window::WeightWindow::uniform(
-            &aabb,
-            [4, 4, 4],
+            &ww_aabb,
+            ww_dims,
             args.ww_lower,
             args.ww_upper,
         ))

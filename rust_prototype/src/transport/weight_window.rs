@@ -44,6 +44,75 @@ pub struct WeightWindow {
 }
 
 impl WeightWindow {
+    /// Generate a weight window from a per-voxel flux estimate
+    /// (forward CADIS-lite / flux-bootstrap convention).
+    ///
+    /// `flux` is the active-batch mesh flux (Σ_active w·d per voxel)
+    /// in row-major `[ix][iy][iz]` order matching `MeshFluxTally`.
+    /// Voxels with low flux are under-sampled — there `w_target` is
+    /// high so analog-weight particles roulette out and surviving
+    /// particles carry more weight per visit. Voxels with high flux
+    /// get a low `w_target` so analog particles split and sampling
+    /// per particle goes up.
+    ///
+    /// Concretely:
+    /// ```text
+    ///   w_target_v = w_ref · φ_max / max(φ_v, φ_floor)
+    ///   w_lower_v  = w_target_v / sqrt(ratio)
+    ///   w_upper_v  = w_target_v * sqrt(ratio)
+    /// ```
+    /// `w_ref` is the analog reference weight (typically 1.0);
+    /// `ratio` is the upper/lower bound ratio (typically 5–10);
+    /// `phi_floor` is a relative floor on φ (e.g. 1e-3 of φ_max) to
+    /// avoid pathological splits where flux is essentially zero.
+    /// Voxels with `φ_v <= phi_floor·φ_max` are flagged inactive
+    /// (lower = 0) so the apply path leaves particles alone there.
+    pub fn from_flux(
+        aabb: &Aabb,
+        n: [usize; 3],
+        flux: &[f64],
+        w_ref: f64,
+        ratio: f64,
+        phi_floor: f64,
+    ) -> Self {
+        let n_vox = n[0].max(1) * n[1].max(1) * n[2].max(1);
+        assert_eq!(
+            flux.len(),
+            n_vox,
+            "flux length {} doesn't match mesh n_vox {}",
+            flux.len(),
+            n_vox
+        );
+        let origin = [aabb.min.x, aabb.min.y, aabb.min.z];
+        let spacing = [
+            (aabb.max.x - aabb.min.x) / n[0].max(1) as f64,
+            (aabb.max.y - aabb.min.y) / n[1].max(1) as f64,
+            (aabb.max.z - aabb.min.z) / n[2].max(1) as f64,
+        ];
+        let phi_max = flux.iter().cloned().fold(0.0_f64, f64::max);
+        let cutoff = phi_max * phi_floor.max(0.0);
+        let sqrt_ratio = ratio.max(1.0).sqrt();
+        let mut lower = vec![0.0; n_vox];
+        let mut upper = vec![0.0; n_vox];
+        for (i, &phi) in flux.iter().enumerate() {
+            if phi <= cutoff || phi_max <= 0.0 {
+                // Inactive voxel — apply() short-circuits on lo == 0.
+                continue;
+            }
+            let w_target = w_ref * phi_max / phi;
+            lower[i] = w_target / sqrt_ratio;
+            upper[i] = w_target * sqrt_ratio;
+        }
+        Self {
+            origin,
+            spacing,
+            n,
+            lower,
+            upper,
+            max_split: 8,
+        }
+    }
+
     /// Build a window with uniform bounds across an AABB.
     pub fn uniform(aabb: &Aabb, n: [usize; 3], lower: f64, upper: f64) -> Self {
         let n_vox = n[0].max(1) * n[1].max(1) * n[2].max(1);
@@ -219,6 +288,98 @@ mod tests {
         apply(&mut p, &ww, &mut rng, &mut pending);
         assert!(p.is_alive());
         assert!((p.weight - 0.01).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_flux_inverts_flux_into_target() {
+        use crate::geometry::Aabb;
+        let aabb = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        // Two voxels: voxel 0 has flux=1.0, voxel 1 has flux=10.0.
+        // φ_max = 10, w_ref = 1, ratio = 4 → sqrt_ratio = 2.
+        //   voxel 0: target = 1 * 10 / 1   = 10  → lower = 5,    upper = 20
+        //   voxel 1: target = 1 * 10 / 10  = 1   → lower = 0.5,  upper = 2
+        let ww = WeightWindow::from_flux(
+            &aabb,
+            [2, 1, 1],
+            &[1.0, 10.0],
+            1.0,
+            4.0,
+            1e-12,
+        );
+        assert!((ww.lower[0] - 5.0).abs() < 1e-9);
+        assert!((ww.upper[0] - 20.0).abs() < 1e-9);
+        assert!((ww.lower[1] - 0.5).abs() < 1e-9);
+        assert!((ww.upper[1] - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn from_flux_zeros_inactive_voxels_below_floor() {
+        use crate::geometry::Aabb;
+        let aabb = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        // φ_max = 100, floor = 1% → cutoff = 1.0.
+        let flux = vec![0.5, 100.0, 50.0];
+        let ww = WeightWindow::from_flux(&aabb, [3, 1, 1], &flux, 1.0, 5.0, 0.01);
+        // Voxel 0 below cutoff → inactive (lower == 0).
+        assert_eq!(ww.lower[0], 0.0);
+        assert_eq!(ww.upper[0], 0.0);
+        // Voxels 1 and 2 active.
+        assert!(ww.lower[1] > 0.0);
+        assert!(ww.lower[2] > 0.0);
+        // High-flux voxel (1) gets the smallest target.
+        assert!(ww.lower[1] < ww.lower[2]);
+    }
+
+    #[test]
+    fn from_flux_round_trip_with_apply() {
+        use crate::geometry::Aabb;
+        let aabb = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(2.0, 1.0, 1.0));
+        // Two voxels, voxel 0 has 10× the flux of voxel 1.
+        // w_ref = 1, ratio = 4 → voxel 0 target = 1 (low flux side
+        // would be 1 not 10 here — wait flux[0] = 10, flux[1] = 1).
+        // Re-explain: voxel 0 (high flux) has target 1, lower 0.5,
+        // upper 2. A particle at weight 1 sits in the band → no-op.
+        // Voxel 1 (low flux) has target 10, lower 5, upper 20. A
+        // particle at weight 1 is below w_lower = 5 → roulette.
+        let ww = WeightWindow::from_flux(
+            &aabb,
+            [2, 1, 1],
+            &[10.0, 1.0],
+            1.0,
+            4.0,
+            1e-12,
+        );
+        let mut rng = Rng::new(42, 0);
+
+        // Particle in voxel 0 — no-op.
+        let mut p = make_particle(Vec3::new(0.5, 0.5, 0.5), 1.0);
+        let mut pending = Vec::new();
+        apply(&mut p, &ww, &mut rng, &mut pending);
+        assert!(p.is_alive());
+        assert!((p.weight - 1.0).abs() < 1e-12);
+        assert!(pending.is_empty());
+
+        // Particle in voxel 1 — should fire roulette (weight 1 < lower 5).
+        // Repeat trials and check the survival rate.
+        let trials = 5000;
+        let mut survived = 0;
+        for i in 0..trials {
+            let mut p = make_particle(Vec3::new(1.5, 0.5, 0.5), 1.0);
+            let mut pending = Vec::new();
+            let mut rng = Rng::new(99, i as u64);
+            apply(&mut p, &ww, &mut rng, &mut pending);
+            assert!(pending.is_empty());
+            if p.is_alive() {
+                survived += 1;
+                // sqrt(5*20) = 10 = w_survive
+                assert!((p.weight - 10.0).abs() < 1e-9);
+            }
+        }
+        // p_survive = w / w_survive = 1 / 10 = 0.1 → ~10% survival
+        let rate = survived as f64 / trials as f64;
+        assert!(
+            (rate - 0.1).abs() < 0.02,
+            "rate {rate} should be ~0.1"
+        );
     }
 
     #[test]
