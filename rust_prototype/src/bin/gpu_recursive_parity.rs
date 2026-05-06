@@ -39,76 +39,28 @@ mod cuda_main {
     /// pin universes, reflective box at world ±1. Only the deepest
     /// cell index is compared, so the chosen materials don't matter.
     fn build_geometry() -> Geometry {
-        let surfaces = vec![
-            // 0: cylinder at element-local (0.5, 0.5) R=0.3
-            Surface::CylinderZ {
-                center_x: 0.5,
-                center_y: 0.5,
-                radius: 0.3,
-                bc: BoundaryCondition::Transmission,
-            },
-            // 1..4: outer box at ±1
-            Surface::PlaneX {
-                x0: -1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneX {
-                x0: 1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneY {
-                y0: -1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneY {
-                y0: 1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            // 5..6: z planes for box closure
-            Surface::PlaneZ {
-                z0: -10.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneZ {
-                z0: 10.0,
-                bc: BoundaryCondition::Reflective,
-            },
-        ];
+        // Surfaces: 0 = pin cylinder, 1..=6 = reflective box (xy + z).
+        let mut surfaces = open_rust_mc::geometry::shapes::pin_cylinders(0.5, 0.5, &[0.3]);
+        let outer_box = open_rust_mc::geometry::shapes::rect_box(
+            [1.0, 1.0, 10.0],
+            BoundaryCondition::Reflective,
+            surfaces.len(),
+        );
+        surfaces.extend(outer_box.surfaces);
+
         let cells = vec![
             // 0: pin fuel
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
             // 1: pin water
             Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
             // 2: root cell — bounding box, fills with lattice
-            Cell::new(
-                CellId(2),
-                cell::intersect_all(vec![
-                    cell::outside(1),
-                    cell::inside(2),
-                    cell::outside(3),
-                    cell::inside(4),
-                    cell::outside(5),
-                    cell::inside(6),
-                ]),
-                CellFill::Lattice(0),
-            )
-            .with_aabb(Aabb::new(
-                Vec3::new(-1.0, -1.0, -10.0),
-                Vec3::new(1.0, 1.0, 10.0),
-            )),
+            Cell::new(CellId(2), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
+                Aabb::new(Vec3::new(-1.0, -1.0, -10.0), Vec3::new(1.0, 1.0, 10.0)),
+            ),
             // 3: outside box
             Cell::new(
                 CellId(3),
-                Region::Union(
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(1)),
-                        Box::new(cell::outside(2)),
-                    )),
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(3)),
-                        Box::new(cell::outside(4)),
-                    )),
-                ),
+                Region::Complement(Box::new(outer_box.inside)),
                 CellFill::Void,
             ),
         ];
@@ -154,32 +106,18 @@ mod cuda_main {
             }
             l
         };
-        let surfaces = vec![
-            Surface::CylinderZ {
-                center_x: pin_center,
-                center_y: pin_center,
-                radius: FUEL_OR,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::CylinderZ {
-                center_x: pin_center,
-                center_y: pin_center,
-                radius: CLAD_IR,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::CylinderZ {
-                center_x: pin_center,
-                center_y: pin_center,
-                radius: CLAD_OR,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::PlaneX { x0: -lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneX { x0:  lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: -lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0:  lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0: -z_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0:  z_half, bc: BoundaryCondition::Reflective },
-        ];
+        let mut surfaces = open_rust_mc::geometry::shapes::pin_cylinders(
+            pin_center,
+            pin_center,
+            &[FUEL_OR, CLAD_IR, CLAD_OR],
+        );
+        let outer_box = open_rust_mc::geometry::shapes::rect_box(
+            [lat_half, lat_half, z_half],
+            BoundaryCondition::Reflective,
+            surfaces.len(),
+        );
+        surfaces.extend(outer_box.surfaces);
+
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
             Cell::new(CellId(1), cell::between(0, 1), CellFill::Void),
@@ -188,34 +126,15 @@ mod cuda_main {
             Cell::new(CellId(4), cell::inside(1), CellFill::Material(2)),
             Cell::new(CellId(5), cell::between(1, 2), CellFill::Material(1)),
             Cell::new(CellId(6), cell::outside(2), CellFill::Material(2)),
-            Cell::new(
-                CellId(7),
-                cell::intersect_all(vec![
-                    cell::outside(3),
-                    cell::inside(4),
-                    cell::outside(5),
-                    cell::inside(6),
-                    cell::outside(7),
-                    cell::inside(8),
-                ]),
-                CellFill::Lattice(0),
-            )
-            .with_aabb(Aabb::new(
-                Vec3::new(-lat_half, -lat_half, -z_half),
-                Vec3::new(lat_half, lat_half, z_half),
-            )),
+            Cell::new(CellId(7), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
+                Aabb::new(
+                    Vec3::new(-lat_half, -lat_half, -z_half),
+                    Vec3::new(lat_half, lat_half, z_half),
+                ),
+            ),
             Cell::new(
                 CellId(8),
-                Region::Union(
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(3)),
-                        Box::new(cell::outside(4)),
-                    )),
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(5)),
-                        Box::new(cell::outside(6)),
-                    )),
-                ),
+                Region::Complement(Box::new(outer_box.inside)),
                 CellFill::Void,
             ),
         ];

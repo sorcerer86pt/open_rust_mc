@@ -37,69 +37,24 @@ mod cuda_main {
     fn build_geometry() -> Geometry {
         // Same 2×2 lattice as the parity test, with two materials:
         // 0 = fissile, 1 = pure scatterer (water-like).
-        let surfaces = vec![
-            Surface::CylinderZ {
-                center_x: 0.5,
-                center_y: 0.5,
-                radius: 0.3,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::PlaneX {
-                x0: -1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneX {
-                x0: 1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneY {
-                y0: -1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneY {
-                y0: 1.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneZ {
-                z0: -10.0,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneZ {
-                z0: 10.0,
-                bc: BoundaryCondition::Reflective,
-            },
-        ];
+        // Surfaces: 0 = pin cylinder, 1..=6 = reflective box (xy + z).
+        let mut surfaces = open_rust_mc::geometry::shapes::pin_cylinders(0.5, 0.5, &[0.3]);
+        let outer_box = open_rust_mc::geometry::shapes::rect_box(
+            [1.0, 1.0, 10.0],
+            BoundaryCondition::Reflective,
+            surfaces.len(),
+        );
+        surfaces.extend(outer_box.surfaces);
+
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
             Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
-            Cell::new(
-                CellId(2),
-                cell::intersect_all(vec![
-                    cell::outside(1),
-                    cell::inside(2),
-                    cell::outside(3),
-                    cell::inside(4),
-                    cell::outside(5),
-                    cell::inside(6),
-                ]),
-                CellFill::Lattice(0),
-            )
-            .with_aabb(Aabb::new(
-                Vec3::new(-1.0, -1.0, -10.0),
-                Vec3::new(1.0, 1.0, 10.0),
-            )),
+            Cell::new(CellId(2), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
+                Aabb::new(Vec3::new(-1.0, -1.0, -10.0), Vec3::new(1.0, 1.0, 10.0)),
+            ),
             Cell::new(
                 CellId(3),
-                Region::Union(
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(1)),
-                        Box::new(cell::outside(2)),
-                    )),
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(3)),
-                        Box::new(cell::outside(4)),
-                    )),
-                ),
+                Region::Complement(Box::new(outer_box.inside)),
                 CellFill::Void,
             ),
         ];

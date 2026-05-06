@@ -41,7 +41,7 @@ mod cuda_main {
 
     use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
     use open_rust_mc::geometry::lattice::RectLattice;
-    use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+    use open_rust_mc::geometry::surface::BoundaryCondition;
     use open_rust_mc::geometry::universe::{Universe, UniverseId};
     use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
     use open_rust_mc::gpu_recursive::GpuRecursiveContext;
@@ -132,32 +132,20 @@ mod cuda_main {
         } else {
             BoundaryCondition::Vacuum
         };
-        let surfaces = vec![
-            Surface::CylinderZ {
-                center_x: pin_center,
-                center_y: pin_center,
-                radius: FUEL_OR,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::CylinderZ {
-                center_x: pin_center,
-                center_y: pin_center,
-                radius: CLAD_IR,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::CylinderZ {
-                center_x: pin_center,
-                center_y: pin_center,
-                radius: CLAD_OR,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::PlaneX { x0: -lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneX { x0:  lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0: -lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneY { y0:  lat_half, bc: BoundaryCondition::Reflective },
-            Surface::PlaneZ { z0: -z_half, bc: z_bc },
-            Surface::PlaneZ { z0:  z_half, bc: z_bc },
-        ];
+
+        let mut surfaces = open_rust_mc::geometry::shapes::pin_cylinders(
+            pin_center,
+            pin_center,
+            &[FUEL_OR, CLAD_IR, CLAD_OR],
+        );
+        let outer_box = open_rust_mc::geometry::shapes::rect_box_split_bc(
+            [lat_half, lat_half, z_half],
+            BoundaryCondition::Reflective,
+            z_bc,
+            surfaces.len(),
+        );
+        surfaces.extend(outer_box.surfaces);
+
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_temperature(900.0),
             Cell::new(CellId(1), cell::between(0, 1), CellFill::Void),
@@ -166,34 +154,15 @@ mod cuda_main {
             Cell::new(CellId(4), cell::inside(1), CellFill::Material(2)).with_temperature(600.0),
             Cell::new(CellId(5), cell::between(1, 2), CellFill::Material(1)).with_temperature(600.0),
             Cell::new(CellId(6), cell::outside(2), CellFill::Material(2)).with_temperature(600.0),
-            Cell::new(
-                CellId(7),
-                cell::intersect_all(vec![
-                    cell::outside(3),
-                    cell::inside(4),
-                    cell::outside(5),
-                    cell::inside(6),
-                    cell::outside(7),
-                    cell::inside(8),
-                ]),
-                CellFill::Lattice(0),
-            )
-            .with_aabb(Aabb::new(
-                Vec3::new(-lat_half, -lat_half, -z_half),
-                Vec3::new(lat_half, lat_half, z_half),
-            )),
+            Cell::new(CellId(7), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
+                Aabb::new(
+                    Vec3::new(-lat_half, -lat_half, -z_half),
+                    Vec3::new(lat_half, lat_half, z_half),
+                ),
+            ),
             Cell::new(
                 CellId(8),
-                Region::Union(
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(3)),
-                        Box::new(cell::outside(4)),
-                    )),
-                    Box::new(Region::Union(
-                        Box::new(cell::inside(5)),
-                        Box::new(cell::outside(6)),
-                    )),
-                ),
+                Region::Complement(Box::new(outer_box.inside)),
                 CellFill::Void,
             ),
         ];

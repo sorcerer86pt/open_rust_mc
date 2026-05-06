@@ -83,50 +83,17 @@ mod cuda_main {
         let pitch = 1.2600;
         let half = pitch / 2.0;
         let z_half = half;
-        let surfaces = vec![
-            Surface::CylinderZ {
-                center_x: 0.0,
-                center_y: 0.0,
-                radius: fuel_or,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::CylinderZ {
-                center_x: 0.0,
-                center_y: 0.0,
-                radius: clad_ir,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::CylinderZ {
-                center_x: 0.0,
-                center_y: 0.0,
-                radius: clad_or,
-                bc: BoundaryCondition::Transmission,
-            },
-            Surface::PlaneX {
-                x0: -half,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneX {
-                x0: half,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneY {
-                y0: -half,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneY {
-                y0: half,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneZ {
-                z0: -z_half,
-                bc: BoundaryCondition::Reflective,
-            },
-            Surface::PlaneZ {
-                z0: z_half,
-                bc: BoundaryCondition::Reflective,
-            },
-        ];
+
+        // Surfaces 0..=2: pin cylinders. 3..=8: reflective box.
+        let mut surfaces =
+            open_rust_mc::geometry::shapes::pin_cylinders(0.0, 0.0, &[fuel_or, clad_ir, clad_or]);
+        let outer_box = open_rust_mc::geometry::shapes::rect_box(
+            [half, half, z_half],
+            BoundaryCondition::Reflective,
+            surfaces.len(),
+        );
+        surfaces.extend(outer_box.surfaces);
+
         let box_aabb = Aabb::new(
             Vec3::new(-half, -half, -z_half),
             Vec3::new(half, half, z_half),
@@ -169,15 +136,10 @@ mod cuda_main {
             .with_temperature(600.0),
             Cell::new(
                 CellId(3),
-                cell::intersect_all(vec![
-                    cell::outside(2),
-                    cell::outside(3),
-                    cell::inside(4),
-                    cell::outside(5),
-                    cell::inside(6),
-                    cell::outside(7),
-                    cell::inside(8),
-                ]),
+                cell::Region::Intersection(
+                    Box::new(cell::outside(2)),
+                    Box::new(outer_box.inside),
+                ),
                 CellFill::Material(2),
             )
             .with_aabb(box_aabb)

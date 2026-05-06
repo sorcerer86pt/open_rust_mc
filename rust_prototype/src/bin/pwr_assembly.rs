@@ -254,7 +254,7 @@ fn setup_geometry(reflective_z: bool, shape: usize) -> Geometry {
 // ── Preview rendering (gated on the `preview` feature) ─────────────
 
 #[cfg(feature = "preview")]
-fn run_preview(geometry: &Geometry, materials: &[Material]) {
+fn run_preview(geometry: &Geometry, materials: &[Material], shape: usize) {
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
     use rust_mc_sim::preview::{
@@ -287,7 +287,7 @@ fn run_preview(geometry: &Geometry, materials: &[Material]) {
         })
         .collect();
 
-    let lat_half = (SHAPE as f64) * PITCH / 2.0;
+    let lat_half = (shape as f64) * PITCH / 2.0;
     let initial = Viewport::square_centered(lat_half * 1.05, 0.0, 900);
 
     // Render closure: per pixel, sample world coords through the
@@ -336,7 +336,7 @@ fn run_preview(geometry: &Geometry, materials: &[Material]) {
 }
 
 #[cfg(not(feature = "preview"))]
-fn run_preview(_geometry: &Geometry, _materials: &[Material]) {
+fn run_preview(_geometry: &Geometry, _materials: &[Material], _shape: usize) {
     eprintln!(
         "  --preview requires the `preview` feature. Re-run with:\n\
          cargo run --release --features preview --bin pwr_assembly -- ..."
@@ -499,7 +499,7 @@ fn main() {
         println!(
             "\n  Opening preview window — close it (Esc / X) to start transport."
         );
-        run_preview(&geometry, &materials);
+        run_preview(&geometry, &materials, shape);
         // Preview-only mode: exit cleanly without running transport.
         return;
     }
