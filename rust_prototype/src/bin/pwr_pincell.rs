@@ -122,6 +122,12 @@ struct Args {
     /// outer reflective box, so the file has non-trivial tally arrays.
     #[arg(long)]
     statepoint: Option<PathBuf>,
+
+    /// Enable implicit-capture + Russian-roulette variance reduction.
+    /// Active under both surface and delta tracking. Defaults to OFF
+    /// so analog runs stay bit-comparable to legacy results.
+    #[arg(long, default_value_t = false)]
+    survival_biasing: bool,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
@@ -261,7 +267,11 @@ fn run_multi_seed<XS: XsProvider>(
             parallel: true,
             tallies: shared_tallies.clone(),
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
-            survival_biasing: None,
+            survival_biasing: if args.survival_biasing {
+                Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
+            } else {
+                None
+            },
         };
 
         if args.seeds > 1 {
