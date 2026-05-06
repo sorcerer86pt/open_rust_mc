@@ -289,6 +289,7 @@ fn run_multi_seed<XS: XsProvider>(
             } else {
                 None
             },
+            weight_window: None,
         };
 
         if args.seeds > 1 {

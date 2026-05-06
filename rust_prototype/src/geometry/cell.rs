@@ -21,8 +21,11 @@ pub enum CellFill {
     Material(u32),
     /// Index into the universes array (for nested geometry).
     Universe(u32),
-    /// Index into the lattices array (for repeated geometry).
+    /// Index into the (rectangular) lattices array.
     Lattice(u32),
+    /// Index into the hex-grid lattices array. Same role as `Lattice`
+    /// but for hex tessellations (VVER cores, FBR assemblies).
+    HexLattice(u32),
     /// Void (no material).
     Void,
 }

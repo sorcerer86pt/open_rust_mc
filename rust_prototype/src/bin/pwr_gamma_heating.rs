@@ -222,6 +222,7 @@ fn main() -> ExitCode {
         statepoint_path: None,
         survival_biasing: None,
         initial_source_bank: None,
+        weight_window: None,
     };
     let t1 = Instant::now();
     let (batch_results, k_eff) =

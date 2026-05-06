@@ -7,4 +7,5 @@ pub mod rng;
 pub mod simulate;
 pub mod statepoint;
 pub mod tally;
+pub mod weight_window;
 pub mod xs_provider;

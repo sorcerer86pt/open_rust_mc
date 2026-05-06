@@ -185,6 +185,16 @@ pub fn find_cell_recursive(world_pos: Vec3, geom: &Geometry) -> Option<CoordStac
                 next_rotation = geom.cells[cell_idx].rotation;
                 next_lattice = Some((lattice_id, [ix as i32, iy as i32, iz as i32]));
             }
+            // HexLattice transport descent + distance-to-grid wiring is
+            // deferred — the math is in `lattice::HexLattice` but the
+            // CoordStack would need a parallel `hex_lattice` field and
+            // `trace_step_recursive` needs a hex `distance_to_grid`
+            // dispatch. Schema is in place (CellFill variant, Geometry
+            // field, validation in `with_hex_lattices`); transport
+            // through hex lattices is the next increment. Until then,
+            // refuse to descend so a misconfigured geometry fails
+            // loudly instead of silently mis-tracking.
+            CellFill::HexLattice(_) => return None,
         }
     }
 }

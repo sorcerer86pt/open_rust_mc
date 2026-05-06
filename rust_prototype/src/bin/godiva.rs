@@ -125,6 +125,22 @@ struct Args {
     /// Only applied to the FIRST seed (others get fresh initial source).
     #[arg(long)]
     restart_from: Option<PathBuf>,
+
+    /// Enable a uniform weight window over a 4×4×4 mesh covering the
+    /// Godiva sphere. Bounds default to (0.25, 4.0) — wide enough that
+    /// well-behaved analog histories rarely cross the threshold (a
+    /// no-op smoke test for the WW machinery). Pair with
+    /// `--ww-lower` / `--ww-upper` to tighten.
+    #[arg(long, default_value_t = false)]
+    weight_window: bool,
+
+    /// Lower weight-window bound (used only when --weight-window is set).
+    #[arg(long, default_value_t = 0.25)]
+    ww_lower: f64,
+
+    /// Upper weight-window bound.
+    #[arg(long, default_value_t = 4.0)]
+    ww_upper: f64,
 }
 
 const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
@@ -272,6 +288,23 @@ fn run_multi_seed<XS: XsProvider>(
         bank
     });
 
+    // Optional weight window (uniform 4×4×4 mesh over the sphere).
+    let weight_window_cfg = if args.weight_window {
+        let r = 8.7407_f64;
+        let aabb = open_rust_mc::geometry::Aabb::new(
+            Vec3::new(-r, -r, -r),
+            Vec3::new(r, r, r),
+        );
+        Some(open_rust_mc::transport::weight_window::WeightWindow::uniform(
+            &aabb,
+            [4, 4, 4],
+            args.ww_lower,
+            args.ww_upper,
+        ))
+    } else {
+        None
+    };
+
     // When --statepoint is set, attach a 4×4×4 mesh flux tally over
     // a cube enclosing the Godiva sphere and a surface current tally
     // on the outer vacuum sphere (leakage current). Both helpers are
@@ -313,6 +346,7 @@ fn run_multi_seed<XS: XsProvider>(
             } else {
                 None
             },
+            weight_window: weight_window_cfg.clone(),
         };
 
         if args.seeds > 1 {

@@ -594,6 +594,7 @@ fn main() {
             } else {
                 None
             },
+            weight_window: None,
         };
 
         if args.seeds > 1 {

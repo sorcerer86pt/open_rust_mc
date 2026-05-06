@@ -80,6 +80,11 @@ pub struct SimConfig {
     /// a statepoint via `transport::statepoint::read_source_bank` to
     /// continue an earlier run.
     pub initial_source_bank: Option<Vec<FissionSite>>,
+    /// Optional Cartesian-mesh weight window. When set, the transport
+    /// loop applies splitting / Russian roulette at every advance to
+    /// keep particle weight inside the per-voxel band. See
+    /// `transport::weight_window` for shape and semantics.
+    pub weight_window: Option<crate::transport::weight_window::WeightWindow>,
 }
 
 /// Implicit-capture + Russian-roulette settings.
@@ -119,6 +124,7 @@ impl Default for SimConfig {
             statepoint_path: None,
             survival_biasing: None,
             initial_source_bank: None,
+            weight_window: None,
         }
     }
 }
@@ -631,6 +637,7 @@ fn transport_particle<XS: XsProvider>(
     xs_provider: &XS,
     tallies: &Tallies,
     survival_biasing: Option<&SurvivalBiasing>,
+    weight_window: Option<&crate::transport::weight_window::WeightWindow>,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
@@ -1039,6 +1046,21 @@ fn transport_particle<XS: XsProvider>(
                     }
                 }
             }
+
+            // Weight-window splitting / roulette at the new position.
+            // Inside the inner while loop so it fires after every step
+            // (collision or surface crossing). When the window is None
+            // this is a no-op; when active it walks the per-voxel
+            // bounds and either splits, rouletes, or leaves the
+            // particle alone.
+            if let Some(ww) = weight_window {
+                crate::transport::weight_window::apply(
+                    &mut particle,
+                    ww,
+                    &mut rng,
+                    &mut pending,
+                );
+            }
         }
 
         // Current particle finished. If any (n,xn) secondaries are pending,
@@ -1310,6 +1332,7 @@ fn transport_particle_delta<XS: XsProvider>(
     majorant: &MajorantTable,
     tallies: &Tallies,
     survival_biasing: Option<&SurvivalBiasing>,
+    weight_window: Option<&crate::transport::weight_window::WeightWindow>,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
@@ -1553,6 +1576,17 @@ fn transport_particle_delta<XS: XsProvider>(
                 &mut result,
                 &mut pending,
             );
+
+            // Weight-window splitting / roulette at the new position.
+            // Inside the inner while loop so it fires per step.
+            if let Some(ww) = weight_window {
+                crate::transport::weight_window::apply(
+                    &mut particle,
+                    ww,
+                    &mut rng,
+                    &mut pending,
+                );
+            }
         }
 
         match pending.pop() {
@@ -1669,6 +1703,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 xs_provider,
                 &config.tallies,
                 config.survival_biasing.as_ref(),
+                config.weight_window.as_ref(),
             ),
             TrackingMode::Delta(majorant) => transport_particle_delta(
                 site,
@@ -1682,6 +1717,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 majorant,
                 &config.tallies,
                 config.survival_biasing.as_ref(),
+                config.weight_window.as_ref(),
             ),
         };
         let particle_results: Vec<ParticleResult> = if config.parallel {
@@ -2185,6 +2221,7 @@ mod tests {
             statepoint_path: None,
             survival_biasing: None,
             initial_source_bank: None,
+            weight_window: None,
         };
 
         let (results, k_final) =
@@ -2304,6 +2341,7 @@ mod tests {
             statepoint_path: None,
             survival_biasing: None,
             initial_source_bank: None,
+            weight_window: None,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -2471,6 +2509,7 @@ mod tests {
             statepoint_path: None,
             survival_biasing: None,
             initial_source_bank: None,
+            weight_window: None,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -2484,6 +2523,7 @@ mod tests {
             statepoint_path: None,
             survival_biasing: None,
             initial_source_bank: None,
+            weight_window: None,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);

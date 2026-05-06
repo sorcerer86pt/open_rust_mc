@@ -70,6 +70,10 @@ pub struct Geometry {
     pub cells: Vec<Cell>,
     pub universes: Vec<Universe>,
     pub lattices: Vec<RectLattice>,
+    /// Hex-grid lattices, filled in only by `with_hex_lattices`.
+    /// `CellFill::HexLattice(idx)` indexes into this vec. Default
+    /// empty so no existing geometry construction breaks.
+    pub hex_lattices: Vec<crate::geometry::lattice::HexLattice>,
     pub root_universe: UniverseId,
     pub universe_surfaces: Vec<Vec<usize>>,
     pub universe_bvhs: Vec<Option<Bvh>>,
@@ -141,7 +145,11 @@ impl Geometry {
                         });
                     }
                 }
-                CellFill::Material(_) | CellFill::Void => {}
+                CellFill::HexLattice(_) | CellFill::Material(_) | CellFill::Void => {
+                    // HexLattice indices are validated separately in
+                    // `with_hex_lattices` since hex_lattices defaults
+                    // to empty in the bare `new` constructor.
+                }
             }
 
             let mut surface_indices = Vec::new();
@@ -215,10 +223,35 @@ impl Geometry {
             cells,
             universes,
             lattices,
+            hex_lattices: Vec::new(),
             root_universe,
             universe_surfaces,
             universe_bvhs,
         })
+    }
+
+    /// Attach hex-grid lattices to a geometry built via `new` /
+    /// `flat` / `from_slices`. Cells using `CellFill::HexLattice(idx)`
+    /// must reference an index in range; the function does not
+    /// re-validate the existing rect-lattice references.
+    pub fn with_hex_lattices(
+        mut self,
+        hex_lattices: Vec<crate::geometry::lattice::HexLattice>,
+    ) -> Result<Self, GeometryError> {
+        let n_hex = hex_lattices.len();
+        for (cell_idx, cell) in self.cells.iter().enumerate() {
+            if let CellFill::HexLattice(h) = cell.fill
+                && (h as usize) >= n_hex
+            {
+                return Err(GeometryError::LatticeFillOutOfRange {
+                    cell: cell_idx,
+                    lattice: h,
+                    n_lattices: n_hex,
+                });
+            }
+        }
+        self.hex_lattices = hex_lattices;
+        Ok(self)
     }
 
     /// Construct a "flat" geometry with a single root universe owning

@@ -393,7 +393,7 @@ fn transport_one_csg(
         let material: Option<&PhotonMaterial> = match cells[cell_idx].fill {
             CellFill::Material(m) => materials.get(m as usize).and_then(|o| o.as_ref()),
             CellFill::Void => None,
-            CellFill::Universe(_) | CellFill::Lattice(_) => {
+            CellFill::Universe(_) | CellFill::Lattice(_) | CellFill::HexLattice(_) => {
                 // Should never appear: find_cell_recursive descends through
                 // these to a Material/Void leaf.
                 debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
