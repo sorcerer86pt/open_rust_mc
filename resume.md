@@ -1,3 +1,332 @@
+# Variance reduction + tallies + restart + hex on GPU — 2026-05-06
+
+## TL;DR
+
+A house-cleaning round. The previously-disclosed
+"first-category" gap list from the engine-status review (track-
+length k-eff, survival biasing, mesh tallies, statepoint, delayed
+neutrons, weight windows) is closed. The HexLattice geometry
+shipped end-to-end on **both** CPU and GPU, no longer "math only —
+wiring pending". Common geometry patterns moved into a shared
+library (`geometry::shapes`) and through to the Python bindings.
+A `transport::dispatch` module now hides the CPU/CUDA backend
+choice behind a single `EigenvalueRunner` trait.
+
+`origin/main` at `a17c379`. Lib tests **227 / 227 green**. Both
+`cargo build --release` (default) and `cargo check --features cuda`
+clean.
+
+## What landed (in commit order)
+
+1. **Track-length k-eff estimator** (`ebbba26`)
+   Adds a second eigenvalue estimator alongside the collision-
+   estimator k. At every flight segment the engine accumulates
+   `w · d · Σ_νf(E)`; per-batch `BatchResult.k_track` is the sum
+   divided by the source size N. Surface tracking only — under
+   delta tracking the path crosses material boundaries silently
+   so the integrand can't be reconstructed from a single-cell
+   evaluation.
+
+   `[godiva]` 60 b × 5 k × 3 seeds, SVD k=5, analog:
+   k_collision = 1.00158 ± 0.00414, k_track = 0.99958 ± 0.00107
+   — **3.9× lower seed-to-seed σ**, means agree within 1 σ_collision.
+   Per-batch σ within a single seed drops 1.2–1.6×.
+
+2. **Survival biasing + Russian roulette** (`ffd3b79`, `49705ae`)
+   Implicit-capture path: at each collision bank fission as
+   stochastic-rounded `w · ν · σ_f / σ_t` sites, reduce weight by
+   `σ_s / σ_t`, sample only among non-absorbing channels via the
+   new `collision::process_scatter_only`, then RR if `w < w_min`.
+   Defaults match OpenMC: `w_min = 0.25`, `w_survive = 1.0`.
+
+   Initially landed for surface tracking + non-thermal collision
+   branch only (`ffd3b79`); follow-up commit (`49705ae`) factored
+   out a shared `dispatch_real_collision` so delta-tracking gets
+   the same SB path. The thermal-scattering inner branch in
+   `transport_particle` falls back to analog (no SB) — that branch
+   only fires for nuclides with S(α,β) data attached, which in
+   PWR pin cell is just H1 in water (no fission, nothing to bias).
+
+   `[godiva]` 80 b × 5 k × 4 seeds, SVD k=5, analog vs SB:
+   - σ_collision per seed: 0.00217 → 0.00202 (-7 %)
+   - σ_track per seed:     0.00171 → 0.00122 (**-28 %**)
+   - ns/particle:          968 → 1343 (+39 %)
+   - **FOM_track: 354 → 500 (+41 %)**
+
+   `[pwr]` 60 b × 5 k × 3 seeds (surface tracking, multi-material):
+   - cross-seed σ on k_inf: 0.00256 → 0.00115 (**-55 %**)
+   - ns/particle:           36 936 → 41 007 (+11 %)
+   - **FOM_collision: 412 → 1842 (4.5×)**
+
+3. **Surface current + mesh flux tallies + HDF5 statepoint**
+   (`84520dd`, `0a65c42`)
+   New `transport::tally` with `SurfaceCurrentTally` (J+ / J-
+   split by `sign(dir · normal)`) and `MeshFluxTally` (Cartesian
+   voxel mesh, Amanatides-Woo deposit). New `transport::statepoint`
+   serialises per-batch arrays + tally arrays + final source bank
+   to HDF5 via `hdf5-pure::FileBuilder`.
+
+   `[godiva]` h5py spot-check on a 30-batch run:
+   1 surface bin (outer vacuum sphere), J+ = 51 871 (outward
+   leakage), J- = 0 (no inward crossings on vacuum BC). 4 × 4 × 4
+   = 64 voxels, total flux 604 520 cm/source.
+
+   `[pwr]` 1.26 cm pin cell, 30 b × 3 k:
+   6 reflective faces, J+ within 2 % across all 6 (square-pin
+   symmetry). Mesh flux 9.99 × 10⁶ cm/source over 225 k histories
+   = 44.4 cm/src, 2.78 cm/src/voxel. Source bank radial mean
+   0.278 cm vs analytic 2R/3 = 0.273 (uniform sampling in fuel
+   cylinder of R = 0.41 cm).
+
+   Library helpers `MeshFluxTally::from_aabb`,
+   `SurfaceCurrentTally::for_reflective_surfaces`,
+   `SurfaceCurrentTally::for_boundary_surfaces` lifted in
+   `0a65c42` so binaries no longer hand-roll the box-AABB or hard-
+   code surface indices.
+
+4. **Statepoint restart** (`0a3ecd3`, `f81c7b4`)
+   Read path: `read_header` + `read_source_bank` + a
+   `SimConfig.initial_source_bank: Option<Vec<FissionSite>>`
+   field. When set, the engine resamples-with-replacement to
+   `particles_per_batch` for batch 1; the warm source skips most
+   of the settle.
+
+   `[godiva]` cold start (50 b × 5 k × 15 inactive):
+   k_collision = 1.00614 ± 0.00309, ns/p 1542.
+   Resume from cold-start statepoint (30 b × 5 k × **5** inactive):
+   k_collision = 1.00411 ± 0.00371, ns/p **1022 (33 % faster)** —
+   means overlap within 1 σ; the warm bank removes settle cost.
+
+   `pwr_assembly` gained `--shape N` so a 3 × 3 / 5 × 5 / 7 × 7
+   minicore variant runs in a few seconds. Chained 3-restart
+   stability test (cold → state1 → warm1 → state2 → warm2 →
+   state3) on each shape, 3 hops × 3 shapes = 9 runs:
+
+   | Shape | Run 1 (cold) | Run 2 (warm) | Run 3 (warm) | max gap |
+   |-------|-------------:|-------------:|-------------:|--------:|
+   | 3×3   | 1.32392      | 1.32646      | 1.32261      | 385 pcm |
+   | 5×5   | 1.33482      | 1.32454      | 1.33024      | 1028 pcm (1.4 σ) |
+   | 7×7   | 1.32730      | 1.33243      | 1.32711      | 532 pcm |
+
+   Source banks round-trip cleanly (inspected via h5py): N = 2000
+   per run, mean source energy 2.0–2.1 MeV (prompt Watt mean) for
+   every shape and step, radial mean scales with shape extent. No
+   drift across hops — the 5 × 5 step 1 → step 2 gap is normal
+   statistical tail at 1.4 σ_combined.
+
+5. **Delayed-neutron emission** (`17d2801`)
+   Per-nuclide energy-dependent ν_delayed(E) loaded from HDF5
+   (sum of all delayed-product yields in MT=18). At each fission
+   yield-banking site, each banked neutron is sampled prompt vs
+   delayed by `β(E) = ν_d / ν_total`; delayed neutrons draw from
+   a soft Watt spectrum (a = 0.4 MeV — ENDF-style aggregate
+   delayed spectrum, captures the spectrum-softening effect for
+   static k-eff without the per-precursor-group breakdown).
+
+   `[godiva]` 80 b × 5 k × 4 seeds, analog:
+   - **Δ_ICSBEP: 196 pcm → 19 pcm** (closer to 1.0000 benchmark)
+   - ns/particle: 968 → 924 (within noise — one extra rng draw
+     per fission neutron)
+
+   `[pwr]` 80 b × 5 k × 5 seeds: k_inf = 1.32775 ± 0.00183,
+   matches resume.md baseline 1.328 within 1 σ.
+
+6. **Forward weight windows + flux-bootstrap generation**
+   (`2e67e7c`, `5e774ec`)
+   Cartesian-mesh weight windows in `transport::weight_window`.
+   Per-voxel `(w_lower, w_upper)` thresholds drive splitting
+   (when `w > w_upper`, copy into `ceil(w / w_survive)` particles)
+   and Russian roulette (`p_survive = w / w_survive` below
+   `w_lower`). `w_survive = sqrt(w_lower · w_upper)` (geometric
+   mean — preserves expected weight). `max_split` cap defaults
+   to 8 to clip runaway splits in high-importance voxels.
+
+   Forward CADIS-lite generation:
+   `WeightWindow::from_flux(aabb, n, flux, w_ref, ratio, phi_floor)`
+   inverts a per-voxel flux estimate into `w_target ∝ φ_max / φ_v`,
+   bracketed by `±sqrt(ratio)`. High-flux voxels get low w_target
+   (split → finer sampling); low-flux voxels get high w_target
+   (roulette → coarser). Voxels below the floor flagged inactive.
+
+   `[godiva]` 60 b × 5 k × 4 seeds, three modes:
+
+   |                              | k_c mean  | σ_t (per-seed) | ns/p | FOM_track |
+   |------------------------------|----------:|---------------:|-----:|----------:|
+   | analog                       | 0.99969   | 0.00153        | 1030 |  416      |
+   | SB                           | 1.00153   | 0.00146        | 1411 |  332      |
+   | SB + bootstrap WW (15-batch calib) | 1.00239 | 0.00290 |  949 |  125      |
+
+   Pipeline correct (means agree across modes); FOM **drops** on
+   Godiva because the geometry is homogeneous — flux is roughly
+   uniform across the 4 × 4 × 4 mesh, so the bootstrap can't find
+   spatial under-sampling. Honest result: weight-window variance
+   reduction pays off on heterogeneous problems, not on a 8.7 cm
+   uniform sphere. The CADIS adjoint solve is a separate research
+   project (deferred).
+
+7. **HexLattice transport — CPU end-to-end**
+   (`2e67e7c` schema, `7acb70a` integration, `7aff6c0` binary,
+   `788d87f` proper hex boundary)
+   `CellFill::HexLattice(u32)` variant; `Geometry.hex_lattices:
+   Vec<HexLattice>` populated via `Geometry::with_hex_lattices`.
+   `Coord` gains `hex_lattice: Option<(HexLatticeId, [i32; 3])>`
+   alongside the rect-lattice slot. `find_cell_recursive` descends
+   through `CellFill::HexLattice(h)` via `HexLattice::find_element`
+   + `universe_at` + `local_position`. `trace_step_recursive`
+   dispatches `HexLattice::distance_to_grid` for stack frames
+   flagged hex.
+
+   New `hex_minicore` binary: N-ring hex array of UO₂ pins inside
+   a hex-shaped reflective boundary (6 reflective `Surface::Plane`
+   instances at 30°, 90°, 150°, 210°, 270°, 330° from +x; inradius
+   `(N + 0.5) · pitch`). Lattice is sized one ring larger
+   internally with the outer ring filled by an all-water
+   placeholder universe — handles cube-rounding ties at the hex
+   edge so float-precision points map to a valid cell.
+
+   `[hex]` 1-ring (7 pins) k_inf = 1.35829 ± 0.00329 (3 seeds × 60
+   batches × 3 k particles, SVD k=5).
+   `[hex]` 2-ring (19 pins) k_inf = 1.36424 ± 0.00399 — both rings
+   agree within 1 σ (gap 60 pcm vs combined σ ~520 pcm). Higher
+   than the rect PWR baseline (1.328) because a hex unit cell has
+   more moderator per pin at the same pitch.
+
+8. **HexLattice transport — GPU port** (`077db2b`)
+   The `CellFill::HexLattice(_) => panic!` stub in `gpu_recursive.rs`
+   is gone. New CUDA device functions `gr_hex_find_element`,
+   `gr_hex_universe_at`, `gr_hex_distance_to_grid`,
+   `gr_hex_cube_round`, `gr_hex_cart_to_axial_frac`,
+   `gr_hex_element_center_local` transliterate the CPU math.
+   `GrGeometry` + `GrCoord` grow parallel hex SoA. `gr_find_cell`
+   dispatches `GR_FILL_HEX_LATTICE` (constant 4); `gr_trace_step`
+   dispatches grid-distance on `has_lattice == 1` (rect) vs `== 2`
+   (hex).
+
+   8 new SoA buffers uploaded by `GpuRecursiveContext`. 5 kernel
+   signatures (`find_cell_batch`, `trace_step_batch`,
+   `multi_step_walk`, `transport_recursive`,
+   `const_xs_transport_persistent`) gained the hex params. 5 Rust
+   launch sites updated.
+
+   Validation: `cargo check --features cuda` clean; runtime parity
+   test against CPU on a hex 1-ring deferred until a CUDA-capable
+   device is available — the equivalent of
+   `gpu_recursive_parity::hex_lattice_descent_and_trace_smoke` is
+   the obvious next step.
+
+9. **`geometry::shapes` builders + Python bindings**
+   (`2243a0e`, `1708781`, `b31b355`)
+   New module exposes:
+   - `rect_box(half, bc, surface_offset) → Shape` — 6 axis-aligned
+     planes + the inside-the-box `Region`.
+   - `rect_box_split_bc(half, xy_bc, z_bc, …)` — same with separate
+     xy / z BCs (the assembly-style "reflective xy + variable z"
+     pattern).
+   - `hex_boundary(n_rings, pitch, orientation, xy_bc, z_half,
+     z_bc, …)` — 6 hex-side `Surface::Plane`s + 2 z planes +
+     inside region. Replaces ~40 lines of hand-rolled trig in
+     `hex_minicore`.
+   - `hex_side_normals(orientation) → [Vec3; 6]` — exposed helper.
+   - `pin_cylinders(center_x, center_y, radii) → Vec<Surface>`.
+
+   `pwr_pincell`, `pwr_assembly`, `hex_minicore`, `gpu_assembly_keff`,
+   `gpu_const_xs_keff`, `gpu_recursive_parity`, `gpu_cpu_trace`
+   refactored to use the helpers — net diff ~30 lines off each
+   binary, surface ordering preserved exactly so cell regions
+   referencing 0..=8 still resolve identically. Tests stayed bit-
+   exact post-refactor.
+
+   Python bindings (`bindings/python/src/lib.rs`) gain
+   `Scene.add_rect_box(prefix, half, bc) → (scene, region_str)`,
+   `Scene.add_hex_boundary(prefix, rings, pitch, orientation,
+   xy_bc, z_half, z_bc) → (scene, region_str)`, and
+   `Scene.add_pin_cylinders(prefix, radii, center_x, center_y) →
+   (scene, names)`. Surfaces register under auto-generated names
+   (`{prefix}_xmin`, `{prefix}_side0`, …); the returned region
+   string slots straight into the existing `add_cell(region=...)`
+   parser.
+
+10. **`transport::dispatch` — backend-agnostic eigenvalue runner**
+    (`a17c379`)
+    Hides the CPU vs CUDA choice behind one `EigenvalueRunner`
+    trait. `Backend::recommended()` defaults to CUDA when
+    `--features cuda` is on, CPU otherwise. `CpuRunner` wraps
+    `simulate::run_eigenvalue_with_geometry`; `CudaRunner`
+    (cuda-feature-gated) lifts the per-batch driver from
+    `gpu_assembly_keff` (transport_recursive call, fission-bank
+    normalisation, k_eff active-mean aggregation) into the library.
+    Returns a unified `EigenvalueOutcome { batches, k_eff,
+    final_source_bank }`.
+
+    Existing binaries unchanged — they can adopt the trait
+    incrementally.
+
+## Honest gaps and what's deferred
+
+- **Hex GPU runtime parity test** — schema and Rust glue compile
+  clean under `cargo check --features cuda`, but the NVRTC compile
+  + on-device validation are pending CUDA hardware. The CPU smoke
+  (`hex_lattice_descent_and_trace_smoke`) covers the math; an
+  equivalent multi-million-event GPU↔CPU comparison is the next
+  step once a device is available.
+
+- **Bootstrap WW on a heterogeneous problem** — the algorithm runs
+  end-to-end on Godiva but doesn't help there because the
+  geometry is uniform. The proper test is PWR pin cell with the
+  WW bootstrap; it would require auto-attaching the mesh tally
+  in `pwr_pincell`'s WW pipeline (currently only Godiva has
+  `--ww-bootstrap-batches`).
+
+- **Survival biasing in the thermal-scatter path** —
+  `transport_particle`'s thermal branch (S(α,β) for H in water)
+  falls back to analog. For PWR, H1 has no fission so the SB
+  benefit on this nuclide would be small; not a priority.
+
+- **Delayed-neutron per-precursor groups** — for static k-eff the
+  aggregated soft-Watt spectrum captures the only effect that
+  matters (mean energy ≈ 0.4 MeV vs prompt ≈ 2 MeV). Per-group
+  precursor concentrations matter only for time-dependent
+  kinetics, not in scope.
+
+- **CADIS / FW-CADIS adjoint solver for WW generation** — needs a
+  deterministic adjoint transport solve (S_N or adjoint MC).
+  Forward bootstrap (above) is the cheap proxy.
+
+- **EADL relaxation cascade on GPU** — flagged in the previous
+  resume.md round; still open. Not on the critical path for any
+  current benchmark.
+
+- **Predictor-corrector depletion (CE/LI, CE/CM)** — Bateman
+  solver coupling; multi-week effort. Out of scope for this round.
+
+- **Doppler-broadened coherent elastic scattering** — Bragg edge
+  / phonon spectrum treatment beyond standard S(α,β); months of
+  work. Out of scope.
+
+- **URR equivalence theory (Stoker-Weiss)** — current URR tables
+  give correct stochastic sampling for infinite medium; the
+  equivalence-theory correction for tight lattices is the
+  follow-on. Open question, not blocking.
+
+- **Python `hex_minicore.py` example** — drafted twice, scoped
+  back when we pivoted to GPU hex. Now that hex transport works
+  through the bindings (`Scene.add_hex_boundary` registers the
+  surfaces; the existing region-string parser handles the
+  inside-hex region), a thin example calling
+  `add_hex_boundary` + `add_pin_cylinders` + `run_eigenvalue` is
+  ~50 lines.
+
+- **Binary refactors to use `EigenvalueRunner`** — godiva,
+  pwr_pincell, pwr_assembly, hex_minicore, gpu_assembly_keff
+  could each shrink ~10–20 lines. Not urgent — the existing
+  call sites still work.
+
+## Test count progression
+
+198 (resume.md last writeup) → 201 (post-rebase) → 217 (after
+hex CPU integration) → 225 (after geometry::shapes) → **227**
+(after dispatch). Net +29 lib tests in this round, all green.
+
 # GPU recursive transport — primitives done, full physics next — 2026-05-05
 
 ## TL;DR
