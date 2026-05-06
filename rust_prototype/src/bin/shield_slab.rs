@@ -115,6 +115,19 @@ struct Args {
     /// `<name>.h5` in `photon_data`.
     #[arg(long, default_value = "water")]
     material: String,
+
+    /// Number of CADIS-lite calibration histories. When `> 0`, runs a
+    /// pre-pass with photons born at `z = T` heading into the slab
+    /// (`-z`), tallies their collision density per z-bin, and prints
+    /// the resulting importance map. This is the input to the next-
+    /// step CADIS weight-window translation; a non-zero value here
+    /// gives a diagnostic readout without yet biasing the forward run.
+    #[arg(long, default_value_t = 0)]
+    cadis_calibration: u64,
+
+    /// Number of z-bins for the CADIS-lite importance map.
+    #[arg(long, default_value_t = 50)]
+    cadis_z_bins: usize,
 }
 
 const N_A: f64 = 6.022_140_76e23;
@@ -214,6 +227,70 @@ fn build_geometry(
     (surfaces, cells)
 }
 
+/// CADIS-lite calibration pass.
+///
+/// Runs `n_histories` photons born at `(0, 0, T-ε)` heading `(0,0,-1)`
+/// — i.e. into the slab from the detector face — and tallies the
+/// collision density per z-bin.
+///
+/// The resulting density `ψ̂\*(z)` is a proxy for the adjoint flux:
+/// voxels reached by these "detector-backward" photons are voxels
+/// that contribute to the response at the detector. The CADIS
+/// importance map is `w_target(z) ∝ ψ̂\*_max / ψ̂\*(z)` — high-
+/// importance voxels (close to the detector) get small `w_target`
+/// (split → finer sampling) and low-importance voxels (close to the
+/// source) get large `w_target` (roulette → coarser sampling).
+///
+/// This is the "lite" form: not a true adjoint MC (no transposed
+/// scatter kernels), just running the same forward physics from the
+/// detector side. It gives the right qualitative gradient for slab
+/// shielding because photon transport is dominated by Compton +
+/// Rayleigh which are kinematically symmetric, and photoelectric
+/// absorption breaks the symmetry only weakly above ~50 keV.
+///
+/// Returns the per-z-bin collision count (un-normalised; the WW
+/// translator only cares about ratios).
+fn cadis_calibration_pass(
+    n_histories: u64,
+    n_z_bins: usize,
+    thickness_cm: f64,
+    source_energy_ev: f64,
+    cutoff_ev: f64,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Option<PhotonMaterial>],
+    seed: u64,
+) -> Vec<u64> {
+    let mut counts = vec![0_u64; n_z_bins];
+    let dz = thickness_cm / n_z_bins as f64;
+
+    // Source: at z = T - ε, heading -z (into the slab from the detector).
+    // The same `transport_history_csg` driver handles this — geometry
+    // / physics don't care which way the source points.
+    let source_pos = Vec3::new(0.0, 0.0, thickness_cm - 1.0e-6);
+    let source_dir = Vec3::new(0.0, 0.0, -1.0);
+
+    for h in 0..n_histories {
+        let mut rng = Rng::new(seed.wrapping_add(0xC4D1_5_5EE_D), h);
+        let result = transport_history_csg(
+            source_pos,
+            source_dir,
+            source_energy_ev,
+            surfaces,
+            cells,
+            materials,
+            cutoff_ev,
+            &mut rng,
+        );
+        // Bin every collision position by its z-coordinate.
+        for &(pos, _e) in &result.collisions {
+            let bin = ((pos.z / dz) as usize).min(n_z_bins.saturating_sub(1));
+            counts[bin] += 1;
+        }
+    }
+    counts
+}
+
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
@@ -252,6 +329,60 @@ fn main() -> Result<(), String> {
     let (surfaces, cells) = build_geometry(args.thickness_cm, args.half_xy_cm);
 
     let source_energy_ev = args.energy_mev * 1.0e6;
+
+    // CADIS-lite calibration pass.
+    if args.cadis_calibration > 0 {
+        println!("  ── CADIS-lite calibration: {} histories, {} z-bins ──",
+                 args.cadis_calibration, args.cadis_z_bins);
+        let t_calib = Instant::now();
+        let counts = cadis_calibration_pass(
+            args.cadis_calibration,
+            args.cadis_z_bins,
+            args.thickness_cm,
+            source_energy_ev,
+            args.cutoff_ev,
+            &surfaces,
+            &cells,
+            &materials,
+            args.seed,
+        );
+        let calib_seconds = t_calib.elapsed().as_secs_f64();
+        let total: u64 = counts.iter().sum();
+        let max = *counts.iter().max().unwrap_or(&0);
+        let dz = args.thickness_cm / args.cadis_z_bins as f64;
+        println!(
+            "  calibration: {} total collisions in {:.2} s ({:.1} ns/history)",
+            total,
+            calib_seconds,
+            calib_seconds * 1e9 / args.cadis_calibration as f64,
+        );
+        println!();
+        println!("  z [cm]      collisions     ψ̂*  (norm.)   w_target ∝ 1/ψ̂*");
+        println!("  ----------  -------------  ------------  ------------------");
+        for (i, &c) in counts.iter().enumerate() {
+            let z_lo = i as f64 * dz;
+            let z_hi = (i + 1) as f64 * dz;
+            let psi_norm = c as f64 / max as f64;
+            // Avoid div-by-zero for empty bins.
+            let w_target = if c > 0 { max as f64 / c as f64 } else { f64::INFINITY };
+            // Print a coarse subset (every n_z_bins/20 rows) so the
+            // line count stays readable for any --cadis-z-bins.
+            let stride = (args.cadis_z_bins / 20).max(1);
+            if i % stride == 0 {
+                println!(
+                    "  {z_lo:>5.1}–{z_hi:<5.1}  {c:>13}  {psi_norm:>12.4}  {w_target:>16.2e}",
+                );
+            }
+        }
+        println!();
+        println!("  note: this is the importance map ψ̂*(z) for the");
+        println!("  next-step CADIS weight-window translator. Voxels");
+        println!("  with low ψ̂* (near z=0, far from detector) are the");
+        println!("  ones that will receive splitting via WW; voxels");
+        println!("  with high ψ̂* (near z=T) get roulette to keep the");
+        println!("  computational budget concentrated where it matters.");
+        println!();
+    }
     // Born just inside the slab so the find_cell_recursive lookup
     // sees us in cell 0 unambiguously.
     let source_pos = Vec3::new(0.0, 0.0, 1.0e-6);

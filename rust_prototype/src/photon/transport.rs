@@ -69,6 +69,11 @@ pub struct HistoryResult {
     /// track-integrate each with
     /// [`crate::photon::electron::track_integrate_electron_csg`].
     pub electrons: Vec<ElectronSource>,
+    /// `(position, energy_at_collision)` for every photon collision in
+    /// this history (source + secondaries). Used by shielding /
+    /// CADIS-style importance-map calibration; callers that don't
+    /// need it can ignore the vec — push cost is negligible.
+    pub collisions: Vec<(Vec3, f64)>,
 }
 
 /// A single photon track in the bank.
@@ -103,6 +108,7 @@ pub fn transport_history<F: Fn(Vec3) -> bool>(
         n_collisions: 0,
         deposits: Vec::new(),
         electrons: Vec::new(),
+        collisions: Vec::new(),
     };
     let mut bank: Vec<BankEntry> = Vec::with_capacity(8);
     bank.push(BankEntry {
@@ -309,6 +315,7 @@ pub fn transport_history_csg(
         n_collisions: 0,
         deposits: Vec::new(),
         electrons: Vec::new(),
+        collisions: Vec::new(),
     };
 
     // Build a flat-geometry wrapper for the recursive primitives.
@@ -456,6 +463,7 @@ fn transport_one_csg(
                 pos = pos + dir * dist_collision;
                 let material = material.expect("sigma_tot > 0 implies material");
                 result.n_collisions += 1;
+                result.collisions.push((pos, energy));
 
                 let channel = material.sample_channel(energy, rng.uniform());
                 let elem_idx = material.sample_element(channel, energy, rng.uniform());
