@@ -67,11 +67,12 @@ use clap::Parser;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
-use open_rust_mc::geometry::Vec3;
+use open_rust_mc::geometry::{Aabb, Vec3};
 use open_rust_mc::photon::material::PhotonMaterial;
-use open_rust_mc::photon::transport::transport_history_csg;
+use open_rust_mc::photon::transport::{transport_history_csg, transport_history_csg_with_ww};
 use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::transport::rng::Rng;
+use open_rust_mc::transport::weight_window::WeightWindow;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -135,6 +136,35 @@ struct Args {
     ///   {"thickness_cm": ..., "n_z_bins": ..., "counts": [...]}
     #[arg(long)]
     cadis_save: Option<PathBuf>,
+
+    /// Load a previously-saved CADIS importance map (from --cadis-save)
+    /// and translate it into a WeightWindow that biases the forward
+    /// run. Splitting/roulette fires on every voxel transition so
+    /// photon weight stays in the per-voxel band defined by ψ̂*. The
+    /// transmission tally accumulates weight × escaped energy and
+    /// remains an unbiased estimator. **This is the CADIS payoff
+    /// step: FOM should jump 50-1000× over the analog baseline.**
+    #[arg(long)]
+    cadis_load: Option<PathBuf>,
+
+    /// Width of the WW band as `w_upper / w_lower` ratio. Larger
+    /// values widen the band (less aggressive splitting + roulette);
+    /// 5.0 is the textbook default.
+    #[arg(long, default_value_t = 5.0)]
+    ww_ratio: f64,
+
+    /// Voxels with importance below `ww_floor × ψ̂*_max` are flagged
+    /// inactive (no splitting / roulette there). Default 1e-3.
+    #[arg(long, default_value_t = 1.0e-3)]
+    ww_floor: f64,
+}
+
+/// Loaded importance map from a `--cadis-save` JSON file.
+#[derive(Debug, serde::Deserialize)]
+struct CadisMap {
+    thickness_cm: f64,
+    n_z_bins: usize,
+    counts: Vec<u64>,
 }
 
 const N_A: f64 = 6.022_140_76e23;
@@ -436,7 +466,60 @@ fn main() -> Result<(), String> {
     let source_pos = Vec3::new(0.0, 0.0, 1.0e-6);
     let source_dir = Vec3::new(0.0, 0.0, 1.0);
 
-    println!("  ── Running analog photon transport ──");
+    // Load the CADIS importance map (from --cadis-save) and build a
+    // `WeightWindow`. The 1D z-bin counts become a 1×1×n_z 3D mesh
+    // aligned with the slab. We set `w_ref` so that `w_target` at
+    // the source position equals 1.0 — that's the consistent-CADIS
+    // normalization: source photons (weight 1.0) sit exactly at the
+    // band centroid at birth, no roulette there. As they propagate
+    // into higher-importance voxels, `w_target` shrinks and the
+    // weight-1 photon ends up above `w_upper` → splitting fires,
+    // pushing more samples toward the detector.
+    let weight_window: Option<WeightWindow> = if let Some(path) = &args.cadis_load {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+        let map: CadisMap = serde_json::from_str(&text)
+            .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+        let aabb = Aabb::new(
+            Vec3::new(-args.half_xy_cm, -args.half_xy_cm, 0.0),
+            Vec3::new(args.half_xy_cm, args.half_xy_cm, map.thickness_cm),
+        );
+        let flux: Vec<f64> = map.counts.iter().map(|&c| c as f64).collect();
+        // Find the importance value at the source z-bin, normalize w_ref so
+        // that w_target(source) ≈ 1.0.
+        let dz = map.thickness_cm / map.n_z_bins as f64;
+        let source_bin = ((source_pos.z / dz) as usize).min(map.n_z_bins - 1);
+        let phi_source = flux[source_bin].max(1.0);
+        let phi_max = flux.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
+        let w_ref = phi_source / phi_max;
+        let ww = WeightWindow::from_flux(
+            &aabb,
+            [1, 1, map.n_z_bins],
+            &flux,
+            w_ref,
+            args.ww_ratio,
+            args.ww_floor,
+        );
+        println!(
+            "  ── CADIS WW loaded from {} ({} z-bins, ratio {}, floor {}) ──",
+            path.display(),
+            map.n_z_bins,
+            args.ww_ratio,
+            args.ww_floor,
+        );
+        println!(
+            "  w_ref (calibrated so w_target(source)=1.0): {w_ref:.4e}",
+        );
+        Some(ww)
+    } else {
+        None
+    };
+    let source_weight: f64 = 1.0;
+
+    println!(
+        "  ── Running {} photon transport ──",
+        if weight_window.is_some() { "CADIS-biased" } else { "analog" },
+    );
     let t0 = Instant::now();
 
     // Per-history transmission fractions for variance estimation.
@@ -449,14 +532,16 @@ fn main() -> Result<(), String> {
 
     for h in 0..args.histories {
         let mut rng = Rng::new(args.seed, h);
-        let result = transport_history_csg(
+        let result = transport_history_csg_with_ww(
             source_pos,
             source_dir,
             source_energy_ev,
+            source_weight,
             &surfaces,
             &cells,
             &materials,
             args.cutoff_ev,
+            weight_window.as_ref(),
             &mut rng,
         );
         total_escaped_ev += result.energy_escaped;

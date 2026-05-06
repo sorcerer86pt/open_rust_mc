@@ -142,6 +142,26 @@ impl WeightWindow {
         self.n[0] * self.n[1] * self.n[2]
     }
 
+    /// Linear voxel index for a world-frame position, or `None` if
+    /// the position falls outside the mesh. Does **not** check
+    /// whether the voxel is flagged active — see `lookup` for that.
+    #[inline]
+    pub fn voxel_index(&self, pos: Vec3) -> Option<usize> {
+        let ix = ((pos.x - self.origin[0]) / self.spacing[0]).floor() as isize;
+        let iy = ((pos.y - self.origin[1]) / self.spacing[1]).floor() as isize;
+        let iz = ((pos.z - self.origin[2]) / self.spacing[2]).floor() as isize;
+        if ix < 0
+            || iy < 0
+            || iz < 0
+            || ix as usize >= self.n[0]
+            || iy as usize >= self.n[1]
+            || iz as usize >= self.n[2]
+        {
+            return None;
+        }
+        Some(self.index(ix as usize, iy as usize, iz as usize))
+    }
+
     /// Look up `(w_lower, w_upper)` at a world-frame position.
     /// Returns `None` when the position is outside the mesh or in a
     /// voxel that's flagged inactive (lower == 0).

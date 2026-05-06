@@ -33,6 +33,7 @@ use crate::photon::material::{Channel, PhotonMaterial};
 use crate::photon::pair::{ANNIHILATION_ENERGY_EV, pair_produce};
 use crate::photon::photoelectric::{DEFAULT_PHOTON_CUTOFF_EV, photoelectric_absorb};
 use crate::transport::rng::Rng;
+use crate::transport::weight_window::WeightWindow;
 
 /// A Compton/photoelectric/pair electron emitted at a collision site.
 /// The CSG transport driver emits these as "track sources" for the
@@ -298,7 +299,6 @@ pub fn deflect(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
 ///
 /// A source outside the modelled geometry is returned immediately as
 /// fully escaped energy.
-#[allow(clippy::too_many_arguments)]
 pub fn transport_history_csg(
     source_pos: Vec3,
     source_dir: Vec3,
@@ -307,6 +307,48 @@ pub fn transport_history_csg(
     cells: &[Cell],
     materials: &[Option<PhotonMaterial>],
     energy_cutoff_ev: f64,
+    rng: &mut Rng,
+) -> HistoryResult {
+    transport_history_csg_with_ww(
+        source_pos,
+        source_dir,
+        source_energy,
+        1.0, // default analog weight
+        surfaces,
+        cells,
+        materials,
+        energy_cutoff_ev,
+        None, // no weight window
+        rng,
+    )
+}
+
+/// CADIS / variance-reduced variant of [`transport_history_csg`].
+///
+/// Adds two parameters:
+///  - `source_weight`: starting weight of the source photon
+///    (analog runs use `1.0`).
+///  - `weight_window`: optional Cartesian-mesh weight window. When
+///    `Some`, splitting / Russian roulette fires after each free
+///    flight that lands the photon in a new voxel, keeping the
+///    photon's weight inside the per-voxel `(w_lower, w_upper)`
+///    band published by the calibration / adjoint pass.
+///
+/// All tally accumulators (`energy_deposited`, `energy_escaped`,
+/// per-electron deposits) scale by the photon's current weight,
+/// so the run-mean of the tallies remains an unbiased estimator
+/// of the analog mean.
+#[allow(clippy::too_many_arguments)]
+pub fn transport_history_csg_with_ww(
+    source_pos: Vec3,
+    source_dir: Vec3,
+    source_energy: f64,
+    source_weight: f64,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Option<PhotonMaterial>],
+    energy_cutoff_ev: f64,
+    weight_window: Option<&WeightWindow>,
     rng: &mut Rng,
 ) -> HistoryResult {
     let mut result = HistoryResult {
@@ -322,7 +364,7 @@ pub fn transport_history_csg(
     let geometry = match crate::geometry::Geometry::from_slices(surfaces, cells) {
         Ok(g) => g,
         Err(_) => {
-            result.energy_escaped += source_energy;
+            result.energy_escaped += source_energy * source_weight;
             return result;
         }
     };
@@ -330,27 +372,35 @@ pub fn transport_history_csg(
     // Find starting stack; if the source is outside the model the
     // photon is born already leaked and its energy escapes.
     let Some(start_stack) = geometry::ray::find_cell_recursive(source_pos, &geometry) else {
-        result.energy_escaped += source_energy;
+        result.energy_escaped += source_energy * source_weight;
         return result;
     };
 
-    // (position, direction, energy, coord_stack). Secondaries are
-    // spawned at a collision site inside the current cell, so they
-    // inherit that cell's stack.
-    let mut bank: Vec<(Vec3, Vec3, f64, crate::geometry::coord::CoordStack)> =
-        vec![(source_pos, source_dir, source_energy, start_stack)];
+    // (position, direction, energy, weight, coord_stack). Secondaries
+    // inherit the parent's weight at the time of the secondary-emitting
+    // collision (Compton: scattered photon keeps weight; pair: each
+    // annihilation photon inherits weight; fluorescence: same).
+    let mut bank: Vec<(Vec3, Vec3, f64, f64, crate::geometry::coord::CoordStack)> = vec![(
+        source_pos,
+        source_dir,
+        source_energy,
+        source_weight,
+        start_stack,
+    )];
 
-    while let Some((pos, dir, energy, coord_stack)) = bank.pop() {
+    while let Some((pos, dir, energy, weight, coord_stack)) = bank.pop() {
         transport_one_csg(
             pos,
             dir,
             energy,
+            weight,
             coord_stack,
             &geometry,
             surfaces,
             cells,
             materials,
             energy_cutoff_ev,
+            weight_window,
             rng,
             &mut bank,
             &mut result,
@@ -365,19 +415,22 @@ fn transport_one_csg(
     start_pos: Vec3,
     start_dir: Vec3,
     start_energy: f64,
+    start_weight: f64,
     start_stack: crate::geometry::coord::CoordStack,
     geometry: &crate::geometry::Geometry,
     surfaces: &[Surface],
     cells: &[Cell],
     materials: &[Option<PhotonMaterial>],
     energy_cutoff_ev: f64,
+    weight_window: Option<&WeightWindow>,
     rng: &mut Rng,
-    bank: &mut Vec<(Vec3, Vec3, f64, crate::geometry::coord::CoordStack)>,
+    bank: &mut Vec<(Vec3, Vec3, f64, f64, crate::geometry::coord::CoordStack)>,
     result: &mut HistoryResult,
 ) {
     let mut pos = start_pos;
     let mut dir = start_dir;
     let mut energy = start_energy;
+    let mut weight = start_weight;
     let mut coord_stack = start_stack;
     let mut cell_idx = coord_stack
         .last()
@@ -389,12 +442,48 @@ fn transport_one_csg(
     // with its remaining energy deposited locally.
     const MAX_EVENTS_PER_TRACK: u32 = 100_000;
     let mut void_streaks = 0_u32;
+    // Track the previous voxel index so the WW hook fires only on
+    // voxel transitions, not on every micro-step.
+    let mut prev_voxel: Option<usize> = weight_window.and_then(|ww| ww.voxel_index(pos));
 
     for _ in 0..MAX_EVENTS_PER_TRACK {
         if energy < energy_cutoff_ev {
-            result.energy_deposited += energy;
-            result.deposits.push((pos, energy));
+            result.energy_deposited += energy * weight;
+            result.deposits.push((pos, energy * weight));
             return;
+        }
+
+        // Weight-window splitting / roulette. Fires on entering a new
+        // voxel — the photon's weight is compared against the
+        // cell-local `(w_lower, w_upper)` band and the action (split
+        // / roulette / no-op) is taken. Killed photons return early;
+        // split photons push (n − 1) copies to `bank` and continue
+        // with the per-copy weight.
+        if let Some(ww) = weight_window {
+            let v = ww.voxel_index(pos);
+            if v.is_some() && v != prev_voxel
+                && let Some((lo, hi)) = ww.lookup(pos)
+            {
+                let w_survive = (lo * hi).sqrt();
+                if weight > hi {
+                    let n_split = ((weight / w_survive).ceil() as u32)
+                        .clamp(2, ww.max_split);
+                    let new_w = weight / n_split as f64;
+                    for _ in 0..(n_split - 1) {
+                        bank.push((pos, dir, energy, new_w, coord_stack.clone()));
+                    }
+                    weight = new_w;
+                } else if weight < lo {
+                    let p_survive = (weight / w_survive).clamp(0.0, 1.0);
+                    if rng.uniform() < p_survive {
+                        weight = w_survive;
+                    } else {
+                        // Rouletted out — no leakage / deposit count.
+                        return;
+                    }
+                }
+            }
+            prev_voxel = v;
         }
 
         let material: Option<&PhotonMaterial> = match cells[cell_idx].fill {
@@ -404,7 +493,7 @@ fn transport_one_csg(
                 // Should never appear: find_cell_recursive descends through
                 // these to a Material/Void leaf.
                 debug_assert!(false, "recursive descent failed: deepest cell is non-leaf");
-                result.energy_escaped += energy;
+                result.energy_escaped += energy * weight;
                 return;
             }
         };
@@ -418,11 +507,11 @@ fn transport_one_csg(
         if sigma_tot <= 0.0 {
             void_streaks += 1;
             if void_streaks > 100 {
-                result.energy_escaped += energy;
+                result.energy_escaped += energy * weight;
                 return;
             }
             let Some(hit) = trace else {
-                result.energy_escaped += energy;
+                result.energy_escaped += energy * weight;
                 return;
             };
             if !handle_boundary(
@@ -433,6 +522,7 @@ fn transport_one_csg(
                 &mut cell_idx,
                 &mut coord_stack,
                 &mut energy,
+                weight,
                 result,
             ) {
                 return;
@@ -453,6 +543,7 @@ fn transport_one_csg(
                     &mut cell_idx,
                     &mut coord_stack,
                     &mut energy,
+                    weight,
                     result,
                 ) {
                     return;
@@ -476,11 +567,11 @@ fn transport_one_csg(
                     }
                     Channel::Incoherent => {
                         let out = compton_scatter(elem, energy, rng);
-                        result.energy_deposited += out.electron_kinetic;
+                        result.energy_deposited += out.electron_kinetic * weight;
                         result.electrons.push(ElectronSource {
                             pos,
                             dir,
-                            e_kin_ev: out.electron_kinetic,
+                            e_kin_ev: out.electron_kinetic * weight,
                             cell_idx,
                         });
                         energy = out.energy_out;
@@ -488,22 +579,28 @@ fn transport_one_csg(
                     }
                     Channel::Photoelectric => {
                         let out = photoelectric_absorb(elem, energy, DEFAULT_PHOTON_CUTOFF_EV, rng);
-                        result.energy_deposited += out.local_deposition;
+                        result.energy_deposited += out.local_deposition * weight;
                         result.electrons.push(ElectronSource {
                             pos,
                             dir,
-                            e_kin_ev: out.local_deposition,
+                            e_kin_ev: out.local_deposition * weight,
                             cell_idx,
                         });
                         for ep in out.fluorescence_photons {
                             let (dx, dy, dz) = rng.isotropic_direction();
-                            bank.push((pos, Vec3::new(dx, dy, dz), ep, coord_stack.clone()));
+                            bank.push((
+                                pos,
+                                Vec3::new(dx, dy, dz),
+                                ep,
+                                weight,
+                                coord_stack.clone(),
+                            ));
                         }
                         return;
                     }
                     Channel::PairProductionNuclear | Channel::PairProductionElectron => {
                         if let Some(out) = pair_produce(energy, rng) {
-                            result.energy_deposited += out.local_deposition();
+                            result.energy_deposited += out.local_deposition() * weight;
                             // Emit the pair kinetic energy as a single
                             // track source. The electron and positron
                             // go in opposite directions on average, but
@@ -514,21 +611,28 @@ fn transport_one_csg(
                             result.electrons.push(ElectronSource {
                                 pos,
                                 dir,
-                                e_kin_ev: out.local_deposition(),
+                                e_kin_ev: out.local_deposition() * weight,
                                 cell_idx,
                             });
                             let (dx, dy, dz) = rng.isotropic_direction();
                             let ann_dir = Vec3::new(dx, dy, dz);
-                            bank.push((pos, ann_dir, ANNIHILATION_ENERGY_EV, coord_stack.clone()));
+                            bank.push((
+                                pos,
+                                ann_dir,
+                                ANNIHILATION_ENERGY_EV,
+                                weight,
+                                coord_stack.clone(),
+                            ));
                             bank.push((
                                 pos,
                                 -ann_dir,
                                 ANNIHILATION_ENERGY_EV,
+                                weight,
                                 coord_stack.clone(),
                             ));
                         } else {
-                            result.energy_deposited += energy;
-                            result.deposits.push((pos, energy));
+                            result.energy_deposited += energy * weight;
+                            result.deposits.push((pos, energy * weight));
                         }
                         return;
                     }
@@ -537,14 +641,15 @@ fn transport_one_csg(
         }
     }
     // Event budget exhausted — deposit remaining energy locally.
-    result.energy_deposited += energy;
-    result.deposits.push((pos, energy));
+    result.energy_deposited += energy * weight;
+    result.deposits.push((pos, energy * weight));
 }
 
 /// Apply the boundary condition at a surface hit. Returns `false` when
 /// the track terminates (leak or unresolved neighbour); `true` when the
 /// photon should continue (reflected or entered a new cell).
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn handle_boundary(
     hit: crate::geometry::ray::RecursiveHit,
     surfaces: &[Surface],
@@ -553,12 +658,13 @@ fn handle_boundary(
     cell_idx: &mut usize,
     coord_stack: &mut crate::geometry::coord::CoordStack,
     energy: &mut f64,
+    weight: f64,
     result: &mut HistoryResult,
 ) -> bool {
     match hit.bc {
         BoundaryCondition::Vacuum => {
             *pos = *pos + *dir * hit.distance;
-            result.energy_escaped += *energy;
+            result.energy_escaped += *energy * weight;
             false
         }
         BoundaryCondition::Reflective => {
@@ -579,7 +685,7 @@ fn handle_boundary(
                     true
                 }
                 None => {
-                    result.energy_escaped += *energy;
+                    result.energy_escaped += *energy * weight;
                     false
                 }
             }
