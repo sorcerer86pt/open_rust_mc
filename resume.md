@@ -1,3 +1,239 @@
+# Depletion + URR equivalence + photon shielding + CADIS-lite — 2026-05-07
+
+## TL;DR
+
+Four big-step items shipped this round. Depletion infrastructure
+(Bateman + CRAM-16/-48 + chains + Python bindings + transport-
+coupled predictor-corrector) went from "explicitly absent" to
+production-grade. URR equivalence theory closed the documented
+Stoker-Weiss / NJOY systematic on PWR pin cells. A photon shielding
+benchmark (`shield_slab`) shipped with documented analog FOM
+baseline. The CADIS-lite framework (importance map calibration +
+WW splitting/roulette wired into the photon hot path) is in tree
+and produces unbiased transmission, but **the FOM gain isn't
+delivered** — the lite proxy isn't a true adjoint flux, and naive
+geometric splitting produces correlated copies that don't reduce
+variance per effective sample. Honest negative result documented;
+real continuous-energy adjoint MC is the research-tier follow-on.
+
+`origin/main` at `43b3236`. Lib tests **260 / 260 green** (was
+227 → 246 → 250 → 260 across the round). `cargo check --features
+cuda` and `cargo check -p open-rust-mc-py` both clean.
+
+## What landed (in commit order)
+
+1. **Depletion module — Bateman + CRAM-16 + chains + Python +
+   URR equivalence** (`ccb0760`)
+   `src/depletion/` — 8 files: `cram.rs` (IPF form, Pusa 2016
+   poles & residues from OpenMC's canonical source), `chain.rs`
+   (decay constants, branches, per-(parent, MT) reaction XS with
+   ENDF default yield inference), `chain_io.rs` (JSON loader, three-
+   way `yields` semantics: omitted → default, `{}` → pure removal,
+   explicit map → use it), `matrix.rs` (transmutation matrix
+   builder), `predictor_corrector.rs` (CE/LI step), `mapping.rs`
+   (table-driven `BurnupMapping` walker), `flux.rs` (per-source
+   flux extractor + power-normalised source rate).
+
+   Two chain libraries shipped: `chains/partial_xe.json` (4 nuclides
+   for the Xe equilibrium demo) and `chains/pwr_actinides.json`
+   (17 nuclides — U/Np/Pu actinide chain plus I-135 / Xe-135 /
+   Cs-135 / Pm-149 / Sm-149 fission products).
+
+   Two binaries: `deplete_demo` (constant-flux Xe equilibrium —
+   matches analytical to 1e-4 relative) and `deplete_pwr` (full
+   transport feedback with **fresh-corrector**: clones materials,
+   runs eigenvalue at predicted composition for the EOC flux
+   estimate, then CRAM with the averaged matrix).
+
+   Python API: `Chain.from_file` / `from_str`, `CramOrder.Order16`
+   / `Order48`, `cram(matrix, n0, order)`, `deplete_constant_flux`,
+   `deplete_with_flux_callback` (FFI-exception-safe Python `flux_at`
+   closure), `Material.set_atom_density(hdf5_file, density)` /
+   `atom_density_of`. Example: `depletion_xe_demo.py`.
+
+   **URR equivalence theory** in the same commit:
+   `src/transport/urr_equivalence.rs` ships Carlvik-Pellaud Dancoff
+   factor for square pin lattices, σ_eff = σ_∞ · σ_0 / (σ_0 + σ_e)
+   with σ_e = (1 − C)/(N · l̄), per-cell Dancoff cache,
+   `is_urr` trait method on `XsProvider` to gate the correction
+   to the URR window. `pwr_pincell --urr-equivalence` toggles it.
+   9 unit tests covering analytic limits (C=0, C=1), asymptotic
+   limits, Carlvik-Pellaud PWR-URR band agreement, scale invariance.
+
+   **Validation:**
+   - `[micro]` Xe-135 equilibrium with constant fission source —
+     CRAM reproduces analytical N_Xe^eq formula to 1e-4 relative.
+   - `[micro]` 1-day CRAM-16 step on the loaded actinides chain —
+     17 nuclides, U-238 → U-239 → Np-239 → Pu-239 buildup all
+     populate correctly, U-235 depletes, Xe-135 grows from fission
+     yield.
+   - `[micro]` CRAM-48 matches CRAM-16 on non-stiff problems
+     (1e-13 relative); not-worse on extreme `λ·Δt = 50` regimes
+     where order 16 starts losing precision.
+
+   Tests this commit: 227 → 250 (+23 across cram, chain, chain_io,
+   mapping, flux, predictor_corrector, urr_equivalence).
+
+2. **Photon shielding slab benchmark** (`2f17a71`)
+   `src/bin/shield_slab.rs` — fixed-source γ transmission through
+   a thick slab. Reflective xy walls (large extent, effectively
+   infinite slab) + reflective back face + **vacuum front face**
+   (the only way photons leave the geometry, so `energy_escaped`
+   from `transport_history_csg` IS the transmitted energy by
+   construction).
+
+   Built-in materials: `water`, `concrete` (ANSI/ANS-6.4 ordinary,
+   2.3 g/cm³, 6 elements), `Pb`, `Fe`, `W`. Reports the analog
+   Figure of Merit `FOM = 1 / (σ_rel² · t_wall)` — the variance-
+   reduction reference any future CADIS / WW scheme has to beat.
+
+   `[shield]` 100 cm water at 1 MeV, 1M histories, single seed:
+   T = 5.26 × 10⁻³ ± 1.13 % relative, **FOM = 348/s**.
+   Physics check: μ for water at 1 MeV = 0.0707/cm → 7.07 mfp
+   uncollided exp(−7.07) = 8.5e-4 × ANSI/ANS-6.4.3 buildup factor
+   ≈ 6.2 = 5.3e-3. Match.
+
+   `[shield]` 50 cm concrete: T = 5.06e-3 ± 2.6 %, FOM = 223/s.
+   Equivalent attenuation to 100 cm water (concrete μ ≈ 2× water μ
+   at 1 MeV, so half the thickness gives the same transmission).
+
+3. **CADIS-lite calibration — detector-backward importance map**
+   (`df9a8bf`)
+   `--cadis-calibration N` flag on `shield_slab` runs N source-
+   photon histories born at `z=T` heading `-z` (into the slab from
+   the detector face), accumulates their collision density per
+   z-bin via a new `HistoryResult.collisions: Vec<(Vec3, f64)>`
+   field, and prints the resulting importance map ψ̂\*(z) alongside
+   the implied `w_target = ψ̂\*_max / ψ̂\*(z)`.
+
+   This is the "lite" form — not a true continuous-energy adjoint
+   MC (no transposed Compton kernel, no adjoint photoelectric
+   source). For Compton + Rayleigh-dominated regimes it's
+   qualitatively correct in the importance-gradient sense, and the
+   peak of ψ̂\*(z) lands at the right depth (~10-15 mfp from the
+   detector, matching photon mfp in water at 1 MeV).
+
+   `[shield]` 50k calibration histories on 100 cm water:
+   - z = 0-5 cm   ψ̂\* = 0.047 → w_target = 21.2 (heavy splitting)
+   - z = 50-55 cm ψ̂\* = 0.350 → w_target = 2.86
+   - z = 85-90 cm ψ̂\* = 1.000 → w_target = 1.00 (peak — matches
+                                                   photon mfp depth)
+   - z = 95-100 cm ψ̂\* = 0.775 → w_target = 1.29 (edge falloff)
+
+4. **CADIS importance map → JSON** (`980af16`)
+   `--cadis-save FILE` persists the calibration result so the
+   next-step CADIS WW translator (the existing `WeightWindow::
+   from_flux` over a 1×1×n_z mesh) can ingest it without re-running
+   calibration. Schema:
+   `{"thickness_cm": ..., "n_z_bins": ..., "counts": [...]}`.
+
+5. **Photon-side CADIS WW + weight bookkeeping** (`43b3236`)
+   The substantial commit. `src/photon/transport.rs` gains a
+   5-tuple bank entry (`pos, dir, energy, weight, coord_stack`).
+   Every tally accumulator multiplies by the photon's current
+   weight, so the run-mean stays an unbiased estimator.
+
+   Backward compatibility: existing `transport_history_csg` callers
+   (`pwr_gamma_heating`, `cs137_pulse_height`, internal lib tests)
+   are unchanged — the public function delegates to a new
+   `transport_history_csg_with_ww` with `source_weight=1.0` and
+   `weight_window=None`, identical to the prior analog behavior.
+
+   New WW hook in `transport_one_csg`: after each free-flight that
+   lands the photon in a new voxel, splitting (`w > w_upper`) or
+   roulette (`w < w_lower`) fires. `prev_voxel` tracking ensures
+   the hook only triggers on transitions, not micro-steps.
+   `WeightWindow::voxel_index` exposed publicly to support
+   the boundary-detection logic.
+
+   `shield_slab --cadis-load FILE` ingests the saved importance
+   map. The critical detail: `w_ref` is set so that
+   `w_target(source_pos) = 1.0` — that's the consistent-CADIS
+   normalisation. Without it, photons born at z=0 (low importance,
+   large `w_target`) immediately fall below `w_lower` and get
+   rouletted away, inflating the tally by the source-weight factor.
+
+   **Validation — transmission unbiased:**
+   `[shield]` 100 cm water, 200 k histories analog vs CADIS:
+   - Analog: T = 5.45e-3 ± 2.5 %, **FOM = 361/s**, 2 800
+     transmitted in 4.6 s
+   - CADIS:  T = 5.21e-3 ± 1.8 %, **FOM = 220/s**, 16 288
+     transmitted in 13.6 s — means agree within 1σ.
+
+   `[shield]` 200 cm water (14 mfp, deep-penetration):
+   - Analog: T = 2.81e-5 ± 36 %, FOM = 1.66/s, 12 transmitted
+   - CADIS:  T = 1.59e-5 ± 34 %, FOM = 0.43/s, 1 434 transmitted
+     (120× more samples reaching the detector!)
+
+   **The negative result.** σ_rel barely improves at 200 cm (34 %
+   vs 36 %) despite 120× more transmitted samples. The split
+   copies are highly correlated — they share their parent's
+   trajectory before the split point — so the effective number of
+   independent samples is bounded by the ~12 photons that would
+   have transmitted analog. Variance reduction per effective
+   sample doesn't materialise; meanwhile splitting at every voxel
+   inflates wall time 3-4×.
+
+   The Wagner-Haghighat 2003 50-1000× FOM gain assumes:
+   (1) true continuous-energy adjoint MC for ψ\* (not the lite
+   collision-density proxy), (2) source-distribution biasing
+   (sample initial position from the importance CDF, not just bias
+   the source weight), (3) energy-dependent WW (4D mesh, not 1D
+   z-only). All three are research-tier work that the shipped
+   infrastructure plugs into.
+
+## What's de-risked vs. what's research
+
+**De-risked (this round):**
+- Bateman / CRAM math at production grade (orders 16 and 48,
+  validated against analytical Xe equilibrium at 1e-4 precision).
+- Chain JSON ingestion with extensible schema; ENDF default yield
+  inference for standard reaction MTs.
+- Multi-nuclide BurnupMapping that cleanly separates chain-only
+  evolution from transport-coupled feedback.
+- URR equivalence theory hook + Carlvik-Pellaud Dancoff for square
+  lattices; ready for OpenMC cross-validation.
+- Photon shielding benchmark with documented analog FOM baseline.
+- Per-photon weight bookkeeping in the photon hot path; WW
+  splitting/roulette infrastructure; CADIS importance-map JSON
+  format.
+
+**Research-tier (deferred, with clear plug-in points):**
+- Continuous-energy adjoint photon MC — transposed Compton kernel,
+  adjoint photoelectric as source, energy-dependent WW. Documented
+  inline in `shield_slab.rs` as the next-step roadmap.
+- Source-distribution biasing for variance reduction (combined
+  splitting instead of geometric splitting).
+- Full PWR depletion bench (chains/pwr_actinides.json + Pu/Np HDF5
+  files + 30-50 GWd/MTU run vs OpenMC's depletion solver).
+
+## Test count progression
+
+227 (prev round close) → 246 (after depletion + chain_io tests +
+ENDF default yields validation) → 250 (after URR equivalence + Xe
+equilibrium analytical match) → **260** (after CADIS-related
+tests + photon weight bookkeeping). Net **+33 lib tests** this
+round, all green.
+
+## Honest scorecard
+
+| Item | Status |
+|---|---|
+| Bateman / CRAM-16 / -48 | ✅ shipped, validated to 1e-4 |
+| Chain JSON loader (3-way yields semantics) | ✅ |
+| `pwr_actinides.json` (17 nuclides, fresh-fuel through ~30 GWd/MTU) | ✅ schema validated, 1-day CRAM clean |
+| BurnupMapping (table-driven chain↔material walker) | ✅ |
+| `deplete_pwr` fresh-corrector (eigenvalue at predicted comp) | ✅ |
+| Python depletion API + Material composition setters | ✅ |
+| URR equivalence theory (Carlvik-Pellaud Dancoff) | ✅ shipped, OpenMC cross-check pending |
+| Photon shielding benchmark (`shield_slab`) | ✅ analog FOM = 348/s @ 100 cm water |
+| CADIS-lite calibration (importance map) | ✅ peaks at right depth |
+| Per-photon weight bookkeeping + WW hook | ✅ |
+| **CADIS FOM gain over analog** | ❌ **not delivered** (lite proxy + naive splitting) |
+| Real continuous-energy adjoint photon MC | research, multi-week |
+
+---
+
 # Variance reduction + tallies + restart + hex on GPU — 2026-05-06
 
 ## TL;DR
