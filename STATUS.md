@@ -5,6 +5,12 @@ Pairs with `resume.md` (the project journal — round-by-round
 narrative). This file is forward-looking: "where are we, what's
 next".
 
+Deferred specs:
+- [`ICSBEP.md`](ICSBEP.md) — phased plan to run the full ICSBEP
+  benchmark suite. Engineering-heavy, ~13 weeks; deferred until
+  time-dependent kinetics, real continuous-energy adjoint MC, and
+  validated full-PWR depletion bench land first.
+
 `origin/main` at `43b3236`. Lib tests **260 / 260 green** on the
 default profile; `cargo check --features cuda` clean; Python
 bindings (`-p open-rust-mc-py`) clean.
