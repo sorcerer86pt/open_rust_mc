@@ -70,6 +70,20 @@ struct Args {
     /// with `cargo run --release --features preview --bin pwr_assembly`.
     #[arg(long, default_value_t = false)]
     preview: bool,
+
+    /// Lattice size N (N×N pin grid). Default 17 (Westinghouse layout).
+    /// For N != 17 the layout is all-fuel (no guide tubes) — useful
+    /// for fast 3×3 mini-core stability tests.
+    #[arg(long, default_value_t = 17)]
+    shape: usize,
+
+    /// Write an HDF5 statepoint at end-of-run (FIRST seed only).
+    #[arg(long)]
+    statepoint: Option<PathBuf>,
+
+    /// Resume from a previously-written statepoint (FIRST seed only).
+    #[arg(long)]
+    restart_from: Option<PathBuf>,
 }
 
 /// Same nuclide list as pwr_pincell.
@@ -91,29 +105,31 @@ const PITCH: f64 = 1.260; // cm, pin-cell pitch
 const FUEL_OR: f64 = 0.4096; // cm, fuel outer radius
 const CLAD_IR: f64 = 0.4180; // cm, clad inner radius
 const CLAD_OR: f64 = 0.4750; // cm, clad outer radius
-const SHAPE: usize = 17;
 
 /// Universe ids assigned by `setup_geometry`.
 const U_ROOT: u32 = 0;
 const U_PIN: u32 = 1;
 const U_GT: u32 = 2;
 
-/// Standard Westinghouse 17×17 layout: `true` = guide tube /
-/// instrument tube, `false` = fuel pin. Indexing is `layout[row][col]`
-/// with row=0 at the bottom; both axes are 0..17.
-fn westinghouse_layout() -> [[bool; SHAPE]; SHAPE] {
-    let mut l = [[false; SHAPE]; SHAPE];
-    let positions: &[(usize, usize)] = &[
-        (2, 5), (2, 8), (2, 11),
-        (3, 3), (3, 13),
-        (5, 2), (5, 5), (5, 8), (5, 11), (5, 14),
-        (8, 2), (8, 5), (8, 8), (8, 11), (8, 14),
-        (11, 2), (11, 5), (11, 8), (11, 11), (11, 14),
-        (13, 3), (13, 13),
-        (14, 5), (14, 8), (14, 11),
-    ];
-    for &(r, c) in positions {
-        l[r][c] = true;
+/// Pin layout: `true` = guide tube / instrument tube, `false` = fuel
+/// pin. Returns the standard Westinghouse 17×17 layout when
+/// `shape == 17`, otherwise an all-fuel grid (no guide tubes) — the
+/// usual choice for non-standard mini-core sizes.
+fn pin_layout(shape: usize) -> Vec<Vec<bool>> {
+    let mut l = vec![vec![false; shape]; shape];
+    if shape == 17 {
+        let positions: &[(usize, usize)] = &[
+            (2, 5), (2, 8), (2, 11),
+            (3, 3), (3, 13),
+            (5, 2), (5, 5), (5, 8), (5, 11), (5, 14),
+            (8, 2), (8, 5), (8, 8), (8, 11), (8, 14),
+            (11, 2), (11, 5), (11, 8), (11, 11), (11, 14),
+            (13, 3), (13, 13),
+            (14, 5), (14, 8), (14, 11),
+        ];
+        for &(r, c) in positions {
+            l[r][c] = true;
+        }
     }
     l
 }
@@ -130,8 +146,8 @@ fn westinghouse_layout() -> [[bool; SHAPE]; SHAPE] {
 ///   6 gt_water_out: outside clad or               → Material(2) H2O
 ///   7 root_inside_box: inside the assembly box    → Lattice(0)
 ///   8 root_outside_box: complement                → Void
-fn setup_geometry(reflective_z: bool) -> Geometry {
-    let lat_half = (SHAPE as f64) * PITCH / 2.0; // 17 × 1.26 / 2 = 10.71 cm
+fn setup_geometry(reflective_z: bool, shape: usize) -> Geometry {
+    let lat_half = (shape as f64) * PITCH / 2.0; // 17 × 1.26 / 2 = 10.71 cm
     let z_half = lat_half;
     let pin_center = PITCH / 2.0; // pin center in element-local coords
 
@@ -259,12 +275,12 @@ fn setup_geometry(reflective_z: bool) -> Geometry {
     ];
 
     // Build the lattice element → universe map (row-major, [ix][iy][iz=0]).
-    let layout = westinghouse_layout();
-    let mut lattice_universes = Vec::with_capacity(SHAPE * SHAPE);
+    let layout = pin_layout(shape);
+    let mut lattice_universes = Vec::with_capacity(shape * shape);
     for iz in 0..1 {
         let _ = iz;
-        for iy in 0..SHAPE {
-            for ix in 0..SHAPE {
+        for iy in 0..shape {
+            for ix in 0..shape {
                 let id = if layout[iy][ix] {
                     UniverseId(U_GT)
                 } else {
@@ -281,7 +297,7 @@ fn setup_geometry(reflective_z: bool) -> Geometry {
         // box, so distance_to_grid in z reports a far crossing that the
         // box surfaces always preempt.
         pitch: Vec3::new(PITCH, PITCH, 2.0 * z_half),
-        shape: [SHAPE, SHAPE, 1],
+        shape: [shape, shape, 1],
         universes: lattice_universes,
         material_overrides: None,
     }];
@@ -500,29 +516,29 @@ fn main() {
     println!("========================================================");
     println!("  17×17 PWR Fuel Assembly — Recursive Geometry Demo");
     println!("========================================================");
+    let shape = args.shape;
     println!(
-        "  Lattice  : {SHAPE}×{SHAPE} pins (pitch {PITCH:.3} cm), \
-        264 fuel + 25 GT/IT (Westinghouse layout)"
+        "  Lattice  : {shape}×{shape} pins (pitch {PITCH:.3} cm)"
     );
-    let layout = westinghouse_layout();
+    let layout = pin_layout(shape);
     let n_gt = layout.iter().flatten().filter(|&&b| b).count();
-    let n_pin = SHAPE * SHAPE - n_gt;
+    let n_pin = shape * shape - n_gt;
     println!("  Layout   : {n_pin} fuel pins + {n_gt} guide tubes");
     println!(
         "  Bounds   : x,y reflective at ±{:.3} cm; z {} at ±{:.3} cm",
-        (SHAPE as f64) * PITCH / 2.0,
+        (shape as f64) * PITCH / 2.0,
         if args.reflective_z {
             "reflective"
         } else {
             "vacuum"
         },
-        (SHAPE as f64) * PITCH / 2.0
+        (shape as f64) * PITCH / 2.0
     );
     println!(
         "  Stack    : depth 3 at every transport step (root → lattice → pin/GT)"
     );
 
-    let geometry = setup_geometry(args.reflective_z);
+    let geometry = setup_geometry(args.reflective_z, shape);
     let materials = setup_materials();
 
     println!(
@@ -545,6 +561,14 @@ fn main() {
     let (xs_provider, xs_mem, load_ms) = load_svd(&args);
     let _ = (xs_mem, load_ms);
 
+    // Optional restart bank from a previous statepoint.
+    let restart_bank = args.restart_from.as_ref().map(|path| {
+        let bank = open_rust_mc::transport::statepoint::read_source_bank(path)
+            .unwrap_or_else(|e| panic!("failed to load restart bank from {path:?}: {e}"));
+        println!("  Resuming from {} ({} sites)", path.display(), bank.len());
+        bank
+    });
+
     let inactive = args.inactive.min(args.batches.saturating_sub(1));
     let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
 
@@ -562,9 +586,13 @@ fn main() {
             verbose: true,
             parallel: true,
             tallies: Default::default(),
-            statepoint_path: None,
+            statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
             survival_biasing: None,
-            initial_source_bank: None,
+            initial_source_bank: if seed == 0 {
+                restart_bank.clone()
+            } else {
+                None
+            },
         };
 
         if args.seeds > 1 {
@@ -622,7 +650,7 @@ fn main() {
 
     println!();
     println!("============================================================");
-    println!("  RESULT — 17×17 PWR Assembly (SVD rank={})", args.rank);
+    println!("  RESULT — {shape}×{shape} PWR Assembly (SVD rank={})", args.rank);
     println!("============================================================");
     println!(
         "  k{}            = {:.5} +/- {:.5}",

@@ -600,6 +600,7 @@ impl NuclideFileReader {
 }
 
 /// Tabulated nu-bar (average neutrons per fission) as a function of energy.
+#[derive(Clone)]
 pub struct NuBarTable {
     /// Energy grid in eV, sorted ascending.
     pub energies: Vec<f64>,
@@ -2083,6 +2084,123 @@ pub fn read_angular_distribution(path: &Path, mt: u32) -> Result<Option<AngularD
         distributions,
         center_of_mass,
     }))
+}
+
+/// Read the delayed-only nu-bar (sum of all delayed-product yields)
+/// from an MT=18 reaction. Returns `None` if the nuclide has no
+/// delayed-product entries (light isotopes, structurals).
+///
+/// Engine consumer: divide by total `nu_bar(E)` to get β(E), the
+/// fraction of fission neutrons that are delayed at incident energy
+/// E. Delayed neutrons typically carry a softer outgoing spectrum
+/// than prompt — for static k-eff that spectrum shift is the only
+/// effect; the per-precursor-group breakdown matters only for
+/// time-dependent kinetics.
+pub fn read_delayed_nu_bar(path: &Path) -> Result<Option<NuBarTable>> {
+    let file = hdf5_pure::File::open(path).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+    let root = file.root();
+    let nuclide_name = match root
+        .groups()
+        .map_err(|e| SvdError::Hdf5 {
+            path: path.display().to_string(),
+            detail: format!("cannot list root groups: {e}"),
+        })?
+        .into_iter()
+        .next()
+    {
+        Some(n) => n,
+        None => return Ok(None),
+    };
+    let nuc = root.group(&nuclide_name).map_err(|e| SvdError::Hdf5 {
+        path: path.display().to_string(),
+        detail: format!("{e}"),
+    })?;
+    let rxn = match nuc.group("reactions").and_then(|r| r.group("reaction_018")) {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    Ok(read_delayed_nu_bar_from_group(&rxn))
+}
+
+/// Same as `read_delayed_nu_bar` but on an already-open reaction_018
+/// group. Returns `None` when the nuclide has no delayed products.
+pub fn read_delayed_nu_bar_from_group(
+    rxn_group: &hdf5_pure::Group<'_>,
+) -> Option<NuBarTable> {
+    let subgroups = rxn_group.groups().unwrap_or_default();
+    let mut delayed_tables: Vec<NuBarTable> = Vec::new();
+    let mut delayed_constants: Vec<f64> = Vec::new();
+
+    for product_name in &subgroups {
+        if !product_name.starts_with("product_") {
+            continue;
+        }
+        let product = match rxn_group.group(product_name) {
+            Ok(g) => g,
+            Err(_) => continue,
+        };
+        let attrs = product.attrs().unwrap_or_default();
+        let is_neutron =
+            matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
+        if !is_neutron {
+            continue;
+        }
+        let is_prompt = matches!(
+            attrs.get("emission_mode"),
+            Some(hdf5_pure::AttrValue::String(s)) if s == "prompt"
+        );
+        if is_prompt {
+            continue;
+        }
+        let yield_ds = match product.dataset("yield") {
+            Ok(ds) => ds,
+            Err(_) => continue,
+        };
+        let shape = yield_ds.shape().unwrap_or_default();
+        let raw = match yield_ds.read_f64() {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if shape.len() == 2 && shape[0] == 2 {
+            let n = shape[1] as usize;
+            if raw.len() >= 2 * n {
+                delayed_tables.push(NuBarTable {
+                    energies: raw[..n].to_vec(),
+                    values: raw[n..2 * n].to_vec(),
+                });
+            }
+        } else if shape.len() == 1 && shape[0] == 1 {
+            delayed_constants.push(raw[0]);
+        }
+    }
+
+    if delayed_tables.is_empty() && delayed_constants.is_empty() {
+        return None;
+    }
+
+    // Pick a common energy grid: union of all delayed-table grids,
+    // or fall back to a 2-point [thermal, fast] grid for the all-
+    // constants case.
+    let energies: Vec<f64> = if let Some(first) = delayed_tables.first() {
+        first.energies.clone()
+    } else {
+        vec![1e-5, 20.0e6]
+    };
+    let constant_sum: f64 = delayed_constants.iter().sum();
+    let mut values: Vec<f64> = energies
+        .iter()
+        .map(|&e| constant_sum + delayed_tables.iter().map(|t| t.lookup(e)).sum::<f64>())
+        .collect();
+    // Sanity floor: nu_delayed must be >= 0.
+    for v in &mut values {
+        if *v < 0.0 {
+            *v = 0.0;
+        }
+    }
+    Some(NuBarTable { energies, values })
 }
 
 // ── Internal helpers for NuclideFileReader ──────────────────────────────────
