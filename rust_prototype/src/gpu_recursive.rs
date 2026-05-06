@@ -46,6 +46,11 @@ const FILL_MATERIAL: i32 = 0;
 const FILL_VOID: i32 = 1;
 const FILL_UNIVERSE: i32 = 2;
 const FILL_LATTICE: i32 = 3;
+const FILL_HEX_LATTICE: i32 = 4;
+
+// Hex orientation discriminants — match CUDA `GR_HEX_ORIENT_*`.
+const HEX_ORIENT_Y: i32 = 0;
+const HEX_ORIENT_X: i32 = 1;
 
 // ── Host-side SoA tables before upload ──────────────────────────────
 
@@ -77,6 +82,16 @@ struct HostTables {
     lat_shape: Vec<i32>,
     lat_universes_off: Vec<i32>,
     lat_universes: Vec<i32>,
+    // Hex lattice SoA — parallel to the rect arrays. The `n_*`
+    // counters match the layout in `geom_recursive.cu::GrGeometry`.
+    hex_center: Vec<f64>,
+    hex_pitch_xy: Vec<f64>,
+    hex_pitch_z: Vec<f64>,
+    hex_n_rings: Vec<i32>,
+    hex_n_axial: Vec<i32>,
+    hex_orientation: Vec<i32>,
+    hex_universes_off: Vec<i32>,
+    hex_universes: Vec<i32>,
 }
 
 fn pack_surface(s: &Surface, params_out: &mut Vec<f64>, bc_out: &mut Vec<i32>) -> i32 {
@@ -248,6 +263,7 @@ fn build_host_tables(geom: &Geometry) -> HostTables {
             CellFill::Void => (FILL_VOID, 0),
             CellFill::Universe(u) => (FILL_UNIVERSE, u as i32),
             CellFill::Lattice(l) => (FILL_LATTICE, l as i32),
+            CellFill::HexLattice(h) => (FILL_HEX_LATTICE, h as i32),
         };
         t.cell_fill_type.push(ft);
         t.cell_fill_data.push(fd);
@@ -292,6 +308,28 @@ fn build_host_tables(geom: &Geometry) -> HostTables {
         t.lat_universes_off.push(off);
     }
 
+    // Hex lattices: flatten parallel SoA. The CUDA `gr_hex_*` device
+    // functions consume the same per-element data layout as the CPU
+    // `HexLattice` struct.
+    use crate::geometry::lattice::HexOrientation;
+    for hex in &geom.hex_lattices {
+        t.hex_center
+            .extend_from_slice(&[hex.center.x, hex.center.y, hex.center.z]);
+        t.hex_pitch_xy.push(hex.pitch_xy);
+        t.hex_pitch_z.push(hex.pitch_z);
+        t.hex_n_rings.push(hex.n_rings as i32);
+        t.hex_n_axial.push(hex.n_axial as i32);
+        t.hex_orientation.push(match hex.orientation {
+            HexOrientation::Y => HEX_ORIENT_Y,
+            HexOrientation::X => HEX_ORIENT_X,
+        });
+        let off = t.hex_universes.len() as i32;
+        for u in &hex.universes {
+            t.hex_universes.push(u.0 as i32);
+        }
+        t.hex_universes_off.push(off);
+    }
+
     t
 }
 
@@ -328,6 +366,15 @@ pub struct GpuRecursiveContext {
     lat_shape: CudaSlice<i32>,
     lat_universes_off: CudaSlice<i32>,
     lat_universes: CudaSlice<i32>,
+    hex_center: CudaSlice<f64>,
+    hex_pitch_xy: CudaSlice<f64>,
+    hex_pitch_z: CudaSlice<f64>,
+    hex_n_rings: CudaSlice<i32>,
+    hex_n_axial: CudaSlice<i32>,
+    hex_orientation: CudaSlice<i32>,
+    hex_universes_off: CudaSlice<i32>,
+    hex_universes: CudaSlice<i32>,
+    n_hex_lattices: i32,
     // Per-thread scratch evals — sized as `n_surfaces * max_threads`.
     evals_scratch: CudaSlice<f64>,
     // Scalars retained for kernel arg packing.
@@ -481,6 +528,66 @@ impl GpuRecursiveContext {
                 .map_err(|e| e.to_string())?
         };
 
+        // Hex lattice buffers — same empty-fallback pattern so kernels
+        // always receive a non-null device pointer.
+        let alloc1_f = || stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string());
+        let alloc1_i = || stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string());
+        let hex_center = if t.hex_center.is_empty() {
+            alloc1_f()?
+        } else {
+            stream.clone_htod(&t.hex_center).map_err(|e| e.to_string())?
+        };
+        let hex_pitch_xy = if t.hex_pitch_xy.is_empty() {
+            alloc1_f()?
+        } else {
+            stream
+                .clone_htod(&t.hex_pitch_xy)
+                .map_err(|e| e.to_string())?
+        };
+        let hex_pitch_z = if t.hex_pitch_z.is_empty() {
+            alloc1_f()?
+        } else {
+            stream
+                .clone_htod(&t.hex_pitch_z)
+                .map_err(|e| e.to_string())?
+        };
+        let hex_n_rings = if t.hex_n_rings.is_empty() {
+            alloc1_i()?
+        } else {
+            stream
+                .clone_htod(&t.hex_n_rings)
+                .map_err(|e| e.to_string())?
+        };
+        let hex_n_axial = if t.hex_n_axial.is_empty() {
+            alloc1_i()?
+        } else {
+            stream
+                .clone_htod(&t.hex_n_axial)
+                .map_err(|e| e.to_string())?
+        };
+        let hex_orientation = if t.hex_orientation.is_empty() {
+            alloc1_i()?
+        } else {
+            stream
+                .clone_htod(&t.hex_orientation)
+                .map_err(|e| e.to_string())?
+        };
+        let hex_universes_off = if t.hex_universes_off.is_empty() {
+            alloc1_i()?
+        } else {
+            stream
+                .clone_htod(&t.hex_universes_off)
+                .map_err(|e| e.to_string())?
+        };
+        let hex_universes = if t.hex_universes.is_empty() {
+            alloc1_i()?
+        } else {
+            stream
+                .clone_htod(&t.hex_universes)
+                .map_err(|e| e.to_string())?
+        };
+        let n_hex_lattices = geom.hex_lattices.len() as i32;
+
         // Per-thread evals scratch.
         let evals_scratch = stream
             .alloc_zeros::<f64>(n_surfaces as usize * n_threads_max)
@@ -516,6 +623,15 @@ impl GpuRecursiveContext {
             lat_shape,
             lat_universes_off,
             lat_universes,
+            hex_center,
+            hex_pitch_xy,
+            hex_pitch_z,
+            hex_n_rings,
+            hex_n_axial,
+            hex_orientation,
+            hex_universes_off,
+            hex_universes,
+            n_hex_lattices,
             evals_scratch,
             n_surfaces,
             root_universe,
@@ -594,6 +710,15 @@ impl GpuRecursiveContext {
             .arg(&self.lat_shape)
             .arg(&self.lat_universes_off)
             .arg(&self.lat_universes)
+            // hex lattices
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
             // scratch + output
             .arg(&self.evals_scratch)
             .arg(&mut out);
@@ -715,6 +840,14 @@ impl GpuRecursiveContext {
             .arg(&self.lat_shape)
             .arg(&self.lat_universes_off)
             .arg(&self.lat_universes)
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
             .arg(&self.evals_scratch)
             .arg(&mut out_dist)
             .arg(&mut out_surf)
@@ -840,6 +973,14 @@ impl GpuRecursiveContext {
             .arg(&self.lat_shape)
             .arg(&self.lat_universes_off)
             .arg(&self.lat_universes)
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
             .arg(&self.evals_scratch)
             .arg(&mut out_x)
             .arg(&mut out_y)
@@ -1048,6 +1189,15 @@ impl GpuRecursiveContext {
             .arg(&self.lat_universes_off)
             .arg(&self.lat_universes)
             .arg(&n_lat)
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
+            .arg(&self.n_hex_lattices)
             .arg(&d_lat_override_off)
             .arg(&d_lat_override_count)
             .arg(&d_override_lat_idx)
@@ -1322,6 +1472,15 @@ impl GpuRecursiveContext {
             .arg(&self.lat_universes_off)
             .arg(&self.lat_universes)
             .arg(&n_lat)
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
+            .arg(&self.n_hex_lattices)
             .arg(&d_lat_override_off)
             .arg(&d_lat_override_count)
             .arg(&d_override_lat_idx)

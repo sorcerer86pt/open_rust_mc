@@ -45,10 +45,18 @@
 #define GR_REGION_UNION         3  // pop 2, push (a || b)
 #define GR_REGION_COMPLEMENT    4  // pop 1, push (!a)
 
-#define GR_FILL_MATERIAL 0
-#define GR_FILL_VOID     1
-#define GR_FILL_UNIVERSE 2
-#define GR_FILL_LATTICE  3
+#define GR_FILL_MATERIAL    0
+#define GR_FILL_VOID        1
+#define GR_FILL_UNIVERSE    2
+#define GR_FILL_LATTICE     3
+#define GR_FILL_HEX_LATTICE 4
+
+// Hex orientation flags — match Rust `HexOrientation` discriminants.
+#define GR_HEX_ORIENT_Y 0  // flat-top (side midpoints at 30° from +x)
+#define GR_HEX_ORIENT_X 1  // pointy-top (side midpoints at 0° from +x)
+
+// GrCoord.has_lattice values: 0 = none, 1 = rect, 2 = hex.
+// In the hex case, (lat_ix, lat_iy, lat_iz) encode (q, r, z_layer).
 
 #define GR_MAX_DEPTH 4
 
@@ -107,6 +115,17 @@ struct GrGeometry {
     const int*    lat_universes_off;
     const int*    lat_universes;
     int           n_lattices;
+    // Hex lattices (parallel SoA — `CellFill::HexLattice(h)` indexes
+    // these arrays; rect lattices live in lat_*).
+    const double* hex_center;     // [nh*3]
+    const double* hex_pitch_xy;   // [nh]
+    const double* hex_pitch_z;    // [nh]
+    const int*    hex_n_rings;    // [nh]
+    const int*    hex_n_axial;    // [nh]
+    const int*    hex_orientation; // [nh]
+    const int*    hex_universes_off; // [nh]
+    const int*    hex_universes;  // flattened (2*N+1)² × n_axial per lattice
+    int           n_hex_lattices;
     // Eval scratchpad: [n_surfaces] doubles per thread (the caller
     // owns this buffer and zeroes it as needed).
     double*       evals;
@@ -205,6 +224,215 @@ __device__ __forceinline__ bool gr_cell_aabb_contains(
         && z >= lo[2] && z <= hi[2];
 }
 
+// ── Hex lattice math (cube-coord round) ─────────────────────────────
+//
+// Mirrors `HexLattice::find_element` / `local_position` / `universe_at`
+// / `distance_to_grid` from `src/geometry/lattice.rs`. The math is
+// closed-form arithmetic — no iteration — so the device port is a
+// straight transliteration of the CPU code.
+
+__device__ __forceinline__ double gr_hex_side_length(double pitch_xy) {
+    // For both orientations, centre-to-centre = sqrt(3) * side.
+    return pitch_xy * 0.5773502691896258;  // 1/sqrt(3)
+}
+
+// Cartesian → axial fractional coords.
+__device__ __forceinline__ void gr_hex_cart_to_axial_frac(
+    double x, double y, double s, int orientation,
+    double* out_qf, double* out_rf)
+{
+    if (orientation == GR_HEX_ORIENT_Y) {
+        // Flat-top inverse:
+        //   q = (2/3 * x) / s
+        //   r = (-x/3 + sqrt(3)/3 * y) / s
+        *out_qf = (2.0 / 3.0 * x) / s;
+        *out_rf = (-x / 3.0 + (1.7320508075688772 / 3.0) * y) / s;
+    } else {
+        // Pointy-top inverse:
+        //   q = (sqrt(3)/3 * x - y/3) / s
+        //   r = (2/3 * y) / s
+        *out_qf = ((1.7320508075688772 / 3.0) * x - y / 3.0) / s;
+        *out_rf = (2.0 / 3.0 * y) / s;
+    }
+}
+
+// Cube-coord rounding: pick the integer triple (x, y, z) with x+y+z=0
+// minimising |frac - rounded| sum.
+__device__ __forceinline__ void gr_hex_cube_round(
+    double qf, double rf,
+    int* out_q, int* out_r)
+{
+    double xf = qf;
+    double zf = rf;
+    double yf = -xf - zf;
+    double x = round(xf);
+    double y = round(yf);
+    double z = round(zf);
+    double xd = fabs(x - xf);
+    double yd = fabs(y - yf);
+    double zd = fabs(z - zf);
+    if (xd > yd && xd > zd) {
+        x = -y - z;
+    } else if (yd > zd) {
+        // y = -x - z;  // not needed — q and r come from x and z
+    } else {
+        z = -x - y;
+    }
+    *out_q = (int)x;
+    *out_r = (int)z;
+}
+
+__device__ __forceinline__ bool gr_hex_find_element(
+    const GrGeometry* g, int hex_id,
+    double x, double y, double z,
+    int* out_q, int* out_r, int* out_zi)
+{
+    const double* ctr = g->hex_center + hex_id * 3;
+    double pitch_xy = g->hex_pitch_xy[hex_id];
+    double pitch_z = g->hex_pitch_z[hex_id];
+    int n_rings = g->hex_n_rings[hex_id];
+    int n_axial = g->hex_n_axial[hex_id];
+    int orient = g->hex_orientation[hex_id];
+
+    double px = x - ctr[0];
+    double py = y - ctr[1];
+    double pz = z - ctr[2];
+    double s = gr_hex_side_length(pitch_xy);
+
+    double qf, rf;
+    gr_hex_cart_to_axial_frac(px, py, s, orient, &qf, &rf);
+
+    int q, r;
+    gr_hex_cube_round(qf, rf, &q, &r);
+
+    // Bounds check via cube ring radius.
+    int cube_s = -q - r;
+    int aq = q < 0 ? -q : q;
+    int ar = r < 0 ? -r : r;
+    int as_ = cube_s < 0 ? -cube_s : cube_s;
+    int ring = aq;
+    if (ar > ring) ring = ar;
+    if (as_ > ring) ring = as_;
+    if (ring > n_rings) return false;
+
+    // z layer: lattice z range is [-n_axial/2, +n_axial/2) * pitch_z.
+    double dz = pz / pitch_z + ((double)n_axial) * 0.5;
+    int zi = (int)floor(dz);
+    if (zi < 0 || zi >= n_axial) return false;
+
+    *out_q = q;
+    *out_r = r;
+    *out_zi = zi;
+    return true;
+}
+
+// Cartesian centre of element (q, r) in lattice frame (relative to
+// hex_center).
+__device__ __forceinline__ void gr_hex_element_center_local(
+    double pitch_xy, int orientation, int q, int r,
+    double* out_x, double* out_y)
+{
+    double s = gr_hex_side_length(pitch_xy);
+    double qf = (double)q;
+    double rf = (double)r;
+    if (orientation == GR_HEX_ORIENT_Y) {
+        // x = 1.5 * s * q
+        // y = sqrt(3) * s * (r + q/2)
+        *out_x = 1.5 * s * qf;
+        *out_y = 1.7320508075688772 * s * (rf + qf * 0.5);
+    } else {
+        // x = sqrt(3) * s * (q + r/2)
+        // y = 1.5 * s * r
+        *out_x = 1.7320508075688772 * s * (qf + rf * 0.5);
+        *out_y = 1.5 * s * rf;
+    }
+}
+
+__device__ __forceinline__ int gr_hex_universe_at(
+    const GrGeometry* g, int hex_id, int q, int r, int zi)
+{
+    int n_rings = g->hex_n_rings[hex_id];
+    int stride = 2 * n_rings + 1;
+    int qi = q + n_rings;
+    int ri = r + n_rings;
+    int slab = stride * stride;
+    int linear = zi * slab + ri * stride + qi;
+    int off = g->hex_universes_off[hex_id];
+    return g->hex_universes[off + linear];
+}
+
+// Distance to next hex grid crossing along (dx, dy, dz) from
+// (px, py, pz) currently inside element (q, r, zi). Six in-plane
+// edges plus 2 axial planes; min positive is reported.
+__device__ double gr_hex_distance_to_grid(
+    const GrGeometry* g, int hex_id,
+    double px, double py, double pz,
+    double dx, double dy, double dz,
+    int q, int r, int zi)
+{
+    const double* ctr = g->hex_center + hex_id * 3;
+    double pitch_xy = g->hex_pitch_xy[hex_id];
+    double pitch_z = g->hex_pitch_z[hex_id];
+    int n_axial = g->hex_n_axial[hex_id];
+    int orient = g->hex_orientation[hex_id];
+
+    // Position relative to lattice frame, then to element centre.
+    double rel_x = (px - ctr[0]);
+    double rel_y = (py - ctr[1]);
+    double rel_z = (pz - ctr[2]);
+    double cx, cy;
+    gr_hex_element_center_local(pitch_xy, orient, q, r, &cx, &cy);
+    double pos_x = rel_x - cx;
+    double pos_y = rel_y - cy;
+    double d_perp = pitch_xy * 0.5;  // half centre-to-centre
+
+    double best = 1e300;
+
+    // Six in-plane edge normals. For HexOrientation::Y the edge
+    // midpoints are at 30°, 90°, 150°, 210°, 270°, 330°. For X they're
+    // at 0°, 60°, 120°, 180°, 240°, 300°.
+    double n_x[6], n_y[6];
+    if (orient == GR_HEX_ORIENT_Y) {
+        const double s30 = 0.5;
+        const double c30 = 0.8660254037844387;  // sqrt(3)/2
+        n_x[0] =  c30; n_y[0] =  s30;
+        n_x[1] =  0.0; n_y[1] =  1.0;
+        n_x[2] = -c30; n_y[2] =  s30;
+        n_x[3] = -c30; n_y[3] = -s30;
+        n_x[4] =  0.0; n_y[4] = -1.0;
+        n_x[5] =  c30; n_y[5] = -s30;
+    } else {
+        const double s30 = 0.5;
+        const double c30 = 0.8660254037844387;
+        n_x[0] =  1.0; n_y[0] =  0.0;
+        n_x[1] =  s30; n_y[1] =  c30;
+        n_x[2] = -s30; n_y[2] =  c30;
+        n_x[3] = -1.0; n_y[3] =  0.0;
+        n_x[4] = -s30; n_y[4] = -c30;
+        n_x[5] =  s30; n_y[5] = -c30;
+    }
+    for (int i = 0; i < 6; ++i) {
+        double pn = pos_x * n_x[i] + pos_y * n_y[i];
+        double dn = dx * n_x[i] + dy * n_y[i];
+        if (fabs(dn) < 1e-300) continue;
+        // Edge plane: pn + t*dn = d_perp
+        double t = (d_perp - pn) / dn;
+        if (t > 1e-12 && t < best) best = t;
+    }
+
+    // Axial planes: z layer boundaries.
+    if (fabs(dz) > 1e-300) {
+        double layer_low = ((double)zi - (double)n_axial * 0.5) * pitch_z;
+        double layer_hi = layer_low + pitch_z;
+        double tlo = (layer_low - rel_z) / dz;
+        double thi = (layer_hi - rel_z) / dz;
+        if (tlo > 1e-12 && tlo < best) best = tlo;
+        if (thi > 1e-12 && thi < best) best = thi;
+    }
+
+    return best;
+}
+
 // ── Lattice element resolution ──────────────────────────────────────
 
 __device__ __forceinline__ bool gr_lattice_find_element(
@@ -297,6 +525,32 @@ __device__ int gr_find_cell(
             current_universe = fd;
             next_off_x = 0.0; next_off_y = 0.0; next_off_z = 0.0;
             next_has_lat = 0;
+            continue;
+        }
+        if (ft == GR_FILL_HEX_LATTICE) {
+            int hex_id = fd;
+            int q, r, zi;
+            if (!gr_hex_find_element(g, hex_id, local_x, local_y, local_z,
+                                     &q, &r, &zi)) {
+                return 0;  // off the hex lattice
+            }
+            current_universe = gr_hex_universe_at(g, hex_id, q, r, zi);
+            // Element offset in lattice frame: hex_center + element_centre.
+            const double* ctr = g->hex_center + hex_id * 3;
+            double pitch_xy = g->hex_pitch_xy[hex_id];
+            double pitch_z = g->hex_pitch_z[hex_id];
+            int orient = g->hex_orientation[hex_id];
+            int n_axial = g->hex_n_axial[hex_id];
+            double cx, cy;
+            gr_hex_element_center_local(pitch_xy, orient, q, r, &cx, &cy);
+            double cz = ((double)zi - (double)n_axial * 0.5 + 0.5) * pitch_z;
+            next_off_x = ctr[0] + cx;
+            next_off_y = ctr[1] + cy;
+            next_off_z = ctr[2] + cz;
+            // has_lattice = 2 distinguishes hex from rect (=1).
+            next_has_lat = 2;
+            next_lat_id = hex_id;
+            next_lat_ix = q; next_lat_iy = r; next_lat_iz = zi;
             continue;
         }
         if (ft == GR_FILL_LATTICE) {
@@ -485,9 +739,11 @@ __device__ int gr_trace_step(
     }
 
     // Source 3: lattice grid lines, evaluated in the parent frame.
+    // has_lattice == 1 → rect (Amanatides-Woo on axis-aligned grid).
+    // has_lattice == 2 → hex (6 edge normals + 2 axial planes).
     const double COINCIDENCE_TOL_GRID = 1e-9;
     for (int d = 0; d < depth; ++d) {
-        if (!stack[d].has_lattice) continue;
+        if (stack[d].has_lattice == 0) continue;
         int lat_id = stack[d].lattice_id;
         double px, py, pz;
         if (d == 0) {
@@ -495,10 +751,19 @@ __device__ int gr_trace_step(
         } else {
             px = locals_x[d - 1]; py = locals_y[d - 1]; pz = locals_z[d - 1];
         }
-        double t = gr_lattice_distance_to_grid(
-            g, lat_id, px, py, pz,
-            world_dx, world_dy, world_dz,
-            stack[d].lat_ix, stack[d].lat_iy, stack[d].lat_iz);
+        double t;
+        if (stack[d].has_lattice == 1) {
+            t = gr_lattice_distance_to_grid(
+                g, lat_id, px, py, pz,
+                world_dx, world_dy, world_dz,
+                stack[d].lat_ix, stack[d].lat_iy, stack[d].lat_iz);
+        } else {
+            // has_lattice == 2 — hex.
+            t = gr_hex_distance_to_grid(
+                g, lat_id, px, py, pz,
+                world_dx, world_dy, world_dz,
+                stack[d].lat_ix, stack[d].lat_iy, stack[d].lat_iz);
+        }
         if (t + COINCIDENCE_TOL_GRID < best_dist) {
             best_dist = t;
             best_surface = -1;

@@ -130,6 +130,13 @@ extern "C" __global__ void const_xs_transport_persistent(
     const int* lat_shape,
     const int* lat_universes_off, const int* lat_universes,
     int n_lattices,
+    // Hex lattices
+    const double* hex_center, const double* hex_pitch_xy,
+    const double* hex_pitch_z,
+    const int* hex_n_rings, const int* hex_n_axial,
+    const int* hex_orientation,
+    const int* hex_universes_off, const int* hex_universes,
+    int n_hex_lattices,
     // Material-override tables (sparse, optional). When all -1, no overrides.
     const int* lat_override_off,
     const int* lat_override_count,
@@ -169,6 +176,12 @@ extern "C" __global__ void const_xs_transport_persistent(
     g.lat_origin = lat_origin; g.lat_pitch = lat_pitch; g.lat_shape = lat_shape;
     g.lat_universes_off = lat_universes_off; g.lat_universes = lat_universes;
     g.n_lattices = n_lattices;
+    g.hex_center = hex_center; g.hex_pitch_xy = hex_pitch_xy;
+    g.hex_pitch_z = hex_pitch_z;
+    g.hex_n_rings = hex_n_rings; g.hex_n_axial = hex_n_axial;
+    g.hex_orientation = hex_orientation;
+    g.hex_universes_off = hex_universes_off; g.hex_universes = hex_universes;
+    g.n_hex_lattices = n_hex_lattices;
     g.evals = evals_scratch + tid * n_surfaces;
 
     double px = pos_x[tid], py = pos_y[tid], pz = pos_z[tid];

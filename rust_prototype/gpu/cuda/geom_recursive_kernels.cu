@@ -23,6 +23,12 @@ extern "C" __global__ void find_cell_batch(
     const double* lat_origin, const double* lat_pitch,
     const int* lat_shape,
     const int* lat_universes_off, const int* lat_universes,
+    // hex lattices
+    const double* hex_center, const double* hex_pitch_xy,
+    const double* hex_pitch_z,
+    const int* hex_n_rings, const int* hex_n_axial,
+    const int* hex_orientation,
+    const int* hex_universes_off, const int* hex_universes,
     // scratch + output
     double* evals_scratch,
     int* out_deepest_cell)
@@ -62,6 +68,15 @@ extern "C" __global__ void find_cell_batch(
     g.lat_universes_off = lat_universes_off;
     g.lat_universes = lat_universes;
     g.n_lattices = 0;
+    g.hex_center = hex_center;
+    g.hex_pitch_xy = hex_pitch_xy;
+    g.hex_pitch_z = hex_pitch_z;
+    g.hex_n_rings = hex_n_rings;
+    g.hex_n_axial = hex_n_axial;
+    g.hex_orientation = hex_orientation;
+    g.hex_universes_off = hex_universes_off;
+    g.hex_universes = hex_universes;
+    g.n_hex_lattices = 0;
 
     // Per-thread evals scratch.
     g.evals = evals_scratch + tid * n_surfaces;
@@ -97,6 +112,12 @@ extern "C" __global__ void trace_step_batch(
     const double* lat_origin, const double* lat_pitch,
     const int* lat_shape,
     const int* lat_universes_off, const int* lat_universes,
+    // hex lattices
+    const double* hex_center, const double* hex_pitch_xy,
+    const double* hex_pitch_z,
+    const int* hex_n_rings, const int* hex_n_axial,
+    const int* hex_orientation,
+    const int* hex_universes_off, const int* hex_universes,
     // scratch + outputs
     double* evals_scratch,
     double* out_distance, int* out_surface_idx, int* out_bc,
@@ -119,6 +140,12 @@ extern "C" __global__ void trace_step_batch(
     g.lat_origin = lat_origin; g.lat_pitch = lat_pitch; g.lat_shape = lat_shape;
     g.lat_universes_off = lat_universes_off; g.lat_universes = lat_universes;
     g.n_lattices = 0;
+    g.hex_center = hex_center; g.hex_pitch_xy = hex_pitch_xy;
+    g.hex_pitch_z = hex_pitch_z;
+    g.hex_n_rings = hex_n_rings; g.hex_n_axial = hex_n_axial;
+    g.hex_orientation = hex_orientation;
+    g.hex_universes_off = hex_universes_off; g.hex_universes = hex_universes;
+    g.n_hex_lattices = 0;
     g.evals = evals_scratch + tid * n_surfaces;
 
     GrCoord stack[GR_MAX_DEPTH];
@@ -178,6 +205,12 @@ extern "C" __global__ void multi_step_walk(
     const double* lat_origin, const double* lat_pitch,
     const int* lat_shape,
     const int* lat_universes_off, const int* lat_universes,
+    // hex lattices
+    const double* hex_center, const double* hex_pitch_xy,
+    const double* hex_pitch_z,
+    const int* hex_n_rings, const int* hex_n_axial,
+    const int* hex_orientation,
+    const int* hex_universes_off, const int* hex_universes,
     // scratch + outputs
     double* evals_scratch,
     double* out_x, double* out_y, double* out_z,
@@ -200,6 +233,12 @@ extern "C" __global__ void multi_step_walk(
     g.lat_origin = lat_origin; g.lat_pitch = lat_pitch; g.lat_shape = lat_shape;
     g.lat_universes_off = lat_universes_off; g.lat_universes = lat_universes;
     g.n_lattices = 0;
+    g.hex_center = hex_center; g.hex_pitch_xy = hex_pitch_xy;
+    g.hex_pitch_z = hex_pitch_z;
+    g.hex_n_rings = hex_n_rings; g.hex_n_axial = hex_n_axial;
+    g.hex_orientation = hex_orientation;
+    g.hex_universes_off = hex_universes_off; g.hex_universes = hex_universes;
+    g.n_hex_lattices = 0;
     g.evals = evals_scratch + tid * n_surfaces;
 
     double px = xs0[tid], py = ys0[tid], pz = zs0[tid];
