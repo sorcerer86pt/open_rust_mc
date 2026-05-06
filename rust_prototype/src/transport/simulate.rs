@@ -383,6 +383,15 @@ pub trait XsProvider: Send + Sync {
     fn thermal_scattering(&self, _nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         None
     }
+
+    /// Energy-dependent delayed-only ν̄ for a nuclide (sum of all
+    /// delayed-product yields). Returns 0 when the nuclide has no
+    /// delayed neutron data, or for non-fissile nuclides. Used by
+    /// the fission-yield path to compute β(E) = ν_d / ν_total and
+    /// pick prompt vs delayed for each banked fission neutron.
+    fn delayed_nu_bar_at(&self, _nuclide_idx: usize, _energy: f64) -> f64 {
+        0.0
+    }
 }
 
 /// Simple constant cross-section provider for testing.
@@ -1088,10 +1097,20 @@ fn dispatch_real_collision<XS: XsProvider>(
                 0
             };
         if n_fiss > 0 {
+            // β(E) = ν_delayed / ν_total — see process_collision for details.
+            let beta = if micro.nu_bar > 0.0 {
+                (micro.delayed_nu_bar / micro.nu_bar).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             for _ in 0..n_fiss {
-                let e_f = match fission_edist {
-                    Some(d) => d.sample(particle.energy, rng),
-                    None => collision::sample_fission_energy(particle.energy, rng),
+                let e_f = if beta > 0.0 && rng.uniform() < beta {
+                    collision::sample_delayed_energy(rng)
+                } else {
+                    match fission_edist {
+                        Some(d) => d.sample(particle.energy, rng),
+                        None => collision::sample_fission_energy(particle.energy, rng),
+                    }
                 };
                 result.fission_sites.push(FissionSite {
                     pos: particle.pos,
@@ -2149,6 +2168,7 @@ mod tests {
                 fission: 1.2,
                 capture: 0.1,
                 nu_bar: 2.43,
+                delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],
         };
@@ -2254,6 +2274,7 @@ mod tests {
                     fission: 2.0,
                     capture: 0.1,
                     nu_bar: 2.43,
+                delayed_nu_bar: 0.0,
                     awr: 235.0,
                 },
                 MicroXs {
@@ -2265,6 +2286,7 @@ mod tests {
                     fission: 0.0,
                     capture: 4.0,
                     nu_bar: 0.0,
+                delayed_nu_bar: 0.0,
                     awr: 91.0,
                 },
             ],
@@ -2324,6 +2346,7 @@ mod tests {
                 fission: 1.0,
                 capture: 1.0,
                 nu_bar: 2.43,
+                delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],
         };
@@ -2376,6 +2399,7 @@ mod tests {
                     fission: 5.0,
                     capture: 5.0,
                     nu_bar: 2.43,
+                delayed_nu_bar: 0.0,
                     awr: 235.0,
                 },
                 MicroXs {
@@ -2387,6 +2411,7 @@ mod tests {
                     fission: 0.0,
                     capture: 0.1,
                     nu_bar: 0.0,
+                delayed_nu_bar: 0.0,
                     awr: 56.0,
                 },
             ],
@@ -2429,6 +2454,7 @@ mod tests {
                 fission: 1.2,
                 capture: 0.1,
                 nu_bar: 2.43,
+                delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],
         };

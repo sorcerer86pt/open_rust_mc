@@ -27,7 +27,13 @@ pub struct MicroXs {
     /// Radiative capture (MT=102).
     pub capture: f64,
     /// Average neutrons per fission (nu-bar), energy-dependent.
+    /// This is the **total** yield (prompt + delayed).
     pub nu_bar: f64,
+    /// Delayed-only ν̄(E). Used to sample prompt vs delayed for each
+    /// banked fission neutron — `β(E) = delayed_nu_bar / nu_bar`.
+    /// Defaults to 0 when the nuclide has no delayed-product entries
+    /// or for non-fissile nuclides.
+    pub delayed_nu_bar: f64,
     /// Atomic weight ratio (A / neutron mass).
     pub awr: f64,
 }
@@ -230,10 +236,24 @@ pub fn process_collision(
         let n_neutrons = fission_yield(xs.nu_bar, particle.weight, rng);
         let mut sites = Vec::with_capacity(n_neutrons);
 
+        // β(E) = ν_delayed / ν_total — fraction of fission neutrons
+        // that are emitted by precursor β-decay (soft Watt spectrum)
+        // rather than promptly (Cranberg / tabulated spectrum). For
+        // static k-eff the spectrum shift is the only effect.
+        let beta = if xs.nu_bar > 0.0 {
+            (xs.delayed_nu_bar / xs.nu_bar).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
         for _ in 0..n_neutrons {
-            let fission_energy = match fission_edist {
-                Some(dist) => dist.sample(particle.energy, rng),
-                None => sample_fission_energy(particle.energy, rng),
+            let fission_energy = if beta > 0.0 && rng.uniform() < beta {
+                sample_delayed_energy(rng)
+            } else {
+                match fission_edist {
+                    Some(dist) => dist.sample(particle.energy, rng),
+                    None => sample_fission_energy(particle.energy, rng),
+                }
             };
             sites.push(FissionSite {
                 pos: particle.pos,
@@ -482,6 +502,27 @@ fn sample_evaporation_energy(incident_energy: f64, rng: &mut Rng) -> f64 {
     e.min(incident_energy).max(1e-5)
 }
 
+/// Sample a delayed-neutron outgoing energy from a soft Watt
+/// spectrum. Delayed neutrons are emitted by precursor β-decay; their
+/// mean energy is ~0.4 MeV, much lower than the prompt ~2 MeV.
+/// Using ENDF-style delayed parameters: a = 0.4 MeV, b = 2.249 /MeV.
+/// For static k-eigenvalue this single combined spectrum captures
+/// the spectrum-softening effect; per-precursor-group breakdown
+/// matters only for time-dependent kinetics.
+pub fn sample_delayed_energy(rng: &mut Rng) -> f64 {
+    let a = 400_000.0; // 0.4 MeV in eV
+    let b = 2.249e-6; // 2.249 /MeV in /eV
+    loop {
+        let e_prime = -a * rng.uniform().ln();
+        let term = a * a * b / 4.0;
+        let xi2 = rng.uniform();
+        let e = e_prime + term + (2.0 * xi2 - 1.0) * (a * a * b * e_prime).sqrt() / 2.0;
+        if e > 0.0 {
+            return e;
+        }
+    }
+}
+
 /// Sample fission neutron energy from a Watt spectrum.
 ///
 /// P(E) ~ exp(-E/a) * sinh(sqrt(b*E))
@@ -540,6 +581,7 @@ mod tests {
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
@@ -562,6 +604,7 @@ mod tests {
             fission: 0.0,
             capture: 10.0,
             nu_bar: 0.0,
+            delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
@@ -584,6 +627,7 @@ mod tests {
             fission: 10.0,
             capture: 0.0,
             nu_bar: 2.43,
+            delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
@@ -616,6 +660,7 @@ mod tests {
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let levels = vec![
@@ -702,6 +747,7 @@ mod tests {
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let levels = vec![DiscreteLevelInfo {
@@ -767,6 +813,7 @@ mod tests {
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let levels = vec![DiscreteLevelInfo {

@@ -228,6 +228,6 @@ fn main() {
         }
     }
     let _ = (Arc::new(()), Material::new("dummy", 0.0)); // suppress unused-warnings
-    let _ = MicroXs { total: 0.0, elastic: 0.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0, nu_bar: 0.0, awr: 0.0 };
+    let _ = MicroXs { total: 0.0, elastic: 0.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0, nu_bar: 0.0, delayed_nu_bar: 0.0, awr: 0.0 };
     println!("\n(diff complete; missing sections = no divergence found at sampled energies)");
 }

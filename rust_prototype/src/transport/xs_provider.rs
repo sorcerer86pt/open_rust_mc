@@ -57,8 +57,13 @@ pub struct NuclideKernels {
     pub awr: f64,
     /// Constant fallback nu-bar.
     pub nu_bar_const: f64,
-    /// Energy-dependent nu-bar table (if available).
+    /// Energy-dependent total nu-bar table (prompt + delayed).
     pub nu_bar_table: Option<NuBarTable>,
+    /// Energy-dependent delayed-only ν̄ table — sum of every delayed
+    /// product yield in MT=18. None when the nuclide has no delayed
+    /// neutron data (light isotopes, structurals). Engine consumer
+    /// computes β(E) = nu_delayed(E) / nu_bar(E) at fission time.
+    pub delayed_nu_bar_table: Option<NuBarTable>,
     /// Discrete inelastic level data (MT=51-91) with SVD kernels.
     pub discrete_levels: Vec<DiscreteLevel>,
     /// Pre-tabulated CDF for sampling discrete inelastic levels when
@@ -155,6 +160,14 @@ impl NuclideKernels {
         self.nu_bar_table
             .as_ref()
             .map_or(self.nu_bar_const, |t| t.lookup(energy))
+    }
+
+    /// Energy-dependent delayed-only ν̄. Returns 0 when the nuclide
+    /// has no delayed-product entries.
+    pub fn delayed_nu_bar_at(&self, energy: f64) -> f64 {
+        self.delayed_nu_bar_table
+            .as_ref()
+            .map_or(0.0, |t| t.lookup(energy))
     }
 
     /// Lookup cross-sections for each discrete level at the given energy.
@@ -352,6 +365,7 @@ impl XsProvider for SvdXsProvider {
             None => elastic + inelastic + n2n + n3n + fission + capture,
         };
         let nu_bar = nuc.nu_bar_at(energy);
+        let delayed_nu_bar = nuc.delayed_nu_bar_at(energy);
 
         MicroXs {
             total,
@@ -362,6 +376,7 @@ impl XsProvider for SvdXsProvider {
             fission,
             capture,
             nu_bar,
+            delayed_nu_bar,
             awr: nuc.awr,
         }
     }
@@ -394,6 +409,10 @@ impl XsProvider for SvdXsProvider {
 
     fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
+    }
+
+    fn delayed_nu_bar_at(&self, nuclide_idx: usize, energy: f64) -> f64 {
+        self.nuclides[nuclide_idx].delayed_nu_bar_at(energy)
     }
 
     fn inelastic_continuum_edist(
@@ -975,6 +994,7 @@ pub fn load_nuclide_with_policy(
                 awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback,
                 nu_bar_table: None,
+                delayed_nu_bar_table: None,
                 discrete_levels: vec![],
                 inelastic_cdf: None,
                 discrete_level_angles: vec![],
@@ -1001,6 +1021,7 @@ pub fn load_nuclide_with_policy(
     let shared_grid: Arc<[f64]> = reader.union_grid.clone().into();
 
     let nu_bar_table = reader.nu_bar().ok();
+    let delayed_nu_bar_table = reader.delayed_nu_bar();
     if let Some(ref t) = nu_bar_table
         && !t.energies.is_empty()
     {
@@ -1225,6 +1246,7 @@ pub fn load_nuclide_with_policy(
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
+        delayed_nu_bar_table,
         discrete_levels,
         inelastic_cdf,
         discrete_level_angles,
@@ -1264,6 +1286,7 @@ pub struct NuclideTableData {
     pub awr: f64,
     pub nu_bar_const: f64,
     pub nu_bar_table: Option<NuBarTable>,
+    pub delayed_nu_bar_table: Option<NuBarTable>,
     pub discrete_levels: Vec<TableDiscreteLevel>,
     pub discrete_level_angles: Vec<Option<AngularDistribution>>,
     pub has_continuum_inelastic: bool,
@@ -1286,6 +1309,12 @@ impl NuclideTableData {
         self.nu_bar_table
             .as_ref()
             .map_or(self.nu_bar_const, |t| t.lookup(energy))
+    }
+
+    pub fn delayed_nu_bar_at(&self, energy: f64) -> f64 {
+        self.delayed_nu_bar_table
+            .as_ref()
+            .map_or(0.0, |t| t.lookup(energy))
     }
 
     pub fn discrete_level_xs(&self, energy: f64) -> Vec<f64> {
@@ -1437,6 +1466,7 @@ impl XsProvider for TableXsProvider {
             None => elastic + inelastic + n2n + n3n + fission + capture,
         };
         let nu_bar = nuc.nu_bar_at(energy);
+        let delayed_nu_bar = nuc.delayed_nu_bar_at(energy);
 
         MicroXs {
             total,
@@ -1447,6 +1477,7 @@ impl XsProvider for TableXsProvider {
             fission,
             capture,
             nu_bar,
+            delayed_nu_bar,
             awr: nuc.awr,
         }
     }
@@ -1479,6 +1510,10 @@ impl XsProvider for TableXsProvider {
 
     fn fission_energy_dist(&self, nuclide_idx: usize) -> Option<&hdf5_reader::EnergyDistribution> {
         self.nuclides[nuclide_idx].fission_energy_dist.as_ref()
+    }
+
+    fn delayed_nu_bar_at(&self, nuclide_idx: usize, energy: f64) -> f64 {
+        self.nuclides[nuclide_idx].delayed_nu_bar_at(energy)
     }
 
     fn inelastic_continuum_edist(
@@ -1619,6 +1654,7 @@ pub fn load_nuclide_table(
                 awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback,
                 nu_bar_table: None,
+                delayed_nu_bar_table: None,
                 discrete_levels: vec![],
                 discrete_level_angles: vec![],
                 has_continuum_inelastic: false,
@@ -1644,6 +1680,7 @@ pub fn load_nuclide_table(
     let shared_grid: Arc<[f64]> = reader.union_grid.clone().into();
 
     let nu_bar_table = reader.nu_bar().ok();
+    let delayed_nu_bar_table = reader.delayed_nu_bar();
     if let Some(ref t) = nu_bar_table
         && !t.energies.is_empty()
     {
@@ -1750,6 +1787,7 @@ pub fn load_nuclide_table(
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
+        delayed_nu_bar_table,
         discrete_levels,
         discrete_level_angles,
         has_continuum_inelastic: has_continuum,
@@ -1801,6 +1839,7 @@ pub fn load_nuclide_table_at_temp(
                 awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback,
                 nu_bar_table: None,
+                delayed_nu_bar_table: None,
                 discrete_levels: vec![],
                 discrete_level_angles: vec![],
                 has_continuum_inelastic: false,
@@ -1847,6 +1886,7 @@ pub fn load_nuclide_table_at_temp(
     let shared_grid: Arc<[f64]> = reader.union_grid.clone().into();
 
     let nu_bar_table = reader.nu_bar().ok();
+    let delayed_nu_bar_table = reader.delayed_nu_bar();
     if let Some(ref t) = nu_bar_table
         && !t.energies.is_empty()
     {
@@ -1944,6 +1984,7 @@ pub fn load_nuclide_table_at_temp(
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
+        delayed_nu_bar_table,
         discrete_levels,
         discrete_level_angles,
         has_continuum_inelastic: has_continuum,
@@ -1999,6 +2040,7 @@ pub fn load_nuclide_at_temp(
                 awr: awr_fallback,
                 nu_bar_const: nu_bar_fallback,
                 nu_bar_table: None,
+                delayed_nu_bar_table: None,
                 discrete_levels: vec![],
                 inelastic_cdf: None,
                 discrete_level_angles: vec![],
@@ -2039,6 +2081,7 @@ pub fn load_nuclide_at_temp(
     let shared_grid: Arc<[f64]> = reader.union_grid.clone().into();
 
     let nu_bar_table = reader.nu_bar().ok();
+    let delayed_nu_bar_table = reader.delayed_nu_bar();
 
     let level_infos = reader.discrete_levels(awr);
     let has_continuum = level_infos.iter().any(|l| l.mt == 91);
@@ -2177,6 +2220,7 @@ pub fn load_nuclide_at_temp(
         awr,
         nu_bar_const: nu_bar_fallback,
         nu_bar_table,
+        delayed_nu_bar_table,
         discrete_levels,
         // Ducru-blended CDF when MT=4 was synthesised; None otherwise.
         inelastic_cdf,

@@ -470,6 +470,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 awr,
                 nu_bar_const: nu_bar,
                 nu_bar_table: None,
+                delayed_nu_bar_table: None,
                 discrete_levels: vec![],
                 inelastic_cdf: None,
                 discrete_level_angles: vec![],

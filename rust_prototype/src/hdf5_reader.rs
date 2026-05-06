@@ -523,6 +523,15 @@ impl NuclideFileReader {
         read_nu_bar_from_group(&rxn)
     }
 
+    /// Read the delayed-only ν̄ table for this nuclide. Returns
+    /// `None` when the nuclide has no delayed-product entries.
+    pub fn delayed_nu_bar(&self) -> Option<NuBarTable> {
+        let root = self.file.root();
+        let nuc = root.group(&self.nuclide_name).ok()?;
+        let rxn = nuc.group("reactions").ok()?.group("reaction_018").ok()?;
+        read_delayed_nu_bar_from_group(&rxn)
+    }
+
     /// Read discrete inelastic levels.
     pub fn discrete_levels(&self, awr: f64) -> Vec<DiscreteLevelInfo> {
         let root = self.file.root();
