@@ -85,6 +85,20 @@ pub struct SimConfig {
     /// keep particle weight inside the per-voxel band. See
     /// `transport::weight_window` for shape and semantics.
     pub weight_window: Option<crate::transport::weight_window::WeightWindow>,
+    /// When `true`, suppresses delayed-neutron emission entirely:
+    /// every banked fission neutron draws its energy from the prompt
+    /// fission spectrum, ignoring `ν_d(E)`. Used for ablation studies
+    /// against the production path (which always samples ~0.65 % of
+    /// fission neutrons from the soft-Watt delayed spectrum).
+    pub disable_delayed_neutrons: bool,
+    /// Optional URR equivalence-theory configuration. When set, the
+    /// transport loop applies the Stoker-Weiss / NJOY rational
+    /// equivalence correction to the per-nuclide URR sample for
+    /// each `xs_kernel_idx` flagged on `UrrEquivalence::absorber_xs_idx`,
+    /// using the cell-local Dancoff factor. When `None`, the URR
+    /// path is infinite-medium-only (current default).
+    pub urr_equivalence:
+        Option<crate::transport::urr_equivalence::UrrEquivalence>,
 }
 
 /// Implicit-capture + Russian-roulette settings.
@@ -125,6 +139,8 @@ impl Default for SimConfig {
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         }
     }
 }
@@ -371,6 +387,15 @@ pub trait XsProvider: Send + Sync {
     }
 
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
+
+    /// True when `energy` falls inside the URR (unresolved-resonance
+    /// region) probability-table range for `nuclide_idx`. Used by the
+    /// equivalence-theory path to gate the spatial self-shielding
+    /// correction — it's only valid inside the URR window. Default
+    /// `false` for providers without URR data.
+    fn is_urr(&self, _nuclide_idx: usize, _energy: f64) -> bool {
+        false
+    }
 
     /// Photon products for a nuclide, one entry per ENDF MT with a
     /// `particle="photon"` product in the HDF5 file. Used by coupled
@@ -624,6 +649,102 @@ const ABSORPTION_PHOTON_MTS: &[u32] = &[102, 103, 107];
 /// Fission photon-production MT (prompt γs from MT=18).
 const FISSION_PHOTON_MTS: &[u32] = &[18];
 
+/// Apply URR equivalence-theory spatial self-shielding correction to
+/// the per-nuclide MicroXs entries. For each nuclide flagged as an
+/// absorber AND in its URR window at this energy:
+///
+///   σ_eff = σ_∞ · σ_0 / (σ_0 + σ_e)
+///   σ_e = (1 − C) / (N_abs · l̄)
+///   σ_0 = Σ_{j ≠ abs} N_j · σ_t,j / N_abs
+///
+/// Updates the absorber's `elastic`, `fission`, `capture`, and
+/// `total` in-place; recomputes the entry's contribution to
+/// `micro_totals`. Inelastic / (n,2n) / (n,3n) channels are not
+/// corrected — equivalence only modulates the resonance-window
+/// contribution, which is concentrated in elastic + capture +
+/// fission for the U-238-class absorbers we care about.
+#[allow(clippy::too_many_arguments)]
+fn apply_urr_equivalence_correction<XS: XsProvider>(
+    eq: &crate::transport::urr_equivalence::UrrEquivalence,
+    material: &Material,
+    xs_provider: &XS,
+    energy: f64,
+    dancoff: f64,
+    mean_chord_cm: f64,
+    micro_xs: &mut [MicroXs; MAX_NUCLIDES],
+    micro_totals: &mut [f64; MAX_NUCLIDES],
+    n_nuclides: usize,
+) {
+    use crate::transport::urr_equivalence::apply_equivalence_correction;
+    for i in 0..n_nuclides {
+        let nuc = &material.nuclides[i];
+        if !eq.is_absorber(nuc.xs_kernel_idx) {
+            continue;
+        }
+        if nuc.atom_density <= 0.0 {
+            continue;
+        }
+        if !xs_provider.is_urr(nuc.xs_kernel_idx, energy) {
+            continue;
+        }
+        // σ_0 = Σ_{j ≠ i} N_j · σ_t,j / N_i.
+        let mut sigma_0 = 0.0_f64;
+        for j in 0..n_nuclides {
+            if j == i {
+                continue;
+            }
+            sigma_0 += material.nuclides[j].atom_density * micro_xs[j].total;
+        }
+        sigma_0 /= nuc.atom_density;
+
+        // Apply correction to the resonance-bearing channels only.
+        let scale_elastic = if micro_xs[i].elastic > 0.0 {
+            apply_equivalence_correction(
+                micro_xs[i].elastic,
+                sigma_0,
+                nuc.atom_density,
+                mean_chord_cm,
+                dancoff,
+            ) / micro_xs[i].elastic
+        } else {
+            1.0
+        };
+        let scale_fission = if micro_xs[i].fission > 0.0 {
+            apply_equivalence_correction(
+                micro_xs[i].fission,
+                sigma_0,
+                nuc.atom_density,
+                mean_chord_cm,
+                dancoff,
+            ) / micro_xs[i].fission
+        } else {
+            1.0
+        };
+        let scale_capture = if micro_xs[i].capture > 0.0 {
+            apply_equivalence_correction(
+                micro_xs[i].capture,
+                sigma_0,
+                nuc.atom_density,
+                mean_chord_cm,
+                dancoff,
+            ) / micro_xs[i].capture
+        } else {
+            1.0
+        };
+
+        micro_xs[i].elastic *= scale_elastic;
+        micro_xs[i].fission *= scale_fission;
+        micro_xs[i].capture *= scale_capture;
+        micro_xs[i].total = micro_xs[i].elastic
+            + micro_xs[i].inelastic
+            + micro_xs[i].n2n
+            + micro_xs[i].n3n
+            + micro_xs[i].fission
+            + micro_xs[i].capture;
+        micro_totals[i] = micro_xs[i].total;
+    }
+}
+
 /// Transport a single particle to completion.
 #[allow(clippy::too_many_arguments)]
 fn transport_particle<XS: XsProvider>(
@@ -638,6 +759,8 @@ fn transport_particle<XS: XsProvider>(
     tallies: &Tallies,
     survival_biasing: Option<&SurvivalBiasing>,
     weight_window: Option<&crate::transport::weight_window::WeightWindow>,
+    disable_delayed_neutrons: bool,
+    urr_equivalence: Option<&crate::transport::urr_equivalence::UrrEquivalence>,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
@@ -789,8 +912,36 @@ fn transport_particle<XS: XsProvider>(
                     }
                 }
 
+                if disable_delayed_neutrons {
+                    xs.delayed_nu_bar = 0.0;
+                }
                 micro_totals[i] = xs.total;
                 micro_xs[i] = xs;
+            }
+
+            // URR equivalence theory pass — applies the Stoker-Weiss
+            // / NJOY rational self-shielding correction to URR samples
+            // for nuclides flagged as resonance absorbers. Cell-local
+            // Dancoff factor + mean chord drives the correction; the
+            // hot path is gated on `is_urr` to avoid spurious damping
+            // outside the URR window.
+            if let Some(eq) = urr_equivalence {
+                let dancoff = eq.dancoff.get(particle.cell_idx);
+                let mean_chord =
+                    eq.mean_chord_cm.get(particle.cell_idx).copied().unwrap_or(0.0);
+                if dancoff < 1.0 && mean_chord > 0.0 {
+                    apply_urr_equivalence_correction(
+                        eq,
+                        material,
+                        xs_provider,
+                        particle.energy,
+                        dancoff,
+                        mean_chord,
+                        &mut micro_xs,
+                        &mut micro_totals,
+                        n_nuclides,
+                    );
+                }
             }
             let macro_total = material.macro_total(&micro_totals[..n_nuclides]);
 
@@ -1329,6 +1480,8 @@ fn transport_particle_delta<XS: XsProvider>(
     cells: &[Cell],
     materials: &[Material],
     xs_provider: &XS,
+    disable_delayed_neutrons: bool,
+    urr_equivalence: Option<&crate::transport::urr_equivalence::UrrEquivalence>,
     majorant: &MajorantTable,
     tallies: &Tallies,
     survival_biasing: Option<&SurvivalBiasing>,
@@ -1513,8 +1666,33 @@ fn transport_particle_delta<XS: XsProvider>(
             for (i, nuc) in material.nuclides.iter().enumerate() {
                 let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
                 xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+                if disable_delayed_neutrons {
+                    xs.delayed_nu_bar = 0.0;
+                }
                 micro_totals[i] = xs.total;
                 micro_xs[i] = xs;
+            }
+            // URR equivalence pass — same gating + correction as
+            // surface-tracking. Delta tracking's acceptance test
+            // depends on the real Σ_t, so the correction has to be
+            // applied before that test.
+            if let Some(eq) = urr_equivalence {
+                let dancoff = eq.dancoff.get(particle.cell_idx);
+                let mean_chord =
+                    eq.mean_chord_cm.get(particle.cell_idx).copied().unwrap_or(0.0);
+                if dancoff < 1.0 && mean_chord > 0.0 {
+                    apply_urr_equivalence_correction(
+                        eq,
+                        material,
+                        xs_provider,
+                        particle.energy,
+                        dancoff,
+                        mean_chord,
+                        &mut micro_xs,
+                        &mut micro_totals,
+                        n_nuclides,
+                    );
+                }
             }
             let sigma_real = material.macro_total(&micro_totals[..n_nuclides]);
 
@@ -1704,6 +1882,8 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 &config.tallies,
                 config.survival_biasing.as_ref(),
                 config.weight_window.as_ref(),
+                config.disable_delayed_neutrons,
+                config.urr_equivalence.as_ref(),
             ),
             TrackingMode::Delta(majorant) => transport_particle_delta(
                 site,
@@ -1714,6 +1894,8 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 cells,
                 materials,
                 xs_provider,
+                config.disable_delayed_neutrons,
+                config.urr_equivalence.as_ref(),
                 majorant,
                 &config.tallies,
                 config.survival_biasing.as_ref(),
@@ -2222,6 +2404,8 @@ mod tests {
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
 
         let (results, k_final) =
@@ -2342,6 +2526,8 @@ mod tests {
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -2510,6 +2696,8 @@ mod tests {
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -2524,6 +2712,8 @@ mod tests {
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);

@@ -150,10 +150,15 @@ build (`--features preview`) clean.
   MC) to compute the importance map. This is a separate code-
   scale project.
 - **Predictor-corrector depletion (CE/LI, CE/CM).** Couples a
-  Bateman solver (already exists for matrix-exponential
-  transmutation) with the transport loop in a feedback cycle.
-  Algorithmically known (Isotalo-Aarnio 2011, OpenMC methods
-  paper) but implementationally non-trivial.
+  CRAM-based Bateman solver to the transport loop in a feedback
+  cycle. Algorithmically known (Pusa 2016 for CRAM-16, Isotalo-
+  Aarnio 2011 for the predictor-corrector schemes, OpenMC methods
+  paper) but implementationally non-trivial. **Status:** the
+  Bateman / CRAM solver does **not** exist in the tree (earlier
+  STATUS.md text claiming it did was incorrect). All depletion
+  pieces — chain, transmutation matrix, CRAM evaluator,
+  predictor-corrector loop, atom-density feedback into `Material`
+  — are open work.
 - **URR equivalence theory (Stoker-Weiss / NJOY).** Current URR
   probability tables handle stochastic XS sampling correctly for
   infinite medium; the equivalence-theory / Dancoff-factor

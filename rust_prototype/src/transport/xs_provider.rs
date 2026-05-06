@@ -224,6 +224,15 @@ impl NuclideKernels {
         total
     }
 
+    /// True if `energy` falls inside the URR probability-table range
+    /// for this nuclide. Returns `false` when no URR table is loaded.
+    pub fn is_urr(&self, energy: f64) -> bool {
+        match &self.urr_tables {
+            Some(u) => u.in_range(energy),
+            None => false,
+        }
+    }
+
     /// Apply URR probability table factors to a MicroXs if the energy is in the URR.
     ///
     /// When `multiply_smooth=true`, the URR factors multiply the smooth XS values.
@@ -434,6 +443,10 @@ impl XsProvider for SvdXsProvider {
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
+    }
+
+    fn is_urr(&self, nuclide_idx: usize, energy: f64) -> bool {
+        self.nuclides[nuclide_idx].is_urr(energy)
     }
 
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
@@ -1337,6 +1350,15 @@ impl NuclideTableData {
             .collect()
     }
 
+    /// True if `energy` falls inside this nuclide's URR
+    /// probability-table range. Returns `false` when no URR table.
+    pub fn is_urr(&self, energy: f64) -> bool {
+        match &self.urr_tables {
+            Some(u) => u.in_range(energy),
+            None => false,
+        }
+    }
+
     pub fn apply_urr(&self, xs: &mut MicroXs, energy: f64, xi: f64) {
         if urr_disabled() {
             return;
@@ -1535,6 +1557,10 @@ impl XsProvider for TableXsProvider {
 
     fn apply_urr(&self, nuclide_idx: usize, xs: &mut MicroXs, energy: f64, xi: f64) {
         self.nuclides[nuclide_idx].apply_urr(xs, energy, xi);
+    }
+
+    fn is_urr(&self, nuclide_idx: usize, energy: f64) -> bool {
+        self.nuclides[nuclide_idx].is_urr(energy)
     }
 
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {

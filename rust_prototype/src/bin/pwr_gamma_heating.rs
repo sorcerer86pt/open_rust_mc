@@ -223,6 +223,8 @@ fn main() -> ExitCode {
         survival_biasing: None,
         initial_source_bank: None,
         weight_window: None,
+        disable_delayed_neutrons: false,
+        urr_equivalence: None,
     };
     let t1 = Instant::now();
     let (batch_results, k_eff) =

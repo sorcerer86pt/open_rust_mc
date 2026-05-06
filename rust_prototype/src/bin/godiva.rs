@@ -329,6 +329,8 @@ fn run_multi_seed<XS: XsProvider>(
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
         let t_calib = Instant::now();
         let (calib_results, _) =
@@ -415,6 +417,8 @@ fn run_multi_seed<XS: XsProvider>(
                 None
             },
             weight_window: weight_window_cfg.clone(),
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
 
         if args.seeds > 1 {

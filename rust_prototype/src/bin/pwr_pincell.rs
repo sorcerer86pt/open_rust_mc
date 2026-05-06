@@ -133,6 +133,52 @@ struct Args {
     /// the first seed; later seeds get fresh initial source.
     #[arg(long)]
     restart_from: Option<PathBuf>,
+
+    /// Run a short calibration pass (this many batches) with a
+    /// 4×4×1 mesh flux tally over the pin-cell bounding box, then
+    /// build a flux-weighted weight window via
+    /// `WeightWindow::from_flux` and use it for the main run.
+    /// Variance reduction without manual bound tuning. 0 disables.
+    #[arg(long, default_value_t = 0)]
+    ww_bootstrap_batches: u32,
+
+    /// w_upper / w_lower ratio used by the bootstrap calibration.
+    /// Larger values widen the band (less aggressive splitting +
+    /// roulette); smaller tighten it.
+    #[arg(long, default_value_t = 5.0)]
+    ww_ratio: f64,
+
+    /// Voxels with flux below `ww_floor * φ_max` are flagged inactive
+    /// (no splitting / roulette). Default 1e-3 = 0.1 % cutoff.
+    #[arg(long, default_value_t = 1e-3)]
+    ww_floor: f64,
+
+    /// Suppress delayed-neutron emission entirely. Every banked
+    /// fission neutron draws its energy from the prompt fission
+    /// spectrum, ignoring ν_d(E). For ablation studies against the
+    /// default path which samples ~0.65 % of fission neutrons from
+    /// the soft-Watt delayed spectrum.
+    #[arg(long, default_value_t = false)]
+    disable_delayed_neutrons: bool,
+
+    /// Enable URR equivalence-theory spatial self-shielding
+    /// correction (Stoker-Weiss / NJOY rational form). Applies the
+    /// `σ_eff = σ_∞ · σ_0 / (σ_0 + σ_e)` correction to U-238 URR
+    /// samples in the fuel cell, with `σ_e = (1 − C)/(N · l̄)` and
+    /// the Carlvik-Pellaud Dancoff factor for the standard PWR
+    /// 1.26 cm pitch / 0.475 cm fuel OR geometry. Off by default —
+    /// run with the flag to compare and quantify the shift.
+    #[arg(long, default_value_t = false)]
+    urr_equivalence: bool,
+
+    /// Override the average moderator total XS (1/cm) used by the
+    /// Carlvik-Pellaud Dancoff factor. Default is 1.5 /cm, which
+    /// is appropriate for water at the U-238 URR window
+    /// (~20-150 keV). At thermal energies (~3.5 /cm) the Dancoff
+    /// factor would be smaller — i.e. tighter coupling — but the
+    /// equivalence correction is irrelevant outside URR.
+    #[arg(long, default_value_t = 1.5)]
+    moderator_sigma_t: f64,
 }
 
 /// Nuclide specs: (filename, AWR, fallback nu-bar, temp_idx).
@@ -249,20 +295,115 @@ fn run_multi_seed<XS: XsProvider>(
         bank
     });
 
+    // Pin-cell bounding box (1.26 cm pitch reflective lattice). Shared
+    // by the WW bootstrap calibration mesh and the statepoint mesh.
+    let outer_aabb = open_rust_mc::geometry::Aabb::new(
+        Vec3::new(-0.63, -0.63, -0.63),
+        Vec3::new(0.63, 0.63, 0.63),
+    );
+    let ww_dims = [4_usize, 4, 1];
+
+    // Optional WW bootstrap: short calibration run with mesh flux
+    // tally, then `WeightWindow::from_flux`. Same pattern as godiva,
+    // sized for the 1.26 cm pin (4×4×1 voxels — keep z dimension at 1
+    // since the pin is reflective on z and translation-invariant).
+    let weight_window_cfg = if args.ww_bootstrap_batches > 0 {
+        println!(
+            "\n── WW bootstrap calibration: {} batches × {} particles, mesh {ww_dims:?} ──",
+            args.ww_bootstrap_batches, args.particles
+        );
+        let mut tallies = Tallies::default();
+        tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&outer_aabb, ww_dims));
+        let calib_inactive = (args.ww_bootstrap_batches / 4)
+            .max(1)
+            .min(args.ww_bootstrap_batches.saturating_sub(1));
+        let calib_config = SimConfig {
+            batches: args.ww_bootstrap_batches,
+            inactive: calib_inactive,
+            particles_per_batch: args.particles,
+            seed: 0,
+            auto_inactive: None,
+            verbose: false,
+            parallel: true,
+            tallies,
+            statepoint_path: None,
+            survival_biasing: None,
+            initial_source_bank: None,
+            weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
+        };
+        let t_calib = Instant::now();
+        let (calib_results, _) =
+            simulate::run_eigenvalue(&calib_config, surfaces, cells, materials, xs_provider);
+        let n_vox: usize = ww_dims.iter().product();
+        let mut flux = vec![0.0_f64; n_vox];
+        let mut n_active_calib = 0_u32;
+        for r in &calib_results {
+            if !r.active {
+                continue;
+            }
+            n_active_calib += 1;
+            for (b, v) in flux.iter_mut().zip(r.mesh_flux.iter()) {
+                *b += v;
+            }
+        }
+        let calib_ms = t_calib.elapsed().as_secs_f64() * 1000.0;
+        let phi_max = flux.iter().cloned().fold(0.0_f64, f64::max);
+        let phi_mean = flux.iter().sum::<f64>() / n_vox as f64;
+        println!(
+            "  calibration: {n_active_calib} active batches in {calib_ms:.0} ms, \
+             φ_max = {phi_max:.2e}, φ_mean = {phi_mean:.2e}"
+        );
+        Some(open_rust_mc::transport::weight_window::WeightWindow::from_flux(
+            &outer_aabb,
+            ww_dims,
+            &flux,
+            1.0,
+            args.ww_ratio,
+            args.ww_floor,
+        ))
+    } else {
+        None
+    };
+
     // When --statepoint is set, attach a 4×4×1 mesh flux tally over
     // the pin-cell bounding box and a surface current tally on every
     // reflective surface. Both come from library helpers so the same
     // setup works on any geometry.
     let mut shared_tallies = Tallies::default();
     if args.statepoint.is_some() {
-        let outer_aabb = open_rust_mc::geometry::Aabb::new(
-            Vec3::new(-0.63, -0.63, -0.63),
-            Vec3::new(0.63, 0.63, 0.63),
-        );
-        shared_tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&outer_aabb, [4, 4, 1]));
+        shared_tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&outer_aabb, ww_dims));
         shared_tallies.surface_current =
             Some(SurfaceCurrentTally::for_reflective_surfaces(&surfaces));
     }
+
+    // URR equivalence config for the fuel cell. Standard PWR pin
+    // geometry (1.26 cm pitch, 0.475 cm fuel OR, 0.4096 cm fuel
+    // radius). Carlvik-Pellaud Dancoff factor for water at the URR
+    // window. U-238 (xs_kernel_idx=1) is flagged as the resonance
+    // absorber. Cell 0 is fuel; the rest (gap/clad/water) get no
+    // correction (default Dancoff=1.0).
+    let urr_eq_cfg = if args.urr_equivalence {
+        use open_rust_mc::transport::urr_equivalence::{
+            dancoff_carlvik_pellaud_square, mean_chord_cylinder, UrrEquivalence,
+        };
+        const FUEL_RADIUS: f64 = 0.4096;
+        const FUEL_OUTER: f64 = 0.4750;
+        const PITCH: f64 = 1.2600;
+        let dancoff = dancoff_carlvik_pellaud_square(PITCH, FUEL_OUTER, args.moderator_sigma_t);
+        let mut eq = UrrEquivalence::new(cells.len());
+        eq.set_cell(0, dancoff, mean_chord_cylinder(FUEL_RADIUS));
+        eq.add_absorber(1); // U-238 — xs_kernel_idx in NUCLIDE_SPECS
+        println!(
+            "  URR equivalence ON: cell 0 fuel, C = {:.4}, l̄ = {:.4} cm, absorber xs_idx=1 (U-238)",
+            dancoff,
+            mean_chord_cylinder(FUEL_RADIUS),
+        );
+        Some(eq)
+    } else {
+        None
+    };
 
     for seed in 0..args.seeds {
         let config = SimConfig {
@@ -289,7 +430,9 @@ fn run_multi_seed<XS: XsProvider>(
             } else {
                 None
             },
-            weight_window: None,
+            weight_window: weight_window_cfg.clone(),
+            disable_delayed_neutrons: args.disable_delayed_neutrons,
+            urr_equivalence: urr_eq_cfg.clone(),
         };
 
         if args.seeds > 1 {

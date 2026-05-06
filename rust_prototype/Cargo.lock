@@ -1392,8 +1392,11 @@ dependencies = [
  "hdf5-pure",
  "ndarray",
  "ndarray-npy",
+ "num-complex",
  "rayon",
  "rust-mc-sim",
+ "serde",
+ "serde_json",
  "smallvec",
  "thiserror 2.0.18",
 ]

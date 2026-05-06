@@ -28,8 +28,9 @@ use open_rust_mc::geometry::universe::{Universe, UniverseId};
 use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
 use open_rust_mc::hdf5_reader;
 use open_rust_mc::thermal::ThermalScatteringData;
+use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
 use open_rust_mc::transport::material::Material;
-use open_rust_mc::transport::simulate::{self, SimConfig};
+use open_rust_mc::transport::simulate::SimConfig;
 use open_rust_mc::transport::xs_provider;
 
 #[derive(Parser, Debug)]
@@ -348,6 +349,8 @@ fn main() {
             survival_biasing: None,
             initial_source_bank: None,
             weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
         };
 
         if args.seeds > 1 {
@@ -355,9 +358,14 @@ fn main() {
             let _ = std::io::stdout().flush();
         }
 
+        let runner = CpuRunner {
+            geometry: &geometry,
+            materials: &materials,
+            xs_provider: &xs_provider,
+        };
         let t1 = Instant::now();
-        let (results, _) =
-            simulate::run_eigenvalue_with_geometry(&config, &geometry, &materials, &xs_provider);
+        let outcome = runner.run(&config);
+        let results = outcome.batches;
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let active: Vec<f64> = results

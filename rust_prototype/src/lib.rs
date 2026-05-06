@@ -9,6 +9,7 @@
 pub mod compare;
 pub mod cp_decompose;
 pub mod decompose;
+pub mod depletion;
 pub mod error;
 pub mod geometry;
 #[cfg(feature = "cuda")]

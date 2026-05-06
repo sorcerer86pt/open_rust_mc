@@ -41,6 +41,12 @@ from ._core import (
     # Top-level functions
     run_eigenvalue,
     run_gamma_heating,
+    # Depletion
+    Chain,
+    CramOrder,
+    cram,
+    deplete_constant_flux,
+    deplete_with_flux_callback,
 )
 
 # Avogadro's number, exact SI-2019 value.
@@ -224,6 +230,12 @@ __all__ = [
     "GammaHeatingResult",
     "run_eigenvalue",
     "run_gamma_heating",
+    # Depletion
+    "Chain",
+    "CramOrder",
+    "cram",
+    "deplete_constant_flux",
+    "deplete_with_flux_callback",
     # Helpers
     "NUCLIDE_DATA",
     "atom_density_from_mass_density",

@@ -26,13 +26,20 @@ mod cuda_main {
     use std::time::Instant;
 
     use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
-    use open_rust_mc::geometry::lattice::RectLattice;
+    use open_rust_mc::geometry::lattice::{HexLattice, HexOrientation, RectLattice};
     use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
+    use open_rust_mc::geometry::shapes;
     use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
     use open_rust_mc::geometry::universe::{Universe, UniverseId};
     use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
     use open_rust_mc::gpu_recursive::{GpuRecursiveContext, GpuWalkResult};
     use rust_mc_sim::Pcg64;
+
+    /// Predicate that matches the root lattice cell whose AABB defines
+    /// the test's sampling box — works for both rect and hex lattices.
+    fn is_lattice_root(fill: &CellFill) -> bool {
+        matches!(fill, CellFill::Lattice(_) | CellFill::HexLattice(_))
+    }
 
     /// Build the same 2×2 lattice the CPU smoke test uses: pin
     /// universe with fuel cylinder + water, lattice of 4 identical
@@ -161,6 +168,100 @@ mod cuda_main {
             .expect("assembly geometry")
     }
 
+    /// 1-ring hex mini-core (7 fuel pins) — same recipe as the
+    /// `hex_minicore` binary, but with synthetic materials. Exercises
+    /// `find_cell_recursive`'s `CellFill::HexLattice` descent and
+    /// `trace_step_recursive`'s hex `distance_to_grid` dispatch on GPU.
+    fn build_hex_geometry() -> Geometry {
+        const PITCH: f64 = 1.260;
+        const FUEL_OR: f64 = 0.4096;
+        const RINGS: usize = 1;
+        let inradius = (RINGS as f64 + 0.5) * PITCH;
+        let circumradius = inradius * 2.0 / 3.0_f64.sqrt();
+        let z_half = inradius;
+
+        // Pin: single fuel cylinder at (0,0). Surface 0.
+        let mut surfaces = shapes::pin_cylinders(0.0, 0.0, &[FUEL_OR]);
+        // Outer hex boundary: surfaces 1..=8 (6 sides + 2 z planes).
+        let outer = shapes::hex_boundary(
+            RINGS,
+            PITCH,
+            HexOrientation::Y,
+            BoundaryCondition::Reflective,
+            z_half,
+            BoundaryCondition::Reflective,
+            surfaces.len(),
+        );
+        surfaces.extend(outer.surfaces);
+
+        let cells = vec![
+            // 0: fuel
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)),
+            // 1: water (outside fuel cylinder, in pin universe)
+            Cell::new(CellId(1), cell::outside(0), CellFill::Material(1)),
+            // 2: root cell — hex lattice fills the inside-hex region.
+            Cell::new(CellId(2), outer.inside.clone(), CellFill::HexLattice(0)).with_aabb(
+                Aabb::new(
+                    Vec3::new(-circumradius, -inradius, -z_half),
+                    Vec3::new(circumradius, inradius, z_half),
+                ),
+            ),
+            // 3: outside hex (partition completeness; reflective BC means
+            // particles never reach this in practice).
+            Cell::new(
+                CellId(3),
+                Region::Complement(Box::new(outer.inside)),
+                CellFill::Void,
+            ),
+            // 4: all-water placeholder for the outer-ring hex slots
+            // (handles cube-rounding ties at the hex edge).
+            Cell::new(
+                CellId(4),
+                Region::Union(Box::new(cell::inside(0)), Box::new(cell::outside(0))),
+                CellFill::Material(1),
+            ),
+        ];
+        let universes = vec![
+            Universe::new(UniverseId(0), vec![2, 3]),
+            Universe::new(UniverseId(1), vec![0, 1]),
+            Universe::new(UniverseId(2), vec![4]),
+        ];
+
+        // Lattice sized one ring larger so float-precision edge points
+        // still resolve cleanly. Outer ring filled with the all-water
+        // placeholder universe.
+        let visible = RINGS;
+        let n = visible + 1;
+        let stride = 2 * n + 1;
+        let mut hex_universes = vec![UniverseId(2); stride * stride];
+        for q in -(n as i32)..=(n as i32) {
+            for r in -(n as i32)..=(n as i32) {
+                let cube_s = -q - r;
+                let ring = q.unsigned_abs().max(r.unsigned_abs()).max(cube_s.unsigned_abs())
+                    as usize;
+                if ring <= visible {
+                    let qi = (q + n as i32) as usize;
+                    let ri = (r + n as i32) as usize;
+                    hex_universes[ri * stride + qi] = UniverseId(1);
+                }
+            }
+        }
+        let hex = HexLattice {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            pitch_xy: PITCH,
+            pitch_z: 2.0 * z_half,
+            n_rings: n,
+            n_axial: 1,
+            orientation: HexOrientation::Y,
+            universes: hex_universes,
+            material_overrides: None,
+        };
+        Geometry::new(surfaces, cells, universes, vec![], UniverseId(0))
+            .expect("hex geometry")
+            .with_hex_lattices(vec![hex])
+            .expect("hex lattice validated")
+    }
+
     pub fn run() {
         let n = 200_000;
         println!("GPU↔CPU recursive cell-find parity test\n");
@@ -184,6 +285,17 @@ mod cuda_main {
         run_walk("2×2 lattice", &build_geometry(), 20_000, 50);
         println!("\n=== Test 6 (multi-step walk, 50 steps): 17×17 PWR assembly ===");
         run_walk("17×17 assembly", &build_assembly_geometry(), 20_000, 50);
+
+        // Test 7-9: hex 1-ring mini-core (7 pins, depth-2 stacks via
+        // CellFill::HexLattice). Mirrors recursive_smoke.rs's
+        // hex_lattice_descent_and_trace_smoke at million-event scale on
+        // the GPU recursive primitives.
+        println!("\n=== Test 7 (find_cell): hex 1-ring mini-core ===");
+        run_one("hex 1-ring", &build_hex_geometry(), n);
+        println!("\n=== Test 8 (trace_step): hex 1-ring mini-core ===");
+        run_trace("hex 1-ring", &build_hex_geometry(), 50_000);
+        println!("\n=== Test 9 (multi-step walk, 50 steps): hex 1-ring mini-core ===");
+        run_walk("hex 1-ring", &build_hex_geometry(), 20_000, 50);
     }
 
     /// CPU reference walker that mirrors the device-side multi_step_walk.
@@ -251,7 +363,7 @@ mod cuda_main {
         let (lo, hi) = geom
             .cells
             .iter()
-            .find(|c| matches!(c.fill, CellFill::Lattice(_)))
+            .find(|c| is_lattice_root(&c.fill))
             .map(|c| (c.aabb.min, c.aabb.max))
             .unwrap_or((Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)));
 
@@ -359,7 +471,7 @@ mod cuda_main {
         let (lo, hi) = geom
             .cells
             .iter()
-            .find(|c| matches!(c.fill, CellFill::Lattice(_)))
+            .find(|c| is_lattice_root(&c.fill))
             .map(|c| (c.aabb.min, c.aabb.max))
             .unwrap_or((Vec3::new(-1.0, -1.0, -1.0), Vec3::new(1.0, 1.0, 1.0)));
 
@@ -498,7 +610,7 @@ mod cuda_main {
         let (lo, hi) = geom
             .cells
             .iter()
-            .find(|c| matches!(c.fill, CellFill::Lattice(_)))
+            .find(|c| is_lattice_root(&c.fill))
             .map(|c| (c.aabb.min, c.aabb.max))
             .unwrap_or((Vec3::new(-1.5, -1.5, -1.0), Vec3::new(1.5, 1.5, 1.0)));
         // Inflate slightly so we also get out-of-lattice "void" points.

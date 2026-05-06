@@ -8,5 +8,6 @@ pub mod dispatch;
 pub mod simulate;
 pub mod statepoint;
 pub mod tally;
+pub mod urr_equivalence;
 pub mod weight_window;
 pub mod xs_provider;

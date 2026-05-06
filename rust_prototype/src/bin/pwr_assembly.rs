@@ -534,6 +534,8 @@ fn main() {
             tallies: Default::default(),
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
             survival_biasing: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
             initial_source_bank: if seed == 0 {
                 restart_bank.clone()
             } else {

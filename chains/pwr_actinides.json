@@ -1,0 +1,69 @@
+{
+    "name": "pwr_actinides",
+    "description": "Realistic PWR depletion chain — actinide buildup (U-235/U-236/U-238 -> U-239 -> Np-239 -> Pu-239/Pu-240/Pu-241/Pu-242/Am-241) plus the dominant fission-product poisons (I-135/Xe-135/Cs-135 and Pm-149/Sm-149). One-group thermal cross-sections from ENDF/B-VIII.0; fission yields from JEFF-3.3 cumulative thermal data for U-235 and Pu-239. Use for fresh-fuel through ~30 GWd/MTU.",
+    "nuclides": [
+        {"name": "U-235",  "zaid": 92235, "decay_constant": 0.0,        "branches": []},
+        {"name": "U-236",  "zaid": 92236, "decay_constant": 0.0,        "branches": []},
+        {"name": "U-237",  "zaid": 92237, "decay_constant": 1.1880e-6,
+            "branches": [{"daughter": 93237, "ratio": 1.0}]},
+        {"name": "U-238",  "zaid": 92238, "decay_constant": 0.0,        "branches": []},
+        {"name": "U-239",  "zaid": 92239, "decay_constant": 4.9290e-4,
+            "branches": [{"daughter": 93239, "ratio": 1.0}]},
+        {"name": "Np-237", "zaid": 93237, "decay_constant": 0.0,        "branches": []},
+        {"name": "Np-239", "zaid": 93239, "decay_constant": 3.4050e-6,
+            "branches": [{"daughter": 94239, "ratio": 1.0}]},
+        {"name": "Pu-239", "zaid": 94239, "decay_constant": 0.0,        "branches": []},
+        {"name": "Pu-240", "zaid": 94240, "decay_constant": 0.0,        "branches": []},
+        {"name": "Pu-241", "zaid": 94241, "decay_constant": 1.5274e-9,
+            "branches": [{"daughter": 95241, "ratio": 1.0}]},
+        {"name": "Pu-242", "zaid": 94242, "decay_constant": 0.0,        "branches": []},
+        {"name": "Am-241", "zaid": 95241, "decay_constant": 0.0,        "branches": []},
+
+        {"name": "I-135",  "zaid": 53135, "decay_constant": 2.9264e-5,
+            "branches": [{"daughter": 54135, "ratio": 1.0}]},
+        {"name": "Xe-135", "zaid": 54135, "decay_constant": 2.10653e-5,
+            "branches": [{"daughter": 55135, "ratio": 1.0}]},
+        {"name": "Cs-135", "zaid": 55135, "decay_constant": 0.0,        "branches": []},
+
+        {"name": "Pm-149", "zaid": 61149, "decay_constant": 3.6262e-6,
+            "branches": [{"daughter": 62149, "ratio": 1.0}]},
+        {"name": "Sm-149", "zaid": 62149, "decay_constant": 0.0,        "branches": []}
+    ],
+
+    "reactions": [
+        {"parent": 92235, "mt": 18, "xs_barns": 583.5,
+         "yields": {"53135": 0.06309, "54135": 0.00256, "61149": 0.01070}},
+        {"parent": 92235, "mt": 102, "xs_barns": 98.7},
+
+        {"parent": 92236, "mt": 102, "xs_barns": 5.12},
+
+        {"parent": 92237, "mt": 102, "xs_barns": 360.0,
+         "yields": {"92238": 1.0}},
+
+        {"parent": 92238, "mt": 102, "xs_barns": 2.7},
+
+        {"parent": 93237, "mt": 102, "xs_barns": 158.0, "yields": {}},
+
+        {"parent": 94239, "mt": 18, "xs_barns": 748.1,
+         "yields": {"53135": 0.06401, "54135": 0.01103, "61149": 0.01218}},
+        {"parent": 94239, "mt": 102, "xs_barns": 270.7},
+
+        {"parent": 94240, "mt": 102, "xs_barns": 286.6},
+        {"parent": 94240, "mt": 18, "xs_barns": 0.05,
+         "yields": {"53135": 0.058, "54135": 0.013, "61149": 0.014}},
+
+        {"parent": 94241, "mt": 18, "xs_barns": 1011.0,
+         "yields": {"53135": 0.0719, "54135": 0.00733, "61149": 0.0146}},
+        {"parent": 94241, "mt": 102, "xs_barns": 362.5},
+
+        {"parent": 94242, "mt": 102, "xs_barns": 18.5, "yields": {}},
+
+        {"parent": 54135, "mt": 102, "xs_barns": 2.65e6, "yields": {}},
+
+        {"parent": 55135, "mt": 102, "xs_barns": 8.7,    "yields": {}},
+
+        {"parent": 61149, "mt": 102, "xs_barns": 1400.0, "yields": {}},
+
+        {"parent": 62149, "mt": 102, "xs_barns": 4.0e4,  "yields": {}}
+    ]
+}

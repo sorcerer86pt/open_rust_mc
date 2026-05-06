@@ -270,6 +270,17 @@ impl XsProvider for HybridSvdWmpXsProvider {
         self.inner.apply_urr(nuclide_idx, xs, energy, xi);
     }
 
+    fn is_urr(&self, nuclide_idx: usize, energy: f64) -> bool {
+        // Same gate as apply_urr — WMP supersedes URR inside its window.
+        if let Some((wmp, _)) = self.wmps[nuclide_idx].as_ref()
+            && energy >= wmp.e_min
+            && energy <= wmp.e_max
+        {
+            return false;
+        }
+        self.inner.is_urr(nuclide_idx, energy)
+    }
+
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         self.inner.thermal_scattering(nuclide_idx)
     }
@@ -468,6 +479,16 @@ impl XsProvider for HybridTableWmpXsProvider {
             return;
         }
         self.inner.apply_urr(nuclide_idx, xs, energy, xi);
+    }
+
+    fn is_urr(&self, nuclide_idx: usize, energy: f64) -> bool {
+        if let Some((wmp, _)) = self.wmps[nuclide_idx].as_ref()
+            && energy >= wmp.e_min
+            && energy <= wmp.e_max
+        {
+            return false;
+        }
+        self.inner.is_urr(nuclide_idx, energy)
     }
 
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {

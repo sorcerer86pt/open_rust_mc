@@ -244,6 +244,39 @@ impl PyMaterial {
         self.nuclides.iter().map(|n| n.atom_density).sum()
     }
 
+    /// In-place update: set the atom density of the nuclide entry
+    /// whose `hdf5_file` matches. Returns `True` if a matching entry
+    /// was updated, `False` if no nuclide with that file is in the
+    /// material (no error — caller can branch on the bool).
+    ///
+    /// Use this between burnup steps to push CRAM-evolved number
+    /// densities back into the live material before the next
+    /// `run_eigenvalue` call.
+    fn set_atom_density<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        hdf5_file: &str,
+        atom_density: f64,
+    ) -> (PyRefMut<'a, Self>, bool) {
+        let mut updated = false;
+        for nuc in slf.nuclides.iter_mut() {
+            if nuc.hdf5_file == hdf5_file {
+                nuc.atom_density = atom_density;
+                updated = true;
+                break;
+            }
+        }
+        (slf, updated)
+    }
+
+    /// Read the atom density of the nuclide with this `hdf5_file`,
+    /// or `None` if not in the material.
+    fn atom_density_of(&self, hdf5_file: &str) -> Option<f64> {
+        self.nuclides
+            .iter()
+            .find(|n| n.hdf5_file == hdf5_file)
+            .map(|n| n.atom_density)
+    }
+
     fn __repr__(&self) -> String {
         format!(
             "<Material {:?} at {:.1} K, {} nuclides>",
@@ -1139,6 +1172,8 @@ fn run_gamma_heating(
         survival_biasing: None,
         initial_source_bank: None,
         weight_window: None,
+        disable_delayed_neutrons: false,
+        urr_equivalence: None,
     };
     let t_neu = std::time::Instant::now();
     let (batch_results, k_running) = py.allow_threads(|| {
@@ -1528,6 +1563,14 @@ fn build_region(expr: &str, surf_idx: &HashMap<String, usize>) -> PyResult<Regio
     for group in or_groups {
         let mut and_terms: Vec<Region> = Vec::new();
         for token in group.split_whitespace() {
+            // Treat `&` as an explicit intersection separator (whitespace-
+            // equivalent). The `add_rect_box` / `add_hex_boundary` helpers
+            // return `" & "`-joined region strings, and downstream user
+            // code typically concatenates them with their own clauses
+            // using `&` as the visible separator.
+            if token == "&" {
+                continue;
+            }
             let (complement, rest) = match token.strip_prefix('~') {
                 Some(stripped) => (true, stripped),
                 None => (false, token),
@@ -1788,6 +1831,8 @@ fn run_eigenvalue(
         survival_biasing: None,
         initial_source_bank: None,
         weight_window: None,
+        disable_delayed_neutrons: false,
+        urr_equivalence: None,
     };
     let t_sim_start = std::time::Instant::now();
     let (batch_results, _k_running, xs_memory_bytes) = match scene.xs_mode {
@@ -1921,6 +1966,247 @@ fn run_eigenvalue(
     })
 }
 
+// ── Depletion bindings ────────────────────────────────────────────────────
+
+/// CRAM approximation order — Python-visible `CramOrder` enum.
+/// `Order16` is the default for PWR-typical Δt; `Order48` for stiff
+/// activation chains and geologic Δt.
+#[pyclass(eq, eq_int, name = "CramOrder", module = "open_rust_mc._core")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PyCramOrder {
+    Order16,
+    Order48,
+}
+
+#[pymethods]
+impl PyCramOrder {
+    fn __repr__(&self) -> String {
+        match self {
+            PyCramOrder::Order16 => "CramOrder.Order16".into(),
+            PyCramOrder::Order48 => "CramOrder.Order48".into(),
+        }
+    }
+}
+
+impl From<PyCramOrder> for open_rust_mc::depletion::cram::CramOrder {
+    fn from(o: PyCramOrder) -> Self {
+        match o {
+            PyCramOrder::Order16 => open_rust_mc::depletion::cram::CramOrder::Cram16,
+            PyCramOrder::Order48 => open_rust_mc::depletion::cram::CramOrder::Cram48,
+        }
+    }
+}
+
+/// A loaded depletion chain. Build from a JSON file
+/// (`Chain.from_file`) or from a JSON string (`Chain.from_str`).
+/// Holds the runtime `DepletionChain` plus the original `ChainSpec`
+/// so name / description survive round-trip.
+#[pyclass(name = "Chain", module = "open_rust_mc._core")]
+struct PyChain {
+    spec: open_rust_mc::depletion::chain_io::ChainSpec,
+    chain: open_rust_mc::depletion::DepletionChain,
+}
+
+#[pymethods]
+impl PyChain {
+    /// Load a chain from a JSON file on disk. See
+    /// `chains/partial_xe.json` for the schema.
+    #[staticmethod]
+    fn from_file(path: PathBuf) -> PyResult<Self> {
+        let spec = open_rust_mc::depletion::chain_io::ChainSpec::from_file(&path)
+            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let chain = spec.build();
+        Ok(Self { spec, chain })
+    }
+
+    /// Load a chain from a JSON string (no I/O). Useful for unit
+    /// tests and notebooks that paste-in a small chain literal.
+    #[staticmethod]
+    fn from_str(text: &str) -> PyResult<Self> {
+        let spec = open_rust_mc::depletion::chain_io::ChainSpec::from_str(text)
+            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        let chain = spec.build();
+        Ok(Self { spec, chain })
+    }
+
+    #[getter]
+    fn name(&self) -> String {
+        self.spec.name.clone()
+    }
+
+    #[getter]
+    fn description(&self) -> String {
+        self.spec.description.clone()
+    }
+
+    #[getter]
+    fn n_nuclides(&self) -> usize {
+        self.chain.len()
+    }
+
+    #[getter]
+    fn n_reactions(&self) -> usize {
+        self.chain.reactions.len()
+    }
+
+    /// List of `(zaid, name)` tuples in chain order. Useful for
+    /// driving an `n0` vector indexed by chain position.
+    fn nuclide_list(&self) -> Vec<(u32, String)> {
+        self.chain
+            .nuclides
+            .iter()
+            .map(|n| (n.zaid, n.name.clone()))
+            .collect()
+    }
+
+    /// Index of `zaid` in this chain, or `None` if not present.
+    fn index_of_zaid(&self, zaid: u32) -> Option<usize> {
+        self.chain.index_of_zaid(zaid)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<Chain '{}': {} nuclides, {} reactions>",
+            self.spec.name,
+            self.chain.len(),
+            self.chain.reactions.len()
+        )
+    }
+}
+
+/// One CE/LI predictor-corrector step at constant flux. Returns the
+/// updated composition vector. Composition is indexed by the chain's
+/// nuclide order (see `Chain.nuclide_list`).
+///
+/// `flux` is the one-group flux in `n / (cm² · s)`. `dt_seconds` is
+/// the time step. `order` selects CRAM-16 (default) or CRAM-48.
+///
+/// Constant-flux variant — the corrector matrix matches the
+/// predictor matrix, so the result is the predictor estimate. For
+/// flux feedback (transport-solve mid-step), call CRAM-16 / CRAM-48
+/// directly with the desired matrix or extend this to take a Python
+/// callback.
+#[pyfunction]
+#[pyo3(signature = (chain, n0, flux, dt_seconds, order=PyCramOrder::Order16))]
+fn deplete_constant_flux(
+    chain: &PyChain,
+    n0: Vec<f64>,
+    flux: f64,
+    dt_seconds: f64,
+    order: PyCramOrder,
+) -> PyResult<Vec<f64>> {
+    if n0.len() != chain.chain.len() {
+        return Err(PyValueError::new_err(format!(
+            "n0 length {} does not match chain length {}",
+            n0.len(),
+            chain.chain.len()
+        )));
+    }
+    let order = open_rust_mc::depletion::cram::CramOrder::from(order);
+    let step = open_rust_mc::depletion::deplete_ce_li(
+        &chain.chain, &n0, flux, dt_seconds, order, |_| flux,
+    );
+    Ok(step.corrected)
+}
+
+/// One CE/LI predictor-corrector step where the corrector flux
+/// comes from a Python callable. `flux_at` is invoked once per
+/// step with the predicted composition and must return the EOC
+/// one-group flux. Use this to plug a real transport solve into
+/// the depletion loop:
+///
+/// ```python
+/// def flux_at(predicted_composition):
+///     # Push predicted composition into materials, run eigenvalue,
+///     # extract mean fuel-cell flux, return it.
+///     for zaid, density in zip(chain.nuclide_list(), predicted_composition):
+///         ...
+///     result = run_eigenvalue(scene, settings)
+///     return mean_flux  # n / (cm² · s)
+///
+/// new_composition = deplete_with_flux_callback(
+///     chain, n0, flux_boc, dt_seconds, flux_at, CramOrder.Order16,
+/// )
+/// ```
+///
+/// The callback runs once per step. Re-entry into Rust is fine —
+/// `flux_at` can call `run_eigenvalue` (or anything else) inside
+/// the closure; the GIL is held during the callback only.
+#[pyfunction]
+#[pyo3(signature = (chain, n0, flux_boc, dt_seconds, flux_at, order=PyCramOrder::Order16))]
+fn deplete_with_flux_callback(
+    py: Python<'_>,
+    chain: &PyChain,
+    n0: Vec<f64>,
+    flux_boc: f64,
+    dt_seconds: f64,
+    flux_at: PyObject,
+    order: PyCramOrder,
+) -> PyResult<Vec<f64>> {
+    if n0.len() != chain.chain.len() {
+        return Err(PyValueError::new_err(format!(
+            "n0 length {} does not match chain length {}",
+            n0.len(),
+            chain.chain.len()
+        )));
+    }
+    let order = open_rust_mc::depletion::cram::CramOrder::from(order);
+
+    // Capture any Python exception thrown by the callback so we can
+    // re-raise it through the PyResult after the Rust call returns.
+    let mut callback_error: Option<PyErr> = None;
+    let result = open_rust_mc::depletion::deplete_ce_li(
+        &chain.chain,
+        &n0,
+        flux_boc,
+        dt_seconds,
+        order,
+        |predicted: &[f64]| {
+            if callback_error.is_some() {
+                return flux_boc;
+            }
+            let predicted_vec: Vec<f64> = predicted.to_vec();
+            match flux_at.call1(py, (predicted_vec,)) {
+                Ok(retval) => retval.extract::<f64>(py).unwrap_or_else(|e| {
+                    callback_error = Some(e);
+                    flux_boc
+                }),
+                Err(e) => {
+                    callback_error = Some(e);
+                    flux_boc
+                }
+            }
+        },
+    );
+    if let Some(e) = callback_error {
+        return Err(e);
+    }
+    Ok(result.corrected)
+}
+
+/// Direct CRAM matrix-exponential evaluator: returns
+/// `exp(matrix) · n0` where `matrix` is the row-major flattened
+/// `n × n` real matrix (already pre-multiplied by `Δt` in the
+/// caller — see `chain.matrix.build_transmutation_matrix`).
+///
+/// This is the low-level primitive; for typical depletion use
+/// `deplete_constant_flux` which builds the matrix from the chain
+/// + flux for you.
+#[pyfunction]
+#[pyo3(signature = (matrix, n0, order=PyCramOrder::Order16))]
+fn cram(matrix: Vec<f64>, n0: Vec<f64>, order: PyCramOrder) -> PyResult<Vec<f64>> {
+    let n = n0.len();
+    if matrix.len() != n * n {
+        return Err(PyValueError::new_err(format!(
+            "matrix length {} does not match n0.len() squared = {}",
+            matrix.len(),
+            n * n
+        )));
+    }
+    let order = open_rust_mc::depletion::cram::CramOrder::from(order);
+    Ok(open_rust_mc::depletion::cram::cram(order, &matrix, &n0))
+}
+
 // ── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -1940,6 +2226,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyXsMode>()?;
     m.add_class::<PyEigenvalueResult>()?;
     m.add_class::<PyGammaHeatingResult>()?;
+    m.add_class::<PyChain>()?;
+    m.add_class::<PyCramOrder>()?;
 
     m.add_function(wrap_pyfunction!(Sphere, m)?)?;
     m.add_function(wrap_pyfunction!(ZCylinder, m)?)?;
@@ -1951,6 +2239,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(run_eigenvalue, m)?)?;
     m.add_function(wrap_pyfunction!(run_gamma_heating, m)?)?;
+    m.add_function(wrap_pyfunction!(cram, m)?)?;
+    m.add_function(wrap_pyfunction!(deplete_constant_flux, m)?)?;
+    m.add_function(wrap_pyfunction!(deplete_with_flux_callback, m)?)?;
 
     Ok(())
 }

@@ -34,6 +34,31 @@ impl Material {
         });
     }
 
+    /// Update the atom density of the nuclide that uses
+    /// `xs_kernel_idx`. Returns `true` if a matching entry was
+    /// updated. Used by the depletion driver to push CRAM-evolved
+    /// number densities back into the live material before the next
+    /// transport solve. No effect on entries with a different
+    /// `xs_kernel_idx`.
+    pub fn set_atom_density(&mut self, xs_kernel_idx: usize, atom_density: f64) -> bool {
+        for nuc in &mut self.nuclides {
+            if nuc.xs_kernel_idx == xs_kernel_idx {
+                nuc.atom_density = atom_density;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Lookup the atom density of the nuclide that uses
+    /// `xs_kernel_idx`, or `None` if not present in this material.
+    pub fn atom_density_of(&self, xs_kernel_idx: usize) -> Option<f64> {
+        self.nuclides
+            .iter()
+            .find(|n| n.xs_kernel_idx == xs_kernel_idx)
+            .map(|n| n.atom_density)
+    }
+
     /// Compute macroscopic total cross-section at a given energy.
     ///
     /// Σ_t(E) = Σ_i N_i · σ_t,i(E)

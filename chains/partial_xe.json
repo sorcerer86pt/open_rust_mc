@@ -1,0 +1,17 @@
+{
+    "name": "partial_xe",
+    "description": "Minimal Xe poisoning chain — U-235 -> I-135 -> Xe-135 -> Cs-135 with U-235 thermal fission yield and Xe-135 (n,gamma) destruction. Use for k_eff feedback demos and as the smallest depletion test that exercises decay + fission yields + reaction-rate coupling.",
+    "nuclides": [
+        {"name": "U-235", "zaid": 92235, "decay_constant": 0.0, "branches": []},
+        {"name": "I-135",  "zaid": 53135, "decay_constant": 2.9264e-5,
+         "branches": [{"daughter": 54135, "ratio": 1.0}]},
+        {"name": "Xe-135", "zaid": 54135, "decay_constant": 2.10653e-5,
+         "branches": [{"daughter": 55135, "ratio": 1.0}]},
+        {"name": "Cs-135", "zaid": 55135, "decay_constant": 0.0, "branches": []}
+    ],
+    "reactions": [
+        {"parent": 92235, "mt": 18, "xs_barns": 583.5,
+         "yields": {"53135": 0.06309, "54135": 0.00256}},
+        {"parent": 54135, "mt": 102, "xs_barns": 2.65e6, "yields": {}}
+    ]
+}
