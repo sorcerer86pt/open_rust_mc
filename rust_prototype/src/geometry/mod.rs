@@ -12,6 +12,7 @@ pub mod cell;
 pub mod coord;
 pub mod lattice;
 pub mod ray;
+pub mod shapes;
 #[cfg(test)]
 mod recursive_smoke;
 pub mod scene;

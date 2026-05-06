@@ -22,7 +22,8 @@ use clap::Parser;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::lattice::{HexLattice, HexOrientation};
-use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+use open_rust_mc::geometry::shapes;
+use open_rust_mc::geometry::surface::BoundaryCondition;
 use open_rust_mc::geometry::universe::{Universe, UniverseId};
 use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
 use open_rust_mc::hdf5_reader;
@@ -184,77 +185,34 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, f64) {
 }
 
 fn setup_geometry(rings: usize, reflective_z: bool) -> Geometry {
-    // Hex-shaped outer boundary: 6 reflective planes oriented at
-    // 30°, 90°, 150°, 210°, 270°, 330° from +x (the edge-midpoint
-    // directions of a flat-top outer hex). Each plane sits at
-    // perpendicular distance `inradius = (N + 0.5) * pitch` from
-    // origin — that's centre-to-edge of the outermost hex layer.
-    //
-    // No more square-box-corners-fall-outside-hex compromise; every
-    // point inside the hex shape maps to a valid axial cell.
+    // Hex outer boundary: 6 reflective planes at the edge-midpoint
+    // directions of a flat-top outer hex, perpendicular distance
+    // `inradius = (rings + 0.5) * pitch`. The lattice itself is
+    // sized one ring larger so that float-precision points right
+    // at the boundary (which can cube-round to ring N+1) still
+    // resolve cleanly through the lattice's outer placeholder ring.
     let inradius = (rings as f64 + 0.5) * PITCH;
-    // Vertex-direction extent (used for the Aabb only).
     let circumradius = inradius * 2.0 / 3.0_f64.sqrt();
     let z_half = inradius.max(1.0);
-
     let z_bc = if reflective_z {
         BoundaryCondition::Reflective
     } else {
         BoundaryCondition::Vacuum
     };
 
-    // Outward-pointing unit normals for the 6 hex sides. Order chosen
-    // so consecutive entries are 60° apart counter-clockwise.
-    let s30 = 0.5_f64;
-    let c30 = 3.0_f64.sqrt() * 0.5;
-    let hex_normals: [Vec3; 6] = [
-        Vec3::new(c30, s30, 0.0),  // 30°
-        Vec3::new(0.0, 1.0, 0.0),  // 90°
-        Vec3::new(-c30, s30, 0.0), // 150°
-        Vec3::new(-c30, -s30, 0.0), // 210°
-        Vec3::new(0.0, -1.0, 0.0), // 270°
-        Vec3::new(c30, -s30, 0.0), // 330°
-    ];
-
-    // Surfaces:
-    //   0..=2: fuel / clad inner / clad outer cylinders (element-local)
-    //   3..=8: 6 hex sides (world frame, reflective)
-    //   9, 10: -z, +z planes
-    let mut surfaces = vec![
-        Surface::CylinderZ {
-            center_x: 0.0,
-            center_y: 0.0,
-            radius: FUEL_OR,
-            bc: BoundaryCondition::Transmission,
-        },
-        Surface::CylinderZ {
-            center_x: 0.0,
-            center_y: 0.0,
-            radius: CLAD_IR,
-            bc: BoundaryCondition::Transmission,
-        },
-        Surface::CylinderZ {
-            center_x: 0.0,
-            center_y: 0.0,
-            radius: CLAD_OR,
-            bc: BoundaryCondition::Transmission,
-        },
-    ];
-    for &n in &hex_normals {
-        surfaces.push(Surface::Plane {
-            normal: n,
-            offset: inradius,
-            bc: BoundaryCondition::Reflective,
-        });
-    }
-    surfaces.push(Surface::PlaneZ {
-        z0: -z_half,
-        bc: z_bc,
-    });
-    surfaces.push(Surface::PlaneZ {
-        z0: z_half,
-        bc: z_bc,
-    });
+    // Cylinders for the pin (surfaces 0, 1, 2 at element-local origin)
+    // + hex outer boundary (surfaces 3..=10 = 6 hex sides + 2 z planes).
+    let mut surfaces = shapes::pin_cylinders(0.0, 0.0, &[FUEL_OR, CLAD_IR, CLAD_OR]);
+    let outer = shapes::hex_boundary(
+        rings,
+        PITCH,
+        HexOrientation::Y,
+        BoundaryCondition::Reflective,
+        z_half,
+        z_bc,
+        surfaces.len(),
+    );
+    surfaces.extend(outer.surfaces);
 
     let cells = vec![
         // 0: fuel
@@ -265,50 +223,19 @@ fn setup_geometry(rings: usize, reflective_z: bool) -> Geometry {
         Cell::new(CellId(2), cell::between(1, 2), CellFill::Material(1)).with_temperature(600.0),
         // 3: water (outside clad)
         Cell::new(CellId(3), cell::outside(2), CellFill::Material(2)).with_temperature(600.0),
-        // 4: root inside hex → HexLattice(0). Region is the
-        // intersection of all 6 hex-side inside-half-spaces plus the
-        // z bounds.
-        Cell::new(
-            CellId(4),
-            cell::intersect_all(vec![
-                cell::inside(3),
-                cell::inside(4),
-                cell::inside(5),
-                cell::inside(6),
-                cell::inside(7),
-                cell::inside(8),
-                cell::outside(9),
-                cell::inside(10),
-            ]),
-            CellFill::HexLattice(0),
-        )
-        .with_aabb(Aabb::new(
+        // 4: root inside hex → HexLattice(0)
+        Cell::new(CellId(4), outer.inside.clone(), CellFill::HexLattice(0)).with_aabb(Aabb::new(
             Vec3::new(-circumradius, -inradius, -z_half),
             Vec3::new(circumradius, inradius, z_half),
         )),
         // 5: outside the hex (complement of cell 4's region — kept
-        // for partition completeness even though reflective BCs make
-        // it unreachable).
+        // for partition completeness).
         Cell::new(
             CellId(5),
-            cell::Region::Complement(Box::new(cell::intersect_all(vec![
-                cell::inside(3),
-                cell::inside(4),
-                cell::inside(5),
-                cell::inside(6),
-                cell::inside(7),
-                cell::inside(8),
-                cell::outside(9),
-                cell::inside(10),
-            ]))),
+            cell::Region::Complement(Box::new(outer.inside)),
             CellFill::Void,
         ),
-        // 6: all-water cell for the U_OUTSIDE_HEX universe. The
-        // hex-shaped boundary makes corner placeholders unreachable
-        // in principle (no off-grid positions inside the hex), but
-        // the placeholder universe still has to exist for the
-        // (2N+1)² doubled-axial array slots that find_element never
-        // queries.
+        // 6: all-water cell for the U_OUTSIDE_HEX universe.
         Cell::new(
             CellId(6),
             cell::Region::Union(
