@@ -42,6 +42,7 @@ use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
+use open_rust_mc::geometry::lattice::HexOrientation;
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{ray, Aabb, Vec3};
 use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
@@ -612,6 +613,172 @@ impl PyScene {
             temperature,
         });
         Ok(slf)
+    }
+
+    /// Register the 6 axis-aligned planes of an axis-aligned box
+    /// centred at the origin with half-extents `half = [hx, hy, hz]`.
+    /// All 6 planes carry `bc` (typically "reflective" or "vacuum").
+    /// Surfaces are named `{prefix}_xmin`, `{prefix}_xmax`, etc.
+    /// Returns the region expression for "inside the box" suitable
+    /// for `add_cell(..., region=...)`.
+    #[pyo3(signature = (prefix, half, bc="reflective"))]
+    fn add_rect_box<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        prefix: &str,
+        half: [f64; 3],
+        bc: &str,
+    ) -> PyResult<(PyRefMut<'a, Self>, String)> {
+        let bc_parsed = parse_bc(bc)?;
+        let names = [
+            format!("{prefix}_xmin"),
+            format!("{prefix}_xmax"),
+            format!("{prefix}_ymin"),
+            format!("{prefix}_ymax"),
+            format!("{prefix}_zmin"),
+            format!("{prefix}_zmax"),
+        ];
+        let surfaces = [
+            Surface::PlaneX { x0: -half[0], bc: bc_parsed },
+            Surface::PlaneX { x0: half[0], bc: bc_parsed },
+            Surface::PlaneY { y0: -half[1], bc: bc_parsed },
+            Surface::PlaneY { y0: half[1], bc: bc_parsed },
+            Surface::PlaneZ { z0: -half[2], bc: bc_parsed },
+            Surface::PlaneZ { z0: half[2], bc: bc_parsed },
+        ];
+        for (name, surface) in names.iter().zip(surfaces.iter()) {
+            if slf.surfaces.contains_key(name) {
+                return Err(PyValueError::new_err(format!(
+                    "surface {name:?} already registered"
+                )));
+            }
+            slf.surface_order.push(name.clone());
+            slf.surfaces.insert(
+                name.clone(),
+                PySurface {
+                    inner: surface.clone(),
+                },
+            );
+        }
+        // Inside region: above xmin, below xmax, etc.
+        let region = format!(
+            "+{}_xmin & -{}_xmax & +{}_ymin & -{}_ymax & +{}_zmin & -{}_zmax",
+            prefix, prefix, prefix, prefix, prefix, prefix
+        );
+        Ok((slf, region))
+    }
+
+    /// Register the 6 reflective hex-side planes plus 2 z planes for
+    /// a hex-shaped 3D region. The hex outer-boundary inradius is
+    /// `(rings + 0.5) * pitch` — sized to enclose an `n_rings`
+    /// tessellation of `pitch`-spaced hex elements.
+    ///
+    /// `orientation`: "flat" (flat-top, side midpoints at 30° steps
+    /// from +x) or "pointy" (vertex-up, midpoints at 0° steps).
+    /// Surfaces are named `{prefix}_side0`..`{prefix}_side5`,
+    /// `{prefix}_zmin`, `{prefix}_zmax`. Returns the
+    /// "inside the hex" region expression.
+    #[pyo3(signature = (prefix, rings, pitch, orientation="flat", xy_bc="reflective", z_half=10.0, z_bc="reflective"))]
+    fn add_hex_boundary<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        prefix: &str,
+        rings: usize,
+        pitch: f64,
+        orientation: &str,
+        xy_bc: &str,
+        z_half: f64,
+        z_bc: &str,
+    ) -> PyResult<(PyRefMut<'a, Self>, String)> {
+        let xy_bc = parse_bc(xy_bc)?;
+        let z_bc = parse_bc(z_bc)?;
+        let orient = match orientation {
+            "flat" | "Y" | "y" => HexOrientation::Y,
+            "pointy" | "X" | "x" => HexOrientation::X,
+            _ => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown hex orientation {orientation:?}; expected 'flat' or 'pointy'"
+                )));
+            }
+        };
+        let inradius = (rings as f64 + 0.5) * pitch;
+        let normals = open_rust_mc::geometry::shapes::hex_side_normals(orient);
+        let mut names: Vec<String> = (0..6).map(|i| format!("{prefix}_side{i}")).collect();
+        names.push(format!("{prefix}_zmin"));
+        names.push(format!("{prefix}_zmax"));
+        let mut surfaces: Vec<Surface> = normals
+            .iter()
+            .map(|&n| Surface::Plane {
+                normal: n,
+                offset: inradius,
+                bc: xy_bc,
+            })
+            .collect();
+        surfaces.push(Surface::PlaneZ {
+            z0: -z_half,
+            bc: z_bc,
+        });
+        surfaces.push(Surface::PlaneZ {
+            z0: z_half,
+            bc: z_bc,
+        });
+        for (name, surface) in names.iter().zip(surfaces.iter()) {
+            if slf.surfaces.contains_key(name) {
+                return Err(PyValueError::new_err(format!(
+                    "surface {name:?} already registered"
+                )));
+            }
+            slf.surface_order.push(name.clone());
+            slf.surfaces.insert(
+                name.clone(),
+                PySurface {
+                    inner: surface.clone(),
+                },
+            );
+        }
+        // Inside region: below all 6 hex sides (-side*) plus z bounds.
+        let mut parts: Vec<String> = (0..6).map(|i| format!("-{prefix}_side{i}")).collect();
+        parts.push(format!("+{prefix}_zmin"));
+        parts.push(format!("-{prefix}_zmax"));
+        Ok((slf, parts.join(" & ")))
+    }
+
+    /// Register N concentric Z cylinders centred at `(center_x,
+    /// center_y)` with the given radii (must be sorted ascending).
+    /// All cylinders carry `bc="transmission"`. Surfaces are named
+    /// `{prefix}_r{i}` (i = 0..N). Returns the list of registered
+    /// names so the caller can build pin region expressions like
+    /// `-{prefix}_r0` (inside fuel) / `-{prefix}_r1 & +{prefix}_r0`
+    /// (annular gap) etc.
+    #[pyo3(signature = (prefix, radii, center_x=0.0, center_y=0.0))]
+    fn add_pin_cylinders<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        prefix: &str,
+        radii: Vec<f64>,
+        center_x: f64,
+        center_y: f64,
+    ) -> PyResult<(PyRefMut<'a, Self>, Vec<String>)> {
+        let mut names = Vec::with_capacity(radii.len());
+        for (i, &r) in radii.iter().enumerate() {
+            let name = format!("{prefix}_r{i}");
+            if slf.surfaces.contains_key(&name) {
+                return Err(PyValueError::new_err(format!(
+                    "surface {name:?} already registered"
+                )));
+            }
+            slf.surface_order.push(name.clone());
+            slf.surfaces.insert(
+                name.clone(),
+                PySurface {
+                    inner: Surface::CylinderZ {
+                        center_x,
+                        center_y,
+                        radius: r,
+                        bc: BoundaryCondition::Transmission,
+                    },
+                },
+            );
+            names.push(name);
+        }
+        Ok((slf, names))
     }
 
     fn __repr__(&self) -> String {
