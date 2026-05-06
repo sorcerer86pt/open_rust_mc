@@ -261,6 +261,7 @@ fn run_multi_seed<XS: XsProvider>(
             parallel: true,
             tallies: shared_tallies.clone(),
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
+            survival_biasing: None,
         };
 
         if args.seeds > 1 {

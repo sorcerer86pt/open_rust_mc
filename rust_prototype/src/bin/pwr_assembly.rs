@@ -563,6 +563,7 @@ fn main() {
             parallel: true,
             tallies: Default::default(),
             statepoint_path: None,
+            survival_biasing: None,
         };
 
         if args.seeds > 1 {

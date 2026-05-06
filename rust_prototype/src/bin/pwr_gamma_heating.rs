@@ -220,6 +220,7 @@ fn main() -> ExitCode {
         parallel: true,
         tallies: Default::default(),
         statepoint_path: None,
+        survival_biasing: None,
     };
     let t1 = Instant::now();
     let (batch_results, k_eff) =

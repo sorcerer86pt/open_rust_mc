@@ -251,6 +251,143 @@ pub fn process_collision(
     CollisionOutcome::Absorption
 }
 
+/// Process a collision under implicit-capture survival biasing.
+///
+/// Unlike `process_collision` (single-channel analog dispatch) this
+/// samples only among the **non-absorbing** channels — elastic,
+/// inelastic, (n,2n), (n,3n). The caller is responsible for:
+///   1. Banking fission neutrons as `stochastic_round(w · ν · σ_f / σ_t)`
+///      sites BEFORE invoking this function.
+///   2. Reducing `particle.weight *= σ_s / σ_t` BEFORE invoking this function
+///      (so the implicit non-absorption survival probability is folded in).
+///   3. Applying Russian roulette AFTER the call.
+///
+/// Returns `CollisionOutcome::Absorption` and kills the particle if
+/// `σ_s == 0` (pure absorber — nothing to scatter into).
+#[allow(clippy::too_many_arguments)]
+pub fn process_scatter_only(
+    particle: &mut Particle,
+    xs: &MicroXs,
+    inelastic_data: Option<&InelasticData<'_>>,
+    elastic_angle: Option<&AngularDistribution>,
+    continuum_edist: Option<&EnergyDistribution>,
+    n2n_edist: Option<&EnergyDistribution>,
+    n3n_edist: Option<&EnergyDistribution>,
+    temperature: f64,
+    rng: &mut Rng,
+) -> CollisionOutcome {
+    particle.n_collisions += 1;
+
+    let scatter_total = xs.elastic + xs.inelastic + xs.n2n + xs.n3n;
+    if scatter_total <= 0.0 {
+        // No scattering channel available — pure absorber. The caller
+        // already booked fission separately via implicit capture, so
+        // mark the particle dead.
+        particle.kill();
+        return CollisionOutcome::Absorption;
+    }
+
+    let xi = rng.uniform() * scatter_total;
+    let mut cum = 0.0;
+
+    cum += xs.elastic;
+    if xi < cum {
+        let (new_energy, new_dir) = super::scatter::elastic_scatter_aniso(
+            particle.energy,
+            particle.dir,
+            xs.awr,
+            elastic_angle,
+            temperature,
+            rng,
+        );
+        particle.energy = new_energy;
+        particle.dir = new_dir;
+        return CollisionOutcome::Scatter;
+    }
+
+    cum += xs.inelastic;
+    if xi < cum {
+        let (q_value, level_idx) = sample_inelastic_level(
+            particle.energy,
+            xs.awr,
+            inelastic_data,
+            continuum_edist,
+            rng,
+        );
+        let angle = level_idx.and_then(|i| {
+            inelastic_data
+                .and_then(|d| d.level_angles.get(i))
+                .and_then(|o| o.as_ref())
+        });
+        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
+            particle.energy,
+            particle.dir,
+            xs.awr,
+            q_value,
+            angle,
+            rng,
+        );
+        particle.energy = new_energy;
+        particle.dir = new_dir;
+        return CollisionOutcome::InelasticScatter {
+            q_value_ev: q_value,
+        };
+    }
+
+    cum += xs.n2n;
+    if xi < cum {
+        let sample_e = |rng: &mut Rng| -> f64 {
+            match n2n_edist {
+                Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+                None => sample_evaporation_energy(particle.energy, rng),
+            }
+        };
+        let e_primary = sample_e(rng);
+        let e_secondary = sample_e(rng);
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_primary;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        let (us, vs, ws) = rng.isotropic_direction();
+        let secondary = SecondaryNeutron {
+            pos: particle.pos,
+            dir: crate::geometry::Vec3::new(us, vs, ws),
+            energy: e_secondary,
+        };
+        return CollisionOutcome::Multiplicity {
+            secondaries: vec![secondary],
+        };
+    }
+
+    // (n,3n)
+    let sample_e = |rng: &mut Rng| -> f64 {
+        match n3n_edist {
+            Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+            None => sample_evaporation_energy(particle.energy, rng),
+        }
+    };
+    let e_primary = sample_e(rng);
+    let e_s1 = sample_e(rng);
+    let e_s2 = sample_e(rng);
+    let (u, v, w) = rng.isotropic_direction();
+    particle.energy = e_primary;
+    particle.dir = crate::geometry::Vec3::new(u, v, w);
+    let (u1, v1, w1) = rng.isotropic_direction();
+    let (u2, v2, w2) = rng.isotropic_direction();
+    let secondaries = vec![
+        SecondaryNeutron {
+            pos: particle.pos,
+            dir: crate::geometry::Vec3::new(u1, v1, w1),
+            energy: e_s1,
+        },
+        SecondaryNeutron {
+            pos: particle.pos,
+            dir: crate::geometry::Vec3::new(u2, v2, w2),
+            energy: e_s2,
+        },
+    ];
+    CollisionOutcome::Multiplicity { secondaries }
+}
+
 /// Sample which discrete inelastic level is excited and return its Q-value.
 ///
 /// If discrete level data is available, sample proportionally to each level's
@@ -350,7 +487,7 @@ fn sample_evaporation_energy(incident_energy: f64, rng: &mut Rng) -> f64 {
 /// P(E) ~ exp(-E/a) * sinh(sqrt(b*E))
 /// Using Cranberg parameters for U-235 thermal fission:
 ///   a = 0.988 MeV, b = 2.249 /MeV
-fn sample_fission_energy(_incident_energy: f64, rng: &mut Rng) -> f64 {
+pub fn sample_fission_energy(_incident_energy: f64, rng: &mut Rng) -> f64 {
     let a = 988_000.0; // 0.988 MeV in eV
     let b = 2.249e-6; // 2.249 /MeV in /eV
 

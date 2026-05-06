@@ -65,6 +65,37 @@ pub struct SimConfig {
     /// per-batch arrays, tally arrays, and the post-normalize source
     /// bank ready for restart. See `transport::statepoint`.
     pub statepoint_path: Option<std::path::PathBuf>,
+    /// Optional implicit-capture + Russian-roulette variance reduction.
+    /// When `Some(_)`, the surface-tracking transport replaces analog
+    /// absorption-as-kill with weight reduction `w *= σ_s/σ_t`, banks
+    /// fission as stochastic-rounded `w·ν·σ_f/σ_t` sites, and rouletes
+    /// once weight drops below `w_min`. Surface tracking + non-thermal
+    /// collision branch only; thermal-scattering and delta-tracking
+    /// paths fall back to analog regardless of this setting.
+    pub survival_biasing: Option<SurvivalBiasing>,
+}
+
+/// Implicit-capture + Russian-roulette settings.
+///
+/// Common OpenMC-style defaults: `w_min = 0.25`, `w_survive = 1.0`.
+/// Particles with weight below `w_min` are rouletted: with probability
+/// `w/w_survive` they survive at weight `w_survive`; otherwise killed.
+/// Net effect is unbiased — expected weight is preserved.
+#[derive(Debug, Clone, Copy)]
+pub struct SurvivalBiasing {
+    /// Weight threshold below which Russian roulette fires.
+    pub w_min: f64,
+    /// Weight that surviving rouletted particles are restored to.
+    pub w_survive: f64,
+}
+
+impl Default for SurvivalBiasing {
+    fn default() -> Self {
+        Self {
+            w_min: 0.25,
+            w_survive: 1.0,
+        }
+    }
 }
 
 impl Default for SimConfig {
@@ -79,6 +110,7 @@ impl Default for SimConfig {
             parallel: true,
             tallies: Tallies::default(),
             statepoint_path: None,
+            survival_biasing: None,
         }
     }
 }
@@ -581,6 +613,7 @@ fn transport_particle<XS: XsProvider>(
     materials: &[Material],
     xs_provider: &XS,
     tallies: &Tallies,
+    survival_biasing: Option<&SurvivalBiasing>,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
@@ -968,30 +1001,56 @@ fn transport_particle<XS: XsProvider>(
                         let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
                         let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
 
-                        let outcome = collision::process_collision(
-                            &mut particle,
-                            &micro_xs[nuc_idx],
-                            inelastic_data.as_ref(),
-                            elastic_angle,
-                            fission_edist,
-                            continuum_edist,
-                            n2n_edist,
-                            n3n_edist,
-                            cell.temperature,
-                            &mut rng,
-                        );
+                        let micro = &micro_xs[nuc_idx];
 
-                        match outcome {
-                            CollisionOutcome::Scatter => {}
-                            CollisionOutcome::InelasticScatter { q_value_ev } => {
-                                result.photon_events.push(PhotonSourceEvent {
-                                    cell_idx: particle.cell_idx as u32,
-                                    pos: [particle.pos.x, particle.pos.y, particle.pos.z],
-                                    energy: q_value_ev.abs(),
-                                    mt: 4,
-                                });
+                        if let Some(sb) = survival_biasing {
+                            // ── Implicit-capture path ───────────────────
+                            // 1. Bank the expected number of fission
+                            //    neutrons (stochastic-rounded).
+                            let nu_sigf_over_sigt = if micro.total > 0.0 {
+                                micro.nu_bar * micro.fission / micro.total
+                            } else {
+                                0.0
+                            };
+                            let n_fiss_expected = particle.weight * nu_sigf_over_sigt;
+                            let n_fiss = n_fiss_expected.floor() as usize
+                                + if rng.uniform() < n_fiss_expected.fract() {
+                                    1
+                                } else {
+                                    0
+                                };
+                            if n_fiss > 0 {
+                                for _ in 0..n_fiss {
+                                    let e_f = match fission_edist {
+                                        Some(d) => d.sample(particle.energy, &mut rng),
+                                        None => collision::sample_fission_energy(
+                                            particle.energy,
+                                            &mut rng,
+                                        ),
+                                    };
+                                    result.fission_sites.push(FissionSite {
+                                        pos: particle.pos,
+                                        energy: e_f,
+                                        weight: 1.0,
+                                    });
+                                }
+                                result.fissions += 1;
+                                sample_photon_products(
+                                    xs_provider,
+                                    xs_kernel_idx,
+                                    FISSION_PHOTON_MTS,
+                                    &particle,
+                                    &mut rng,
+                                    &mut result.photon_events,
+                                );
                             }
-                            CollisionOutcome::Absorption => {
+
+                            // 2. Reduce particle weight by the
+                            //    non-absorption probability σ_s/σ_t.
+                            let sigma_a = micro.capture + micro.fission;
+                            let sigma_s = (micro.total - sigma_a).max(0.0);
+                            if sigma_s <= 0.0 {
+                                // Pure absorber — particle is gone.
                                 result.absorptions += 1;
                                 result.capture_cells.push(particle.cell_idx);
                                 sample_photon_products(
@@ -1002,27 +1061,126 @@ fn transport_particle<XS: XsProvider>(
                                     &mut rng,
                                     &mut result.photon_events,
                                 );
-                            }
-                            CollisionOutcome::Fission { sites } => {
-                                result.fissions += 1;
-                                result.fission_sites.extend(sites);
-                                sample_photon_products(
-                                    xs_provider,
-                                    xs_kernel_idx,
-                                    FISSION_PHOTON_MTS,
-                                    &particle,
+                                particle.kill();
+                            } else {
+                                particle.weight *= sigma_s / micro.total;
+
+                                // 3. Sample a scatter-only collision.
+                                let outcome = collision::process_scatter_only(
+                                    &mut particle,
+                                    micro,
+                                    inelastic_data.as_ref(),
+                                    elastic_angle,
+                                    continuum_edist,
+                                    n2n_edist,
+                                    n3n_edist,
+                                    cell.temperature,
                                     &mut rng,
-                                    &mut result.photon_events,
                                 );
+                                match outcome {
+                                    CollisionOutcome::Scatter => {}
+                                    CollisionOutcome::InelasticScatter { q_value_ev } => {
+                                        result.photon_events.push(PhotonSourceEvent {
+                                            cell_idx: particle.cell_idx as u32,
+                                            pos: [
+                                                particle.pos.x,
+                                                particle.pos.y,
+                                                particle.pos.z,
+                                            ],
+                                            energy: q_value_ev.abs(),
+                                            mt: 4,
+                                        });
+                                    }
+                                    CollisionOutcome::Multiplicity { secondaries } => {
+                                        for s in secondaries {
+                                            pending.push(Particle::new(
+                                                s.pos,
+                                                s.dir,
+                                                s.energy,
+                                                particle.cell_idx,
+                                            ));
+                                        }
+                                    }
+                                    // Pure-absorber fallback inside scatter_only.
+                                    CollisionOutcome::Absorption => {
+                                        result.absorptions += 1;
+                                    }
+                                    // Fission has already been booked above.
+                                    CollisionOutcome::Fission { .. } => {}
+                                }
+
+                                // 4. Russian roulette below w_min.
+                                if particle.is_alive() && particle.weight < sb.w_min {
+                                    let p_survive = particle.weight / sb.w_survive;
+                                    if rng.uniform() < p_survive {
+                                        particle.weight = sb.w_survive;
+                                    } else {
+                                        particle.kill();
+                                    }
+                                }
                             }
-                            CollisionOutcome::Multiplicity { secondaries } => {
-                                for s in secondaries {
-                                    pending.push(Particle::new(
-                                        s.pos,
-                                        s.dir,
-                                        s.energy,
-                                        particle.cell_idx,
-                                    ));
+                        } else {
+                            // ── Analog path (legacy bit-exact) ──────────
+                            let outcome = collision::process_collision(
+                                &mut particle,
+                                micro,
+                                inelastic_data.as_ref(),
+                                elastic_angle,
+                                fission_edist,
+                                continuum_edist,
+                                n2n_edist,
+                                n3n_edist,
+                                cell.temperature,
+                                &mut rng,
+                            );
+
+                            match outcome {
+                                CollisionOutcome::Scatter => {}
+                                CollisionOutcome::InelasticScatter { q_value_ev } => {
+                                    result.photon_events.push(PhotonSourceEvent {
+                                        cell_idx: particle.cell_idx as u32,
+                                        pos: [
+                                            particle.pos.x,
+                                            particle.pos.y,
+                                            particle.pos.z,
+                                        ],
+                                        energy: q_value_ev.abs(),
+                                        mt: 4,
+                                    });
+                                }
+                                CollisionOutcome::Absorption => {
+                                    result.absorptions += 1;
+                                    result.capture_cells.push(particle.cell_idx);
+                                    sample_photon_products(
+                                        xs_provider,
+                                        xs_kernel_idx,
+                                        ABSORPTION_PHOTON_MTS,
+                                        &particle,
+                                        &mut rng,
+                                        &mut result.photon_events,
+                                    );
+                                }
+                                CollisionOutcome::Fission { sites } => {
+                                    result.fissions += 1;
+                                    result.fission_sites.extend(sites);
+                                    sample_photon_products(
+                                        xs_provider,
+                                        xs_kernel_idx,
+                                        FISSION_PHOTON_MTS,
+                                        &particle,
+                                        &mut rng,
+                                        &mut result.photon_events,
+                                    );
+                                }
+                                CollisionOutcome::Multiplicity { secondaries } => {
+                                    for s in secondaries {
+                                        pending.push(Particle::new(
+                                            s.pos,
+                                            s.dir,
+                                            s.energy,
+                                            particle.cell_idx,
+                                        ));
+                                    }
                                 }
                             }
                         }
@@ -1490,6 +1648,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 materials,
                 xs_provider,
                 &config.tallies,
+                config.survival_biasing.as_ref(),
             ),
             TrackingMode::Delta(majorant) => transport_particle_delta(
                 site,
@@ -2002,6 +2161,7 @@ mod tests {
             parallel: false,
             tallies: Default::default(),
             statepoint_path: None,
+            survival_biasing: None,
         };
 
         let (results, k_final) =
@@ -2117,6 +2277,7 @@ mod tests {
             parallel: false,
             tallies: Default::default(),
             statepoint_path: None,
+            survival_biasing: None,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -2278,6 +2439,7 @@ mod tests {
             parallel: false,
             tallies: Default::default(),
             statepoint_path: None,
+            survival_biasing: None,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -2289,6 +2451,7 @@ mod tests {
             parallel: false,
             tallies: Default::default(),
             statepoint_path: None,
+            survival_biasing: None,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);

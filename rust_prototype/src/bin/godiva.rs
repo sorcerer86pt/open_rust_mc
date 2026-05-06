@@ -111,6 +111,12 @@ struct Args {
     /// for restart. Path is interpreted relative to the cwd.
     #[arg(long)]
     statepoint: Option<PathBuf>,
+
+    /// Enable implicit-capture + Russian-roulette variance reduction.
+    /// Surface tracking only — no effect under delta tracking. Defaults
+    /// to OFF so analog runs stay bit-comparable to legacy results.
+    #[arg(long, default_value_t = false)]
+    survival_biasing: bool,
 }
 
 const NUCLIDE_SPECS: &[(&str, f64, f64)] = &[
@@ -263,6 +269,11 @@ fn run_multi_seed<XS: XsProvider>(
             parallel: true,
             tallies: Default::default(),
             statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
+            survival_biasing: if args.survival_biasing {
+                Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
+            } else {
+                None
+            },
         };
 
         if args.seeds > 1 {
