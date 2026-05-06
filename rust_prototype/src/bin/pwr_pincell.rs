@@ -347,62 +347,20 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
     let clad_or = 0.4750; // cm, clad outer radius
     let pitch = 1.2600; // cm, pin pitch
     let half = pitch / 2.0;
+    let z_half = half;
 
-    let z_half = half; // Use same extent in Z for reflective bounding
-
-    let surfaces = vec![
-        // 0: fuel outer cylinder
-        Surface::CylinderZ {
-            center_x: 0.0,
-            center_y: 0.0,
-            radius: fuel_or,
-            bc: BoundaryCondition::Transmission,
-        },
-        // 1: clad inner cylinder
-        Surface::CylinderZ {
-            center_x: 0.0,
-            center_y: 0.0,
-            radius: clad_ir,
-            bc: BoundaryCondition::Transmission,
-        },
-        // 2: clad outer cylinder
-        Surface::CylinderZ {
-            center_x: 0.0,
-            center_y: 0.0,
-            radius: clad_or,
-            bc: BoundaryCondition::Transmission,
-        },
-        // 3: -X plane
-        Surface::PlaneX {
-            x0: -half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 4: +X plane
-        Surface::PlaneX {
-            x0: half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 5: -Y plane
-        Surface::PlaneY {
-            y0: -half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 6: +Y plane
-        Surface::PlaneY {
-            y0: half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 7: -Z plane (reflective — infinite lattice in Z)
-        Surface::PlaneZ {
-            z0: -z_half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 8: +Z plane
-        Surface::PlaneZ {
-            z0: z_half,
-            bc: BoundaryCondition::Reflective,
-        },
-    ];
+    // Cylinders (surfaces 0..=2) via shapes::pin_cylinders + outer
+    // reflective box (surfaces 3..=8) via shapes::rect_box. Surface
+    // ordering matches the original hand-rolled layout, so cell
+    // regions referring to indices 0..=8 stay correct.
+    let mut surfaces =
+        open_rust_mc::geometry::shapes::pin_cylinders(0.0, 0.0, &[fuel_or, clad_ir, clad_or]);
+    let outer_box = open_rust_mc::geometry::shapes::rect_box(
+        [half, half, z_half],
+        BoundaryCondition::Reflective,
+        surfaces.len(),
+    );
+    surfaces.extend(outer_box.surfaces);
 
     let box_aabb = Aabb::new(
         Vec3::new(-half, -half, -z_half),
@@ -452,18 +410,15 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
             Vec3::new(clad_or, clad_or, z_half),
         ))
         .with_temperature(600.0),
-        // 3: Water (outside clad, inside reflective box)
+        // 3: Water — outside clad, inside the full reflective box.
+        // The xy + z bounds come from `rect_box.inside` (the "inside
+        // the box" region the helper returned).
         Cell::new(
             CellId(3),
-            cell::intersect_all(vec![
-                cell::outside(2), // outside clad
-                cell::outside(3), // x > -half
-                cell::inside(4),  // x < +half
-                cell::outside(5), // y > -half
-                cell::inside(6),  // y < +half
-                cell::outside(7), // z > -z_half
-                cell::inside(8),  // z < +z_half
-            ]),
+            cell::Region::Intersection(
+                Box::new(cell::outside(2)),
+                Box::new(outer_box.inside),
+            ),
             CellFill::Material(2),
         )
         .with_aabb(box_aabb)

@@ -65,6 +65,54 @@ pub fn rect_box(half: [f64; 3], bc: BoundaryCondition, surface_offset: usize) ->
     Shape { surfaces, inside }
 }
 
+/// Same as `rect_box` but with separate boundary conditions for the
+/// xy planes vs the z planes. Common pattern for assembly geometries
+/// where xy is reflective (infinite radial lattice) and z is either
+/// reflective (k_inf) or vacuum (k_eff with axial leakage).
+pub fn rect_box_split_bc(
+    half: [f64; 3],
+    xy_bc: BoundaryCondition,
+    z_bc: BoundaryCondition,
+    surface_offset: usize,
+) -> Shape {
+    let surfaces = vec![
+        Surface::PlaneX {
+            x0: -half[0],
+            bc: xy_bc,
+        },
+        Surface::PlaneX {
+            x0: half[0],
+            bc: xy_bc,
+        },
+        Surface::PlaneY {
+            y0: -half[1],
+            bc: xy_bc,
+        },
+        Surface::PlaneY {
+            y0: half[1],
+            bc: xy_bc,
+        },
+        Surface::PlaneZ {
+            z0: -half[2],
+            bc: z_bc,
+        },
+        Surface::PlaneZ {
+            z0: half[2],
+            bc: z_bc,
+        },
+    ];
+    let s = surface_offset;
+    let inside = crate::geometry::cell::intersect_all(vec![
+        crate::geometry::cell::outside(s),
+        crate::geometry::cell::inside(s + 1),
+        crate::geometry::cell::outside(s + 2),
+        crate::geometry::cell::inside(s + 3),
+        crate::geometry::cell::outside(s + 4),
+        crate::geometry::cell::inside(s + 5),
+    ]);
+    Shape { surfaces, inside }
+}
+
 /// Outward unit normals for the 6 sides of a regular hex centred at
 /// origin. Order is counter-clockwise starting at the smallest
 /// positive angle. Z is always 0.

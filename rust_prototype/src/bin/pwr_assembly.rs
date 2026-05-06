@@ -26,7 +26,7 @@ use clap::Parser;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::lattice::RectLattice;
-use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+use open_rust_mc::geometry::surface::BoundaryCondition;
 use open_rust_mc::geometry::universe::{Universe, UniverseId};
 use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
 use open_rust_mc::hdf5_reader;
@@ -157,60 +157,22 @@ fn setup_geometry(reflective_z: bool, shape: usize) -> Geometry {
         BoundaryCondition::Vacuum
     };
 
-    // Surfaces — 0..=2 in element-local frame, 3..=8 in world frame.
-    let surfaces = vec![
-        // 0: fuel outer cylinder — element-local center (pitch/2, pitch/2)
-        Surface::CylinderZ {
-            center_x: pin_center,
-            center_y: pin_center,
-            radius: FUEL_OR,
-            bc: BoundaryCondition::Transmission,
-        },
-        // 1: clad inner cylinder
-        Surface::CylinderZ {
-            center_x: pin_center,
-            center_y: pin_center,
-            radius: CLAD_IR,
-            bc: BoundaryCondition::Transmission,
-        },
-        // 2: clad outer cylinder
-        Surface::CylinderZ {
-            center_x: pin_center,
-            center_y: pin_center,
-            radius: CLAD_OR,
-            bc: BoundaryCondition::Transmission,
-        },
-        // 3: -X box plane (reflective)
-        Surface::PlaneX {
-            x0: -lat_half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 4: +X box plane
-        Surface::PlaneX {
-            x0: lat_half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 5: -Y box plane
-        Surface::PlaneY {
-            y0: -lat_half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 6: +Y box plane
-        Surface::PlaneY {
-            y0: lat_half,
-            bc: BoundaryCondition::Reflective,
-        },
-        // 7: -Z box plane
-        Surface::PlaneZ {
-            z0: -z_half,
-            bc: z_bc,
-        },
-        // 8: +Z box plane
-        Surface::PlaneZ {
-            z0: z_half,
-            bc: z_bc,
-        },
-    ];
+    // Cylinders (surfaces 0..=2) at element-local pin centre, plus
+    // the reflective xy / variable-z outer box (surfaces 3..=8).
+    // Cell regions referencing indices 0..=8 stay correct because the
+    // helpers preserve the original surface ordering.
+    let mut surfaces = open_rust_mc::geometry::shapes::pin_cylinders(
+        pin_center,
+        pin_center,
+        &[FUEL_OR, CLAD_IR, CLAD_OR],
+    );
+    let outer_box = open_rust_mc::geometry::shapes::rect_box_split_bc(
+        [lat_half, lat_half, z_half],
+        BoundaryCondition::Reflective,
+        z_bc,
+        surfaces.len(),
+    );
+    surfaces.extend(outer_box.surfaces);
 
     let cells = vec![
         // 0: fuel
@@ -231,36 +193,19 @@ fn setup_geometry(reflective_z: bool, shape: usize) -> Geometry {
         Cell::new(CellId(5), cell::between(1, 2), CellFill::Material(1)).with_temperature(600.0),
         // 6: GT outer water
         Cell::new(CellId(6), cell::outside(2), CellFill::Material(2)).with_temperature(600.0),
-        // 7: root cell — the entire assembly box, filled with the lattice
-        Cell::new(
-            CellId(7),
-            cell::intersect_all(vec![
-                cell::outside(3), // x > -lat_half
-                cell::inside(4),  // x < +lat_half
-                cell::outside(5), // y > -lat_half
-                cell::inside(6),  // y < +lat_half
-                cell::outside(7), // z > -z_half
-                cell::inside(8),  // z < +z_half
-            ]),
-            CellFill::Lattice(0),
-        )
-        .with_aabb(Aabb::new(
-            Vec3::new(-lat_half, -lat_half, -z_half),
-            Vec3::new(lat_half, lat_half, z_half),
-        )),
-        // 8: outside the assembly box
+        // 7: root cell — the entire assembly box, filled with the lattice.
+        // Region from `rect_box_split_bc.inside` covers all 6 box planes
+        // including the z bounds.
+        Cell::new(CellId(7), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
+            Aabb::new(
+                Vec3::new(-lat_half, -lat_half, -z_half),
+                Vec3::new(lat_half, lat_half, z_half),
+            ),
+        ),
+        // 8: outside the assembly box (complement of cell 7's region).
         Cell::new(
             CellId(8),
-            cell::Region::Union(
-                Box::new(cell::Region::Union(
-                    Box::new(cell::inside(3)),
-                    Box::new(cell::outside(4)),
-                )),
-                Box::new(cell::Region::Union(
-                    Box::new(cell::inside(5)),
-                    Box::new(cell::outside(6)),
-                )),
-            ),
+            cell::Region::Complement(Box::new(outer_box.inside)),
             CellFill::Void,
         ),
     ];
