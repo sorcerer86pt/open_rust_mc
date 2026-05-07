@@ -20,12 +20,17 @@
 //! `trace_step_recursive`, and the existing surface-BC handling. It does
 //! not touch the continuous-energy MC engine; both solvers are siblings.
 
+pub mod adjoint_svd;
 pub mod cadis;
 pub mod fsr;
 pub mod integrator;
 pub mod mgxs;
 pub mod solver;
 
+pub use adjoint_svd::{
+    AdjointReconError, AdjointRepr, AdjointSvd, PickerSpace, SpaceMode, compression_bytes,
+    pick_representation, recon_error,
+};
 pub use cadis::weight_window_from_adjoint;
 pub use fsr::FsrMesh;
 pub use mgxs::{MaterialMgxs, MgxsLibrary, ScatterMatrix};

@@ -1,0 +1,21 @@
+rr_adjoint_svd — Phase 1 (Evans 2020) SVD on adjoint flux
+thickness=100.0 cm  half_xy=50.0 cm  σ_t=0.0707 cm⁻¹
+=== Regime 1 — REAL slab adjoint, [10×10×25] = 2500 voxels ===
+Random-ray adjoint solve: 0.34s wall time
+Reshape: [n_x*n_y, n_z] = [100 × 25]
+
+[regime1_real_slab] Dense: 100×25 = 2500 entries, 20000 bytes (19.53 KB)
+rank   factor bytes          ratio  compress    max_rel_err   frob_rel_err
+   1           1008         19.841     95.0%        5.803e2       2.784e-1
+   2           2016          9.921     89.9%        1.546e1       8.517e-2
+   3           3024          6.614     84.9%        2.498e1       5.066e-2
+   4           4032          4.960     79.8%        2.441e1       4.221e-2
+   5           5040          3.968     74.8%        1.764e1       3.781e-2
+
+=== Regime 3 — REAL multigroup pin-cell adjoint ===
+Pin-cell adjoint solved: 100 FSRs × 2 groups (k_eff=0.70056)
+
+[regime3_pincell] Dense: 100×2 = 200 entries, 1600 bytes (1.56 KB)
+rank   factor bytes          ratio  compress    max_rel_err   frob_rel_err
+   1            824          1.942     48.5%       1.285e-1       5.429e-2
+   2           1648          0.971     -3.0%      2.124e-15      2.159e-16

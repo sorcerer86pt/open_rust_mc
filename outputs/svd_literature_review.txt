@@ -1,0 +1,172 @@
+SVD literature review — gaps relative to current codebase, 2026-05-08
+=========================================================================
+
+Survey of recent (2020–2026) SVD / low-rank / model-order-reduction
+literature for nuclear cross sections and Monte Carlo variance
+reduction, scoped against what's in tree.
+
+Three notable gaps. Actionable items at the end.
+
+
+# Items found
+
+## (1) SVD on adjoint flux for WW compression
+
+  Evans et al., "Singular value decomposition of adjoint flux
+  distributions for Monte Carlo variance reduction",
+  Ann. Nucl. Energy 2020.
+    https://www.sciencedirect.com/science/article/abs/pii/S0306454920300256
+    https://www.ornl.gov/publication/singular-value-decomposition-adjoint-flux-distributions-monte-carlo-variance-reduction
+
+  Apply SVD (linear or log space) to a deterministic adjoint flux
+  distribution; store SVD factors instead of dense ψ*. Reported up
+  to ~10× memory reduction for the WW arrays without significant
+  hit to MC tally convergence. Tested on AP1000 streaming and JET
+  fusion using Shift + Denovo.
+
+  Relevance: applies to the random-ray adjoint we just shipped. Our
+  outputs/cadis_water_*.json files store ψ*(z) dense (1×1×n_z).
+  Scaled to a 3D AP1000-style mesh the array becomes huge. SVD
+  machinery is already in tree (kernel.rs, decompose.rs); only used
+  for cross-section reconstruction today. Direct extension.
+
+
+## (2) ML-based pointwise XS reduction (competitor to SVD-XS)
+
+  Hashemi, Macián-Juan, Ohlerich, Sci. Rep. 2026.
+    https://www.nature.com/articles/s41598-026-35227-9
+  Companion: Hashemi et al., "Adaptive resampling algorithm for
+  nuclear data processing", Sci. Rep. 15, 32573 (2025).
+    https://pmc.ncbi.nlm.nih.gov/articles/PMC12796490/
+
+  Modifies OpenMC's HDF5 nuclear data files; retains 10–50% of the
+  pointwise grid for 23 nuclides while preserving thresholds and
+  resonance structure. Reported on EPR full core (wall time −18%)
+  and VVER-1000 (wall time −42%, ΔK_eff < 100 pcm, U-235 fission
+  rate error < 0.002%).
+
+  Relevance: direct competitor to SVD-XS for the same use case.
+  Ratio comparable to ours (their wall-time-down × memory-down)
+  appears to beat our PWR pin-cell SVD result (0.95× wall time at
+  5× memory).
+
+
+## (3) DCT-DB — discrete-cosine-transform Doppler broadening
+
+  No primary citation surfaced; mentioned in survey searches.
+  Reformulates Doppler broadening as a heat-equation solve;
+  pre-computes DCT coefficients of σ(E,T). Reported scaling: 512
+  nuclides over 200–3000 K from ENDF/B-VIII.0.
+
+  Relevance: targets the same multi-temperature regime where we
+  claim SVD wins on memory (paper §memprec, [godiva-off-library]
+  1.35× and [pwr-off-library] 1.32× memory advantage). DCT-DB is a
+  different transform attacking the same problem. Head-to-head
+  benchmark would either confirm SVD's off-library edge or
+  eliminate it.
+
+
+## (4) Tensor-train decomposition
+
+  "Effective algorithms for tensor-train decomposition via the UTV
+  framework", arXiv 2501.07904 (2025).
+    https://arxiv.org/html/2501.07904v2
+
+  TT-SVD constructs the TT format via successive matrix SVDs.
+  Compresses high-order tensors by exploiting joint structure
+  across modes.
+
+  Relevance: cross sections form a 4-tensor Σ(E, T, nuclide, reaction).
+  Our 2D SVD compresses (E, T) per (nuclide, reaction) pair
+  independently. The project's earlier [micro] cross-isotope finding
+  (subspace angle > 85° between U-235/238/Pu-239) discouraged
+  shared-basis approaches, but that was per-pair 2D SVD, not joint
+  TT. TT-SVD doesn't require shared basis — it captures the joint
+  structure adaptively. Re-checking is cheap.
+
+
+# Other recent work surveyed (not strongly competitive)
+
+  - ANN-POD for N-TH coupling, Sci. Tech. Nucl. Inst. 2023.
+    https://onlinelibrary.wiley.com/doi/10.1155/2023/9385756
+    POD on solution fields, not XS data.
+
+  - POD-RB for radiation transport, OSTI 2024.
+    https://www.osti.gov/servlets/purl/2418284
+    Parametric ROM for transport equation; orthogonal axis to XS
+    compression.
+
+  - Functional-form thermal XS approximation, Ann. Nucl. Energy 2021.
+    https://www.sciencedirect.com/science/article/abs/pii/S0306454921006964
+    Parametric thermal-region fits; narrower scope than SVD.
+
+  - Windowed multipole, Josey/Ducru/Forget/Smith, J. Comput. Phys. 2016.
+    Already in tree as the WMP backend (`wmp.rs`).
+
+  - POD reduced order model for resolving angular direction,
+    J. Comput. Phys. 2015.
+    https://www.sciencedirect.com/science/article/abs/pii/S0021999115003009
+    Angular-direction reduction — different axis than our XS work.
+
+
+# Actionable opportunities
+
+  Three items, ordered by effort × payoff:
+
+  (A) SVD-compress the random-ray adjoint output (Evans 2020 method).
+      Effort:  low. Apply existing kernel::SvdKernel to the 3D voxel
+               ψ*(r,g) array in random_ray::cadis. Save SVD factors
+               instead of dense flux.
+      Payoff:  5–10× shrink in WW JSON files; matters for AP1000
+               and fusion-shielding scale.
+      Risk:    log-space variant needed at low-φ voxels; Evans
+               documents this.
+
+  (B) DCT-DB as alternative XS backend for off-library temperatures.
+      Effort:  medium-high. New Doppler-broadening kernel comparable
+               in scope to wmp.rs. Likely needs a Python tool to
+               pre-compute DCT coefficients from ENDF.
+      Payoff:  unclear. Either confirms SVD's off-library memory
+               edge or eliminates it. Publishable either way.
+      Risk:    implementation effort dwarfs per-result novelty.
+
+  (C) Tensor-train (E × T × reaction) decomposition for cross-isotope
+      structure.
+      Effort:  medium. TT-SVD via successive SVDs is mechanically
+               straightforward.
+      Payoff:  speculative. May confirm the negative result with a
+               stronger method.
+      Risk:    likely no compression gain; cross-isotope angle was
+               already large in 2D.
+
+
+# Recommendation
+
+  (A) is the obvious next step:
+    - directly extends what just shipped this round
+    - published method to follow
+    - SVD machinery already in tree
+    - ~1–2 day implementation + benchmark on existing 100/200 cm
+      shield_slab geometries
+
+  (B) is highest-stakes follow-on. SVD's off-library memory advantage
+  is the only deployment regime where SVD wins cleanly today. If
+  DCT-DB matches or beats it there, the case for SVD-XS shrinks
+  significantly. Worth doing eventually, after (A).
+
+  (C) is exploratory; lowest priority. Re-checks a finding that the
+  existing 2D-SVD analysis already established with a stronger
+  method. Negative result likely.
+
+
+# Citation summary
+
+  Most directly relevant: Evans 2020 (item A) and Hashemi 2025-2026
+  (item 2 — competing approach we don't have a response to).
+
+  Codebase already aligned with: WMP (Josey 2016) and POD/ROM
+  literature on the solution side.
+
+  Codebase missing: SVD-on-adjoint-flux for WW compression (A);
+  non-SVD transforms for off-library Doppler (B); higher-order
+  tensor decompositions (C).
