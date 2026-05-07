@@ -52,16 +52,19 @@ in the CDF to sample the level. The $13$--$41$-deep walk vanishes.
 On a small-L3 RTX A$1000$, three seeds $\times$ $60$ batches
 $\times$ $50\,000$ particles, $\mathtt{-{}-force\text{-}svd}$:
 
-\begin{tabular}{lrr}
+\noindent\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}l@{\hspace{6pt}}r@{\hspace{6pt}}r@{}}
 \toprule
 provider & ns/p & $k_\infty$ \\
 \midrule
-GPU pointwise (reference)   & $19\,664 \pm 30$ & $1.32758 \pm 0.00063$ \\
-GPU SVD pre-synth, cache off & $23\,508 \pm 58$ & $1.32759 \pm 0.00083$ \\
-GPU SVD synth-only          & $19\,848 \pm 31$ & $1.32776 \pm 0.00083$ \\
-GPU SVD synth $+$ CDF       & $19\,473 \pm 15$ & $1.32774 \pm 0.00043$ \\
+GPU pointwise (ref.) & $19\,664(30)$ & $1.32758(63)$ \\
+GPU SVD pre-synth    & $23\,508(58)$ & $1.32759(83)$ \\
+GPU SVD synth-only   & $19\,848(31)$ & $1.32776(83)$ \\
+GPU SVD synth$+$CDF  & $19\,473(15)$ & $1.32774(43)$ \\
 \bottomrule
-\end{tabular}
+\end{tabular}}
+
+\noindent{\footnotesize Numbers in parentheses are 1-$\sigma$ on the last digits.}
 
 \noindent
 Original ratio $1.30\times$ slower
