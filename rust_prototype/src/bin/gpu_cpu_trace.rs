@@ -136,10 +136,7 @@ mod cuda_main {
             .with_temperature(600.0),
             Cell::new(
                 CellId(3),
-                cell::Region::Intersection(
-                    Box::new(cell::outside(2)),
-                    Box::new(outer_box.inside),
-                ),
+                cell::Region::Intersection(Box::new(cell::outside(2)), Box::new(outer_box.inside)),
                 CellFill::Material(2),
             )
             .with_aabb(box_aabb)

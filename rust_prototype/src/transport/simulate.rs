@@ -97,8 +97,7 @@ pub struct SimConfig {
     /// each `xs_kernel_idx` flagged on `UrrEquivalence::absorber_xs_idx`,
     /// using the cell-local Dancoff factor. When `None`, the URR
     /// path is infinite-medium-only (current default).
-    pub urr_equivalence:
-        Option<crate::transport::urr_equivalence::UrrEquivalence>,
+    pub urr_equivalence: Option<crate::transport::urr_equivalence::UrrEquivalence>,
 }
 
 /// Implicit-capture + Russian-roulette settings.
@@ -927,8 +926,11 @@ fn transport_particle<XS: XsProvider>(
             // outside the URR window.
             if let Some(eq) = urr_equivalence {
                 let dancoff = eq.dancoff.get(particle.cell_idx);
-                let mean_chord =
-                    eq.mean_chord_cm.get(particle.cell_idx).copied().unwrap_or(0.0);
+                let mean_chord = eq
+                    .mean_chord_cm
+                    .get(particle.cell_idx)
+                    .copied()
+                    .unwrap_or(0.0);
                 if dancoff < 1.0 && mean_chord > 0.0 {
                     apply_urr_equivalence_correction(
                         eq,
@@ -956,8 +958,7 @@ fn transport_particle<XS: XsProvider>(
             // looked up, so no extra XS evaluation.
             let mut macro_nu_sigma_f = 0.0_f64;
             for (i, nuc) in material.nuclides.iter().enumerate() {
-                macro_nu_sigma_f +=
-                    nuc.atom_density * micro_xs[i].nu_bar * micro_xs[i].fission;
+                macro_nu_sigma_f += nuc.atom_density * micro_xs[i].nu_bar * micro_xs[i].fission;
             }
 
             let dist_collision = rng.exponential(macro_total);
@@ -977,8 +978,7 @@ fn transport_particle<XS: XsProvider>(
                 _ => dist_collision,
             };
             if macro_nu_sigma_f > 0.0 {
-                result.track_length_nu_sigf +=
-                    particle.weight * advance_dist * macro_nu_sigma_f;
+                result.track_length_nu_sigf += particle.weight * advance_dist * macro_nu_sigma_f;
             }
             // Mesh flux tally: deposit w · d into every voxel the
             // segment intersects. Skipped when the tally is disabled.
@@ -1026,10 +1026,8 @@ fn transport_particle<XS: XsProvider>(
                             particle.advance(hit.distance + (hit.distance * 1e-8).max(1e-8));
                             match hit.next_stack {
                                 Some(stack) => {
-                                    particle.cell_idx = stack
-                                        .last()
-                                        .map(|c| c.cell_idx as usize)
-                                        .unwrap_or(0);
+                                    particle.cell_idx =
+                                        stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
                                     particle.coord_stack = stack;
                                 }
                                 None => {
@@ -1205,12 +1203,7 @@ fn transport_particle<XS: XsProvider>(
             // bounds and either splits, rouletes, or leaves the
             // particle alone.
             if let Some(ww) = weight_window {
-                crate::transport::weight_window::apply(
-                    &mut particle,
-                    ww,
-                    &mut rng,
-                    &mut pending,
-                );
+                crate::transport::weight_window::apply(&mut particle, ww, &mut rng, &mut pending);
             }
         }
 
@@ -1557,10 +1550,8 @@ fn transport_particle_delta<XS: XsProvider>(
                             particle.advance(d_collision);
                             match geometry::ray::find_cell_recursive(particle.pos, geometry) {
                                 Some(stack) => {
-                                    particle.cell_idx = stack
-                                        .last()
-                                        .map(|c| c.cell_idx as usize)
-                                        .unwrap_or(0);
+                                    particle.cell_idx =
+                                        stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
                                     particle.coord_stack = stack;
                                 }
                                 None => {
@@ -1678,8 +1669,11 @@ fn transport_particle_delta<XS: XsProvider>(
             // applied before that test.
             if let Some(eq) = urr_equivalence {
                 let dancoff = eq.dancoff.get(particle.cell_idx);
-                let mean_chord =
-                    eq.mean_chord_cm.get(particle.cell_idx).copied().unwrap_or(0.0);
+                let mean_chord = eq
+                    .mean_chord_cm
+                    .get(particle.cell_idx)
+                    .copied()
+                    .unwrap_or(0.0);
                 if dancoff < 1.0 && mean_chord > 0.0 {
                     apply_urr_equivalence_correction(
                         eq,
@@ -1758,12 +1752,7 @@ fn transport_particle_delta<XS: XsProvider>(
             // Weight-window splitting / roulette at the new position.
             // Inside the inner while loop so it fires per step.
             if let Some(ww) = weight_window {
-                crate::transport::weight_window::apply(
-                    &mut particle,
-                    ww,
-                    &mut rng,
-                    &mut pending,
-                );
+                crate::transport::weight_window::apply(&mut particle, ww, &mut rng, &mut pending);
             }
         }
 
@@ -1796,8 +1785,8 @@ pub fn run_eigenvalue<XS: XsProvider>(
     // Wrap the flat surfaces+cells in a single-universe Geometry, then
     // delegate to the geometry-aware variant. Existing binaries that
     // pass slices keep working unchanged.
-    let geometry = crate::geometry::Geometry::from_slices(surfaces, cells)
-        .expect("geometry must validate");
+    let geometry =
+        crate::geometry::Geometry::from_slices(surfaces, cells).expect("geometry must validate");
     run_eigenvalue_with_geometry(config, &geometry, materials, xs_provider)
 }
 
@@ -2124,9 +2113,9 @@ fn initial_source(
             // OR any Material cell (nested case where the leaf is inside
             // a universe/lattice fill).
             let accept = match cells.get(deepest).map(|c| c.fill) {
-                Some(CellFill::Material(_)) => Some(deepest) == target_idx
-                    || target_idx.is_none()
-                    || stack.len() > 1,
+                Some(CellFill::Material(_)) => {
+                    Some(deepest) == target_idx || target_idx.is_none() || stack.len() > 1
+                }
                 _ => false,
             };
             if accept {
@@ -2495,7 +2484,7 @@ mod tests {
                     fission: 2.0,
                     capture: 0.1,
                     nu_bar: 2.43,
-                delayed_nu_bar: 0.0,
+                    delayed_nu_bar: 0.0,
                     awr: 235.0,
                 },
                 MicroXs {
@@ -2507,7 +2496,7 @@ mod tests {
                     fission: 0.0,
                     capture: 4.0,
                     nu_bar: 0.0,
-                delayed_nu_bar: 0.0,
+                    delayed_nu_bar: 0.0,
                     awr: 91.0,
                 },
             ],
@@ -2623,7 +2612,7 @@ mod tests {
                     fission: 5.0,
                     capture: 5.0,
                     nu_bar: 2.43,
-                delayed_nu_bar: 0.0,
+                    delayed_nu_bar: 0.0,
                     awr: 235.0,
                 },
                 MicroXs {
@@ -2635,7 +2624,7 @@ mod tests {
                     fission: 0.0,
                     capture: 0.1,
                     nu_bar: 0.0,
-                delayed_nu_bar: 0.0,
+                    delayed_nu_bar: 0.0,
                     awr: 56.0,
                 },
             ],

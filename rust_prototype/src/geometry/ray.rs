@@ -742,12 +742,12 @@ mod tests {
             assert_eq!(stack[0].cell_idx, 4, "({x},{y}) parent");
             assert_eq!(stack[1].cell_idx, deep_cell, "({x},{y}) deepest cell");
             let (_, idxs) = stack[1].lattice.expect("({x},{y}) should be in a lattice");
+            assert_eq!([idxs[0], idxs[1]], lattice_xy, "({x},{y}) lattice element");
             assert_eq!(
-                [idxs[0], idxs[1]],
-                lattice_xy,
-                "({x},{y}) lattice element"
+                stack.material_idx(cells_ref),
+                Some(mat),
+                "({x},{y}) material"
             );
-            assert_eq!(stack.material_idx(cells_ref), Some(mat), "({x},{y}) material");
         };
 
         // Element (0,0): A pin centered at world (-0.5, -0.5).
@@ -839,8 +839,8 @@ mod tests {
             universes: vec![UniverseId(1); 4],
             material_overrides: None,
         }];
-        let geom = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
-            .expect("geometry");
+        let geom =
+            Geometry::new(surfaces, cells, universes, lattices, UniverseId(0)).expect("geometry");
 
         // Start at world (-0.9, -0.9, 0): element-local (0.1, 0.1).
         // Cylinder at (0.5, 0.5) R=0.3; ray heading +x at y=0.1 misses
@@ -953,8 +953,14 @@ mod tests {
                 Universe::new(UniverseId(0), vec![2, 3]),
                 Universe::new(UniverseId(1), vec![0, 1]),
             ];
-            Geometry::new(surfaces.clone(), cells, universes, Vec::new(), UniverseId(0))
-                .expect("geometry")
+            Geometry::new(
+                surfaces.clone(),
+                cells,
+                universes,
+                Vec::new(),
+                UniverseId(0),
+            )
+            .expect("geometry")
         };
 
         // Without rotation: (1, 0, 0) → pin-local (1, 0, 0) → fuel.
@@ -1064,8 +1070,8 @@ mod tests {
             universes: vec![UniverseId(1); 4],
             material_overrides: None,
         }];
-        let geom = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
-            .expect("geometry");
+        let geom =
+            Geometry::new(surfaces, cells, universes, lattices, UniverseId(0)).expect("geometry");
 
         let pos0 = Vec3::new(-0.5, -0.5, 0.0); // element (0,0) center → cylinder center → fuel
         let dir = Vec3::new(1.0, 0.0, 0.0);

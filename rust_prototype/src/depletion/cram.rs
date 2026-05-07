@@ -327,12 +327,7 @@ mod tests {
         // Row-major A (size 2), with row i giving the rate of dN_i/dt:
         //   dN_A/dt = -λ_A · N_A
         //   dN_B/dt = +λ_A · N_A − λ_B · N_B
-        let a = vec![
-            -lambda_a * dt,
-            0.0,
-            lambda_a * dt,
-            -lambda_b * dt,
-        ];
+        let a = vec![-lambda_a * dt, 0.0, lambda_a * dt, -lambda_b * dt];
         let n0 = vec![1.0_f64, 0.0_f64];
         let n_t = cram16(&a, &n0);
 
@@ -341,8 +336,8 @@ mod tests {
         //   N_B(t) = λ_A / (λ_B − λ_A) · (e^{-λ_A t} − e^{-λ_B t}).
         // Both numerator and denominator flip sign together when
         // λ_A and λ_B are reversed, so the expression is symmetric.
-        let n_b_expected = lambda_a / (lambda_b - lambda_a)
-            * ((-lambda_a * dt).exp() - (-lambda_b * dt).exp());
+        let n_b_expected =
+            lambda_a / (lambda_b - lambda_a) * ((-lambda_a * dt).exp() - (-lambda_b * dt).exp());
 
         assert!(
             (n_t[0] - n_a_expected).abs() < 1e-12,

@@ -29,13 +29,17 @@ use std::collections::HashMap;
 use clap::Parser;
 
 use open_rust_mc::depletion::{
-    chain::{u235_thermal_iodine_xenon_yields, DecayBranch, DepletionChain, NuclideEntry},
+    DepletionStep,
+    chain::{DecayBranch, DepletionChain, NuclideEntry, u235_thermal_iodine_xenon_yields},
     cram::CramOrder,
-    deplete_ce_li, DepletionStep,
+    deplete_ce_li,
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "deplete_demo", about = "Xe-135 equilibrium poisoning via CRAM-16")]
+#[command(
+    name = "deplete_demo",
+    about = "Xe-135 equilibrium poisoning via CRAM-16"
+)]
 struct Args {
     /// Thermal-region flux (n / cm² / s). PWR core average ≈ 3e14.
     #[arg(long, default_value_t = 3.0e14)]
@@ -124,7 +128,12 @@ fn build_chain() -> DepletionChain {
     });
 
     // U-235 thermal fission yields → I-135 (cumulative) + Xe-135 (independent).
-    chain.add_reaction(U235, 18, U235_SIGMA_F_BARN, Some(u235_thermal_iodine_xenon_yields()));
+    chain.add_reaction(
+        U235,
+        18,
+        U235_SIGMA_F_BARN,
+        Some(u235_thermal_iodine_xenon_yields()),
+    );
     // Xe-135 (n,γ) → Xe-136 (untracked — out of chain).
     chain.add_reaction(XE135, 102, XE135_SIGMA_C_BARN, Some(HashMap::new()));
 
@@ -173,12 +182,8 @@ fn main() {
         args.flux,
     );
     println!();
-    println!(
-        "  step    t [h]      N_U235        N_I-135       N_Xe-135      N_Cs-135"
-    );
-    println!(
-        "  ----  --------  ------------  ------------  ------------  ------------"
-    );
+    println!("  step    t [h]      N_U235        N_I-135       N_Xe-135      N_Cs-135");
+    println!("  ----  --------  ------------  ------------  ------------  ------------");
     let order: CramOrder = args.cram_order.into();
     for step in 0..args.steps {
         let result: DepletionStep =

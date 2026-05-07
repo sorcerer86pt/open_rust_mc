@@ -40,7 +40,9 @@ pub enum GeometryError {
         universe: u32,
         n_universes: usize,
     },
-    #[error("region in cell {cell} references surface index {surface} but only {n_surfaces} surfaces exist")]
+    #[error(
+        "region in cell {cell} references surface index {surface} but only {n_surfaces} surfaces exist"
+    )]
     SurfaceIndexOutOfRange {
         cell: usize,
         surface: usize,
@@ -301,10 +303,7 @@ impl Geometry {
     /// `None` for `Void` cells. Falls through to the static fill
     /// when the deepest stack frame isn't inside a lattice or when
     /// the lattice has no override for this cell.
-    pub fn effective_material_idx(
-        &self,
-        stack: &super::coord::CoordStack,
-    ) -> EffectiveFill {
+    pub fn effective_material_idx(&self, stack: &super::coord::CoordStack) -> EffectiveFill {
         let Some(deepest) = stack.last() else {
             return EffectiveFill::Void;
         };
@@ -339,9 +338,9 @@ pub enum EffectiveFill {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::Vec3;
     use crate::geometry::cell::{self, CellId};
     use crate::geometry::surface::BoundaryCondition;
-    use crate::geometry::Vec3;
 
     fn godiva_surfaces_and_cells() -> (Vec<Surface>, Vec<Cell>) {
         let surfaces = vec![Surface::Sphere {
@@ -380,13 +379,7 @@ mod tests {
         let universes = vec![Universe::new(UniverseId(0), vec![0, 1, 99])];
         let err = Geometry::new(surfaces, cells, universes, Vec::new(), UniverseId(0))
             .expect_err("should reject");
-        matches!(
-            err,
-            GeometryError::CellIndexOutOfRange {
-                cell: 99,
-                ..
-            }
-        );
+        matches!(err, GeometryError::CellIndexOutOfRange { cell: 99, .. });
     }
 
     #[test]
@@ -517,22 +510,11 @@ mod tests {
             pitch: Vec3::new(1.0, 1.0, 2e6),
             shape: [2, 2, 1],
             universes: vec![UniverseId(1); 4],
-            material_overrides: Some(vec![
-                e00,
-                HashMap::new(),
-                HashMap::new(),
-                e11,
-            ]),
+            material_overrides: Some(vec![e00, HashMap::new(), HashMap::new(), e11]),
         };
 
-        let geom = Geometry::new(
-            surfaces,
-            cells,
-            universes,
-            vec![lattice],
-            UniverseId(0),
-        )
-        .expect("geometry");
+        let geom = Geometry::new(surfaces, cells, universes, vec![lattice], UniverseId(0))
+            .expect("geometry");
 
         let lookup_at = |element: [i32; 3], cell_idx: u32| -> EffectiveFill {
             use crate::geometry::Coord;
@@ -590,12 +572,7 @@ mod tests {
             origin: Vec3::new(0.0, 0.0, 0.0),
             pitch: Vec3::new(1.0, 1.0, 1.0),
             shape: [2, 2, 1],
-            universes: vec![
-                UniverseId(0),
-                UniverseId(0),
-                UniverseId(0),
-                UniverseId(99),
-            ],
+            universes: vec![UniverseId(0), UniverseId(0), UniverseId(0), UniverseId(99)],
             material_overrides: None,
         }];
         let err = Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))

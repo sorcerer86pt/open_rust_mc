@@ -758,7 +758,13 @@ fn synthesize_inelastic_mt4(
     }
 
     // Build the synthesized SVD kernel.
-    let kernel = build_kernel_from_data(&summed, svd_rank, temp_idx, shared_grid, &reader.temperatures)?;
+    let kernel = build_kernel_from_data(
+        &summed,
+        svd_rank,
+        temp_idx,
+        shared_grid,
+        &reader.temperatures,
+    )?;
 
     // Build the CDF tensor F_l(E, T) on a log-decimated energy grid.
     // F_ℓ is smooth in E (resonance peaks cancel in the σ_ℓ/Σσ ratio),
@@ -814,7 +820,11 @@ fn synthesize_inelastic_mt4(
             }
         }
         let span = union[hi] - union[lo];
-        let alpha = if span > 0.0 { (e - union[lo]) / span } else { 0.0 };
+        let alpha = if span > 0.0 {
+            (e - union[lo]) / span
+        } else {
+            0.0
+        };
         (lo, alpha)
     };
 
@@ -1138,8 +1148,7 @@ pub fn load_nuclide_with_policy(
                 // GPU-deployable. Synthesis alone closes the gap to
                 // ~1.0094× of GPU pointwise on PWR (small-L3, RTX A1000),
                 // so the CDF is currently optional.
-                let level_mts: Vec<u32> =
-                    discrete_levels.iter().map(|l| l.info.mt).collect();
+                let level_mts: Vec<u32> = discrete_levels.iter().map(|l| l.info.mt).collect();
                 // load_nuclide_with_policy is the on-library entry
                 // point — pass the library temperature for the
                 // chosen `temp_idx` as the Ducru target so the
@@ -2154,8 +2163,7 @@ pub fn load_nuclide_at_temp(
         .map(|xs| PointwiseTable::from_shared_grid(Arc::clone(&shared_grid), xs.clone()));
 
     let elastic = build_kernel_at_temp(&reader, 2, svd_rank, target_temp, &shared_grid);
-    let native_inelastic =
-        build_kernel_at_temp(&reader, 4, svd_rank, target_temp, &shared_grid);
+    let native_inelastic = build_kernel_at_temp(&reader, 4, svd_rank, target_temp, &shared_grid);
     let (inelastic, inelastic_cdf): (Option<ReactionKernel>, Option<InelasticCdf>) =
         match native_inelastic {
             Some(k) => (Some(k), None),
@@ -2164,8 +2172,7 @@ pub fn load_nuclide_at_temp(
                 // synth path mirrors the on-library version but the
                 // 3-point unity weights now do real work (target_temp
                 // sits between library columns).
-                let level_mts: Vec<u32> =
-                    discrete_levels.iter().map(|l| l.info.mt).collect();
+                let level_mts: Vec<u32> = discrete_levels.iter().map(|l| l.info.mt).collect();
                 match synthesize_inelastic_mt4(
                     &reader,
                     &level_mts,
@@ -2543,10 +2550,7 @@ mod tests {
     fn make_inv_sqrt_kernel(grid: Vec<f64>, k: f64) -> ReactionKernel {
         let n_e = grid.len();
         // σ(E) = k / √E  ⇒  log10(σ) = log10(k) − 0.5·log10(E)
-        let log_sigma: Vec<f64> = grid
-            .iter()
-            .map(|&e| k.log10() - 0.5 * e.log10())
-            .collect();
+        let log_sigma: Vec<f64> = grid.iter().map(|&e| k.log10() - 0.5 * e.log10()).collect();
 
         // n_t = 1, rank = 1: single column, basis stores `log10(σ)`
         // directly with the trivial Vᵀ = [1.0]. This bypasses the
@@ -2677,7 +2681,8 @@ mod tests {
             let e_mid = (w[0] * w[1]).sqrt();
             let idx = rxn.kernel.energy_index(e_mid);
             assert_eq!(
-                idx, i,
+                idx,
+                i,
                 "energy {e_mid} between grid[{i}]={} and grid[{}]={} should resolve \
                  to lower-bracket idx {i}, got {idx}",
                 w[0],

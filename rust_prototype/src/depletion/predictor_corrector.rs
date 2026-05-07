@@ -21,8 +21,8 @@
 //! changes most isotopics by 1 to 5 %.
 
 use crate::depletion::chain::DepletionChain;
-use crate::depletion::cram::{cram, CramOrder};
-use crate::depletion::matrix::{build_transmutation_matrix, TransmutationInputs};
+use crate::depletion::cram::{CramOrder, cram};
+use crate::depletion::matrix::{TransmutationInputs, build_transmutation_matrix};
 
 /// The result of one predictor-corrector step. `predicted` is the
 /// CE estimate (cheap, single matrix solve); `corrected` is the
@@ -66,7 +66,10 @@ where
 
     // Predictor: A₀ · Δt, then CRAM.
     let a0 = build_transmutation_matrix(
-        &TransmutationInputs { chain, flux: flux_boc },
+        &TransmutationInputs {
+            chain,
+            flux: flux_boc,
+        },
         dt_seconds,
     );
     let predicted = cram(order, &a0, n0);
@@ -80,10 +83,17 @@ where
     // are linear in flux (which they are here) — but we keep the
     // explicit average so non-linear extensions slot in cleanly.
     let a_eoc = build_transmutation_matrix(
-        &TransmutationInputs { chain, flux: flux_eoc },
+        &TransmutationInputs {
+            chain,
+            flux: flux_eoc,
+        },
         dt_seconds,
     );
-    let avg: Vec<f64> = a0.iter().zip(a_eoc.iter()).map(|(a, b)| 0.5 * (a + b)).collect();
+    let avg: Vec<f64> = a0
+        .iter()
+        .zip(a_eoc.iter())
+        .map(|(a, b)| 0.5 * (a + b))
+        .collect();
     let corrected = cram(order, &avg, n0);
 
     DepletionStep {
@@ -139,21 +149,33 @@ mod tests {
             zaid: 999_999,
             decay_constant: lambda_s,
             decay_branches: vec![
-                DecayBranch { daughter_zaid: 53135, branch_ratio: frac_i },
-                DecayBranch { daughter_zaid: 54135, branch_ratio: frac_xe },
+                DecayBranch {
+                    daughter_zaid: 53135,
+                    branch_ratio: frac_i,
+                },
+                DecayBranch {
+                    daughter_zaid: 54135,
+                    branch_ratio: frac_xe,
+                },
             ],
         });
         chain.add_nuclide(NuclideEntry {
             name: "I-135".into(),
             zaid: 53135,
             decay_constant: lambda_i,
-            decay_branches: vec![DecayBranch { daughter_zaid: 54135, branch_ratio: 1.0 }],
+            decay_branches: vec![DecayBranch {
+                daughter_zaid: 54135,
+                branch_ratio: 1.0,
+            }],
         });
         chain.add_nuclide(NuclideEntry {
             name: "Xe-135".into(),
             zaid: 54135,
             decay_constant: lambda_xe,
-            decay_branches: vec![DecayBranch { daughter_zaid: 55135, branch_ratio: 1.0 }],
+            decay_branches: vec![DecayBranch {
+                daughter_zaid: 55135,
+                branch_ratio: 1.0,
+            }],
         });
         chain.add_nuclide(NuclideEntry {
             name: "Cs-135".into(),

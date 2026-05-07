@@ -20,9 +20,7 @@
 #[cfg(not(feature = "cuda"))]
 fn main() {
     eprintln!("ERROR: this binary requires the 'cuda' feature.");
-    eprintln!(
-        "Build with: cargo run --release --features cuda --bin gpu_assembly_keff -- ..."
-    );
+    eprintln!("Build with: cargo run --release --features cuda --bin gpu_assembly_keff -- ...");
     std::process::exit(1);
 }
 
@@ -105,13 +103,31 @@ mod cuda_main {
     fn westinghouse_layout() -> [[bool; SHAPE]; SHAPE] {
         let mut l = [[false; SHAPE]; SHAPE];
         let positions: &[(usize, usize)] = &[
-            (2, 5), (2, 8), (2, 11),
-            (3, 3), (3, 13),
-            (5, 2), (5, 5), (5, 8), (5, 11), (5, 14),
-            (8, 2), (8, 5), (8, 8), (8, 11), (8, 14),
-            (11, 2), (11, 5), (11, 8), (11, 11), (11, 14),
-            (13, 3), (13, 13),
-            (14, 5), (14, 8), (14, 11),
+            (2, 5),
+            (2, 8),
+            (2, 11),
+            (3, 3),
+            (3, 13),
+            (5, 2),
+            (5, 5),
+            (5, 8),
+            (5, 11),
+            (5, 14),
+            (8, 2),
+            (8, 5),
+            (8, 8),
+            (8, 11),
+            (8, 14),
+            (11, 2),
+            (11, 5),
+            (11, 8),
+            (11, 11),
+            (11, 14),
+            (13, 3),
+            (13, 13),
+            (14, 5),
+            (14, 8),
+            (14, 11),
         ];
         for &(r, c) in positions {
             l[r][c] = true;
@@ -149,10 +165,12 @@ mod cuda_main {
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_temperature(900.0),
             Cell::new(CellId(1), cell::between(0, 1), CellFill::Void),
-            Cell::new(CellId(2), cell::between(1, 2), CellFill::Material(1)).with_temperature(600.0),
+            Cell::new(CellId(2), cell::between(1, 2), CellFill::Material(1))
+                .with_temperature(600.0),
             Cell::new(CellId(3), cell::outside(2), CellFill::Material(2)).with_temperature(600.0),
             Cell::new(CellId(4), cell::inside(1), CellFill::Material(2)).with_temperature(600.0),
-            Cell::new(CellId(5), cell::between(1, 2), CellFill::Material(1)).with_temperature(600.0),
+            Cell::new(CellId(5), cell::between(1, 2), CellFill::Material(1))
+                .with_temperature(600.0),
             Cell::new(CellId(6), cell::outside(2), CellFill::Material(2)).with_temperature(600.0),
             Cell::new(CellId(7), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
                 Aabb::new(
@@ -257,9 +275,7 @@ mod cuda_main {
 
         println!("=== GPU 17×17 PWR assembly k_inf — recursive geometry ===");
         println!("  data dir   : {}", args.data_dir.display());
-        println!(
-            "  geometry   : depth-3 Westinghouse 17x17 (264 fuel + 24 GT + 1 IT)"
-        );
+        println!("  geometry   : depth-3 Westinghouse 17x17 (264 fuel + 24 GT + 1 IT)");
         println!("  particles  : {}/batch", args.particles);
         println!(
             "  batches    : {} ({} inactive + {} active)",
@@ -332,8 +348,8 @@ mod cuda_main {
             geom.universes.len(),
             geom.lattices.len()
         );
-        let rec = GpuRecursiveContext::build(&geom, args.particles)
-            .expect("GpuRecursiveContext::build");
+        let rec =
+            GpuRecursiveContext::build(&geom, args.particles).expect("GpuRecursiveContext::build");
 
         let gpu_ms = t1.elapsed().as_secs_f64() * 1000.0;
         println!("  GPU ready in {gpu_ms:.0} ms");
@@ -407,10 +423,7 @@ mod cuda_main {
 
             let seed_ms = seed_t0.elapsed().as_secs_f64() * 1000.0;
             let k_mean: f64 = k_active.iter().sum::<f64>() / k_active.len() as f64;
-            let k_var: f64 = k_active
-                .iter()
-                .map(|k| (k - k_mean).powi(2))
-                .sum::<f64>()
+            let k_var: f64 = k_active.iter().map(|k| (k - k_mean).powi(2)).sum::<f64>()
                 / (k_active.len() - 1).max(1) as f64;
             let k_se = (k_var / k_active.len() as f64).sqrt();
 
@@ -442,11 +455,7 @@ mod cuda_main {
         if args.seeds > 1 {
             println!(
                 "  k_inf  = {:.5} ± {:.5}   ({} seeds × {} active batches × {} particles)",
-                k_grand_mean,
-                k_grand_se,
-                args.seeds,
-                active,
-                args.particles
+                k_grand_mean, k_grand_se, args.seeds, active, args.particles
             );
             for (i, k) in all_seeds_k_means.iter().enumerate() {
                 println!("    seed {i}: k = {:.5}", k);
@@ -463,8 +472,7 @@ mod cuda_main {
         println!(
             "  total wall = {:.0} ms ({:.1} ns/particle)",
             total_ms,
-            total_ms * 1e6
-                / (args.seeds as f64 * args.batches as f64 * args.particles as f64)
+            total_ms * 1e6 / (args.seeds as f64 * args.batches as f64 * args.particles as f64)
         );
     }
 }

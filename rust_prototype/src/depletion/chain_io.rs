@@ -221,7 +221,10 @@ mod tests {
         assert_eq!(chain.index_of_zaid(92235), Some(0));
         assert_eq!(chain.index_of_zaid(54135), Some(2));
         // Fission yields preserved.
-        let rxn = chain.reactions.get(&(92235, 18)).expect("U-235 fission entry");
+        let rxn = chain
+            .reactions
+            .get(&(92235, 18))
+            .expect("U-235 fission entry");
         assert!((rxn.yields[&53135] - 0.06309).abs() < 1e-12);
     }
 
@@ -262,9 +265,18 @@ mod tests {
             .reactions
             .get(&(92235u32, 18u32))
             .expect("U-235 (n,fission) reaction");
-        assert!(u235_fission.yields.contains_key(&53135), "U-235 → I-135 yield");
-        assert!(u235_fission.yields.contains_key(&54135), "U-235 → Xe-135 yield");
-        assert!(u235_fission.yields.contains_key(&61149), "U-235 → Pm-149 yield");
+        assert!(
+            u235_fission.yields.contains_key(&53135),
+            "U-235 → I-135 yield"
+        );
+        assert!(
+            u235_fission.yields.contains_key(&54135),
+            "U-235 → Xe-135 yield"
+        );
+        assert!(
+            u235_fission.yields.contains_key(&61149),
+            "U-235 → Pm-149 yield"
+        );
         // Xe-135 (n,γ) is a pure removal channel (no daughter tracked).
         let xe_capture = chain
             .reactions
@@ -283,8 +295,8 @@ mod tests {
     /// U-239 → Np-239 → Pu-239 buildup chain populates.
     #[test]
     fn pwr_actinides_chain_solves_one_cram_step_correctly() {
-        use crate::depletion::deplete_ce_li;
         use crate::depletion::cram::CramOrder;
+        use crate::depletion::deplete_ce_li;
 
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -304,9 +316,7 @@ mod tests {
         // Burn one day at 3e14 n/cm²/s. CRAM-16, constant flux.
         let dt = 86_400.0_f64;
         let flux = 3.0e14_f64;
-        let step = deplete_ce_li(
-            &chain, &n0, flux, dt, CramOrder::Cram16, |_| flux,
-        );
+        let step = deplete_ce_li(&chain, &n0, flux, dt, CramOrder::Cram16, |_| flux);
         let n_t = &step.corrected;
 
         // Sanity: no NaN, no large negatives. CRAM is unconditionally
@@ -314,10 +324,7 @@ mod tests {
         // zero is just numerical noise — clip below 1e-30.
         for (i, &x) in n_t.iter().enumerate() {
             assert!(x.is_finite(), "NaN/Inf at chain idx {i}");
-            assert!(
-                x > -1e-30,
-                "large negative density at chain idx {i}: {x}",
-            );
+            assert!(x > -1e-30, "large negative density at chain idx {i}: {x}",);
         }
 
         // U-235 mass decreased.
@@ -325,7 +332,8 @@ mod tests {
         assert!(
             n_t[u235_idx] < n0[u235_idx],
             "U-235 should deplete: {} -> {}",
-            n0[u235_idx], n_t[u235_idx],
+            n0[u235_idx],
+            n_t[u235_idx],
         );
         // U-239 grew from 0.
         let u239_idx = chain.index_of_zaid(92239).unwrap();
@@ -371,7 +379,10 @@ mod tests {
             ]
         }"#;
         let chain = ChainSpec::from_str(json).expect("parse").build();
-        let rxn = chain.reactions.get(&(92238, 102)).expect("U-238 (n,γ) entry");
+        let rxn = chain
+            .reactions
+            .get(&(92238, 102))
+            .expect("U-238 (n,γ) entry");
         // Default daughter from ENDF: (Z, A+1) = U-239.
         assert!((rxn.yields[&92239] - 1.0).abs() < 1e-15);
     }

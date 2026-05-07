@@ -1,10 +1,10 @@
 //! Transport module — particle state, transport loop, and event processing.
 
+pub mod dispatch;
 pub mod hybrid_xs;
 pub mod material;
 pub mod particle;
 pub mod rng;
-pub mod dispatch;
 pub mod simulate;
 pub mod statepoint;
 pub mod tally;

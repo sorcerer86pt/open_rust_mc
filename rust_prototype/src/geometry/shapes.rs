@@ -18,10 +18,10 @@
 //! No magic surface indices, no copy-paste of the same 6 PlaneX/PlaneY/PlaneZ
 //! literal block in every binary.
 
+use crate::geometry::Vec3;
 use crate::geometry::cell::Region;
 use crate::geometry::lattice::HexOrientation;
 use crate::geometry::surface::{BoundaryCondition, Surface};
-use crate::geometry::Vec3;
 
 /// Result of a shape builder: the new surfaces and the
 /// inside-the-shape Region using indices `[surface_offset, surface_offset + surfaces.len())`.

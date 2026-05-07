@@ -119,13 +119,31 @@ fn pin_layout(shape: usize) -> Vec<Vec<bool>> {
     let mut l = vec![vec![false; shape]; shape];
     if shape == 17 {
         let positions: &[(usize, usize)] = &[
-            (2, 5), (2, 8), (2, 11),
-            (3, 3), (3, 13),
-            (5, 2), (5, 5), (5, 8), (5, 11), (5, 14),
-            (8, 2), (8, 5), (8, 8), (8, 11), (8, 14),
-            (11, 2), (11, 5), (11, 8), (11, 11), (11, 14),
-            (13, 3), (13, 13),
-            (14, 5), (14, 8), (14, 11),
+            (2, 5),
+            (2, 8),
+            (2, 11),
+            (3, 3),
+            (3, 13),
+            (5, 2),
+            (5, 5),
+            (5, 8),
+            (5, 11),
+            (5, 14),
+            (8, 2),
+            (8, 5),
+            (8, 8),
+            (8, 11),
+            (8, 14),
+            (11, 2),
+            (11, 5),
+            (11, 8),
+            (11, 11),
+            (11, 14),
+            (13, 3),
+            (13, 13),
+            (14, 5),
+            (14, 8),
+            (14, 11),
         ];
         for &(r, c) in positions {
             l[r][c] = true;
@@ -196,12 +214,10 @@ fn setup_geometry(reflective_z: bool, shape: usize) -> Geometry {
         // 7: root cell — the entire assembly box, filled with the lattice.
         // Region from `rect_box_split_bc.inside` covers all 6 box planes
         // including the z bounds.
-        Cell::new(CellId(7), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(
-            Aabb::new(
-                Vec3::new(-lat_half, -lat_half, -z_half),
-                Vec3::new(lat_half, lat_half, z_half),
-            ),
-        ),
+        Cell::new(CellId(7), outer_box.inside.clone(), CellFill::Lattice(0)).with_aabb(Aabb::new(
+            Vec3::new(-lat_half, -lat_half, -z_half),
+            Vec3::new(lat_half, lat_half, z_half),
+        )),
         // 8: outside the assembly box (complement of cell 7's region).
         Cell::new(
             CellId(8),
@@ -269,9 +285,8 @@ fn run_preview(geometry: &Geometry, materials: &[Material], shape: usize) {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                auto_color_from_name(&m.name).unwrap_or_else(|| {
-                    fallback.colors.get(i).copied().unwrap_or(fallback.void)
-                })
+                auto_color_from_name(&m.name)
+                    .unwrap_or_else(|| fallback.colors.get(i).copied().unwrap_or(fallback.void))
             })
             .collect(),
         void: fallback.void,
@@ -306,8 +321,7 @@ fn run_preview(geometry: &Geometry, materials: &[Material], shape: usize) {
                 let pos = Vec3::new(world_x, world_y, vp.z_slice);
                 let color = match find_cell_recursive(pos, geometry) {
                     Some(stack) => {
-                        let deepest_idx =
-                            stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                        let deepest_idx = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
                         match geometry.cells[deepest_idx].fill {
                             CellFill::Material(m) => palette
                                 .colors
@@ -463,9 +477,7 @@ fn main() {
     println!("  17×17 PWR Fuel Assembly — Recursive Geometry Demo");
     println!("========================================================");
     let shape = args.shape;
-    println!(
-        "  Lattice  : {shape}×{shape} pins (pitch {PITCH:.3} cm)"
-    );
+    println!("  Lattice  : {shape}×{shape} pins (pitch {PITCH:.3} cm)");
     let layout = pin_layout(shape);
     let n_gt = layout.iter().flatten().filter(|&&b| b).count();
     let n_pin = shape * shape - n_gt;
@@ -480,9 +492,7 @@ fn main() {
         },
         (shape as f64) * PITCH / 2.0
     );
-    println!(
-        "  Stack    : depth 3 at every transport step (root → lattice → pin/GT)"
-    );
+    println!("  Stack    : depth 3 at every transport step (root → lattice → pin/GT)");
 
     let geometry = setup_geometry(args.reflective_z, shape);
     let materials = setup_materials();
@@ -496,9 +506,7 @@ fn main() {
     );
 
     if args.preview {
-        println!(
-            "\n  Opening preview window — close it (Esc / X) to start transport."
-        );
+        println!("\n  Opening preview window — close it (Esc / X) to start transport.");
         run_preview(&geometry, &materials, shape);
         // Preview-only mode: exit cleanly without running transport.
         return;
@@ -532,7 +540,11 @@ fn main() {
             verbose: true,
             parallel: true,
             tallies: Default::default(),
-            statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
+            statepoint_path: if seed == 0 {
+                args.statepoint.clone()
+            } else {
+                None
+            },
             survival_biasing: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
@@ -563,8 +575,8 @@ fn main() {
             .collect();
         let n_active = active.len() as f64;
         let k_mean = active.iter().sum::<f64>() / n_active;
-        let k_var =
-            active.iter().map(|&k| (k - k_mean).powi(2)).sum::<f64>() / (n_active * (n_active - 1.0));
+        let k_var = active.iter().map(|&k| (k - k_mean).powi(2)).sum::<f64>()
+            / (n_active * (n_active - 1.0));
         let k_std = k_var.sqrt();
 
         if args.seeds > 1 {
@@ -594,12 +606,14 @@ fn main() {
         std_per_seed.first().copied().unwrap_or(0.0)
     };
     let total_ms: f64 = t_per_seed.iter().sum();
-    let total_ns_per_particle =
-        total_ms * 1e6 / (args.seeds as u64 * total_histories) as f64;
+    let total_ns_per_particle = total_ms * 1e6 / (args.seeds as u64 * total_histories) as f64;
 
     println!();
     println!("============================================================");
-    println!("  RESULT — {shape}×{shape} PWR Assembly (SVD rank={})", args.rank);
+    println!(
+        "  RESULT — {shape}×{shape} PWR Assembly (SVD rank={})",
+        args.rank
+    );
     println!("============================================================");
     println!(
         "  k{}            = {:.5} +/- {:.5}",
@@ -607,7 +621,13 @@ fn main() {
         k_mean,
         k_std
     );
-    println!("  Histories      = {} per seed × {} seeds", total_histories, args.seeds);
+    println!(
+        "  Histories      = {} per seed × {} seeds",
+        total_histories, args.seeds
+    );
     println!("  Total sim time = {:.0} ms", total_ms);
-    println!("  ns/particle    = {:.1} (averaged over all seeds)", total_ns_per_particle);
+    println!(
+        "  ns/particle    = {:.1} (averaged over all seeds)",
+        total_ns_per_particle
+    );
 }

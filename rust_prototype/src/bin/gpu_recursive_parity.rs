@@ -82,8 +82,7 @@ mod cuda_main {
             universes: vec![UniverseId(1); 4],
             material_overrides: None,
         }];
-        Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
-            .expect("geometry")
+        Geometry::new(surfaces, cells, universes, lattices, UniverseId(0)).expect("geometry")
     }
 
     fn build_assembly_geometry() -> Geometry {
@@ -100,13 +99,31 @@ mod cuda_main {
         let layout = {
             let mut l = [[false; 17]; 17];
             let positions: &[(usize, usize)] = &[
-                (2, 5), (2, 8), (2, 11),
-                (3, 3), (3, 13),
-                (5, 2), (5, 5), (5, 8), (5, 11), (5, 14),
-                (8, 2), (8, 5), (8, 8), (8, 11), (8, 14),
-                (11, 2), (11, 5), (11, 8), (11, 11), (11, 14),
-                (13, 3), (13, 13),
-                (14, 5), (14, 8), (14, 11),
+                (2, 5),
+                (2, 8),
+                (2, 11),
+                (3, 3),
+                (3, 13),
+                (5, 2),
+                (5, 5),
+                (5, 8),
+                (5, 11),
+                (5, 14),
+                (8, 2),
+                (8, 5),
+                (8, 8),
+                (8, 11),
+                (8, 14),
+                (11, 2),
+                (11, 5),
+                (11, 8),
+                (11, 11),
+                (11, 14),
+                (13, 3),
+                (13, 13),
+                (14, 5),
+                (14, 8),
+                (14, 11),
             ];
             for &(r, c) in positions {
                 l[r][c] = true;
@@ -153,7 +170,11 @@ mod cuda_main {
         let mut lattice_universes = Vec::with_capacity(SHAPE * SHAPE);
         for iy in 0..SHAPE {
             for ix in 0..SHAPE {
-                let id = if layout[iy][ix] { UniverseId(2) } else { UniverseId(1) };
+                let id = if layout[iy][ix] {
+                    UniverseId(2)
+                } else {
+                    UniverseId(1)
+                };
                 lattice_universes.push(id);
             }
         }
@@ -237,8 +258,10 @@ mod cuda_main {
         for q in -(n as i32)..=(n as i32) {
             for r in -(n as i32)..=(n as i32) {
                 let cube_s = -q - r;
-                let ring = q.unsigned_abs().max(r.unsigned_abs()).max(cube_s.unsigned_abs())
-                    as usize;
+                let ring = q
+                    .unsigned_abs()
+                    .max(r.unsigned_abs())
+                    .max(cube_s.unsigned_abs()) as usize;
                 if ring <= visible {
                     let qi = (q + n as i32) as usize;
                     let ri = (r + n as i32) as usize;
@@ -422,11 +445,11 @@ mod cuda_main {
         let mut cell_mismatches: usize = 0;
         let mut max_pos_rel_err: f64 = 0.0;
         for (c, g) in cpu.iter().zip(gpu.iter()) {
-            let dx = c.0 .0 - g.final_pos.0;
-            let dy = c.0 .1 - g.final_pos.1;
-            let dz = c.0 .2 - g.final_pos.2;
+            let dx = c.0.0 - g.final_pos.0;
+            let dy = c.0.1 - g.final_pos.1;
+            let dz = c.0.2 - g.final_pos.2;
             let r = (dx * dx + dy * dy + dz * dz).sqrt();
-            let scale = (c.0 .0.abs() + c.0 .1.abs() + c.0 .2.abs()).max(1e-12);
+            let scale = (c.0.0.abs() + c.0.1.abs() + c.0.2.abs()).max(1e-12);
             let rel = r / scale;
             if rel > max_pos_rel_err {
                 max_pos_rel_err = rel;
@@ -594,8 +617,7 @@ mod cuda_main {
     }
 
     fn run_one(label: &str, geom: &Geometry, n: usize) {
-        println!(
-            "  geometry  : {label}");
+        println!("  geometry  : {label}");
         println!(
             "  surfaces  : {}, cells: {}, universes: {}, lattices: {}",
             geom.surfaces.len(),
@@ -640,7 +662,10 @@ mod cuda_main {
             })
             .collect();
         let cpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        println!("\nCPU find_cell_recursive: {cpu_ms:.1} ms ({:.1} ns/pt)", cpu_ms * 1e6 / n as f64);
+        println!(
+            "\nCPU find_cell_recursive: {cpu_ms:.1} ms ({:.1} ns/pt)",
+            cpu_ms * 1e6 / n as f64
+        );
 
         // GPU pass.
         println!("\nBuilding GPU context...");
@@ -648,7 +673,10 @@ mod cuda_main {
         let t0 = Instant::now();
         let gpu_results = ctx.find_cell_batch(&points).expect("gpu find_cell_batch");
         let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        println!("GPU find_cell_batch:    {gpu_ms:.1} ms ({:.1} ns/pt)", gpu_ms * 1e6 / n as f64);
+        println!(
+            "GPU find_cell_batch:    {gpu_ms:.1} ms ({:.1} ns/pt)",
+            gpu_ms * 1e6 / n as f64
+        );
 
         // Compare.
         let mut mismatches: Vec<(usize, i32, i32, (f64, f64, f64))> = Vec::new();
@@ -676,9 +704,7 @@ mod cuda_main {
         if !mismatches.is_empty() {
             println!("\nFirst 10 mismatches:");
             for (i, cpu, gpu, (x, y, z)) in mismatches.iter().take(10) {
-                println!(
-                    "  [{i:>6}] world=({x:+.4}, {y:+.4}, {z:+.4})  cpu={cpu}  gpu={gpu}"
-                );
+                println!("  [{i:>6}] world=({x:+.4}, {y:+.4}, {z:+.4})  cpu={cpu}  gpu={gpu}");
             }
             std::process::exit(1);
         }

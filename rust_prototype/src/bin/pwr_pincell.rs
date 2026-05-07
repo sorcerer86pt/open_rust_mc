@@ -355,14 +355,16 @@ fn run_multi_seed<XS: XsProvider>(
             "  calibration: {n_active_calib} active batches in {calib_ms:.0} ms, \
              φ_max = {phi_max:.2e}, φ_mean = {phi_mean:.2e}"
         );
-        Some(open_rust_mc::transport::weight_window::WeightWindow::from_flux(
-            &outer_aabb,
-            ww_dims,
-            &flux,
-            1.0,
-            args.ww_ratio,
-            args.ww_floor,
-        ))
+        Some(
+            open_rust_mc::transport::weight_window::WeightWindow::from_flux(
+                &outer_aabb,
+                ww_dims,
+                &flux,
+                1.0,
+                args.ww_ratio,
+                args.ww_floor,
+            ),
+        )
     } else {
         None
     };
@@ -386,7 +388,7 @@ fn run_multi_seed<XS: XsProvider>(
     // correction (default Dancoff=1.0).
     let urr_eq_cfg = if args.urr_equivalence {
         use open_rust_mc::transport::urr_equivalence::{
-            dancoff_carlvik_pellaud_square, mean_chord_cylinder, UrrEquivalence,
+            UrrEquivalence, dancoff_carlvik_pellaud_square, mean_chord_cylinder,
         };
         const FUEL_RADIUS: f64 = 0.4096;
         const FUEL_OUTER: f64 = 0.4750;
@@ -419,7 +421,11 @@ fn run_multi_seed<XS: XsProvider>(
             verbose: true,
             parallel: true,
             tallies: shared_tallies.clone(),
-            statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
+            statepoint_path: if seed == 0 {
+                args.statepoint.clone()
+            } else {
+                None
+            },
             survival_biasing: if args.survival_biasing {
                 Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
             } else {
@@ -558,10 +564,7 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>) {
         // the box" region the helper returned).
         Cell::new(
             CellId(3),
-            cell::Region::Intersection(
-                Box::new(cell::outside(2)),
-                Box::new(outer_box.inside),
-            ),
+            cell::Region::Intersection(Box::new(cell::outside(2)), Box::new(outer_box.inside)),
             CellFill::Material(2),
         )
         .with_aabb(box_aabb)

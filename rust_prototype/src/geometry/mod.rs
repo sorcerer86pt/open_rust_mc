@@ -12,10 +12,10 @@ pub mod cell;
 pub mod coord;
 pub mod lattice;
 pub mod ray;
-pub mod shapes;
 #[cfg(test)]
 mod recursive_smoke;
 pub mod scene;
+pub mod shapes;
 pub mod surface;
 pub mod universe;
 
@@ -276,9 +276,21 @@ mod mat3_tests {
     #[test]
     fn rotation_z_pi_over_two_sends_x_to_y() {
         let r = Mat3::rotation_z(std::f64::consts::FRAC_PI_2);
-        assert!(approx(r.transform(Vec3::new(1.0, 0.0, 0.0)), Vec3::new(0.0, 1.0, 0.0), 1e-12));
-        assert!(approx(r.transform(Vec3::new(0.0, 1.0, 0.0)), Vec3::new(-1.0, 0.0, 0.0), 1e-12));
-        assert!(approx(r.transform(Vec3::new(0.0, 0.0, 1.0)), Vec3::new(0.0, 0.0, 1.0), 1e-12));
+        assert!(approx(
+            r.transform(Vec3::new(1.0, 0.0, 0.0)),
+            Vec3::new(0.0, 1.0, 0.0),
+            1e-12
+        ));
+        assert!(approx(
+            r.transform(Vec3::new(0.0, 1.0, 0.0)),
+            Vec3::new(-1.0, 0.0, 0.0),
+            1e-12
+        ));
+        assert!(approx(
+            r.transform(Vec3::new(0.0, 0.0, 1.0)),
+            Vec3::new(0.0, 0.0, 1.0),
+            1e-12
+        ));
     }
 
     #[test]

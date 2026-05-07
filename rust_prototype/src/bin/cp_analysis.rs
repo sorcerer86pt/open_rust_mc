@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use open_rust_mc::cp_decompose::{
-    cp_greedy_rank1, max_abs_error, relative_l2_error, CpDecomposition,
+    CpDecomposition, cp_greedy_rank1, max_abs_error, relative_l2_error,
 };
 use open_rust_mc::hdf5_reader::NuclideFileReader;
 
@@ -127,14 +127,13 @@ fn analyse_nuclide(name: &str, path: &std::path::Path, args: &Args) {
     );
 
     // Optional log-decimation (matches the InelasticCdf convention).
-    let (n_e, decimated): (usize, Vec<Vec<Vec<f64>>>) = if args.decimate_e > 0
-        && args.decimate_e < n_e_full
-    {
-        let dec = decimate_per_level(&per_level, &energies, args.decimate_e);
-        (args.decimate_e, dec)
-    } else {
-        (n_e_full, per_level.clone())
-    };
+    let (n_e, decimated): (usize, Vec<Vec<Vec<f64>>>) =
+        if args.decimate_e > 0 && args.decimate_e < n_e_full {
+            let dec = decimate_per_level(&per_level, &energies, args.decimate_e);
+            (args.decimate_e, dec)
+        } else {
+            (n_e_full, per_level.clone())
+        };
     println!("  shape (decomposed): n_e = {n_e}, n_t = {n_t}, n_l = {n_l}");
 
     // Build the σ(E, T, ℓ) 3-tensor flat: tensor[i * n_t * n_l + t * n_l + l]
@@ -152,26 +151,14 @@ fn analyse_nuclide(name: &str, path: &std::path::Path, args: &Args) {
     println!("  ||σ||_F = {:.4e}", tensor_l2);
 
     // Decompose at max_rank, reuse for every truncation k <= max_rank.
-    let cp = cp_greedy_rank1(
-        &tensor,
-        n_e,
-        n_t,
-        n_l,
-        args.max_rank,
-        args.max_iter,
-        1e-9,
-    );
+    let cp = cp_greedy_rank1(&tensor, n_e, n_t, n_l, args.max_rank, args.max_iter, 1e-9);
 
     // Reference: per-level rank-1 SVD memory (current production for
     // synthesised nuclides — n_l rank-1 SVDs).
     let per_level_svd_bytes = n_l * (n_e + n_t) * std::mem::size_of::<f64>();
 
-    println!(
-        "\n  rank  rel_L2     max_abs       mem_KB     vs_per_level_svd"
-    );
-    println!(
-        "  ----  ---------  ----------    --------   ----------------"
-    );
+    println!("\n  rank  rel_L2     max_abs       mem_KB     vs_per_level_svd");
+    println!("  ----  ---------  ----------    --------   ----------------");
     for k in 1..=cp.rank {
         let recon = cp.reconstruct(k);
         let l2 = relative_l2_error(&tensor, &recon);

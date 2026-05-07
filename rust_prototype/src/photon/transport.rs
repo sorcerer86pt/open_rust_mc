@@ -75,6 +75,64 @@ pub struct HistoryResult {
     /// CADIS-style importance-map calibration; callers that don't
     /// need it can ignore the vec — push cost is negligible.
     pub collisions: Vec<(Vec3, f64)>,
+    /// Next-event-estimator tally (eV) — accumulates the deterministic
+    /// per-collision contribution to forward transmission for slab-
+    /// shielding NEE callers. Always 0 unless transport was launched
+    /// via `transport_history_csg_with_ww_nee` with `Some(NeeConfig)`.
+    /// Mutually exclusive with `energy_escaped` as an estimator: in
+    /// NEE mode the analog escape tally is suppressed and `nee_tally`
+    /// is the unbiased transmitted-energy estimator.
+    pub nee_tally: f64,
+    /// Per-collision NEE diagnostic trace. Each entry is
+    /// `(z, energy_in_ev, contribution_ev)` for one collision where
+    /// the NEE accumulator fired. Only populated when transport was
+    /// launched via the NEE wrapper *and* `nee_trace_enabled` was set
+    /// in the config — otherwise this stays empty (zero allocation
+    /// cost in the production path).
+    pub nee_trace: Vec<(f64, f64, f64)>,
+}
+
+/// Configuration for the next-event estimator.
+///
+/// Currently slab-shielding-shaped: a single detector face at
+/// `z = detector_z_cm`. At each Compton collision in the slab, the
+/// transport driver adds
+/// `weight × (σ_compton/σ_total) × ∫ KN_PDF · E_out · exp(-Σ_t·(T-z)/μ) dμ`
+/// to `result.nee_tally`. Plus an uncollided-source contribution at
+/// the source birth point.
+///
+/// `exclusion_cm` is the MCNP-style regularisation parameter: when
+/// `> 0`, collisions inside the slab of thickness `exclusion_cm`
+/// adjacent to the detector face score a value that's been
+/// analytically averaged over a uniform-z distribution in
+/// `[T - exclusion_cm, T]`. For a *point* detector this regularises
+/// the well-known `1/r²` variance singularity (rare large hits
+/// dominate variance). **For the planar slab detector here, the
+/// raw integrand has no `1/r²` singularity** — `(T−z)/μ → 0` is
+/// killed by `exp(−τ) → 1` not by a reciprocal-distance pole — so
+/// the exclusion-zone knob is a parametric *safety-net*, not a
+/// known fix for the systematic per-collision-summation bias
+/// reported in `outputs/random_ray_cadis_fom.txt`. The MCNP F5
+/// reference (Shultis & Faw, MCNP Primer §4.4) discusses the
+/// point-detector case; T-CURE / hybrid-MC literature
+/// (Hybrid MC for multilayer transport, JCP 2021) generalises the
+/// regularisation idea but its formal applicability to bounded-
+/// integrand planar tallies is unsettled. Default: 0.0 (off,
+/// numerically identical to v1).
+#[derive(Debug, Clone, Copy)]
+pub struct NeeConfig {
+    /// Detector face z-coordinate in cm. Photons reach the detector
+    /// by traveling in the +z direction.
+    pub detector_z_cm: f64,
+    /// MCNP-style exclusion-zone thickness in cm (slab adjacent to
+    /// the detector face). `0.0` disables regularisation. Typical
+    /// values for parametric study: 0.1–2.0 mfp = 1.4–28 cm for water
+    /// at 1 MeV.
+    pub exclusion_cm: f64,
+    /// When `true`, every per-collision NEE contribution is appended
+    /// to `result.nee_trace`. Diagnostic only — leave off in
+    /// production runs (one alloc + write per collision).
+    pub trace: bool,
 }
 
 /// A single photon track in the bank.
@@ -110,6 +168,8 @@ pub fn transport_history<F: Fn(Vec3) -> bool>(
         deposits: Vec::new(),
         electrons: Vec::new(),
         collisions: Vec::new(),
+        nee_tally: 0.0,
+        nee_trace: Vec::new(),
     };
     let mut bank: Vec<BankEntry> = Vec::with_capacity(8);
     bank.push(BankEntry {
@@ -358,6 +418,8 @@ pub fn transport_history_csg_with_ww(
         deposits: Vec::new(),
         electrons: Vec::new(),
         collisions: Vec::new(),
+        nee_tally: 0.0,
+        nee_trace: Vec::new(),
     };
 
     // Build a flat-geometry wrapper for the recursive primitives.
@@ -401,6 +463,111 @@ pub fn transport_history_csg_with_ww(
             materials,
             energy_cutoff_ev,
             weight_window,
+            None,
+            rng,
+            &mut bank,
+            &mut result,
+        );
+    }
+
+    result
+}
+
+/// NEE-aware variant of `transport_history_csg_with_ww`.
+///
+/// When `nee` is `Some(NeeConfig)`, the transport driver:
+/// - Adds the *uncollided forward transmission* of the source photon
+///   to `result.nee_tally` once at birth.
+/// - At every Compton collision in the slab, adds the deterministic
+///   forward-transmission integral to `result.nee_tally`.
+/// - Leaves the analog `result.energy_escaped` tally **untouched**
+///   (still accumulates real escapes). Both estimators are unbiased
+///   for the same physical quantity; the caller picks based on which
+///   has the better FOM at the depth of interest. (At deep
+///   penetration the NEE tally has dramatically lower variance per
+///   wall-second.)
+///
+/// Calling with `nee = None` is identical to
+/// `transport_history_csg_with_ww`.
+#[allow(clippy::too_many_arguments)]
+pub fn transport_history_csg_with_ww_nee(
+    source_pos: Vec3,
+    source_dir: Vec3,
+    source_energy: f64,
+    source_weight: f64,
+    surfaces: &[Surface],
+    cells: &[Cell],
+    materials: &[Option<PhotonMaterial>],
+    energy_cutoff_ev: f64,
+    weight_window: Option<&WeightWindow>,
+    nee: Option<&NeeConfig>,
+    rng: &mut Rng,
+) -> HistoryResult {
+    let mut result = HistoryResult {
+        energy_deposited: 0.0,
+        energy_escaped: 0.0,
+        n_collisions: 0,
+        deposits: Vec::new(),
+        electrons: Vec::new(),
+        collisions: Vec::new(),
+        nee_tally: 0.0,
+        nee_trace: Vec::new(),
+    };
+
+    let geometry = match crate::geometry::Geometry::from_slices(surfaces, cells) {
+        Ok(g) => g,
+        Err(_) => {
+            result.energy_escaped += source_energy * source_weight;
+            return result;
+        }
+    };
+
+    let Some(start_stack) = geometry::ray::find_cell_recursive(source_pos, &geometry) else {
+        result.energy_escaped += source_energy * source_weight;
+        return result;
+    };
+
+    // Uncollided source-flight contribution to NEE tally.
+    if let Some(nee_cfg) = nee {
+        let cell_idx = start_stack
+            .last()
+            .map(|c| c.cell_idx as usize)
+            .unwrap_or(0);
+        if let CellFill::Material(m) = cells[cell_idx].fill {
+            if let Some(mat) = materials.get(m as usize).and_then(|o| o.as_ref()) {
+                let uncoll = crate::photon::nee::uncollided_forward_transmission(
+                    mat,
+                    source_energy,
+                    source_pos.z,
+                    nee_cfg.detector_z_cm,
+                );
+                result.nee_tally += source_weight * uncoll;
+            }
+        }
+    }
+
+    let mut bank: Vec<(Vec3, Vec3, f64, f64, crate::geometry::coord::CoordStack)> = vec![(
+        source_pos,
+        source_dir,
+        source_energy,
+        source_weight,
+        start_stack,
+    )];
+
+    while let Some((pos, dir, energy, weight, coord_stack)) = bank.pop() {
+        transport_one_csg(
+            pos,
+            dir,
+            energy,
+            weight,
+            coord_stack,
+            &geometry,
+            surfaces,
+            cells,
+            materials,
+            energy_cutoff_ev,
+            weight_window,
+            nee,
             rng,
             &mut bank,
             &mut result,
@@ -423,6 +590,7 @@ fn transport_one_csg(
     materials: &[Option<PhotonMaterial>],
     energy_cutoff_ev: f64,
     weight_window: Option<&WeightWindow>,
+    nee: Option<&NeeConfig>,
     rng: &mut Rng,
     bank: &mut Vec<(Vec3, Vec3, f64, f64, crate::geometry::coord::CoordStack)>,
     result: &mut HistoryResult,
@@ -432,10 +600,7 @@ fn transport_one_csg(
     let mut energy = start_energy;
     let mut weight = start_weight;
     let mut coord_stack = start_stack;
-    let mut cell_idx = coord_stack
-        .last()
-        .map(|c| c.cell_idx as usize)
-        .unwrap_or(0);
+    let mut cell_idx = coord_stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
 
     // Shared cap across collisions + surface crossings. A stuck photon
     // (pathological geometry, grazing reflection loop) is terminated
@@ -461,13 +626,13 @@ fn transport_one_csg(
         // with the per-copy weight.
         if let Some(ww) = weight_window {
             let v = ww.voxel_index(pos);
-            if v.is_some() && v != prev_voxel
+            if v.is_some()
+                && v != prev_voxel
                 && let Some((lo, hi)) = ww.lookup(pos)
             {
                 let w_survive = (lo * hi).sqrt();
                 if weight > hi {
-                    let n_split = ((weight / w_survive).ceil() as u32)
-                        .clamp(2, ww.max_split);
+                    let n_split = ((weight / w_survive).ceil() as u32).clamp(2, ww.max_split);
                     let new_w = weight / n_split as f64;
                     for _ in 0..(n_split - 1) {
                         bank.push((pos, dir, energy, new_w, coord_stack.clone()));
@@ -555,6 +720,29 @@ fn transport_one_csg(
                 let material = material.expect("sigma_tot > 0 implies material");
                 result.n_collisions += 1;
                 result.collisions.push((pos, energy));
+
+                // Next-event-estimator contribution from this collision.
+                // `compton_forward_transmission` returns the channel-
+                // averaged bound-corrected per-collision contribution
+                // (divides by Σ_total internally), so the caller only
+                // multiplies by photon weight. Analog accumulators are
+                // unchanged — both estimators run in parallel.
+                if let Some(nee_cfg) = nee {
+                    let nee_compton =
+                        crate::photon::nee::compton_forward_transmission(
+                            material,
+                            energy,
+                            pos.z,
+                            nee_cfg.detector_z_cm,
+                            dir.z,
+                            nee_cfg.exclusion_cm,
+                        );
+                    let contribution = weight * nee_compton;
+                    result.nee_tally += contribution;
+                    if nee_cfg.trace {
+                        result.nee_trace.push((pos.z, energy, contribution));
+                    }
+                }
 
                 let channel = material.sample_channel(energy, rng.uniform());
                 let elem_idx = material.sample_element(channel, energy, rng.uniform());

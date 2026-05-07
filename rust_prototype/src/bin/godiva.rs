@@ -302,10 +302,7 @@ fn run_multi_seed<XS: XsProvider>(
     //   2. --weight-window           → uniform bounds.
     //   3. otherwise                 → no weight window.
     let r = 8.7407_f64;
-    let ww_aabb = open_rust_mc::geometry::Aabb::new(
-        Vec3::new(-r, -r, -r),
-        Vec3::new(r, r, r),
-    );
+    let ww_aabb = open_rust_mc::geometry::Aabb::new(Vec3::new(-r, -r, -r), Vec3::new(r, r, r));
     let ww_dims = [4_usize, 4, 4];
     let weight_window_cfg = if args.ww_bootstrap_batches > 0 {
         println!(
@@ -314,8 +311,9 @@ fn run_multi_seed<XS: XsProvider>(
         );
         let mut tallies = Tallies::default();
         tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&ww_aabb, ww_dims));
-        let calib_inactive =
-            (args.ww_bootstrap_batches / 4).max(1).min(args.ww_bootstrap_batches.saturating_sub(1));
+        let calib_inactive = (args.ww_bootstrap_batches / 4)
+            .max(1)
+            .min(args.ww_bootstrap_batches.saturating_sub(1));
         let calib_config = SimConfig {
             batches: args.ww_bootstrap_batches,
             inactive: calib_inactive,
@@ -356,21 +354,20 @@ fn run_multi_seed<XS: XsProvider>(
         );
         Some(
             open_rust_mc::transport::weight_window::WeightWindow::from_flux(
-                &ww_aabb,
-                ww_dims,
-                &flux,
-                1.0,    // w_ref
-                5.0,    // ratio (w_upper / w_lower)
-                1e-3,   // floor: voxels below 0.1% of φ_max are inactive
+                &ww_aabb, ww_dims, &flux, 1.0,  // w_ref
+                5.0,  // ratio (w_upper / w_lower)
+                1e-3, // floor: voxels below 0.1% of φ_max are inactive
             ),
         )
     } else if args.weight_window {
-        Some(open_rust_mc::transport::weight_window::WeightWindow::uniform(
-            &ww_aabb,
-            ww_dims,
-            args.ww_lower,
-            args.ww_upper,
-        ))
+        Some(
+            open_rust_mc::transport::weight_window::WeightWindow::uniform(
+                &ww_aabb,
+                ww_dims,
+                args.ww_lower,
+                args.ww_upper,
+            ),
+        )
     } else {
         None
     };
@@ -382,13 +379,10 @@ fn run_multi_seed<XS: XsProvider>(
     let mut shared_tallies = Tallies::default();
     if args.statepoint.is_some() {
         let r = 8.7407_f64;
-        let outer_aabb = open_rust_mc::geometry::Aabb::new(
-            Vec3::new(-r, -r, -r),
-            Vec3::new(r, r, r),
-        );
+        let outer_aabb =
+            open_rust_mc::geometry::Aabb::new(Vec3::new(-r, -r, -r), Vec3::new(r, r, r));
         shared_tallies.mesh_flux = Some(MeshFluxTally::from_aabb(&outer_aabb, [4, 4, 4]));
-        shared_tallies.surface_current =
-            Some(SurfaceCurrentTally::for_boundary_surfaces(surfaces));
+        shared_tallies.surface_current = Some(SurfaceCurrentTally::for_boundary_surfaces(surfaces));
     }
 
     for seed in 0..args.seeds {
@@ -405,7 +399,11 @@ fn run_multi_seed<XS: XsProvider>(
             verbose: true,
             parallel: true,
             tallies: shared_tallies.clone(),
-            statepoint_path: if seed == 0 { args.statepoint.clone() } else { None },
+            statepoint_path: if seed == 0 {
+                args.statepoint.clone()
+            } else {
+                None
+            },
             survival_biasing: if args.survival_biasing {
                 Some(open_rust_mc::transport::simulate::SurvivalBiasing::default())
             } else {

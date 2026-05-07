@@ -68,9 +68,9 @@ use clap::Parser;
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
-use open_rust_mc::photon::material::PhotonMaterial;
-use open_rust_mc::photon::transport::{transport_history_csg, transport_history_csg_with_ww};
 use open_rust_mc::photon::PhotonElement;
+use open_rust_mc::photon::material::PhotonMaterial;
+use open_rust_mc::photon::transport::{transport_history_csg_with_ww_nee, NeeConfig};
 use open_rust_mc::transport::rng::Rng;
 use open_rust_mc::transport::weight_window::WeightWindow;
 
@@ -117,33 +117,19 @@ struct Args {
     #[arg(long, default_value = "water")]
     material: String,
 
-    /// Number of CADIS-lite calibration histories. When `> 0`, runs a
-    /// pre-pass with photons born at `z = T` heading into the slab
-    /// (`-z`), tallies their collision density per z-bin, and prints
-    /// the resulting importance map. This is the input to the next-
-    /// step CADIS weight-window translation; a non-zero value here
-    /// gives a diagnostic readout without yet biasing the forward run.
-    #[arg(long, default_value_t = 0)]
-    cadis_calibration: u64,
-
-    /// Number of z-bins for the CADIS-lite importance map.
-    #[arg(long, default_value_t = 50)]
-    cadis_z_bins: usize,
-
-    /// Persist the calibration importance map to a JSON file. The
-    /// next-step CADIS WW translator (`WeightWindow::from_flux` over
-    /// a 1×1×n_z voxel mesh) will ingest this file. Schema:
-    ///   {"thickness_cm": ..., "n_z_bins": ..., "counts": [...]}
-    #[arg(long)]
-    cadis_save: Option<PathBuf>,
-
-    /// Load a previously-saved CADIS importance map (from --cadis-save)
-    /// and translate it into a WeightWindow that biases the forward
-    /// run. Splitting/roulette fires on every voxel transition so
-    /// photon weight stays in the per-voxel band defined by ψ̂*. The
+    /// Load a CADIS importance map (JSON, schema
+    /// `{"thickness_cm": ..., "n_z_bins": ..., "counts": [...]}`) and
+    /// translate it into a `WeightWindow` that biases the forward run.
+    /// Splitting/roulette fires on every voxel transition so photon
+    /// weight stays in the per-voxel band defined by ψ̂*. The
     /// transmission tally accumulates weight × escaped energy and
-    /// remains an unbiased estimator. **This is the CADIS payoff
-    /// step: FOM should jump 50-1000× over the analog baseline.**
+    /// remains an unbiased estimator.
+    ///
+    /// The recommended generator for this map is the `rr_cadis_slab`
+    /// binary, which solves the multigroup random-ray adjoint for the
+    /// same slab geometry. See `outputs/random_ray_cadis_fom.txt` for
+    /// the head-to-head measurement that motivated dropping the older
+    /// in-binary "lite" collision-density proxy.
     #[arg(long)]
     cadis_load: Option<PathBuf>,
 
@@ -153,10 +139,54 @@ struct Args {
     #[arg(long, default_value_t = 5.0)]
     ww_ratio: f64,
 
+    /// Adaptive-ratio coefficient. When > 0, each voxel's band ratio
+    /// scales as `ratio_v = ww_ratio · (1 + ww_growth · log10(φ_max/φ_v))`,
+    /// widening the band at low-importance voxels (far from the
+    /// detector). Set to 0 (default) for fixed `ww_ratio` everywhere.
+    /// Empirically 0.5–2.0 helps at thick slabs (>10 mfp) where the
+    /// importance gradient is steep enough that fixed ratio is either
+    /// too tight near the source or too loose near the detector.
+    #[arg(long, default_value_t = 0.0)]
+    ww_growth: f64,
+
     /// Voxels with importance below `ww_floor × ψ̂*_max` are flagged
     /// inactive (no splitting / roulette there). Default 1e-3.
     #[arg(long, default_value_t = 1.0e-3)]
     ww_floor: f64,
+
+    /// Enable the next-event (DXTRAN-style) estimator for the
+    /// transmitted-energy tally. At every Compton collision the
+    /// driver adds the expected energy that would scatter forward and
+    /// arrive unscattered at the detector face — this fires at every
+    /// collision regardless of whether the photon physically escapes,
+    /// so the tally accumulates much faster than analog at deep
+    /// penetration. Compatible with `--cadis-load`: NEE + WW combine
+    /// for additional FOM gain. v1 limitations (Compton only, free-
+    /// electron Klein-Nishina, no back-reflection contribution, plus
+    /// a known systematic bias from per-collision summation that
+    /// hasn't been fully diagnosed) are documented in
+    /// `outputs/random_ray_cadis_fom.txt` and `src/photon/nee.rs`.
+    #[arg(long, default_value_t = false)]
+    next_event: bool,
+
+    /// MCNP-style exclusion-zone thickness (cm) for the next-event
+    /// estimator. When `> 0`, collisions inside the slab of thickness
+    /// `nee_exclusion_cm` adjacent to the detector face score an
+    /// analytically z-averaged contribution instead of the raw
+    /// per-collision integrand. The regularisation is the standard
+    /// fix for point-detector `1/r²` variance singularities; for the
+    /// planar detector here the integrand is bounded so it's a
+    /// parametric safety knob, not a known bias fix. Default 0.0 =
+    /// disabled (numerically identical to v1 NEE).
+    #[arg(long, default_value_t = 0.0)]
+    nee_exclusion_cm: f64,
+
+    /// Diagnostic: dump per-collision NEE contributions for every
+    /// history. Use with very low `--histories` (≤ 20) — output is
+    /// ~100 lines per history. Helps trace where the NEE accumulator
+    /// diverges from analog expectations.
+    #[arg(long, default_value_t = false)]
+    nee_trace: bool,
 }
 
 /// Loaded importance map from a `--cadis-save` JSON file.
@@ -211,16 +241,13 @@ fn build_single_element(
     m_g_mol: f64,
 ) -> Result<PhotonMaterial, String> {
     let file = format!("{name}.h5");
-    let elem = PhotonElement::from_hdf5(&photon_data.join(&file))
-        .map_err(|e| format!("{file}: {e}"))?;
+    let elem =
+        PhotonElement::from_hdf5(&photon_data.join(&file)).map_err(|e| format!("{file}: {e}"))?;
     let n = rho * N_A / m_g_mol * 1.0e-24;
     Ok(PhotonMaterial::mono(n, elem).with_density(rho))
 }
 
-fn build_geometry(
-    thickness_cm: f64,
-    half_xy_cm: f64,
-) -> (Vec<Surface>, Vec<Cell>) {
+fn build_geometry(thickness_cm: f64, half_xy_cm: f64) -> (Vec<Surface>, Vec<Cell>) {
     // Surfaces: 0 z_back (refl), 1 z_front (vacuum), 2 x_min (refl),
     // 3 x_max (refl), 4 y_min (refl), 5 y_max (refl).
     let surfaces = vec![
@@ -264,70 +291,6 @@ fn build_geometry(
     (surfaces, cells)
 }
 
-/// CADIS-lite calibration pass.
-///
-/// Runs `n_histories` photons born at `(0, 0, T-ε)` heading `(0,0,-1)`
-/// — i.e. into the slab from the detector face — and tallies the
-/// collision density per z-bin.
-///
-/// The resulting density `ψ̂\*(z)` is a proxy for the adjoint flux:
-/// voxels reached by these "detector-backward" photons are voxels
-/// that contribute to the response at the detector. The CADIS
-/// importance map is `w_target(z) ∝ ψ̂\*_max / ψ̂\*(z)` — high-
-/// importance voxels (close to the detector) get small `w_target`
-/// (split → finer sampling) and low-importance voxels (close to the
-/// source) get large `w_target` (roulette → coarser sampling).
-///
-/// This is the "lite" form: not a true adjoint MC (no transposed
-/// scatter kernels), just running the same forward physics from the
-/// detector side. It gives the right qualitative gradient for slab
-/// shielding because photon transport is dominated by Compton +
-/// Rayleigh which are kinematically symmetric, and photoelectric
-/// absorption breaks the symmetry only weakly above ~50 keV.
-///
-/// Returns the per-z-bin collision count (un-normalised; the WW
-/// translator only cares about ratios).
-fn cadis_calibration_pass(
-    n_histories: u64,
-    n_z_bins: usize,
-    thickness_cm: f64,
-    source_energy_ev: f64,
-    cutoff_ev: f64,
-    surfaces: &[Surface],
-    cells: &[Cell],
-    materials: &[Option<PhotonMaterial>],
-    seed: u64,
-) -> Vec<u64> {
-    let mut counts = vec![0_u64; n_z_bins];
-    let dz = thickness_cm / n_z_bins as f64;
-
-    // Source: at z = T - ε, heading -z (into the slab from the detector).
-    // The same `transport_history_csg` driver handles this — geometry
-    // / physics don't care which way the source points.
-    let source_pos = Vec3::new(0.0, 0.0, thickness_cm - 1.0e-6);
-    let source_dir = Vec3::new(0.0, 0.0, -1.0);
-
-    for h in 0..n_histories {
-        let mut rng = Rng::new(seed.wrapping_add(0xC4D1_5_5EE_D), h);
-        let result = transport_history_csg(
-            source_pos,
-            source_dir,
-            source_energy_ev,
-            surfaces,
-            cells,
-            materials,
-            cutoff_ev,
-            &mut rng,
-        );
-        // Bin every collision position by its z-coordinate.
-        for &(pos, _e) in &result.collisions {
-            let bin = ((pos.z / dz) as usize).min(n_z_bins.saturating_sub(1));
-            counts[bin] += 1;
-        }
-    }
-    counts
-}
-
 fn main() -> Result<(), String> {
     let args = Args::parse();
 
@@ -367,100 +330,6 @@ fn main() -> Result<(), String> {
 
     let source_energy_ev = args.energy_mev * 1.0e6;
 
-    // CADIS-lite calibration pass.
-    if args.cadis_calibration > 0 {
-        println!("  ── CADIS-lite calibration: {} histories, {} z-bins ──",
-                 args.cadis_calibration, args.cadis_z_bins);
-        let t_calib = Instant::now();
-        let counts = cadis_calibration_pass(
-            args.cadis_calibration,
-            args.cadis_z_bins,
-            args.thickness_cm,
-            source_energy_ev,
-            args.cutoff_ev,
-            &surfaces,
-            &cells,
-            &materials,
-            args.seed,
-        );
-        let calib_seconds = t_calib.elapsed().as_secs_f64();
-        let total: u64 = counts.iter().sum();
-        let max = *counts.iter().max().unwrap_or(&0);
-        let dz = args.thickness_cm / args.cadis_z_bins as f64;
-        println!(
-            "  calibration: {} total collisions in {:.2} s ({:.1} ns/history)",
-            total,
-            calib_seconds,
-            calib_seconds * 1e9 / args.cadis_calibration as f64,
-        );
-        println!();
-        println!("  z [cm]      collisions     ψ̂*  (norm.)   w_target ∝ 1/ψ̂*");
-        println!("  ----------  -------------  ------------  ------------------");
-        for (i, &c) in counts.iter().enumerate() {
-            let z_lo = i as f64 * dz;
-            let z_hi = (i + 1) as f64 * dz;
-            let psi_norm = c as f64 / max as f64;
-            // Avoid div-by-zero for empty bins.
-            let w_target = if c > 0 { max as f64 / c as f64 } else { f64::INFINITY };
-            // Print a coarse subset (every n_z_bins/20 rows) so the
-            // line count stays readable for any --cadis-z-bins.
-            let stride = (args.cadis_z_bins / 20).max(1);
-            if i % stride == 0 {
-                println!(
-                    "  {z_lo:>5.1}–{z_hi:<5.1}  {c:>13}  {psi_norm:>12.4}  {w_target:>16.2e}",
-                );
-            }
-        }
-        println!();
-        println!("  note: this is the importance map ψ̂*(z) for the");
-        println!("  next-step CADIS weight-window translator. Voxels");
-        println!("  with low ψ̂* (near z=0, far from detector) are the");
-        println!("  ones that will receive splitting via WW; voxels");
-        println!("  with high ψ̂* (near z=T) get roulette to keep the");
-        println!("  computational budget concentrated where it matters.");
-        println!();
-
-        // Optional persistence of the importance map for downstream
-        // CADIS WW translation. Schema is the bare minimum needed by
-        // the next-step `WeightWindow::from_flux` builder; extending
-        // to xyz mesh / multi-energy is a follow-on.
-        if let Some(path) = &args.cadis_save {
-            let json = format!(
-                "{{\"thickness_cm\":{},\"n_z_bins\":{},\"counts\":[{}]}}",
-                args.thickness_cm,
-                args.cadis_z_bins,
-                counts.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(","),
-            );
-            std::fs::write(path, json)
-                .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
-            println!("  importance map saved to {}", path.display());
-            println!();
-        }
-
-        // === Next-step CADIS roadmap (in-source TODO) ===========
-        // 1. Translate `counts` → `WeightWindow` via
-        //    `WeightWindow::from_flux(aabb, [1,1,n_z], flux,
-        //                             w_ref=1.0, ratio=5.0, floor=1e-3)`
-        //    — the existing infrastructure already does the
-        //    `w_target ∝ φ_max / φ` math; pass the calibration
-        //    counts as the `flux` argument.
-        // 2. Add a `weight: f64` field to the photon state in
-        //    `photon::transport::transport_one_csg`. Initialise to
-        //    1.0 at source; thread through the bank entries and
-        //    secondaries so daughters inherit it.
-        // 3. After each free-flight in `transport_one_csg`, query
-        //    the WW for the new voxel: split if `weight > w_upper`
-        //    (push N copies into the bank with weight w/N), roulette
-        //    if `weight < w_lower` (kill with prob 1−w/w_survive
-        //    else restore to w_survive).
-        // 4. The transmission tally accumulates `result.energy_escaped`
-        //    weighted by `weight` instead of unit-weight.
-        // 5. Re-run shield_slab with --cadis-load <map.json>
-        //    --use-cadis-ww and measure FOM gain on the existing
-        //    analog 348/s baseline. Wagner-Haghighat 2003 reports
-        //    50-1000× FOM gain for slab problems of this depth.
-        // ========================================================
-    }
     // Born just inside the slab so the find_cell_recursive lookup
     // sees us in cell 0 unambiguously.
     let source_pos = Vec3::new(0.0, 0.0, 1.0e-6);
@@ -492,47 +361,86 @@ fn main() -> Result<(), String> {
         let phi_source = flux[source_bin].max(1.0);
         let phi_max = flux.iter().cloned().fold(0.0_f64, f64::max).max(1.0);
         let w_ref = phi_source / phi_max;
-        let ww = WeightWindow::from_flux(
-            &aabb,
-            [1, 1, map.n_z_bins],
-            &flux,
-            w_ref,
-            args.ww_ratio,
-            args.ww_floor,
-        );
+        let ww = if args.ww_growth > 0.0 {
+            WeightWindow::from_flux_adaptive(
+                &aabb,
+                [1, 1, map.n_z_bins],
+                &flux,
+                w_ref,
+                args.ww_ratio,
+                args.ww_growth,
+                args.ww_floor,
+            )
+        } else {
+            WeightWindow::from_flux(
+                &aabb,
+                [1, 1, map.n_z_bins],
+                &flux,
+                w_ref,
+                args.ww_ratio,
+                args.ww_floor,
+            )
+        };
         println!(
-            "  ── CADIS WW loaded from {} ({} z-bins, ratio {}, floor {}) ──",
+            "  ── CADIS WW loaded from {} ({} z-bins, ratio {} growth {}, floor {}) ──",
             path.display(),
             map.n_z_bins,
             args.ww_ratio,
+            args.ww_growth,
             args.ww_floor,
         );
-        println!(
-            "  w_ref (calibrated so w_target(source)=1.0): {w_ref:.4e}",
-        );
+        println!("  w_ref (calibrated so w_target(source)=1.0): {w_ref:.4e}",);
         Some(ww)
     } else {
         None
     };
     let source_weight: f64 = 1.0;
 
-    println!(
-        "  ── Running {} photon transport ──",
-        if weight_window.is_some() { "CADIS-biased" } else { "analog" },
-    );
+    let nee_cfg = if args.next_event {
+        // Force trace on whenever --next-event is on. The trace
+        // capture has ~5–10% wall overhead but lets us compute the
+        // first-only / last-only / full-sum estimator variants at the
+        // same time from one run for clean head-to-head comparison.
+        Some(NeeConfig {
+            detector_z_cm: args.thickness_cm,
+            exclusion_cm: args.nee_exclusion_cm.max(0.0),
+            trace: true,
+        })
+    } else {
+        None
+    };
+
+    let mode_label = match (weight_window.is_some(), args.next_event) {
+        (true, true) => "CADIS+NEE",
+        (true, false) => "CADIS-biased",
+        (false, true) => "NEE",
+        (false, false) => "analog",
+    };
+    println!("  ── Running {} photon transport ──", mode_label);
     let t0 = Instant::now();
 
     // Per-history transmission fractions for variance estimation.
-    // Stack-allocated batch sums would be more efficient for huge
-    // history counts, but a Vec is fine up to ~10⁸ histories.
+    // In NEE mode the NEE tally is the unbiased estimator; otherwise
+    // the analog escape tally is.
     let mut total_escaped_ev = 0.0_f64;
     let mut total_escaped_squared = 0.0_f64;
     let mut n_transmitted_histories: u64 = 0;
     let mut total_collisions: u64 = 0;
+    // Three-way estimator accumulators, all measured from the same
+    // transport run via the per-collision trace:
+    //  - full: current (sum every collision's NEE_i + uncollided)
+    //  - first: only the first collision's NEE + uncollided
+    //  - last: only the last collision's NEE + uncollided
+    let mut total_first_coll_nee = 0.0_f64;
+    let mut total_uncollided_nee = 0.0_f64;
+    let mut total_tally_first = 0.0_f64;
+    let mut total_tally_first_sq = 0.0_f64;
+    let mut total_tally_last = 0.0_f64;
+    let mut total_tally_last_sq = 0.0_f64;
 
     for h in 0..args.histories {
         let mut rng = Rng::new(args.seed, h);
-        let result = transport_history_csg_with_ww(
+        let result = transport_history_csg_with_ww_nee(
             source_pos,
             source_dir,
             source_energy_ev,
@@ -542,14 +450,74 @@ fn main() -> Result<(), String> {
             &materials,
             args.cutoff_ev,
             weight_window.as_ref(),
+            nee_cfg.as_ref(),
             &mut rng,
         );
-        total_escaped_ev += result.energy_escaped;
-        total_escaped_squared += result.energy_escaped * result.energy_escaped;
-        if result.energy_escaped > 0.0 {
+        // Pick estimator: NEE tally if --next-event, else analog escape.
+        let tally = if args.next_event {
+            result.nee_tally
+        } else {
+            result.energy_escaped
+        };
+        total_escaped_ev += tally;
+        total_escaped_squared += tally * tally;
+        if tally > 0.0 {
             n_transmitted_histories += 1;
         }
         total_collisions += result.n_collisions as u64;
+        // Diagnostic decomposition: first-collision-only NEE +
+        // uncollided source contribution. Total NEE = uncollided +
+        // Σ per-collision contributions; here we isolate the first
+        // collision and the constant uncollided piece so we can see
+        // which component carries the bias.
+        let first_contrib = result.nee_trace.first().map(|t| t.2).unwrap_or(0.0);
+        let last_contrib = result.nee_trace.last().map(|t| t.2).unwrap_or(0.0);
+        total_first_coll_nee += first_contrib;
+        // Uncollided contribution per history is the analog
+        // uncollided E·exp(-Σ_t·T) — it's constant per source photon
+        // for shield_slab. Reconstruct: total_NEE = uncoll + per-coll
+        // sum; the per-collision sum is recoverable from the trace.
+        let per_coll_sum: f64 = result.nee_trace.iter().map(|t| t.2).sum();
+        let uncollided_part = result.nee_tally - per_coll_sum;
+        total_uncollided_nee += uncollided_part;
+        // First-only and last-only tally variants per history.
+        let tally_first = uncollided_part + first_contrib;
+        let tally_last = uncollided_part + last_contrib;
+        total_tally_first += tally_first;
+        total_tally_first_sq += tally_first * tally_first;
+        total_tally_last += tally_last;
+        total_tally_last_sq += tally_last * tally_last;
+
+        // Per-history NEE diagnostic dump.
+        if args.nee_trace && args.next_event {
+            println!(
+                "  history {h}: collisions={}, analog_escape={:.4e} eV, NEE_tally={:.4e} eV",
+                result.n_collisions, result.energy_escaped, result.nee_tally
+            );
+            // Cumulative per-collision contribution.
+            let mut cum = 0.0_f64;
+            for (i, &(z, e_in, contrib)) in result.nee_trace.iter().enumerate() {
+                cum += contrib;
+                println!(
+                    "    coll {:>3}: z={:>6.2} cm  E_in={:.3e} eV  Δ={:.3e} eV  cum={:.3e} eV  cum/E_src={:.3e}",
+                    i, z, e_in, contrib, cum, cum / source_energy_ev
+                );
+            }
+            // Compare with analog: the photon either physically
+            // escaped (analog tally > 0) or didn't.
+            let analog_norm = result.energy_escaped / source_energy_ev;
+            let nee_norm = result.nee_tally / source_energy_ev;
+            println!(
+                "    summary: analog/E={:.3e}  NEE/E={:.3e}  ratio={:.2}",
+                analog_norm,
+                nee_norm,
+                if analog_norm > 0.0 {
+                    nee_norm / analog_norm
+                } else {
+                    f64::INFINITY
+                }
+            );
+        }
     }
 
     let wall_seconds = t0.elapsed().as_secs_f64();
@@ -593,6 +561,67 @@ fn main() -> Result<(), String> {
     println!();
     println!("  ── FOM (CADIS baseline) ───────────────────────────────");
     println!("  FOM = 1 / (σ_rel² · t)  = {fom:.3e}    [s⁻¹]");
+    if args.next_event {
+        // Decomposition (per source photon, normalised).
+        let uncoll_per_src = total_uncollided_nee / n / source_energy_ev;
+        let first_coll_per_src = total_first_coll_nee / n / source_energy_ev;
+        let total_per_src = total_escaped_ev / n / source_energy_ev;
+        let per_coll_only = total_per_src - uncoll_per_src;
+        let subsequent_coll = per_coll_only - first_coll_per_src;
+
+        // First-only and last-only estimator variants. Statistics
+        // computed from the same transport run for clean comparison.
+        let mean_first = total_tally_first / n;
+        let var_first = (total_tally_first_sq / n) - mean_first.powi(2);
+        let stderr_first = (var_first.max(0.0) / n).sqrt();
+        let t_first = mean_first / source_energy_ev;
+        let rel_err_first = stderr_first / mean_first.max(1e-30);
+        let fom_first = 1.0 / (rel_err_first * rel_err_first * wall_seconds.max(1e-9));
+
+        let mean_last = total_tally_last / n;
+        let var_last = (total_tally_last_sq / n) - mean_last.powi(2);
+        let stderr_last = (var_last.max(0.0) / n).sqrt();
+        let t_last = mean_last / source_energy_ev;
+        let rel_err_last = stderr_last / mean_last.max(1e-30);
+        let fom_last = 1.0 / (rel_err_last * rel_err_last * wall_seconds.max(1e-9));
+
+        println!();
+        println!("  ── NEE decomposition (per source photon, normalised) ──");
+        println!("  uncollided contribution = {:.4e}", uncoll_per_src);
+        println!("  first-collision NEE     = {:.4e}", first_coll_per_src);
+        println!("  subsequent collisions   = {:.4e}", subsequent_coll);
+        println!("  full-sum (= total)      = {:.4e}", total_per_src);
+        println!();
+        println!("  ── Three-way estimator comparison ──");
+        println!(
+            "  Estimator           |  T          | σ_rel    | FOM (/s)"
+        );
+        println!(
+            "  full per-coll sum    | {:.4e} | {:>5.2}%  | {:.3e}",
+            total_per_src,
+            100.0 * rel_err,
+            fom
+        );
+        println!(
+            "  first-only + uncoll  | {:.4e} | {:>5.2}%  | {:.3e}",
+            t_first,
+            100.0 * rel_err_first,
+            fom_first
+        );
+        println!(
+            "  last-only + uncoll   | {:.4e} | {:>5.2}%  | {:.3e}",
+            t_last,
+            100.0 * rel_err_last,
+            fom_last
+        );
+        println!();
+        println!("  Reading:");
+        println!("   - full overcounts if Σ NEE_i fires at multiple correlated states.");
+        println!("   - first-only is a strict lower-bound estimator (single-Compton-from-first).");
+        println!("   - last-only captures the photon's final-flight contribution; should be");
+        println!("     close to analog scattered if photons mostly escape via single Compton");
+        println!("     from their last collision.");
+    }
     println!();
     println!("  Use this number as the analog reference. CADIS-driven");
     println!("  weight windows on the same problem must beat this FOM");

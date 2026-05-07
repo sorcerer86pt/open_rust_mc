@@ -91,9 +91,17 @@ fn main() {
             if max_rel > 5e-2 {
                 println!(
                     "  {} @ {:.3e} eV: max_rel={:.3e}\n    SVD: el={:.3e} fis={:.3e} cap={:.3e} tot={:.3e}\n    Tab: el={:.3e} fis={:.3e} cap={:.3e} tot={:.3e}",
-                    NUCLIDE_NAMES[ni], e, max_rel,
-                    s.elastic, s.fission, s.capture, s.total,
-                    t.elastic, t.fission, t.capture, t.total,
+                    NUCLIDE_NAMES[ni],
+                    e,
+                    max_rel,
+                    s.elastic,
+                    s.fission,
+                    s.capture,
+                    s.total,
+                    t.elastic,
+                    t.fission,
+                    t.capture,
+                    t.total,
                 );
             }
         }
@@ -104,7 +112,12 @@ fn main() {
         let s_info = svd.discrete_level_info(ni);
         let t_info = tab.discrete_level_info(ni);
         if s_info.len() != t_info.len() {
-            println!("  {}: SVD has {} levels, Table has {}", NUCLIDE_NAMES[ni], s_info.len(), t_info.len());
+            println!(
+                "  {}: SVD has {} levels, Table has {}",
+                NUCLIDE_NAMES[ni],
+                s_info.len(),
+                t_info.len()
+            );
             continue;
         }
         for (i, (sl, tl)) in s_info.iter().zip(t_info.iter()).enumerate() {
@@ -114,9 +127,14 @@ fn main() {
             {
                 println!(
                     "  {} level {}: SVD mt={} Q={} thr={}  Table mt={} Q={} thr={}",
-                    NUCLIDE_NAMES[ni], i,
-                    sl.mt, sl.q_value, sl.threshold,
-                    tl.mt, tl.q_value, tl.threshold
+                    NUCLIDE_NAMES[ni],
+                    i,
+                    sl.mt,
+                    sl.q_value,
+                    sl.threshold,
+                    tl.mt,
+                    tl.q_value,
+                    tl.threshold
                 );
             }
         }
@@ -128,10 +146,18 @@ fn main() {
             let s_xs = svd.discrete_level_xs(ni, e);
             let t_xs = tab.discrete_level_xs(ni, e);
             if s_xs.len() != t_xs.len() {
-                println!("  {} @ {:.3e}: lengths differ {} vs {}", NUCLIDE_NAMES[ni], e, s_xs.len(), t_xs.len());
+                println!(
+                    "  {} @ {:.3e}: lengths differ {} vs {}",
+                    NUCLIDE_NAMES[ni],
+                    e,
+                    s_xs.len(),
+                    t_xs.len()
+                );
                 continue;
             }
-            let max_rel = s_xs.iter().zip(t_xs.iter())
+            let max_rel = s_xs
+                .iter()
+                .zip(t_xs.iter())
                 .map(|(s, t)| (s - t).abs() / t.abs().max(1e-30))
                 .fold(0_f64, f64::max);
             if max_rel > 1e-2 {
@@ -159,17 +185,26 @@ fn main() {
         let s_e = svd.elastic_angular_dist(ni).is_some();
         let t_e = tab.elastic_angular_dist(ni).is_some();
         if s_e != t_e {
-            println!("  {} elastic_angle: SVD={} Table={}", NUCLIDE_NAMES[ni], s_e, t_e);
+            println!(
+                "  {} elastic_angle: SVD={} Table={}",
+                NUCLIDE_NAMES[ni], s_e, t_e
+            );
         }
         let s_f = svd.fission_energy_dist(ni).is_some();
         let t_f = tab.fission_energy_dist(ni).is_some();
         if s_f != t_f {
-            println!("  {} fission_edist: SVD={} Table={}", NUCLIDE_NAMES[ni], s_f, t_f);
+            println!(
+                "  {} fission_edist: SVD={} Table={}",
+                NUCLIDE_NAMES[ni], s_f, t_f
+            );
         }
         let s_c = svd.inelastic_continuum_edist(ni).is_some();
         let t_c = tab.inelastic_continuum_edist(ni).is_some();
         if s_c != t_c {
-            println!("  {} inelastic_cont_edist: SVD={} Table={}", NUCLIDE_NAMES[ni], s_c, t_c);
+            println!(
+                "  {} inelastic_cont_edist: SVD={} Table={}",
+                NUCLIDE_NAMES[ni], s_c, t_c
+            );
         }
         let s2 = svd.n2n_edist(ni).is_some();
         let t2 = tab.n2n_edist(ni).is_some();
@@ -179,7 +214,10 @@ fn main() {
         let s_a = svd.discrete_level_angles(ni).len();
         let t_a = tab.discrete_level_angles(ni).len();
         if s_a != t_a {
-            println!("  {} #level_angles: SVD={} Table={}", NUCLIDE_NAMES[ni], s_a, t_a);
+            println!(
+                "  {} #level_angles: SVD={} Table={}",
+                NUCLIDE_NAMES[ni], s_a, t_a
+            );
         }
     }
 
@@ -187,18 +225,26 @@ fn main() {
     {
         let s = svd.lookup(1, 1000.0);
         let t = tab.lookup(1, 1000.0);
-        println!("  PRE-URR  SVD: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e} inel={:.6e}",
-            s.elastic, s.fission, s.capture, s.total, s.inelastic);
-        println!("  PRE-URR  Tab: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e} inel={:.6e}",
-            t.elastic, t.fission, t.capture, t.total, t.inelastic);
+        println!(
+            "  PRE-URR  SVD: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e} inel={:.6e}",
+            s.elastic, s.fission, s.capture, s.total, s.inelastic
+        );
+        println!(
+            "  PRE-URR  Tab: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e} inel={:.6e}",
+            t.elastic, t.fission, t.capture, t.total, t.inelastic
+        );
         let mut s2 = s.clone();
         let mut t2 = t.clone();
         svd.apply_urr(1, &mut s2, 1000.0, 0.5);
         tab.apply_urr(1, &mut t2, 1000.0, 0.5);
-        println!("  POST-URR SVD: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e}",
-            s2.elastic, s2.fission, s2.capture, s2.total);
-        println!("  POST-URR Tab: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e}",
-            t2.elastic, t2.fission, t2.capture, t2.total);
+        println!(
+            "  POST-URR SVD: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e}",
+            s2.elastic, s2.fission, s2.capture, s2.total
+        );
+        println!(
+            "  POST-URR Tab: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e}",
+            t2.elastic, t2.fission, t2.capture, t2.total
+        );
     }
     println!("\n=== diff: apply_urr() at 1 keV ===");
     use open_rust_mc::physics::collision::MicroXs;
@@ -219,15 +265,33 @@ fn main() {
                 if max_rel > 1e-2 {
                     println!(
                         "  {} @ {:.3e} xi={}: max_rel={:.3e} S(el={:.3e} f={:.3e} c={:.3e}) T(el={:.3e} f={:.3e} c={:.3e})",
-                        NUCLIDE_NAMES[ni], e, xi, max_rel,
-                        s_xs.elastic, s_xs.fission, s_xs.capture,
-                        t_xs.elastic, t_xs.fission, t_xs.capture
+                        NUCLIDE_NAMES[ni],
+                        e,
+                        xi,
+                        max_rel,
+                        s_xs.elastic,
+                        s_xs.fission,
+                        s_xs.capture,
+                        t_xs.elastic,
+                        t_xs.fission,
+                        t_xs.capture
                     );
                 }
             }
         }
     }
     let _ = (Arc::new(()), Material::new("dummy", 0.0)); // suppress unused-warnings
-    let _ = MicroXs { total: 0.0, elastic: 0.0, inelastic: 0.0, n2n: 0.0, n3n: 0.0, fission: 0.0, capture: 0.0, nu_bar: 0.0, delayed_nu_bar: 0.0, awr: 0.0 };
+    let _ = MicroXs {
+        total: 0.0,
+        elastic: 0.0,
+        inelastic: 0.0,
+        n2n: 0.0,
+        n3n: 0.0,
+        fission: 0.0,
+        capture: 0.0,
+        nu_bar: 0.0,
+        delayed_nu_bar: 0.0,
+        awr: 0.0,
+    };
     println!("\n(diff complete; missing sections = no divergence found at sampled energies)");
 }

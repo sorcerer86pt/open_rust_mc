@@ -9,4 +9,4 @@
 //! so existing call sites keep compiling.
 
 pub use rust_mc_sim::ducru::ducru_weights;
-pub use rust_mc_sim::svd::{reconstruct_log_faer, LogHashIndex as EnergyHashTable, SvdKernel};
+pub use rust_mc_sim::svd::{LogHashIndex as EnergyHashTable, SvdKernel, reconstruct_log_faer};

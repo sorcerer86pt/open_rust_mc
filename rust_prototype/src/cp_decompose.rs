@@ -5,6 +5,4 @@
 //! types (`CpDecomposition`, `cp_greedy_rank1`,
 //! `relative_l2_error`, `max_abs_error`).
 
-pub use rust_mc_sim::cp::{
-    cp_greedy_rank1, max_abs_error, relative_l2_error, CpDecomposition,
-};
+pub use rust_mc_sim::cp::{CpDecomposition, cp_greedy_rank1, max_abs_error, relative_l2_error};

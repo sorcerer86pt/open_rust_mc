@@ -20,9 +20,7 @@
 #[cfg(not(feature = "cuda"))]
 fn main() {
     eprintln!("ERROR: this binary requires the 'cuda' feature.");
-    eprintln!(
-        "Build with: cargo run --release --features cuda --bin gpu_recursive_keff -- ..."
-    );
+    eprintln!("Build with: cargo run --release --features cuda --bin gpu_recursive_keff -- ...");
     std::process::exit(1);
 }
 
@@ -138,9 +136,7 @@ mod cuda_main {
         let mat_data = gpu
             .upload_material_data(&materials, &awrs, &nu_bars)
             .expect("upload material data");
-        let sab_data = gpu
-            .upload_sab_data_empty()
-            .expect("upload empty S(α,β)");
+        let sab_data = gpu.upload_sab_data_empty().expect("upload empty S(α,β)");
         let wmp_data = gpu
             .upload_wmp_data_empty(nuclide_specs.len())
             .expect("upload empty WMP");
@@ -153,17 +149,20 @@ mod cuda_main {
         let t2 = Instant::now();
         let ref_result = gpu
             .run_batch(
-                &source, 1, &nuc_data, &mat_data, &sab_data, &wmp_data,
-                args.max_events as u32, /* GEOM_GODIVA */ 1,
+                &source,
+                1,
+                &nuc_data,
+                &mat_data,
+                &sab_data,
+                &wmp_data,
+                args.max_events as u32,
+                /* GEOM_GODIVA */ 1,
             )
             .expect("run_batch");
         let ref_ms = t2.elapsed().as_secs_f64() * 1000.0;
         println!(
             "  k_eff       = {:.5}\n  collisions  = {}\n  fissions    = {}\n  leakage     = {}",
-            ref_result.k_eff,
-            ref_result.collisions,
-            ref_result.fissions,
-            ref_result.leakage
+            ref_result.k_eff, ref_result.collisions, ref_result.fissions, ref_result.leakage
         );
         println!(
             "  bank size   = {} (sites)\n  time        = {:.0} ms",
@@ -208,10 +207,7 @@ mod cuda_main {
         let rec_ms = t3.elapsed().as_secs_f64() * 1000.0;
         println!(
             "  k_eff       = {:.5}\n  collisions  = {}\n  fissions    = {}\n  leakage     = {}",
-            rec_result.k_eff,
-            rec_result.n_collisions,
-            rec_result.n_fissions,
-            rec_result.n_leakage
+            rec_result.k_eff, rec_result.n_collisions, rec_result.n_fissions, rec_result.n_leakage
         );
         println!(
             "  bank size   = {} (sites)\n  time        = {:.0} ms",
@@ -229,9 +225,17 @@ mod cuda_main {
                 "  {label:<14} hardcoded {c:>10}   recursive {g:>10}   Δ {diff:>9.0} ({pct:.3}%)"
             );
         };
-        cmp("collisions", ref_result.collisions as u64, rec_result.n_collisions);
-        cmp("fissions",   ref_result.fissions   as u64, rec_result.n_fissions);
-        cmp("leakage",    ref_result.leakage    as u64, rec_result.n_leakage);
+        cmp(
+            "collisions",
+            ref_result.collisions as u64,
+            rec_result.n_collisions,
+        );
+        cmp(
+            "fissions",
+            ref_result.fissions as u64,
+            rec_result.n_fissions,
+        );
+        cmp("leakage", ref_result.leakage as u64, rec_result.n_leakage);
         cmp(
             "bank size",
             ref_result.fission_bank.len() as u64,

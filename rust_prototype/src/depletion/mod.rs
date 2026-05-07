@@ -37,10 +37,10 @@ pub mod predictor_corrector;
 pub use chain::{DecayBranch, DepletionChain, NuclideEntry, ReactionXs};
 pub use chain_io::{ChainLoadError, ChainSpec};
 pub use cram::cram16;
-pub use mapping::{BurnupMapping, BurnupMappingEntry};
 pub use flux::{
-    mean_fissions_per_source, mean_flux_per_source, power_normalized_source,
-    voxel_flux_per_source, E_PER_FISSION_J,
+    E_PER_FISSION_J, mean_fissions_per_source, mean_flux_per_source, power_normalized_source,
+    voxel_flux_per_source,
 };
-pub use matrix::{build_transmutation_matrix, TransmutationInputs};
-pub use predictor_corrector::{deplete_ce_li, DepletionStep};
+pub use mapping::{BurnupMapping, BurnupMappingEntry};
+pub use matrix::{TransmutationInputs, build_transmutation_matrix};
+pub use predictor_corrector::{DepletionStep, deplete_ce_li};

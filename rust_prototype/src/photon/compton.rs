@@ -103,6 +103,133 @@ pub fn compton_scatter_free(elem: &PhotonElement, energy_in: f64, rng: &mut Rng)
     }
 }
 
+// --- Analytic Klein-Nishina helpers (free electron) ------------------------
+
+/// Classical electron radius squared in cm². CODATA-2018:
+/// `r_e = 2.8179403262e-13 cm` so `r_e² = 7.94079e-26 cm²`.
+pub const R_E_SQ_CM2: f64 = 7.940_787_338_e-26;
+
+/// Outgoing Compton photon energy `E' = E / (1 + α(1 − μ))` (free
+/// electron, no Doppler). `μ = cos θ ∈ [-1, 1]`.
+#[inline]
+pub fn compton_e_out(energy_in: f64, mu: f64) -> f64 {
+    let alpha = energy_in / M_E_C2_EV;
+    energy_in / (1.0 + alpha * (1.0 - mu))
+}
+
+/// Klein-Nishina total free-electron Compton cross section (cm²)
+/// at incoming photon energy `E` (eV). Reduces to Thomson
+/// `σ_T = (8π/3)r_e²` in the limit `α → 0`.
+///
+/// Formula (Heitler 1954 / Jackson §13.7):
+/// ```text
+///   σ_KN(α) = 2π r_e² · {
+///     (1+α)/α² · [2(1+α)/(1+2α) − ln(1+2α)/α]
+///     + ln(1+2α)/(2α)
+///     − (1+3α)/(1+2α)²
+///   }
+/// ```
+pub fn klein_nishina_total(energy_in: f64) -> f64 {
+    let alpha = energy_in / M_E_C2_EV;
+    let opa = 1.0 + alpha;
+    let oda = 1.0 + 2.0 * alpha;
+    let log_oda = oda.ln();
+    let two_pi_re_sq = 2.0 * std::f64::consts::PI * R_E_SQ_CM2;
+    two_pi_re_sq
+        * ((opa / (alpha * alpha)) * (2.0 * opa / oda - log_oda / alpha)
+            + log_oda / (2.0 * alpha)
+            - (1.0 + 3.0 * alpha) / (oda * oda))
+}
+
+/// Klein-Nishina differential cross section per unit `μ = cos θ`,
+/// `dσ/dμ` in cm². Free electron, no bound correction.
+///
+/// `dσ/dΩ = (r_e²/2) · (k')² · (k/k' + k'/k − sin²θ)` with
+/// `k' = 1/(1+α(1−μ))`. Multiplying by `2π` (azimuthal integration)
+/// gives `dσ/dμ`.
+#[inline]
+pub fn klein_nishina_dcs_dmu(energy_in: f64, mu: f64) -> f64 {
+    let alpha = energy_in / M_E_C2_EV;
+    let k_prime = 1.0 / (1.0 + alpha * (1.0 - mu));
+    let sin_sq = (1.0 - mu * mu).max(0.0);
+    let dsigma_domega =
+        0.5 * R_E_SQ_CM2 * k_prime * k_prime * (1.0 / k_prime + k_prime - sin_sq);
+    2.0 * std::f64::consts::PI * dsigma_domega
+}
+
+/// Klein-Nishina probability density on `μ ∈ [-1, 1]`, normalised so
+/// `∫_{-1}^{1} pdf dμ = 1`. This is the angular distribution per
+/// scatter event used by the next-event / DXTRAN-style estimator
+/// to compute the deterministic-contribution to a forward detector.
+#[inline]
+pub fn klein_nishina_pdf(energy_in: f64, mu: f64) -> f64 {
+    klein_nishina_dcs_dmu(energy_in, mu) / klein_nishina_total(energy_in)
+}
+
+#[cfg(test)]
+mod kn_helpers_tests {
+    use super::*;
+    use crate::quadrature::{GL16_NODES, GL16_WEIGHTS};
+
+    #[test]
+    fn pdf_integrates_to_one() {
+        // Tolerance loosened with energy: at higher α the KN PDF is
+        // strongly forward-peaked and 16-point Gauss-Legendre on
+        // [-1, 1] no longer resolves the peak. 1e-3 is sufficient
+        // for the unit test — the production NEE integrator splits
+        // the [-1, 1] range into segments to handle this.
+        for &(e, tol) in &[(1.0e3_f64, 1e-6), (1.0e5, 1e-6), (1.0e6, 1e-4), (5.0e6, 1e-3)] {
+            let mut acc = 0.0;
+            for i in 0..16 {
+                acc += GL16_WEIGHTS[i] * klein_nishina_pdf(e, GL16_NODES[i]);
+            }
+            assert!(
+                (acc - 1.0).abs() < tol,
+                "E={e}: ∫pdf = {acc}, expected 1 (tol {tol})"
+            );
+        }
+    }
+
+    #[test]
+    fn forward_scatter_has_no_energy_loss() {
+        // μ = 1 (cos θ = 1, θ = 0): photon continues forward, E' = E.
+        for &e in &[1.0e3_f64, 1.0e6, 1.0e7] {
+            assert!((compton_e_out(e, 1.0) - e).abs() / e < 1e-15);
+        }
+    }
+
+    #[test]
+    fn backscatter_e_out_matches_textbook() {
+        // μ = -1 (back-scatter): E' = E / (1 + 2α).
+        let e = 1.0e6;
+        let alpha = e / M_E_C2_EV;
+        let expected = e / (1.0 + 2.0 * alpha);
+        assert!((compton_e_out(e, -1.0) - expected).abs() / expected < 1e-15);
+    }
+
+    #[test]
+    fn total_xs_matches_thomson_at_low_energy() {
+        // σ_T = (8π/3) r_e². At α = 1 keV / 511 keV ≈ 2e-3, σ_KN should
+        // be within 1% of Thomson.
+        let thomson = (8.0 / 3.0) * std::f64::consts::PI * R_E_SQ_CM2;
+        let kn_low = klein_nishina_total(1.0e3); // 1 keV
+        let rel = ((kn_low - thomson) / thomson).abs();
+        assert!(rel < 0.01, "σ_KN(1 keV) = {kn_low}, Thomson = {thomson}, rel = {rel}");
+    }
+
+    #[test]
+    fn total_xs_decreases_with_energy() {
+        // KN cross section monotonically decreases with photon energy.
+        let energies = [1.0e3_f64, 1.0e4, 1.0e5, 1.0e6, 1.0e7];
+        let mut prev = klein_nishina_total(energies[0]);
+        for &e in &energies[1..] {
+            let now = klein_nishina_total(e);
+            assert!(now < prev, "σ_KN not monotone: {prev} -> {now} at E={e}");
+            prev = now;
+        }
+    }
+}
+
 /// Apply Compton Doppler broadening.
 ///
 /// Inputs are the incoming photon kinematics `(energy_in, α, k_free)`

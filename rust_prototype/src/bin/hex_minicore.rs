@@ -181,7 +181,10 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, f64) {
         thermal,
     };
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("  Loaded {} nuclides in {load_ms:.0} ms", NUCLIDE_SPECS.len());
+    println!(
+        "  Loaded {} nuclides in {load_ms:.0} ms",
+        NUCLIDE_SPECS.len()
+    );
     (provider, load_ms)
 }
 
@@ -239,10 +242,7 @@ fn setup_geometry(rings: usize, reflective_z: bool) -> Geometry {
         // 6: all-water cell for the U_OUTSIDE_HEX universe.
         Cell::new(
             CellId(6),
-            cell::Region::Union(
-                Box::new(cell::inside(0)),
-                Box::new(cell::outside(0)),
-            ),
+            cell::Region::Union(Box::new(cell::inside(0)), Box::new(cell::outside(0))),
             CellFill::Material(2),
         )
         .with_temperature(600.0),
@@ -269,7 +269,10 @@ fn setup_geometry(rings: usize, reflective_z: bool) -> Geometry {
     for q in -(n as i32)..=(n as i32) {
         for r in -(n as i32)..=(n as i32) {
             let cube_s = -q - r;
-            let ring = q.unsigned_abs().max(r.unsigned_abs()).max(cube_s.unsigned_abs()) as usize;
+            let ring = q
+                .unsigned_abs()
+                .max(r.unsigned_abs())
+                .max(cube_s.unsigned_abs()) as usize;
             let qi = (q + n as i32) as usize;
             let ri = (r + n as i32) as usize;
             if ring <= visible {
@@ -386,19 +389,14 @@ fn main() {
         t_per_seed.push(sim_ms);
 
         if args.seeds > 1 {
-            println!(
-                "k_inf={k_mean:.5}  k_track={k_track_mean:.5}  {sim_ms:.0}ms"
-            );
+            println!("k_inf={k_mean:.5}  k_track={k_track_mean:.5}  {sim_ms:.0}ms");
         }
     }
 
     let n_seeds = k_per_seed.len() as f64;
     let k_mean = k_per_seed.iter().sum::<f64>() / n_seeds;
-    let k_var = k_per_seed
-        .iter()
-        .map(|k| (k - k_mean).powi(2))
-        .sum::<f64>()
-        / (n_seeds - 1.0).max(1.0);
+    let k_var =
+        k_per_seed.iter().map(|k| (k - k_mean).powi(2)).sum::<f64>() / (n_seeds - 1.0).max(1.0);
     let k_std = k_var.sqrt();
 
     let kt_mean = k_track_per_seed.iter().sum::<f64>() / n_seeds;
@@ -413,7 +411,8 @@ fn main() {
     let ns_per_p = total_t_ms * 1e6 / (total_histories * args.seeds as u64) as f64;
 
     println!("\n========================================================");
-    println!("  RESULT — hex mini-core ({} ring{}, SVD rank={})",
+    println!(
+        "  RESULT — hex mini-core ({} ring{}, SVD rank={})",
         args.rings,
         if args.rings == 1 { "" } else { "s" },
         args.rank

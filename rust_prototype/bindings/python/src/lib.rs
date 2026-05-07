@@ -671,12 +671,30 @@ impl PyScene {
             format!("{prefix}_zmax"),
         ];
         let surfaces = [
-            Surface::PlaneX { x0: -half[0], bc: bc_parsed },
-            Surface::PlaneX { x0: half[0], bc: bc_parsed },
-            Surface::PlaneY { y0: -half[1], bc: bc_parsed },
-            Surface::PlaneY { y0: half[1], bc: bc_parsed },
-            Surface::PlaneZ { z0: -half[2], bc: bc_parsed },
-            Surface::PlaneZ { z0: half[2], bc: bc_parsed },
+            Surface::PlaneX {
+                x0: -half[0],
+                bc: bc_parsed,
+            },
+            Surface::PlaneX {
+                x0: half[0],
+                bc: bc_parsed,
+            },
+            Surface::PlaneY {
+                y0: -half[1],
+                bc: bc_parsed,
+            },
+            Surface::PlaneY {
+                y0: half[1],
+                bc: bc_parsed,
+            },
+            Surface::PlaneZ {
+                z0: -half[2],
+                bc: bc_parsed,
+            },
+            Surface::PlaneZ {
+                z0: half[2],
+                bc: bc_parsed,
+            },
         ];
         for (name, surface) in names.iter().zip(surfaces.iter()) {
             if slf.surfaces.contains_key(name) {
@@ -2103,9 +2121,10 @@ fn deplete_constant_flux(
         )));
     }
     let order = open_rust_mc::depletion::cram::CramOrder::from(order);
-    let step = open_rust_mc::depletion::deplete_ce_li(
-        &chain.chain, &n0, flux, dt_seconds, order, |_| flux,
-    );
+    let step =
+        open_rust_mc::depletion::deplete_ce_li(&chain.chain, &n0, flux, dt_seconds, order, |_| {
+            flux
+        });
     Ok(step.corrected)
 }
 

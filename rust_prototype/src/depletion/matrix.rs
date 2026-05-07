@@ -80,7 +80,13 @@ mod tests {
             decay_constant: 1.0e-3,
             decay_branches: vec![],
         });
-        let a = build_transmutation_matrix(&TransmutationInputs { chain: &chain, flux: 0.0 }, 60.0);
+        let a = build_transmutation_matrix(
+            &TransmutationInputs {
+                chain: &chain,
+                flux: 0.0,
+            },
+            60.0,
+        );
         assert!((a[0] - (-1.0e-3 * 60.0)).abs() < 1e-15);
     }
 
@@ -103,7 +109,13 @@ mod tests {
             decay_branches: vec![],
         });
         let dt = 3600.0; // 1 hour
-        let a = build_transmutation_matrix(&TransmutationInputs { chain: &chain, flux: 0.0 }, dt);
+        let a = build_transmutation_matrix(
+            &TransmutationInputs {
+                chain: &chain,
+                flux: 0.0,
+            },
+            dt,
+        );
         // 2x2 row-major: [[A_00, A_01], [A_10, A_11]]
         assert!((a[0] - (-2.93e-5 * dt)).abs() < 1e-15);
         assert!((a[2] - (2.93e-5 * dt)).abs() < 1e-15);
@@ -131,7 +143,10 @@ mod tests {
         let dt = 86_400.0_f64;
         let flux = 1.0e14_f64;
         let a = build_transmutation_matrix(
-            &TransmutationInputs { chain: &chain, flux },
+            &TransmutationInputs {
+                chain: &chain,
+                flux,
+            },
             dt,
         );
         let expected_rate_dt = 2.7 * 1.0e-24 * flux * dt;

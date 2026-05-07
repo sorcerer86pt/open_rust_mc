@@ -92,8 +92,7 @@ impl BurnupMapping {
         for entry in &self.entries {
             if entry.material_idx < materials.len() {
                 let density = composition[entry.chain_idx];
-                materials[entry.material_idx]
-                    .set_atom_density(entry.xs_kernel_idx, density);
+                materials[entry.material_idx].set_atom_density(entry.xs_kernel_idx, density);
             }
         }
     }
@@ -183,11 +182,8 @@ mod tests {
     fn pull_reads_current_material_state() {
         let chain = build_chain();
         let materials = build_materials();
-        let mapping = BurnupMapping::from_zaid_table(
-            &chain,
-            &materials,
-            &[(92235, 0, 0), (54135, 0, 9)],
-        );
+        let mapping =
+            BurnupMapping::from_zaid_table(&chain, &materials, &[(92235, 0, 0), (54135, 0, 9)]);
         let composition = mapping.pull(&chain, &materials);
         assert_eq!(composition.len(), 3);
         assert!((composition[0] - 7.19e-4).abs() < 1e-15);
@@ -200,11 +196,8 @@ mod tests {
     fn round_trip_pull_then_push_is_identity() {
         let chain = build_chain();
         let mut materials = build_materials();
-        let mapping = BurnupMapping::from_zaid_table(
-            &chain,
-            &materials,
-            &[(92235, 0, 0), (54135, 0, 9)],
-        );
+        let mapping =
+            BurnupMapping::from_zaid_table(&chain, &materials, &[(92235, 0, 0), (54135, 0, 9)]);
         let comp = mapping.pull(&chain, &materials);
         mapping.push(&comp, &mut materials);
         let comp_again = mapping.pull(&chain, &materials);

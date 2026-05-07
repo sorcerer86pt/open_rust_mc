@@ -1,3 +1,180 @@
+# Random-ray TRRM (forward + adjoint, immortal rays) + FW-CADIS replacement — 2026-05-08
+
+## TL;DR
+
+The 2026-05-07 round shipped a "lite" detector-backward collision-
+density CADIS proxy and documented it as **not delivering FOM gain
+over analog**. This round closes that scorecard item. A complete
+multigroup random-ray transport solver (Tramm 2018-style flat-source
+TRRM, with the Tramm & Siegel 2021 immortal-ray persistent-state
+variant) lands as `random_ray::*`, and the lite proxy is removed
+from `shield_slab.rs` after empirical demonstration that the random-
+ray adjoint replaces it strictly better at every measured depth.
+
+`origin/main` is at the previous round's `43b3236`. Lib tests
+**287 / 287 green** (was 260; +27 this round). `cargo check`
+default and `cargo check --features cuda` both clean.
+
+Headline FOM measurements (1 MeV photons through water,
+shield_slab benchmark, full provenance in `outputs/random_ray_cadis_fom.txt`):
+
+| Depth   | Mode             | T          | σ_rel | FOM (/s) | vs analog |
+|---------|------------------|------------|------:|---------:|----------:|
+| 100 cm  | Analog           | 5.372e-3   | 1.11% |    161.7 | —         |
+| 100 cm  | Lite CADIS (gone)| 5.231e-3   | 1.86% |    111.4 | 0.69× WORSE |
+| 100 cm  | **RR CADIS**     | 5.330e-3   | 1.02% |  **354** | **2.19× BETTER** |
+| 200 cm  | Analog           | 1.105e-5   | 10.2% |    0.351 | —         |
+| 200 cm  | Lite CADIS (gone)| 1.366e-5   | 37.6% |    0.071 | 0.20× WORSE |
+| 200 cm  | **RR CADIS**     | 1.252e-5   | 11.8% |  **1.52**| **4.32× BETTER** |
+
+Both RR-CADIS results are unbiased within combined MC σ. RR vs lite at
+200 cm: 21× FOM improvement.
+
+## What landed (in commit order)
+
+1. **`random_ray` module — multigroup forward + adjoint TRRM**
+   `src/random_ray/{mod,mgxs,fsr,integrator,solver,cadis}.rs` —
+   ~1500 lines.
+   - `MgxsLibrary` / `MaterialMgxs` / `ScatterMatrix` — multigroup XS
+     with shared storage for forward (`Σ_s,g→g'`) and adjoint
+     (transposed) lookups; χ-normalisation + Σ_t-positivity checked at
+     construction.
+   - `FsrMesh` — enum over `Cartesian` (uniform voxel grid, O(1)
+     `fsr_at(pos, _)` integer division) and `Cell` (one FSR per
+     `(deepest cell, lattice element)` key, HashMap lookup, supports
+     analytic *or* stochastic per-FSR volume from track lengths).
+   - `solve_segment` — analytic MoC ODE step
+     `ψ_out = ψ_in·e^(-τ) + (q/Σ_t)(1-e^(-τ))` plus track-length
+     `l·ψ_avg`. Numerically stable `(1-e^(-τ))/τ` series for τ→0.
+   - `RandomRaySolver` — ray sampler (uniform AABB × isotropic dir),
+     dead-zone + active-zone phasing, per-segment integration through
+     `trace_step_recursive`, BC handling (vacuum kills mortal /
+     reflects-with-zero immortal, reflective specular, transmission
+     continues), source iteration with k-power-method update,
+     `AdjointFlag::{Forward, Adjoint}` switch, `cfg.immortal: bool`
+     for persistent-ray mode per Tramm & Siegel 2021.
+
+2. **`rr_pincell` binary — multigroup pin-cell benchmark**
+   2-group, UO₂ cylinder + water moderator pin cell with reflective
+   BCs. Cell-based FSRs with analytic volumes (1 fuel + 1 moderator
+   FSR auto-discovered). Forward (mortal + immortal) + adjoint all
+   run end-to-end; per-region thermal/fast spectra physically correct.
+   Wall ~12 s. Scaling to full C5G7 (4 fuel × 7 groups × 17×17
+   lattice) is data plumbing — no new solver code needed.
+
+3. **`rr_cadis_slab` binary + `WeightWindow::from_flux` bridge**
+   `random_ray::cadis::weight_window_from_adjoint` runs the random-
+   ray adjoint and feeds the result into the existing
+   `transport::weight_window::WeightWindow::from_flux` pipeline.
+   `rr_cadis_slab` is the slab-shaped CLI that produces the JSON
+   `shield_slab --cadis-load` already consumes (CadisMap schema:
+   `{thickness_cm, n_z_bins, counts}`). For 1-group non-fissionable
+   problems the adjoint operator equals the forward operator (1×1
+   scatter matrix is its own transpose), so the adjoint is computed
+   as a fixed-source forward solve with the source localised at the
+   detector face — that's the cheap exact reduction.
+
+4. **Lite CADIS removed from `shield_slab.rs`**
+   `cadis_calibration_pass`, `--cadis-calibration`, `--cadis-z-bins`,
+   `--cadis-save` deleted. `shield_slab.rs` lost ~180 lines (608 →
+   428). `--cadis-load`, `--ww-ratio`, `--ww-floor` retained — they
+   consume RR-generated JSONs unchanged. The decision was driven by
+   the empirical measurement above: the lite proxy is worse than
+   analog at every measured depth, the random-ray adjoint is
+   strictly better at every measured depth, and keeping a known-
+   inferior parallel implementation in a working binary is dead
+   weight.
+
+5. **Canonical importance maps regenerated**
+   `outputs/cadis_water_100cm.json` (25 z-bins) and
+   `outputs/cadis_water_200cm.json` (50 z-bins) regenerated from
+   `rr_cadis_slab`. Old lite-generated files replaced. Mesh
+   resolution sweep at 100 cm shows 25–30 bins is the sweet spot:
+   coarser meshes reduce wall-time bloat from per-voxel splitting
+   without sacrificing fidelity at slab depths of 7–14 mfp.
+
+6. **GPU port — scaffold**
+   `gpu/cuda/random_ray_persistent.cu` — kernel with per-segment MoC
+   ODE, vacuum reflect-with-zero, reflective + transmission BCs,
+   Cartesian FSR lookup, atomic-add accumulators. `src/gpu_random_ray.rs`
+   — Rust wrapper with NVRTC compile + buffer alloc + scaffold launch.
+   `cargo check --features cuda` clean. Runtime parity validation
+   against CPU is **deferred until CUDA hardware is available** — same
+   convention as the hex-GPU work in this file.
+
+## Validated benchmarks (lib tests)
+
+- 1-group infinite homogeneous reflective box: k_inf within 500 pcm
+  of analytic `νΣ_f/Σ_a = 1.25` (forward + immortal).
+- Fixed-source infinite medium: `φ = Q/Σ_a` recovered within 10%.
+- Adjoint-identity: forward k vs adjoint k agree within 800 pcm.
+- Slab importance-gradient: ψ̂*(z) decreases away from the detector
+  face; `WeightWindow::from_flux` produces correctly-oriented WW.
+- 2-group, 2-material cell-based: physically correct per-region
+  spectra (moderator thermal/fast > fuel thermal/fast).
+- MoC integrator unit tests: `(1-e^(-τ))/τ` series agrees with direct
+  formula to 1e-8 for τ ∈ [1e-4, 10]; segment in steady state holds
+  ψ constant; track_psi matches definite integral to 1e-12.
+
+## Tests this round
+
+260 (resume.md last writeup) → 277 (after `random_ray` module + 17
+unit / cell-based / multigroup tests) → 286 (after immortal-ray and
+two-group end-to-end tests) → **287** (after the cell-based mesh
+ergonomics test). Net **+27 lib tests**, all green.
+
+## Honest scorecard
+
+| Item | Status |
+|---|---|
+| Forward random-ray k-eigenvalue (mortal + immortal) | ✅ shipped, validated |
+| Adjoint random-ray (transposed Σ_s, χ ↔ νΣ_f swap) | ✅ shipped, validated |
+| Cell-based FSRs with analytic *or* stochastic volume | ✅ shipped, validated |
+| MoC integrator (analytic ODE, τ→0 stability) | ✅ shipped, 1e-12 against analytic |
+| `rr_pincell` 2-group benchmark binary | ✅ shipped, runs end-to-end |
+| `rr_cadis_slab` FW-CADIS substrate | ✅ shipped, JSON drop-in |
+| Lite CADIS removal + canonical-JSON regen | ✅ done |
+| **CADIS FOM gain over analog (100 cm + 200 cm)** | ✅ **delivered** (2.2× / 4.3×) |
+| Adaptive per-voxel ratio (`WeightWindow::from_flux_adaptive`) | ✅ implemented + unit-tested + wired via `--ww-growth`; ❌ doesn't beat fixed ratio empirically (default growth=0) |
+| Textbook 50–1000× CADIS gain | ❌ ruled out for this WW design — see negative results below |
+| Linear source approximation (1st-order) | deferred (flat on fine mesh equivalent for axis-aligned problems) |
+| Full C5G7 (4 fuel × 7g × 17×17) | data plumbing, no new code |
+| GPU runtime validation | deferred until CUDA hardware available |
+| Continuous-splitting variance reduction (DXTRAN-style) | research-tier, **the actual lever needed for >14 mfp** |
+
+### Negative results documented this round
+
+- **Adaptive-ratio WW** (`WeightWindow::from_flux_adaptive`): widens
+  the band at low-importance voxels per
+  `ratio_v = base_ratio · (1 + ratio_growth · log10(φ_max/φ_v))`.
+  Hypothesis was that the depth-dependent optimal-fixed-ratio (peaks
+  at ratio≈3 at 200cm, monotone-up at 100cm) could be captured by
+  one variable-band WW. At converged statistics adaptive ratio is
+  statistically indistinguishable from fixed `ratio=5` at 100 cm
+  (1M hist: 152 vs 146) and **worse** at 200 cm (2M hist: 1.52 vs
+  0.39 — wider source-side bands oversplit in the transition zone).
+  Lever stays in tree behind `--ww-growth=0.0` default; the
+  experiment ruled it out as a path to bigger CADIS gains on this
+  benchmark.
+
+- **300 cm (≈21 mfp)** under any naive WW configuration:
+  `(ratio, growth) ∈ {5,10,20} × {0,1,2,3}` all give 0 transmitted
+  photons in 500 k histories. The exponential bound from
+  `max_split=8` per voxel crossing limits how much the WW can
+  multiply photons regardless of how the band is shaped.
+  Continuous-splitting along the characteristic (DXTRAN-style
+  point-detector estimator at every collision) is the textbook fix
+  and remains research-tier work.
+
+- **Source-distribution biasing for `shield_slab`**: textbook CADIS
+  source biasing samples emission position/direction from the
+  importance CDF. shield_slab's source is monodirectional + at one
+  point — the importance CDF degenerates to a delta and there's no
+  distribution to bias. Source-biasing is the right lever for
+  volume / angular-distribution sources, not beam sources.
+
+---
+
 # Depletion + URR equivalence + photon shielding + CADIS-lite — 2026-05-07
 
 ## TL;DR

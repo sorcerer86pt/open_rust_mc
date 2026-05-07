@@ -93,7 +93,13 @@ impl DepletionChain {
     /// Register a reaction for nuclide `zaid`. `yields` is filled
     /// with the standard ENDF mapping when empty for a recognized
     /// MT; otherwise the caller's map is used.
-    pub fn add_reaction(&mut self, zaid: u32, mt: u32, xs_barns: f64, yields: Option<HashMap<u32, f64>>) {
+    pub fn add_reaction(
+        &mut self,
+        zaid: u32,
+        mt: u32,
+        xs_barns: f64,
+        yields: Option<HashMap<u32, f64>>,
+    ) {
         let yields = yields.unwrap_or_else(|| default_yields_for(zaid, mt));
         self.reactions.insert(
             (zaid, mt),

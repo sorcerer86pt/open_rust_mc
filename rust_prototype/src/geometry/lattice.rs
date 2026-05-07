@@ -266,19 +266,11 @@ impl HexLattice {
             // convention (size = side length s):
             //   x = 1.5 * s * q
             //   y = √3 * s * (r + q/2)
-            HexOrientation::Y => Vec3::new(
-                1.5 * s * q,
-                3.0_f64.sqrt() * s * (r + q * 0.5),
-                0.0,
-            ),
+            HexOrientation::Y => Vec3::new(1.5 * s * q, 3.0_f64.sqrt() * s * (r + q * 0.5), 0.0),
             // Pointy-top: q-axis tilted right, r-axis along world y.
             //   x = √3 * s * (q + r/2)
             //   y = 1.5 * s * r
-            HexOrientation::X => Vec3::new(
-                3.0_f64.sqrt() * s * (q + r * 0.5),
-                1.5 * s * r,
-                0.0,
-            ),
+            HexOrientation::X => Vec3::new(3.0_f64.sqrt() * s * (q + r * 0.5), 1.5 * s * r, 0.0),
         }
     }
 
@@ -327,7 +319,10 @@ impl HexLattice {
 
         // Bounds check via cube ring radius.
         let cube_s = -q - r;
-        let ring = q.unsigned_abs().max(r.unsigned_abs()).max(cube_s.unsigned_abs()) as usize;
+        let ring = q
+            .unsigned_abs()
+            .max(r.unsigned_abs())
+            .max(cube_s.unsigned_abs()) as usize;
         if ring > self.n_rings {
             return None;
         }
@@ -345,9 +340,7 @@ impl HexLattice {
 
     /// Get the universe at axial coordinate `(q, r, z)`.
     pub fn universe_at(&self, q: i32, r: i32, z: i32) -> UniverseId {
-        let idx = self
-            .axial_index(q, r, z)
-            .expect("axial index out of range");
+        let idx = self.axial_index(q, r, z).expect("axial index out of range");
         self.universes[idx]
     }
 
@@ -356,8 +349,7 @@ impl HexLattice {
     /// recursive descent's offset calculation.
     pub fn local_position(&self, world_pos: Vec3, q: i32, r: i32, z: i32) -> Vec3 {
         let centre_xy = self.element_center_local(q, r);
-        let centre_z =
-            (z as f64 - (self.n_axial as f64) * 0.5 + 0.5) * self.pitch_z;
+        let centre_z = (z as f64 - (self.n_axial as f64) * 0.5 + 0.5) * self.pitch_z;
         let world_local = world_pos - self.center;
         Vec3::new(
             world_local.x - centre_xy.x,
@@ -369,12 +361,7 @@ impl HexLattice {
     /// Distance along `local_dir` from `local_pos` (in lattice frame)
     /// until the particle crosses out of element `current`. Six in-plane
     /// edges plus the two axial planes; min positive is reported.
-    pub fn distance_to_grid(
-        &self,
-        local_pos: Vec3,
-        local_dir: Vec3,
-        current: [i32; 3],
-    ) -> f64 {
+    pub fn distance_to_grid(&self, local_pos: Vec3, local_dir: Vec3, current: [i32; 3]) -> f64 {
         let d_perp = self.pitch_xy * 0.5;
         let elem_center = self.element_center_local(current[0], current[1]);
         let pos_rel = Vec3::new(
@@ -421,8 +408,7 @@ impl HexLattice {
 
         // Axial planes.
         if local_dir.z.abs() > 0.0 {
-            let centre_z =
-                (current[2] as f64 - (self.n_axial as f64) * 0.5 + 0.5) * self.pitch_z;
+            let centre_z = (current[2] as f64 - (self.n_axial as f64) * 0.5 + 0.5) * self.pitch_z;
             let half_z = self.pitch_z * 0.5;
             let target_z = if local_dir.z > 0.0 {
                 centre_z + half_z
@@ -506,7 +492,11 @@ mod hex_tests {
         // at 30°/90°/etc. Heading +y (90°) for flat-top should cross
         // the top edge at distance pitch/2.
         let lat = unit_lattice(HexOrientation::Y);
-        let d = lat.distance_to_grid(Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), [0, 0, 0]);
+        let d = lat.distance_to_grid(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            [0, 0, 0],
+        );
         assert!(
             (d - lat.pitch_xy * 0.5).abs() < 1e-12,
             "expected pitch/2 = {}, got {}",
@@ -517,7 +507,11 @@ mod hex_tests {
         // For pointy-top, edge normal at 0° (+x), heading +x crosses
         // right edge at distance pitch/2.
         let lat = unit_lattice(HexOrientation::X);
-        let d = lat.distance_to_grid(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), [0, 0, 0]);
+        let d = lat.distance_to_grid(
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            [0, 0, 0],
+        );
         assert!(
             (d - lat.pitch_xy * 0.5).abs() < 1e-12,
             "expected pitch/2 = {}, got {}",

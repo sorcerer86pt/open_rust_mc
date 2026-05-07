@@ -33,11 +33,11 @@ use std::time::Instant;
 use clap::Parser;
 
 use open_rust_mc::depletion::{
-    chain::{u235_thermal_iodine_xenon_yields, DecayBranch, DepletionChain, NuclideEntry},
+    BurnupMapping, E_PER_FISSION_J,
+    chain::{DecayBranch, DepletionChain, NuclideEntry, u235_thermal_iodine_xenon_yields},
     chain_io::ChainSpec,
     cram::CramOrder,
     deplete_ce_li, mean_fissions_per_source, mean_flux_per_source, power_normalized_source,
-    BurnupMapping, E_PER_FISSION_J,
 };
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
@@ -272,10 +272,7 @@ fn setup_geometry() -> (Vec<Surface>, Vec<Cell>, Aabb) {
         .with_temperature(600.0),
         Cell::new(
             CellId(3),
-            cell::Region::Intersection(
-                Box::new(cell::outside(2)),
-                Box::new(outer_box.inside),
-            ),
+            cell::Region::Intersection(Box::new(cell::outside(2)), Box::new(outer_box.inside)),
             CellFill::Material(2),
         )
         .with_aabb(pin_aabb)
@@ -290,7 +287,11 @@ fn load_xs(args: &Args) -> xs_provider::SvdXsProvider {
         let path = args.data_dir.join(filename);
         if path.exists() {
             kernels.push(xs_provider::load_nuclide(
-                &path, args.rank, nuc_temp_idx, awr, nu_bar,
+                &path,
+                args.rank,
+                nuc_temp_idx,
+                awr,
+                nu_bar,
             ));
         } else {
             eprintln!("WARN: {} not found — using zero kernel", path.display());
@@ -435,9 +436,18 @@ fn main() {
     println!("  PWR pin-cell burnup driver — CRAM-16 + transport feedback");
     println!("==========================================================");
     println!("  data_dir       : {}", args.data_dir.display());
-    println!("  steps          : {}  ({:.1} h each)", args.steps, args.hours_per_step);
-    println!("  power          : {:.1} W/cm pin length", args.power_w_per_cm);
-    println!("  particles      : {} × {} batches", args.particles, args.batches);
+    println!(
+        "  steps          : {}  ({:.1} h each)",
+        args.steps, args.hours_per_step
+    );
+    println!(
+        "  power          : {:.1} W/cm pin length",
+        args.power_w_per_cm
+    );
+    println!(
+        "  particles      : {} × {} batches",
+        args.particles, args.batches
+    );
     println!();
 
     let provider = load_xs(&args);
@@ -500,9 +510,7 @@ fn main() {
     println!(
         "  step       t [h]    k_eff       φ_fuel [n/cm²/s]    N_Xe/N_U235     ΔN_U235/N_U235"
     );
-    println!(
-        "  -----  --------  --------  -----------------  --------------  ----------------"
-    );
+    println!("  -----  --------  --------  -----------------  --------------  ----------------");
 
     let dt = args.hours_per_step * 3_600.0;
     let order: CramOrder = args.cram_order.into();
@@ -574,21 +582,10 @@ fn main() {
             );
             let phi_eoc_per_source = mean_flux_per_source(&eoc_batches, &eoc_mesh);
             let f_eoc_per_source = mean_fissions_per_source(&eoc_batches);
-            let q_eoc = power_normalized_source(
-                target_power,
-                f_eoc_per_source,
-                E_PER_FISSION_J,
-            );
+            let q_eoc = power_normalized_source(target_power, f_eoc_per_source, E_PER_FISSION_J);
             phi_eoc_per_source * q_eoc
         };
-        let result = deplete_ce_li(
-            &chain,
-            &chain_composition,
-            phi_physical,
-            dt,
-            order,
-            flux_at,
-        );
+        let result = deplete_ce_li(&chain, &chain_composition, phi_physical, dt, order, flux_at);
         chain_composition = result.corrected;
 
         // Push every mapped (chain → material) entry. ZAIDs that
@@ -599,6 +596,9 @@ fn main() {
     }
 
     println!();
-    println!("  Source rate Q (final step) — physical flux scaled to {:.1} W power", target_power);
+    println!(
+        "  Source rate Q (final step) — physical flux scaled to {:.1} W power",
+        target_power
+    );
     println!("  Pin cell volume {:.3} cm³", pin_volume);
 }

@@ -86,12 +86,7 @@ impl Bvh {
     /// `find_cell_recursive`, which already keeps an `evals` buffer
     /// for the cell-region tests.
     #[inline]
-    pub fn find_cell_with_evals(
-        &self,
-        pos: Vec3,
-        evals: &[f64],
-        cells: &[Cell],
-    ) -> Option<usize> {
+    pub fn find_cell_with_evals(&self, pos: Vec3, evals: &[f64], cells: &[Cell]) -> Option<usize> {
         let root = self.root.as_ref()?;
         find_cell_recursive(root, pos, evals, cells)
     }

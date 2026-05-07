@@ -101,11 +101,7 @@ pub const NO_DANCOFF_CORRECTION: f64 = 1.0;
 /// terms — significant at the level we care about for benchmarks.
 /// Upgrade to Carlvik-Pellaud is a follow-on; for now this gives the
 /// right qualitative behaviour and the correct asymptotic limits.
-pub fn dancoff_square_lattice(
-    pitch_cm: f64,
-    fuel_or_cm: f64,
-    sigma_m_total_per_cm: f64,
-) -> f64 {
+pub fn dancoff_square_lattice(pitch_cm: f64, fuel_or_cm: f64, sigma_m_total_per_cm: f64) -> f64 {
     let gap = (pitch_cm - 2.0 * fuel_or_cm).max(0.0);
     let alpha_square = 1.08_f64;
     (-sigma_m_total_per_cm * gap * alpha_square).exp()
@@ -149,11 +145,7 @@ pub fn dancoff_carlvik_pellaud_square(
 
 /// Hex / triangular-lattice Dancoff factor. Same form as
 /// `dancoff_square_lattice` with `α = 1.10`.
-pub fn dancoff_hex_lattice(
-    pitch_cm: f64,
-    fuel_or_cm: f64,
-    sigma_m_total_per_cm: f64,
-) -> f64 {
+pub fn dancoff_hex_lattice(pitch_cm: f64, fuel_or_cm: f64, sigma_m_total_per_cm: f64) -> f64 {
     let gap = (pitch_cm - 2.0 * fuel_or_cm).max(0.0);
     let alpha_hex = 1.10_f64;
     (-sigma_m_total_per_cm * gap * alpha_hex).exp()

@@ -265,7 +265,15 @@ fn power_iteration_flat(
         for (i, &pos) in source.iter().enumerate() {
             let mut rng = Pcg64::new(seed.wrapping_add(batch as u64 * 1_000_003), i as u64);
             let dir = isotropic_dir(&mut rng);
-            track_history_flat(surfaces, cells, materials, &mut rng, pos, dir, &mut new_bank);
+            track_history_flat(
+                surfaces,
+                cells,
+                materials,
+                &mut rng,
+                pos,
+                dir,
+                &mut new_bank,
+            );
         }
         let k = new_bank.len() as f64 / n.max(1) as f64;
         if !new_bank.is_empty() {
@@ -283,11 +291,7 @@ fn power_iteration_flat(
     }
     let n_active = k_history.len() as f64;
     let mean = k_history.iter().sum::<f64>() / n_active;
-    let var = k_history
-        .iter()
-        .map(|k| (k - mean).powi(2))
-        .sum::<f64>()
-        / (n_active - 1.0).max(1.0);
+    let var = k_history.iter().map(|k| (k - mean).powi(2)).sum::<f64>() / (n_active - 1.0).max(1.0);
     let stderr = (var / n_active).sqrt();
     (mean, stderr)
 }
@@ -310,10 +314,7 @@ fn power_iteration(
         let mut new_bank: Vec<Vec3> = Vec::new();
         let n = source.len() as u64;
         for (i, &pos) in source.iter().enumerate() {
-            let mut rng = Pcg64::new(
-                seed.wrapping_add(batch as u64 * 1_000_003),
-                i as u64,
-            );
+            let mut rng = Pcg64::new(seed.wrapping_add(batch as u64 * 1_000_003), i as u64);
             let dir = isotropic_dir(&mut rng);
             track_history(geom, materials, &mut rng, pos, dir, &mut new_bank);
         }
@@ -339,11 +340,7 @@ fn power_iteration(
     let _ = total_batch;
     let n_active = k_history.len() as f64;
     let mean = k_history.iter().sum::<f64>() / n_active;
-    let var = k_history
-        .iter()
-        .map(|k| (k - mean).powi(2))
-        .sum::<f64>()
-        / (n_active - 1.0).max(1.0);
+    let var = k_history.iter().map(|k| (k - mean).powi(2)).sum::<f64>() / (n_active - 1.0).max(1.0);
     let stderr = (var / n_active).sqrt();
     (mean, stderr)
 }
@@ -404,8 +401,7 @@ fn flat_unit_cell() -> Geometry {
         ),
     ];
     let universes = vec![Universe::new(UniverseId(0), vec![0, 1])];
-    Geometry::new(surfaces, cells, universes, Vec::new(), UniverseId(0))
-        .expect("flat unit cell")
+    Geometry::new(surfaces, cells, universes, Vec::new(), UniverseId(0)).expect("flat unit cell")
 }
 
 /// 2×2 lattice of identical fissile pins, reflective on outer 2×2 box.
@@ -492,8 +488,7 @@ fn lattice_unit_cell_2x2() -> Geometry {
         universes: vec![UniverseId(1); 4],
         material_overrides: None,
     }];
-    Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
-        .expect("lattice 2x2")
+    Geometry::new(surfaces, cells, universes, lattices, UniverseId(0)).expect("lattice 2x2")
 }
 
 // ── Tests ───────────────────────────────────────────────────────────
@@ -568,8 +563,15 @@ fn flat_recursive_matches_flat_old_bit_for_bit() {
         })
         .collect();
 
-    let (k_old, se_old) =
-        power_iteration_flat(&geom.surfaces, &geom.cells, &materials, &source, 25, 50, 0xF1A7);
+    let (k_old, se_old) = power_iteration_flat(
+        &geom.surfaces,
+        &geom.cells,
+        &materials,
+        &source,
+        25,
+        50,
+        0xF1A7,
+    );
     let (k_new, se_new) = power_iteration(&geom, &materials, &source, 25, 50, 0xF1A7);
 
     eprintln!("old primitives k = {k_old:.6} +/- {se_old:.6}");
@@ -713,8 +715,8 @@ fn hex_lattice_descent_and_trace_smoke() {
     // (q=1, r=0) ring-1 hex at the expected pitch, with the
     // CoordStack carrying the new (q, r, z) on the deepest frame.
     let geom = hex_unit_cell_ring1();
-    let stack = find_cell_recursive(Vec3::new(0.0, 0.0, 0.0), &geom)
-        .expect("centre hex must resolve");
+    let stack =
+        find_cell_recursive(Vec3::new(0.0, 0.0, 0.0), &geom).expect("centre hex must resolve");
     assert!(stack.len() >= 2, "hex descent should produce ≥ 2 frames");
     let deepest = stack.last().unwrap();
     assert_eq!(deepest.universe.0, 1, "deepest frame is the pin universe");
@@ -730,13 +732,8 @@ fn hex_lattice_descent_and_trace_smoke() {
     // grid edge — distance 0.1 cm.
     let pos = Vec3::new(0.0, 0.4, 0.0);
     let outer_stack = find_cell_recursive(pos, &geom).expect("outside-pin position resolves");
-    let hit = trace_step_recursive(
-        &outer_stack,
-        pos,
-        Vec3::new(0.0, 1.0, 0.0),
-        &geom,
-    )
-    .expect("hex trace must succeed");
+    let hit = trace_step_recursive(&outer_stack, pos, Vec3::new(0.0, 1.0, 0.0), &geom)
+        .expect("hex trace must succeed");
     let expected_edge = 0.1_f64;
     assert!(
         (hit.distance - expected_edge).abs() < 5e-3,
@@ -781,7 +778,11 @@ fn lattice_keff_lands_in_sane_range() {
     let source: Vec<Vec3> = (0..n)
         .map(|i| {
             let mut rng = Pcg64::new(0x1A77, i);
-            Vec3::new(2.0 * (rng.uniform() - 0.5), 2.0 * (rng.uniform() - 0.5), 0.0)
+            Vec3::new(
+                2.0 * (rng.uniform() - 0.5),
+                2.0 * (rng.uniform() - 0.5),
+                0.0,
+            )
         })
         .collect();
     let (k, se) = power_iteration(&geom, &materials, &source, 25, 50, 0x1A77);

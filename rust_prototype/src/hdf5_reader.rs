@@ -2136,9 +2136,7 @@ pub fn read_delayed_nu_bar(path: &Path) -> Result<Option<NuBarTable>> {
 
 /// Same as `read_delayed_nu_bar` but on an already-open reaction_018
 /// group. Returns `None` when the nuclide has no delayed products.
-pub fn read_delayed_nu_bar_from_group(
-    rxn_group: &hdf5_pure::Group<'_>,
-) -> Option<NuBarTable> {
+pub fn read_delayed_nu_bar_from_group(rxn_group: &hdf5_pure::Group<'_>) -> Option<NuBarTable> {
     let subgroups = rxn_group.groups().unwrap_or_default();
     let mut delayed_tables: Vec<NuBarTable> = Vec::new();
     let mut delayed_constants: Vec<f64> = Vec::new();
@@ -2152,8 +2150,7 @@ pub fn read_delayed_nu_bar_from_group(
             Err(_) => continue,
         };
         let attrs = product.attrs().unwrap_or_default();
-        let is_neutron =
-            matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
+        let is_neutron = matches!(attrs.get("particle"), Some(hdf5_pure::AttrValue::String(s)) if s == "neutron");
         if !is_neutron {
             continue;
         }

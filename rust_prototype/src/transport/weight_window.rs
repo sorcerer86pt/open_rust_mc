@@ -113,6 +113,80 @@ impl WeightWindow {
         }
     }
 
+    /// Adaptive-ratio variant of `from_flux`. The band width is
+    /// per-voxel rather than uniform:
+    ///
+    /// ```text
+    ///   ratio_v = base_ratio · (1 + ratio_growth · log10(phi_max / phi_v))
+    /// ```
+    ///
+    /// Voxels with low importance (large `phi_max/phi_v`, i.e. far
+    /// from the detector) get a wider band — that prevents the
+    /// shallow-end splits and roulette events from inflating wall
+    /// time when the particles are still streaming through low-
+    /// importance regions. Voxels near the detector keep `base_ratio`
+    /// so the high-importance sampling is unchanged.
+    ///
+    /// `ratio_growth = 0` reduces exactly to `from_flux` with fixed
+    /// `ratio = base_ratio`. Typical `ratio_growth` values are 0.5–2.0
+    /// for slab-shielding problems; tune empirically per benchmark.
+    ///
+    /// The 200 cm shielding sweep that motivated this method showed
+    /// FOM peaking near `base_ratio ≈ 3` while the 100 cm sweep
+    /// peaked near `base_ratio ≈ 12` — i.e. optimal ratio scales
+    /// with depth. Adaptive ratio captures that depth-dependence
+    /// inside a single weight window without needing the user to
+    /// re-tune for every slab thickness.
+    pub fn from_flux_adaptive(
+        aabb: &Aabb,
+        n: [usize; 3],
+        flux: &[f64],
+        w_ref: f64,
+        base_ratio: f64,
+        ratio_growth: f64,
+        phi_floor: f64,
+    ) -> Self {
+        let n_vox = n[0].max(1) * n[1].max(1) * n[2].max(1);
+        assert_eq!(
+            flux.len(),
+            n_vox,
+            "flux length {} doesn't match mesh n_vox {}",
+            flux.len(),
+            n_vox
+        );
+        let origin = [aabb.min.x, aabb.min.y, aabb.min.z];
+        let spacing = [
+            (aabb.max.x - aabb.min.x) / n[0].max(1) as f64,
+            (aabb.max.y - aabb.min.y) / n[1].max(1) as f64,
+            (aabb.max.z - aabb.min.z) / n[2].max(1) as f64,
+        ];
+        let phi_max = flux.iter().cloned().fold(0.0_f64, f64::max);
+        let cutoff = phi_max * phi_floor.max(0.0);
+        let mut lower = vec![0.0; n_vox];
+        let mut upper = vec![0.0; n_vox];
+        for (i, &phi) in flux.iter().enumerate() {
+            if phi <= cutoff || phi_max <= 0.0 {
+                continue;
+            }
+            // log10(phi_max / phi_v) ≥ 0 because phi_v ≤ phi_max.
+            let importance_decade = (phi_max / phi).log10().max(0.0);
+            let ratio_v =
+                (base_ratio * (1.0 + ratio_growth * importance_decade)).max(1.0);
+            let sqrt_ratio = ratio_v.sqrt();
+            let w_target = w_ref * phi_max / phi;
+            lower[i] = w_target / sqrt_ratio;
+            upper[i] = w_target * sqrt_ratio;
+        }
+        Self {
+            origin,
+            spacing,
+            n,
+            lower,
+            upper,
+            max_split: 8,
+        }
+    }
+
     /// Build a window with uniform bounds across an AABB.
     pub fn uniform(aabb: &Aabb, n: [usize; 3], lower: f64, upper: f64) -> Self {
         let n_vox = n[0].max(1) * n[1].max(1) * n[2].max(1);
@@ -195,7 +269,12 @@ impl WeightWindow {
 /// On split the primary is mutated in place to the per-copy weight
 /// and the additional copies are appended to `pending`. On roulette
 /// kill the particle's status is set to `Dead`.
-pub fn apply(particle: &mut Particle, ww: &WeightWindow, rng: &mut Rng, pending: &mut Vec<Particle>) {
+pub fn apply(
+    particle: &mut Particle,
+    ww: &WeightWindow,
+    rng: &mut Rng,
+    pending: &mut Vec<Particle>,
+) {
     if !particle.is_alive() {
         return;
     }
@@ -227,8 +306,8 @@ pub fn apply(particle: &mut Particle, ww: &WeightWindow, rng: &mut Rng, pending:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geometry::coord::{Coord, CoordStack};
     use crate::geometry::UniverseId;
+    use crate::geometry::coord::{Coord, CoordStack};
     use smallvec::smallvec;
 
     fn make_particle(pos: Vec3, weight: f64) -> Particle {
@@ -318,18 +397,57 @@ mod tests {
         // φ_max = 10, w_ref = 1, ratio = 4 → sqrt_ratio = 2.
         //   voxel 0: target = 1 * 10 / 1   = 10  → lower = 5,    upper = 20
         //   voxel 1: target = 1 * 10 / 10  = 1   → lower = 0.5,  upper = 2
-        let ww = WeightWindow::from_flux(
-            &aabb,
-            [2, 1, 1],
-            &[1.0, 10.0],
-            1.0,
-            4.0,
-            1e-12,
-        );
+        let ww = WeightWindow::from_flux(&aabb, [2, 1, 1], &[1.0, 10.0], 1.0, 4.0, 1e-12);
         assert!((ww.lower[0] - 5.0).abs() < 1e-9);
         assert!((ww.upper[0] - 20.0).abs() < 1e-9);
         assert!((ww.lower[1] - 0.5).abs() < 1e-9);
         assert!((ww.upper[1] - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn from_flux_adaptive_with_zero_growth_matches_from_flux() {
+        let aabb = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let flux = [1.0, 10.0];
+        let ww_fixed = WeightWindow::from_flux(&aabb, [2, 1, 1], &flux, 1.0, 4.0, 1e-12);
+        let ww_adapt = WeightWindow::from_flux_adaptive(
+            &aabb,
+            [2, 1, 1],
+            &flux,
+            1.0,
+            4.0,
+            0.0, // ratio_growth = 0 → identical to from_flux
+            1e-12,
+        );
+        for i in 0..2 {
+            assert!((ww_fixed.lower[i] - ww_adapt.lower[i]).abs() < 1e-12);
+            assert!((ww_fixed.upper[i] - ww_adapt.upper[i]).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn from_flux_adaptive_widens_low_importance_voxels() {
+        // Three voxels with φ = [1, 100, 10000]. log10(φ_max/φ_v) per
+        // voxel: [4, 2, 0]. With base_ratio=4, ratio_growth=1 →
+        //   ratio_v = [4·(1+4)=20, 4·(1+2)=12, 4·(1+0)=4]
+        // → sqrt_ratio = [√20, √12, √4] = [4.47, 3.46, 2.0]
+        // Lowest-importance voxel (largest w_target) gets the widest band.
+        let aabb = Aabb::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 1.0, 1.0));
+        let ww = WeightWindow::from_flux_adaptive(
+            &aabb,
+            [3, 1, 1],
+            &[1.0, 100.0, 10000.0],
+            1.0,
+            4.0,
+            1.0,
+            1e-12,
+        );
+        let band_width = |i: usize| ww.upper[i] / ww.lower[i].max(1e-30);
+        let r0 = band_width(0); // φ=1, log10(10000) = 4
+        let r1 = band_width(1); // φ=100, log10(100) = 2
+        let r2 = band_width(2); // φ=10000, log10(1) = 0
+        assert!((r0 - 20.0).abs() < 1e-6, "r0 = {r0}, expected 20");
+        assert!((r1 - 12.0).abs() < 1e-6, "r1 = {r1}, expected 12");
+        assert!((r2 - 4.0).abs() < 1e-6, "r2 = {r2}, expected 4");
     }
 
     #[test]
@@ -360,14 +478,7 @@ mod tests {
         // upper 2. A particle at weight 1 sits in the band → no-op.
         // Voxel 1 (low flux) has target 10, lower 5, upper 20. A
         // particle at weight 1 is below w_lower = 5 → roulette.
-        let ww = WeightWindow::from_flux(
-            &aabb,
-            [2, 1, 1],
-            &[10.0, 1.0],
-            1.0,
-            4.0,
-            1e-12,
-        );
+        let ww = WeightWindow::from_flux(&aabb, [2, 1, 1], &[10.0, 1.0], 1.0, 4.0, 1e-12);
         let mut rng = Rng::new(42, 0);
 
         // Particle in voxel 0 — no-op.
@@ -396,10 +507,7 @@ mod tests {
         }
         // p_survive = w / w_survive = 1 / 10 = 0.1 → ~10% survival
         let rate = survived as f64 / trials as f64;
-        assert!(
-            (rate - 0.1).abs() < 0.02,
-            "rate {rate} should be ~0.1"
-        );
+        assert!((rate - 0.1).abs() < 0.02, "rate {rate} should be ~0.1");
     }
 
     #[test]

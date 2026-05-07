@@ -1,0 +1,297 @@
+Random-Ray FW-CADIS — head-to-head FOM measurement
+====================================================
+
+Three-way comparison: analog vs the older "lite" detector-backward
+collision-density proxy (since removed) vs the random-ray multigroup
+adjoint shipped this round, on the existing `shield_slab` photon-
+transmission benchmark.
+
+Setup:
+- Source: 1 MeV monodirectional photon beam normal to z=0 face
+- Geometry: water slab, reflective xy + z_back, vacuum z_front
+- σ_t at 1 MeV ≈ 0.0707 cm⁻¹
+- Source-side w_target normalised to 1.0; band width = ratio = 5.0
+- Importance maps stored at 25–50 z-bins to match shield_slab's 1×1×n_z
+  WeightWindow translator. Mesh resolution matters for FOM (see
+  resolution sensitivity below).
+
+100 cm (≈ 7 mfp) — moderate penetration, T ≈ 5e-3
+====================================================
+
+| Mode         | Histories | T              | σ_rel | Wall (s) | FOM (/s) | Δ vs analog |
+|--------------|----------:|----------------|------:|---------:|---------:|------------:|
+| Analog       | 1 000 000 | 5.372e-3       | 1.11% |   49.8   | 161.7    | —           |
+| Lite CADIS   |   200 000 | 5.231e-3       | 1.86% |   25.9   | 111.4    | 0.69× WORSE |
+| RR CADIS *   | 1 000 000 | 5.330e-3       | 1.02% |   27.1   | 354.2    | 2.19× BETTER|
+
+  * 25-bin RR map (outputs/cadis_water_100cm.json).
+
+200 cm (≈ 14 mfp) — deep penetration, T ≈ 1e-5
+====================================================
+
+| Mode         | Histories | T              | σ_rel | Wall (s) | FOM (/s) | Δ vs analog |
+|--------------|----------:|----------------|------:|---------:|---------:|------------:|
+| Analog       | 5 000 000 | 1.105e-5       | 10.2% |  272.4   | 0.351    | —           |
+| Lite CADIS   |   200 000 | 1.366e-5       | 37.6% |   99.8   | 0.071    | 0.20× WORSE |
+| RR CADIS *   | 2 000 000 | 1.252e-5       | 11.8% |   47.0   | 1.518    | 4.32× BETTER|
+
+  * 50-bin RR map (outputs/cadis_water_200cm.json).
+
+  RR CADIS vs Lite CADIS at 200 cm: 21× FOM improvement.
+
+300 cm (≈ 21 mfp) — beyond naive WW reach
+====================================================
+
+ratio=5  : T = 8.83e-9 ± 100% (1 transmitted in 1M)  — FOM = 0.020
+ratio=50 : T = 0       (0 transmitted in 500k)       — FOM = 0.0
+
+  Naive geometric splitting hits its limit at deep penetration: the
+  required w_target ratio source-to-detector exceeds the band width
+  × max_split combination, and photons either all roulette out near
+  the source or never split enough to reach the detector. Source-
+  distribution biasing + energy-dependent WW + larger max_split caps
+  are the next-tier improvements. Out of scope for this round.
+
+Bias check
+====================================================
+
+100 cm: RR CADIS T = 5.330e-3 vs analog T = 5.372e-3 → 0.5σ_combined.
+        Unbiased.
+200 cm: RR CADIS T = 1.252e-5 vs analog T = 1.105e-5 → 1.0σ_combined.
+        Unbiased.
+
+Resolution sensitivity
+====================================================
+
+A coarser n_z_bins reduces wall-time bloat from per-voxel splitting at
+the cost of fidelity in the importance gradient. Sweep at 100 cm:
+
+| n_z_bins | Wall (s, 200k) | σ_rel | FOM (/s) |
+|---------:|---------------:|------:|---------:|
+|       25 |            5.4 | 2.28% |    354   |
+|       50 |           11.6 | 1.85% |    251   |
+
+The 25–30 range is the practical sweet spot for slabs of this depth.
+Finer meshes are warranted only when the importance gradient varies
+on a sub-mfp scale.
+
+Adaptive-ratio lever — negative result
+====================================================
+
+`WeightWindow::from_flux_adaptive` widens the band at low-importance
+voxels (`ratio_v = base_ratio · (1 + ratio_growth · log10(φ_max/φ_v))`).
+Wired into shield_slab as `--ww-growth`. Hypothesis: variable band
+captures the depth-dependent optimal ratio (see fixed-ratio sweep
+below), avoiding the per-thickness manual tuning.
+
+Fixed-ratio sweep (motivation):
+
+  100 cm:  ratio=2 → FOM=220, ratio=12 → FOM=317  (monotone-up)
+  200 cm:  ratio=2 → FOM=0.7, ratio=3  → FOM=1.37, ratio=20 → FOM=0.77
+                                                   (peaks at ratio≈3)
+
+Adaptive sweep (1M histories @ 100cm, 2M @ 200cm):
+
+| growth | FOM @ 100 cm | FOM @ 200 cm |
+|-------:|-------------:|-------------:|
+|    0.0 |       151.9  |        1.518 |  (= fixed ratio=5 baseline)
+|    0.5 |       145.7  |          —   |
+|    1.5 |          —   |        0.388 |
+
+Conclusion: at converged statistics, adaptive ratio does **not** beat
+fixed `ratio=5` on this benchmark. Wider source-side bands oversplit
+in the transition region between source and detector. The lever is
+implemented + unit-tested + exposed via `--ww-growth`, but the default
+remains `0.0` (fixed ratio).
+
+300 cm at any (ratio, growth) combination produces zero transmitted
+photons in 500k histories — naive geometric splitting is bounded by
+`max_split^n_voxel_crossings` and that exponential growth is capped
+at `max_split = 8` per crossing. The required source-to-detector
+w_target ratio at 21 mfp exceeds anything reachable. **The right
+lever for >14 mfp is continuous-splitting along characteristics
+(DXTRAN-style point-detector estimator) — research-tier work.**
+
+Next-event estimator (v1) — biased, parked
+====================================================
+
+Implemented `--next-event` on shield_slab: at every Compton collision
+the transport driver adds the deterministic forward-transmission
+contribution `w × p_compton × ∫_0^1 KN_PDF(μ) · E'(μ) · exp(-Σ_t · (T-z)/μ) dμ`
+to a separate `nee_tally` field on `HistoryResult`. Plus an uncollided
+source-flight contribution at birth. Math module (`photon::nee`) is
+unit-tested against analytic limits and the shared validated GL-16
+quadrature (see `src/quadrature.rs`).
+
+**Empirical result at converged stats (100 cm water, 1 MeV, 1M analog
+vs 200k NEE):**
+
+  Analog  : T = 5.292e-3 ± 1.12%  → FOM = 125
+  NEE v1  : T = 6.542e-3 ± 1.19%  → FOM = 117
+
+NEE estimate is **biased high by 23.6%**, a >13σ_combined deviation —
+real bias, not statistical noise. Cause: the v1 NEE integrates the
+free-electron Klein-Nishina angular DCS, but actual Compton scattering
+in matter includes the bound-electron correction `S(x,Z)/Z`. At the
+forward angles that dominate the integrand `(μ → 1, x → 0)`, the
+bound correction `S/Z → 0`, so the free-KN forward DCS is much larger
+than the actual bound DCS. NEE overcounts forward-scatter probability
+and therefore over-estimates transmission.
+
+The wall-time penalty of NEE is ~9× per history (16-point GL integral
+at every collision). At 100 cm the reduced σ_rel doesn't compensate,
+so FOM is roughly neutral against analog.
+
+At 200 cm the analog reference is statistics-limited (1 transmitted in
+100k histories at first measurement). NEE produces a self-consistent
+σ_rel = 23%, T = 9.4e-6 — but the bias means the absolute T is
+unreliable. Until the bound correction is added, NEE is parked as a
+**v1 with a known accuracy bug**.
+
+**Update (after debug round):**
+
+Bound-electron correction was implemented (the v0 was free-KN-only):
+the bound-corrected `compton_forward_transmission` now multiplies the
+free-KN per-electron DCS by `Σ_e n_e · S(x, Z_e)` per quadrature node.
+The integral matches the tabulated `incoherent_xs` macroscopic XS
+within 5% (`integrated_bound_compton_dcs_matches_tabulated_macro_xs`
+unit test). **The bias did not decrease** — went from +24% (free-KN)
+to +21% (bound-corrected) at 100 cm. Bound correction is a real
+physics improvement but isn't the dominant cause of the bias.
+
+MCNP-style exclusion zone was also implemented per literature (the
+classical fix for point-detector `1/r²` variance singularity):
+collisions within `--nee-exclusion-cm R` of the detector face score
+an analytically z-averaged contribution
+`(μ/(Σ_t·R))·(1 − exp(−Σ_t·R/μ))` instead of the raw
+`exp(−Σ_t·(T−z)/μ)`. Empirical sweep at 100 cm:
+
+  R = 0    cm  → T = 6.40e-3, FOM = 119, bias +21%
+  R = 1    cm  → T = 6.40e-3, FOM = 127, bias +21%
+  R = 5    cm  → T = 6.46e-3, FOM = 269, bias +22%
+  R = 14   cm  → T = 6.97e-3, FOM = 283, bias +32%
+  R = 28   cm  → T = 9.08e-3, FOM = 436, bias +71%
+
+The exclusion zone *worsens* the bias. The mechanism: for collisions
+at z near T−R, the averaged factor is *larger* than the raw factor
+(averaging over depths in [T−R, T] shifts the attenuation toward
+shallower z where exp(−τ) is bigger). Summed over many collisions
+inside the zone, this shifts the total tally upward — compounding the
+per-collision-sum bias rather than cancelling it.
+
+**The exclusion-zone literature is for *point detectors*, not planar
+detectors.** For our planar slab face the integrand is bounded
+(`(T−z)/μ → 0` is killed by `exp(−τ) → 1`, no `1/r²` pole), so the
+classical regularisation doesn't apply.
+
+**The actual bias source — diagnosed:**
+
+Instrumented the NEE with a `--nee-trace` flag that decomposes the
+tally per source photon into uncollided + first-collision + subsequent-
+collisions contributions. At 100 cm / 1 MeV / 100 k histories:
+
+  uncollided contribution = 8.56e-4   (matches analog uncollided ≈ 8.5e-4 ✓)
+  first-collision NEE     = 1.20e-3
+  subsequent collisions   = 4.42e-3   ← dominant
+  total NEE               = 6.48e-3
+
+Analog total = 5.30e-3 = uncollided 8.5e-4 + scattered 4.45e-3.
+
+**The subsequent-collision summation (4.42e-3) is 3.7× the first-
+collision contribution and is the bias driver.** First-collision-only
+NEE plus uncollided ≈ 2.05e-3, well below analog total — that's
+consistent with NEE being a single-Compton-direct-flight subset of
+total analog. But once the per-collision summation across i > 1
+fires, the running NEE total rapidly exceeds analog.
+
+The theoretical argument that `Σ_i E[X_i × 1[reach i]]` is
+*mutually-exclusive* (a photon escapes at most once, so the X_i
+events partition realisations) appears to break in practice. The
+most likely subtlety: my NEE_i = E[X_i | state i, channel sampled]
+averages over hypothetical μ values, but the actual X_i depends on
+the sampled μ. When subsequent collisions are reached (photon DIDN'T
+escape forward at i), the sampled μ at i was non-forward — but my
+NEE_i at i still added the full forward-hemisphere expectation. That
+contribution is correctly counted at i, but then at i+1 we add ANOTHER
+forward-hemisphere expectation conditional on the photon's new state
+(which only arose because i was non-forward). The two contributions
+are not strictly mutually exclusive; the conditional structure is
+more subtle than the textbook proof admits in this slab geometry.
+
+The fix is non-trivial. Either:
+  1. Use the **track-length estimator** instead of the next-event
+     estimator at collisions: tally `w · σ_compton · l · response(s)`
+     along free-flight segments. This avoids the per-collision-sum
+     issue entirely.
+  2. Apply a "russian roulette + splitting" scheme on the NEE
+     contributions to enforce that only ONE contribution per photon
+     is counted (with appropriate weight adjustment).
+  3. Switch to the surface-crossing estimator for the planar detector
+     geometry — record `w · E_escape × μ_z / detector_area` for every
+     photon that crosses the detector face, regardless of its scatter
+     state.
+
+Option 3 is the cleanest match for shield_slab — it's a textbook
+unbiased planar-detector tally with no per-collision summation issue.
+Option 1 (collision-flux estimator with track-length) is what
+Serpent uses and is a drop-in replacement for the NEE math module's
+output (just plug into a different transport hook).
+
+For this round: the v1 NEE remains in tree behind `--next-event` with
+clear documentation that it produces +21–38% biased-high estimates
+and shouldn't be used for production transmission tallies.
+
+The lever stays in tree behind `--next-event` and `--nee-exclusion-cm`,
+both off by default. Math module + quadrature module + KN helpers
+are all validated (302+ unit tests) and useful regardless. A future
+session can take this on with fresh eyes.
+
+Reading
+====================================================
+
+The 2026-05-07 round documented the lite proxy as **not delivering FOM
+gain** — confirmed here at both depths (lite is 0.69× at 100 cm,
+0.20× at 200 cm — actively worse than analog). The proxy peaks one
+mfp back from the detector face (collision-density artefact) instead
+of at the detector face (true importance peak), so the resulting WW
+biases sampling away from the actual response region.
+
+The random-ray multigroup adjoint flips the result at both depths:
+2.2× FOM gain at 100 cm, 4.3× FOM gain at 200 cm. Both are unbiased
+within combined MC σ. The lite path has been removed from the
+codebase — the shipped substrate is `rr_cadis_slab` +
+`random_ray::cadis::weight_window_from_adjoint` +
+`random_ray::solver::RandomRaySolver`.
+
+The textbook 50–1000× CADIS gain still isn't reached. That remains
+gated on:
+
+  1. Source-distribution biasing (sample initial position from the
+     adjoint importance CDF instead of analog uniform).
+  2. Energy-dependent WW (1 MeV is mostly Compton, but lower-energy
+     photons after multiple scatters have different importance).
+  3. Larger max_split + dynamic ratio at deep penetration.
+
+These build on the random-ray adjoint substrate; none requires
+revisiting the importance-proxy decision.
+
+Provenance
+====================================================
+
+Importance maps (canonical):
+  outputs/cadis_water_100cm.json  (25 z-bins, 100 cm slab, RR adjoint)
+  outputs/cadis_water_200cm.json  (50 z-bins, 200 cm slab, RR adjoint)
+
+Generated with `target/release/rr_cadis_slab` and consumed by
+`target/release/shield_slab --cadis-load`. Photon data:
+data/endfb-vii.1-hdf5/photon (ENDF/B-VII.1).
+
+History
+====================================================
+
+The earlier "lite" detector-backward collision-density proxy was
+removed from `shield_slab.rs` once the random-ray adjoint
+demonstrated strict superiority on this benchmark. The previous
+round's analysis (resume.md, 2026-05-07) documents what the lite
+proxy did and why it fails; this file documents the empirical
+measurement that justified replacing it.

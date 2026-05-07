@@ -45,8 +45,7 @@ impl Particle {
     /// frame. Used by callers that don't (yet) construct a full
     /// recursive `CoordStack` — assumes depth-1 geometry.
     pub fn new(pos: Vec3, dir: Vec3, energy: f64, cell_idx: usize) -> Self {
-        let coord_stack: CoordStack =
-            smallvec![Coord::root(UniverseId(0), cell_idx as u32)];
+        let coord_stack: CoordStack = smallvec![Coord::root(UniverseId(0), cell_idx as u32)];
         Self {
             pos,
             dir,
@@ -64,10 +63,7 @@ impl Particle {
     /// caller has already resolved the stack via
     /// `find_cell_recursive`.
     pub fn with_stack(pos: Vec3, dir: Vec3, energy: f64, coord_stack: CoordStack) -> Self {
-        let cell_idx = coord_stack
-            .last()
-            .map(|c| c.cell_idx as usize)
-            .unwrap_or(0);
+        let cell_idx = coord_stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
         Self {
             pos,
             dir,

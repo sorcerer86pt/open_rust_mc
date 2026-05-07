@@ -86,11 +86,7 @@ pub struct MeshFluxTally {
 
 impl MeshFluxTally {
     pub fn new(origin: [f64; 3], spacing: [f64; 3], n: [usize; 3]) -> Self {
-        Self {
-            origin,
-            spacing,
-            n,
-        }
+        Self { origin, spacing, n }
     }
 
     /// Build a mesh that covers `aabb` exactly with `n[i]` voxels along
@@ -104,11 +100,7 @@ impl MeshFluxTally {
             (aabb.max.y - aabb.min.y) / n[1].max(1) as f64,
             (aabb.max.z - aabb.min.z) / n[2].max(1) as f64,
         ];
-        Self {
-            origin,
-            spacing,
-            n,
-        }
+        Self { origin, spacing, n }
     }
 
     pub fn n_voxels(&self) -> usize {
@@ -189,8 +181,8 @@ impl MeshFluxTally {
                 && iv[2] >= 0
                 && iv[2] < nz
             {
-                let idx = (iv[0] as usize * self.n[1] + iv[1] as usize) * self.n[2]
-                    + iv[2] as usize;
+                let idx =
+                    (iv[0] as usize * self.n[1] + iv[1] as usize) * self.n[2] + iv[2] as usize;
                 acc[idx] += weight * dt;
             }
             t = t_end;

@@ -69,8 +69,7 @@ mod cuda_main {
             universes: vec![UniverseId(1); 4],
             material_overrides: None,
         }];
-        Geometry::new(surfaces, cells, universes, lattices, UniverseId(0))
-            .expect("geometry")
+        Geometry::new(surfaces, cells, universes, lattices, UniverseId(0)).expect("geometry")
     }
 
     /// CPU reference transport — same algorithm the GPU kernel runs.
@@ -136,9 +135,15 @@ mod cuda_main {
                                 pos = pos + dir * hit.distance;
                                 if let Some(s) = hit.surface_idx {
                                     match geom.surfaces[s] {
-                                        Surface::PlaneX { .. } => dir = Vec3::new(-dir.x, dir.y, dir.z),
-                                        Surface::PlaneY { .. } => dir = Vec3::new(dir.x, -dir.y, dir.z),
-                                        Surface::PlaneZ { .. } => dir = Vec3::new(dir.x, dir.y, -dir.z),
+                                        Surface::PlaneX { .. } => {
+                                            dir = Vec3::new(-dir.x, dir.y, dir.z)
+                                        }
+                                        Surface::PlaneY { .. } => {
+                                            dir = Vec3::new(dir.x, -dir.y, dir.z)
+                                        }
+                                        Surface::PlaneZ { .. } => {
+                                            dir = Vec3::new(dir.x, dir.y, -dir.z)
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -311,14 +316,24 @@ mod cuda_main {
             cpu_fis
         );
         println!("  leakage     = {cpu_leak}");
-        println!("  k = fissions / particle = {:.5}", cpu_fis as f64 / n as f64);
+        println!(
+            "  k = fissions / particle = {:.5}",
+            cpu_fis as f64 / n as f64
+        );
 
         // GPU pass.
         println!("\nBuilding GPU context...");
         let ctx = GpuRecursiveContext::build(&geom, n).expect("gpu context");
         let t0 = Instant::now();
         let gpu = ctx
-            .const_xs_transport(&positions, &directions, &seeds, &materials, max_events, fis_capacity)
+            .const_xs_transport(
+                &positions,
+                &directions,
+                &seeds,
+                &materials,
+                max_events,
+                fis_capacity,
+            )
             .expect("gpu transport");
         let gpu_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!(
@@ -345,15 +360,17 @@ mod cuda_main {
             let diff = (c as f64 - g as f64).abs();
             let scale = (c as f64).max(g as f64).max(1.0);
             let pct = diff / scale * 100.0;
-            println!(
-                "  {label:<14} CPU {c:>10}  GPU {g:>10}  Δ {diff:>8.0} ({pct:.3}%)"
-            );
+            println!("  {label:<14} CPU {c:>10}  GPU {g:>10}  Δ {diff:>8.0} ({pct:.3}%)");
         };
         cmp("collisions", cpu_coll, gpu.n_collisions);
         cmp("absorptions", cpu_abs, gpu.n_absorptions);
         cmp("fissions", cpu_fis, gpu.n_fissions);
         cmp("leakage", cpu_leak, gpu.n_leakage);
-        cmp("bank size", cpu_bank.len() as u64, gpu.fission_sites.len() as u64);
+        cmp(
+            "bank size",
+            cpu_bank.len() as u64,
+            gpu.fission_sites.len() as u64,
+        );
         let k_cpu = cpu_fis as f64 / n as f64;
         let k_gpu = gpu.n_fissions as f64 / n as f64;
         let k_diff_pcm = (k_cpu - k_gpu).abs() * 1e5;

@@ -43,6 +43,7 @@ pub mod electron;
 pub mod gpu;
 pub mod hdf5_reader;
 pub mod material;
+pub mod nee;
 pub mod pair;
 pub mod photoelectric;
 pub mod transport;

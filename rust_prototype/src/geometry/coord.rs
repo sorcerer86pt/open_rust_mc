@@ -210,10 +210,8 @@ mod tests {
 
     #[test]
     fn deepest_returns_last_frame() {
-        let stack: CoordStack = smallvec![
-            Coord::root(UniverseId(0), 1),
-            Coord::root(UniverseId(5), 9),
-        ];
+        let stack: CoordStack =
+            smallvec![Coord::root(UniverseId(0), 1), Coord::root(UniverseId(5), 9),];
         assert_eq!(stack.deepest().universe, UniverseId(5));
         assert_eq!(stack.deepest_cell_idx(), 9);
     }

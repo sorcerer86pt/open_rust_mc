@@ -305,7 +305,11 @@ mod tests {
         let bytes = build_statepoint(&sp).expect("build");
         let f = hdf5_pure::File::from_bytes(bytes).expect("read");
 
-        let k = f.dataset("k_collision_per_batch").unwrap().read_f64().unwrap();
+        let k = f
+            .dataset("k_collision_per_batch")
+            .unwrap()
+            .read_f64()
+            .unwrap();
         assert_eq!(k.len(), 3);
         assert!((k[0] - 0.999).abs() < 1e-12);
         assert!((k[2] - 1.000).abs() < 1e-12);
@@ -371,7 +375,10 @@ mod tests {
     fn statepoint_roundtrip_with_tallies() {
         let n_surf = 2;
         let n_vox = 4;
-        let batches = vec![dummy_batch(1, 0.99, n_surf, n_vox), dummy_batch(2, 1.01, n_surf, n_vox)];
+        let batches = vec![
+            dummy_batch(1, 0.99, n_surf, n_vox),
+            dummy_batch(2, 1.01, n_surf, n_vox),
+        ];
         let sp = StatepointInputs {
             batches: &batches,
             source_bank: &[],
@@ -385,7 +392,11 @@ mod tests {
         let bytes = build_statepoint(&sp).expect("build");
         let f = hdf5_pure::File::from_bytes(bytes).expect("read");
 
-        let pos = f.dataset("surface_current_pos").unwrap().read_f64().unwrap();
+        let pos = f
+            .dataset("surface_current_pos")
+            .unwrap()
+            .read_f64()
+            .unwrap();
         assert_eq!(pos.len(), 2 * n_surf);
         // Every dummy batch wrote 0.5 into every bin.
         for v in &pos {
