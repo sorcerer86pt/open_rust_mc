@@ -166,6 +166,190 @@ pub fn klein_nishina_pdf(energy_in: f64, mu: f64) -> f64 {
     klein_nishina_dcs_dmu(energy_in, mu) / klein_nishina_total(energy_in)
 }
 
+// ── Adjoint Compton ────────────────────────────────────────────────
+
+/// Outcome of one **adjoint** Compton scatter sample. The adjoint
+/// particle is "moving backwards" in time: it enters the collision
+/// at `energy_out` and the kernel returns the inferred pre-collision
+/// (i.e. higher) photon energy `energy_in` and the scattering
+/// cosine `μ`.
+#[derive(Debug, Clone, Copy)]
+pub struct AdjointComptonOutcome {
+    /// Sampled pre-collision (higher) photon energy in eV. Always
+    /// `>= energy_out`.
+    pub energy_in: f64,
+    /// Scattering cosine `μ = cos θ`. By Compton kinematics
+    /// `μ = 1 − m_e c² · (1/E_out − 1/E_in)`.
+    pub mu: f64,
+    /// Number of rejection attempts before acceptance — useful for
+    /// efficiency telemetry.
+    pub attempts: u32,
+}
+
+/// Adjoint Compton kernel. Inverts the Klein-Nishina relation:
+/// given the post-collision photon energy `energy_out` (eV), sample
+/// the pre-collision energy `energy_in` and scattering cosine `μ`
+/// distributed by the **transposed** Compton kernel.
+///
+/// # Math
+///
+/// Forward kinematics: `E_out = E_in / (1 + α (1−μ))` with
+/// `α = E_in / m_e c²`. Inverse (kinematic): given `(E_out, μ)`
+///
+/// ```text
+///   E_in = E_out / (1 − β (1−μ))    with  β = E_out / m_e c²
+/// ```
+///
+/// Constraint for finite positive `E_in`: `β(1−μ) < 1`, i.e.
+/// `μ > 1 − m_e c²/E_out`. For `E_out < m_e c²/2` every μ ∈ [-1, 1]
+/// is allowed (the kinematic curve is bounded). For `E_out ≥ m_e c²`
+/// only forward angles `μ > 1 − 1/β` are allowed — at high energy
+/// adjoint Compton is forward-peaked (the photon was higher energy
+/// and only a glancing forward scatter degrades it that little).
+///
+/// Adjoint density (Lewis-Miller §10.3 / Wagner-Haghighat 1998):
+/// `P_adj(E_in | E_out) ∝ Σ_s_fwd(E_in → E_out)`. For Compton the
+/// forward differential per unit outgoing energy is
+/// `∂σ_KN/∂E_out = (dσ/dμ)(E_in, μ_kin) · m_e c²/E_out²`, and with
+/// `E_out` fixed the `1/E_out²` factor is constant in `E_in`. So:
+///
+/// ```text
+///   p_target(E_in) ∝ klein_nishina_dcs_dmu(E_in, μ_kin(E_in, E_out))
+/// ```
+///
+/// — no `1/E_in²` Jacobian; the `dμ/dE_in` factor cancels into the
+/// constant. We sample with a flat-on-E_in envelope on
+/// `[E_out, E_in_max]` and accept with `KN_dcs / 2π r_e²` (the
+/// Thomson-limit ceiling, `dσ/dμ = 2π · (r_e²/2)(1+μ²) ≤ 2π r_e²`,
+/// safely bounded by `3 r_e²`). Rejection efficiency is moderate
+/// (~30 % at 1 MeV inputs); a more aggressive `1/(E_in·m_ec²)`-tail
+/// envelope would tighten it but isn't required for correctness.
+///
+/// Bound-electron correction: same `S(x, Z)/Z` rejection used by the
+/// forward sampler — `x = E_in sin(θ/2) / hc` is unchanged because
+/// the kinematic relation is energy-momentum conservation regardless
+/// of which direction we walk in time.
+///
+/// References:
+/// - Wagner & Haghighat, *Nucl. Sci. Eng.* 128, 186 (1998) §III —
+///   adjoint MC for Compton via reverse kinematics.
+/// - Lewis & Miller, *Computational Methods of Neutron Transport*
+///   §10.3 — generic adjoint kernel form `σ_s^*(E', Ω' → E, Ω) =
+///   σ_s(E, Ω → E', Ω')`.
+pub fn adjoint_compton_scatter(
+    elem: &PhotonElement,
+    energy_out: f64,
+    e_in_max: f64,
+    rng: &mut Rng,
+) -> AdjointComptonOutcome {
+    assert!(
+        e_in_max > energy_out,
+        "adjoint compton: e_in_max ({e_in_max}) must exceed energy_out ({energy_out})",
+    );
+    let beta = energy_out / M_E_C2_EV;
+    // μ_min from kinematic: 1 − 1/β. If β ≤ 1 (E_out < m_e c²) all
+    // μ ∈ [-1,1] are kinematically allowed.
+    let mu_min = if beta <= 1.0 { -1.0 } else { 1.0 - 1.0 / beta };
+    // Clamp e_in_max to the kinematic limit (μ = mu_min branch):
+    //   E_in_kin_max = E_out / (1 − β · (1 − μ_min))
+    // For β ≤ 1 (μ_min = -1) → E_in_kin_max = E_out/(1 − 2β); inf
+    // when 2β = 1 i.e. E_out = m_e c²/2.
+    let e_in_kin_max = if beta < 0.5 {
+        energy_out / (1.0 - 2.0 * beta)
+    } else {
+        f64::INFINITY
+    };
+    let e_in_hi = e_in_max.min(e_in_kin_max);
+    if !(e_in_hi > energy_out) {
+        // No kinematic room — forward scatter limit, return the
+        // degenerate (E_in = E_out, μ = 1) sample.
+        return AdjointComptonOutcome {
+            energy_in: energy_out,
+            mu: 1.0,
+            attempts: 1,
+        };
+    }
+
+    // Flat-on-E_in envelope on [E_out, e_in_hi]. Acceptance ratio
+    // `KN_dcs(E_in, μ_kin) / envelope_ceiling`. The Klein-Nishina
+    // differential dσ/dμ = 2π · dσ/dΩ peaks at the forward direction
+    // (μ = 1) where dσ/dΩ → r_e² (k' → 1), so dσ/dμ ≤ 2π·r_e² ≈
+    // 6.28·r_e² across the whole kinematic curve. Ceiling = 8·r_e²
+    // gives ~25 % headroom for FP safety; rejection efficiency is
+    // ~50 % at moderate (μ ≈ 0.5) angles, ~80 % at backscatter.
+    let inv_lo = 1.0 / energy_out;
+    let envelope_ceiling = 8.0 * R_E_SQ_CM2;
+    let e_in_span = e_in_hi - energy_out;
+
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        if attempts > 10_000 {
+            // Pathological: degenerate kinematic interval. Return
+            // forward-scatter limit.
+            return AdjointComptonOutcome {
+                energy_in: energy_out,
+                mu: 1.0,
+                attempts,
+            };
+        }
+        let xi = rng.uniform();
+        let e_in = energy_out + xi * e_in_span;
+        if e_in <= energy_out {
+            continue;
+        }
+        // μ from kinematic inverse.
+        let mu = 1.0 - M_E_C2_EV * (inv_lo - 1.0 / e_in);
+        if mu < mu_min || mu > 1.0 {
+            continue;
+        }
+        let kn_dcs = klein_nishina_dcs_dmu(e_in, mu);
+        let target_density = kn_dcs; // up to constant
+        let r1 = rng.uniform();
+        if r1 * envelope_ceiling >= target_density {
+            continue;
+        }
+        // Bound-electron rejection — re-uses the forward S(x,Z)/Z
+        // table with x = E_in sin(θ/2) / hc, identical kinematics.
+        let theta = mu.clamp(-1.0, 1.0).acos();
+        let x = e_in * (0.5 * theta).sin() / HC_EV_ANGSTROM;
+        let s_over_z = scattering_factor_s_over_z(elem, x);
+        if rng.uniform() >= s_over_z {
+            continue;
+        }
+        return AdjointComptonOutcome {
+            energy_in: e_in,
+            mu,
+            attempts,
+        };
+    }
+}
+
+/// Read the bound-electron incoherent scattering factor `S(x, Z)/Z`
+/// at the requested `x` (Å⁻¹) from the element's tabulated curve.
+/// Mirrors the same lookup the forward Compton sampler uses; pulled
+/// out so the adjoint kernel can call it directly without going
+/// through the full forward-rejection routine.
+fn scattering_factor_s_over_z(elem: &PhotonElement, x: f64) -> f64 {
+    let sf: &ScatteringFactor = &elem.incoherent_scattering_factor;
+    if sf.x.is_empty() {
+        return 1.0;
+    }
+    if x <= sf.x[0] {
+        return (sf.value[0] / elem.z as f64).clamp(0.0, 1.0);
+    }
+    let last = sf.x.len() - 1;
+    if x >= sf.x[last] {
+        return (sf.value[last] / elem.z as f64).clamp(0.0, 1.0);
+    }
+    // Linear interp in x; S is gently varying.
+    let i = sf.x.partition_point(|v| *v < x).saturating_sub(1);
+    let i = i.min(last - 1);
+    let t = (x - sf.x[i]) / (sf.x[i + 1] - sf.x[i]);
+    let s = sf.value[i] + t * (sf.value[i + 1] - sf.value[i]);
+    (s / elem.z as f64).clamp(0.0, 1.0)
+}
+
 #[cfg(test)]
 mod kn_helpers_tests {
     use super::*;
@@ -895,6 +1079,142 @@ mod tests {
             (mu2_sampled - mu2_analytic).abs() < 5e-3,
             "<μ²>: sampled {mu2_sampled}, analytic {mu2_analytic}"
         );
+    }
+
+    /// Adjoint Compton: kinematic invariant. The relation
+    /// `1/E_out − 1/E_in = (1−μ)/m_e c²` is enforced at sample time;
+    /// no sample should violate it (within FP noise).
+    #[test]
+    fn adjoint_compton_kinematic_invariant() {
+        let Some(elem) = load("H.h5") else {
+            eprintln!("skipping: H.h5 not present");
+            return;
+        };
+        let mut rng = Rng::new(0xADC011, 1);
+        let e_out = 200_000.0; // 200 keV
+        let e_in_max = 5e6;
+        for _ in 0..2000 {
+            let o = adjoint_compton_scatter(&elem, e_out, e_in_max, &mut rng);
+            let lhs = 1.0 / e_out - 1.0 / o.energy_in;
+            let rhs = (1.0 - o.mu) / M_E_C2_EV;
+            assert!(
+                (lhs - rhs).abs() < 1e-6 * (lhs.abs().max(rhs.abs()).max(1e-30)),
+                "kinematic violation: lhs={lhs:e} rhs={rhs:e}, mu={}, e_in={}",
+                o.mu,
+                o.energy_in,
+            );
+            assert!(o.energy_in >= e_out - 1e-6);
+            assert!(o.mu >= -1.0 - 1e-12 && o.mu <= 1.0 + 1e-12);
+        }
+    }
+
+    /// **Conditional density check** — the central correctness test
+    /// for adjoint Compton. The adjoint conditional density on E_in
+    /// given a fixed E_out should be proportional to
+    /// `KN_dcs_dmu(E_in, μ_kin(E_in, E_out))` (the forward Klein-
+    /// Nishina differential evaluated along the kinematic curve).
+    /// We sample the adjoint kernel many times at fixed E_out, build
+    /// a histogram of E_in, and χ² it against the analytic density.
+    #[test]
+    fn adjoint_compton_conditional_matches_analytic() {
+        let Some(elem) = load("H.h5") else {
+            eprintln!("skipping: H.h5 not present");
+            return;
+        };
+        const N: usize = 200_000;
+        const E_OUT_FIXED: f64 = 200_000.0; // 200 keV
+        const E_IN_MAX: f64 = 5.0e6;
+        const N_BINS: usize = 25;
+
+        // Linear bin grid on E_in ∈ [E_OUT_FIXED, kinematic_max]; use
+        // the E_OUT < m_e c²/2 case where every μ ∈ [-1, 1] is valid
+        // and the kinematic bound is finite.
+        let beta = E_OUT_FIXED / M_E_C2_EV;
+        let e_in_kin_max = E_OUT_FIXED / (1.0 - 2.0 * beta);
+        let e_in_hi = E_IN_MAX.min(e_in_kin_max);
+        let bin_w = (e_in_hi - E_OUT_FIXED) / N_BINS as f64;
+        let bin = |e: f64| -> Option<usize> {
+            if e < E_OUT_FIXED || e >= e_in_hi {
+                return None;
+            }
+            Some(((e - E_OUT_FIXED) / bin_w) as usize)
+        };
+
+        let mut rng = Rng::new(0xDB2, 0);
+        let mut h_sampled = vec![0u64; N_BINS];
+        for _ in 0..N {
+            let o = adjoint_compton_scatter(&elem, E_OUT_FIXED, E_IN_MAX, &mut rng);
+            if let Some(b) = bin(o.energy_in) {
+                h_sampled[b] += 1;
+            }
+        }
+
+        // Analytic expected count per bin: integrate
+        //   p(E_in) = KN_dcs_dmu(E_in, μ_kin(E_in, E_OUT_FIXED))
+        // over each bin. Use mid-point rule with 5 sub-samples per
+        // bin (KN is smooth, this converges fast).
+        let inv_e_out = 1.0 / E_OUT_FIXED;
+        let mut analytic = vec![0.0_f64; N_BINS];
+        let sub = 5_usize;
+        for i in 0..N_BINS {
+            for s in 0..sub {
+                let e_in = E_OUT_FIXED + (i as f64 + (s as f64 + 0.5) / sub as f64) * bin_w;
+                let mu = 1.0 - M_E_C2_EV * (inv_e_out - 1.0 / e_in);
+                if !(-1.0..=1.0).contains(&mu) {
+                    continue;
+                }
+                analytic[i] += klein_nishina_dcs_dmu(e_in, mu);
+            }
+            analytic[i] *= bin_w / sub as f64;
+        }
+        let analytic_sum: f64 = analytic.iter().sum();
+        let total: u64 = h_sampled.iter().sum();
+        assert!(
+            total > N as u64 / 2,
+            "adjoint sample efficiency too low: {total}/{N}",
+        );
+        let scale = total as f64 / analytic_sum;
+        let mut chi2 = 0.0_f64;
+        let mut active = 0;
+        for i in 0..N_BINS {
+            let exp = analytic[i] * scale;
+            if exp < 50.0 {
+                continue;
+            }
+            let obs = h_sampled[i] as f64;
+            chi2 += (obs - exp).powi(2) / exp;
+            active += 1;
+        }
+        let chi2_red = chi2 / active as f64;
+        assert!(
+            chi2_red < 2.5,
+            "adjoint conditional density disagrees: χ²_red = {chi2_red:.3} over {active} bins",
+        );
+    }
+
+    /// Adjoint sampling at high `E_out` (where the kinematic-allowed
+    /// μ range collapses to forward-only) returns μ ≥ μ_min and
+    /// E_in ≥ E_out.
+    #[test]
+    fn adjoint_compton_high_energy_forward_peak() {
+        let Some(elem) = load("H.h5") else {
+            eprintln!("skipping: H.h5 not present");
+            return;
+        };
+        let mut rng = Rng::new(0xC0DE, 0);
+        let e_out = 5.0e6; // 5 MeV — β = 9.78, μ_min = 1 − 1/β ≈ 0.898
+        let mu_min_expected = 1.0 - M_E_C2_EV / e_out;
+        let e_in_max = 50e6;
+        for _ in 0..1000 {
+            let o = adjoint_compton_scatter(&elem, e_out, e_in_max, &mut rng);
+            assert!(
+                o.mu >= mu_min_expected - 1e-6,
+                "high-E adjoint sampled μ = {} below kinematic min {}",
+                o.mu,
+                mu_min_expected,
+            );
+            assert!(o.energy_in >= e_out);
+        }
     }
 
     /// `interp_linear` endpoint / midpoint behaviour.
