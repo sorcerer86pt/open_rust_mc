@@ -209,12 +209,19 @@ bindings (`-p open-rust-mc-py`) clean.
   validated asymptotic limits, but haven't yet measured the
   predicted ~50-200 pcm shift on the existing PWR pin cell vs a
   reference run with `enable_resonance_equivalence` on.
-- **`pwr_actinides.json` end-to-end run.** Chain JSON loads and
-  solves CRAM cleanly. Running `deplete_pwr` over real burnup
-  with this chain needs Pu239/Pu240/Pu241/Pu242/Np237/Np239/etc.
-  HDF5 files added to `NUCLIDE_SPECS` + `NUCLIDE_INFO` so the
-  `BurnupMapping` includes them. Mechanical 1-day extension once
-  the data files are in `data_dir`.
+- ~~**`pwr_actinides.json` end-to-end run.**~~ **Done 2026-05-08.**
+  `deplete_pwr` now wires all 17 chain ZAIDs into transport
+  (0 chain-only); the actinide buildup nuclides (U-236/237/239,
+  Np-237/239, Pu-239/240/241/242, Am-241, I-135, Cs-135,
+  Pm-149, Sm-149) loaded from HDF5 with initial density 0 and
+  fed by CRAM each step. `MAX_NUCLIDES` bumped from 16 → 32
+  to fit the 18-nuclide fuel material. Per-step trace adds
+  Pu-239/Pu-240/Sm-149 columns when the chain has actinides.
+  6 steps × 48 h × 200 W/cm at CRAM-48 (`outputs/deplete_pwr_actinides.txt`):
+  Pu-239/U-235 grows linearly 0 → 2.4 %, Pu-240 grows
+  quadratically, Sm-149 reaches near-equilibrium ~1.5e-4,
+  k_eff 1.331 → 1.206 over 12 d (steep but expected for the
+  light pin-cell model). Qualitatively correct trajectories.
 
 ### Medium-effort (1-2 weeks each)
 

@@ -135,6 +135,24 @@ const IDX_ZR92: usize = 6;
 const IDX_ZR94: usize = 7;
 const IDX_O16_WATER: usize = 8;
 const IDX_XE135: usize = 9;
+// Actinide chain + Sm-149 chain — populated when the user passes
+// `--chain pwr_actinides.json`. Loaded for every depletion run; the
+// initial atom densities are zero on the transport side and grow via
+// the BurnupMapping push from CRAM.
+const IDX_U236: usize = 10;
+const IDX_U237: usize = 11;
+const IDX_U239: usize = 12;
+const IDX_NP237: usize = 13;
+const IDX_NP239: usize = 14;
+const IDX_PU239: usize = 15;
+const IDX_PU240: usize = 16;
+const IDX_PU241: usize = 17;
+const IDX_PU242: usize = 18;
+const IDX_AM241: usize = 19;
+const IDX_I135: usize = 20;
+const IDX_CS135: usize = 21;
+const IDX_PM149: usize = 22;
+const IDX_SM149: usize = 23;
 
 const NUCLIDE_SPECS: &[(&str, f64, f64, usize)] = &[
     ("U235.h5", 233.025, 2.43, 3),
@@ -147,6 +165,21 @@ const NUCLIDE_SPECS: &[(&str, f64, f64, usize)] = &[
     ("Zr94.h5", 93.120, 0.0, 2),
     ("O16.h5", 15.858, 0.0, 2),
     ("Xe135.h5", 133.748, 0.0, 2),
+    // pwr_actinides chain — initial density 0, fed by CRAM each step.
+    ("U236.h5",  234.018, 0.0,  3),
+    ("U237.h5",  235.012, 0.0,  3),
+    ("U239.h5",  237.001, 0.0,  3),
+    ("Np237.h5", 235.012, 0.0,  3),
+    ("Np239.h5", 236.999, 0.0,  3),
+    ("Pu239.h5", 236.999, 2.88, 3),
+    ("Pu240.h5", 237.992, 2.79, 3),
+    ("Pu241.h5", 238.978, 2.95, 3),
+    ("Pu242.h5", 239.979, 2.81, 3),
+    ("Am241.h5", 238.986, 0.0,  3),
+    ("I135.h5",  133.750, 0.0,  3),
+    ("Cs135.h5", 133.747, 0.0,  3),
+    ("Pm149.h5", 147.639, 0.0,  3),
+    ("Sm149.h5", 147.638, 0.0,  3),
 ];
 
 /// Per-`xs_kernel_idx` (zaid, material_idx) parallel to
@@ -175,6 +208,21 @@ const NUCLIDE_INFO: &[(u32, usize)] = &[
     (40094, 1), // Zr-94  in clad
     (8016, 2),  // O-16   in water (different xs_kernel_idx)
     (54135, 0), // Xe-135 in fuel
+    // pwr_actinides chain — actinide buildup + Sm-149 / Pm-149 / I-135 / Cs-135.
+    (92236, 0), // U-236  in fuel
+    (92237, 0), // U-237  in fuel
+    (92239, 0), // U-239  in fuel
+    (93237, 0), // Np-237 in fuel
+    (93239, 0), // Np-239 in fuel
+    (94239, 0), // Pu-239 in fuel
+    (94240, 0), // Pu-240 in fuel
+    (94241, 0), // Pu-241 in fuel
+    (94242, 0), // Pu-242 in fuel
+    (95241, 0), // Am-241 in fuel
+    (53135, 0), // I-135  in fuel
+    (55135, 0), // Cs-135 in fuel
+    (61149, 0), // Pm-149 in fuel
+    (62149, 0), // Sm-149 in fuel
 ];
 
 const ZAID_U235: u32 = 92235;
@@ -193,6 +241,21 @@ fn setup_materials(initial_xe_density: f64) -> Vec<Material> {
     fuel.add_nuclide(2.2482e-2, IDX_U238);
     fuel.add_nuclide(4.6402e-2, IDX_O16_FUEL);
     fuel.add_nuclide(initial_xe_density, IDX_XE135);
+    // Actinide / FP chain — initial atom density 0; CRAM grows them.
+    fuel.add_nuclide(0.0, IDX_U236);
+    fuel.add_nuclide(0.0, IDX_U237);
+    fuel.add_nuclide(0.0, IDX_U239);
+    fuel.add_nuclide(0.0, IDX_NP237);
+    fuel.add_nuclide(0.0, IDX_NP239);
+    fuel.add_nuclide(0.0, IDX_PU239);
+    fuel.add_nuclide(0.0, IDX_PU240);
+    fuel.add_nuclide(0.0, IDX_PU241);
+    fuel.add_nuclide(0.0, IDX_PU242);
+    fuel.add_nuclide(0.0, IDX_AM241);
+    fuel.add_nuclide(0.0, IDX_I135);
+    fuel.add_nuclide(0.0, IDX_CS135);
+    fuel.add_nuclide(0.0, IDX_PM149);
+    fuel.add_nuclide(0.0, IDX_SM149);
 
     let mut clad = Material::new("Zircaloy", 600.0);
     clad.add_nuclide(2.2932e-2, IDX_ZR90);
@@ -507,10 +570,22 @@ fn main() {
     let pin_volume = 1.26_f64 * 1.26 * 1.26;
     let target_power = args.power_w_per_cm * 1.26;
 
-    println!(
-        "  step       t [h]    k_eff       φ_fuel [n/cm²/s]    N_Xe/N_U235     ΔN_U235/N_U235"
-    );
-    println!("  -----  --------  --------  -----------------  --------------  ----------------");
+    let zaid_pu239 = chain.index_of_zaid(94239);
+    let zaid_pu240 = chain.index_of_zaid(94240);
+    let zaid_sm149 = chain.index_of_zaid(62149);
+    let actinides_in_chain =
+        zaid_pu239.is_some() && zaid_pu240.is_some() && zaid_sm149.is_some();
+    if actinides_in_chain {
+        println!(
+            "  step    t [h]   k_eff   φ_fuel [n/cm²/s]   N_Xe/U235   N_Pu239/U235   N_Pu240/U235   N_Sm149/U235   ΔU235/U235"
+        );
+        println!("  ----  -------  ------  ----------------  ----------  -------------  -------------  -------------  ----------");
+    } else {
+        println!(
+            "  step       t [h]    k_eff       φ_fuel [n/cm²/s]    N_Xe/N_U235     ΔN_U235/N_U235"
+        );
+        println!("  -----  --------  --------  -----------------  --------------  ----------------");
+    }
 
     let dt = args.hours_per_step * 3_600.0;
     let order: CramOrder = args.cram_order.into();
@@ -544,16 +619,36 @@ fn main() {
         let n_xe135 = chain_composition[chain.index_of_zaid(ZAID_XE135).unwrap()];
         let t_hours = step as f64 * args.hours_per_step;
 
-        println!(
-            "  {:>5}  {:>8.2}  {:>8.5}  {:>17.3e}  {:>14.4e}  {:>+15.2}%  ({:.0} ms)",
-            step,
-            t_hours,
-            k_eff,
-            phi_physical,
-            n_xe135 / n_u235.max(1e-30),
-            100.0 * (n_u235 - n_u235_initial) / n_u235_initial,
-            t_run.elapsed().as_secs_f64() * 1000.0,
-        );
+        if actinides_in_chain {
+            let n_pu239 = chain_composition[zaid_pu239.unwrap()];
+            let n_pu240 = chain_composition[zaid_pu240.unwrap()];
+            let n_sm149 = chain_composition[zaid_sm149.unwrap()];
+            let n_u235_safe = n_u235.max(1e-30);
+            println!(
+                "  {:>4}  {:>7.2}  {:>6.4}  {:>16.3e}  {:>10.3e}  {:>13.3e}  {:>13.3e}  {:>13.3e}  {:>+9.2}%  ({:.0} ms)",
+                step,
+                t_hours,
+                k_eff,
+                phi_physical,
+                n_xe135 / n_u235_safe,
+                n_pu239 / n_u235_safe,
+                n_pu240 / n_u235_safe,
+                n_sm149 / n_u235_safe,
+                100.0 * (n_u235 - n_u235_initial) / n_u235_initial,
+                t_run.elapsed().as_secs_f64() * 1000.0,
+            );
+        } else {
+            println!(
+                "  {:>5}  {:>8.2}  {:>8.5}  {:>17.3e}  {:>14.4e}  {:>+15.2}%  ({:.0} ms)",
+                step,
+                t_hours,
+                k_eff,
+                phi_physical,
+                n_xe135 / n_u235.max(1e-30),
+                100.0 * (n_u235 - n_u235_initial) / n_u235_initial,
+                t_run.elapsed().as_secs_f64() * 1000.0,
+            );
+        }
 
         if step == args.steps {
             break;

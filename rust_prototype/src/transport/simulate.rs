@@ -24,8 +24,11 @@ use crate::transport::rng::Rng;
 use crate::transport::tally::{ParticleTallies, Tallies};
 
 /// Maximum nuclides per material for stack-allocated XS buffers.
-/// Godiva has 3, most materials have < 8. Avoids per-collision heap allocation.
-const MAX_NUCLIDES: usize = 16;
+/// Godiva has 3, the basic PWR pin cell has 8, the actinides-chain
+/// fuel material has 18 (U-235/238 + O-16 + Xe-135 + 14 chain
+/// nuclides for actinide buildup + Sm/Pm/I/Cs poisoning). Avoids
+/// per-collision heap allocation.
+const MAX_NUCLIDES: usize = 32;
 
 /// Configuration for a simulation.
 pub struct SimConfig {
