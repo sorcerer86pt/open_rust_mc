@@ -2,72 +2,32 @@
 members = [".", "bindings/python"]
 resolver = "2"
 
-[package]
-name = "open-rust-mc"
+[workspace.package]
 version = "0.4.0"
 edition = "2024"
 license = "MIT"
+authors = ["Fabio Rodrigues <sorcerer86pt@gmail.com>"]
+repository = "https://github.com/sorcerer86pt/open-rust-mc"
 
-[dependencies]
-# Math + data foundation extracted into its own crate
-# (https://github.com/sorcerer86pt/Rust-MC-SimulationLib).
-# Path-dep'd while the two crates co-evolve; switch to a versioned
-# crates.io release once rust-mc-sim is published.
-rust-mc-sim = { path = "../../rust-mc-sim", features = ["parallel"] }
-# Re-exported only when our `preview` feature is on; pulls in
-# minifb + font8x8 transitively.
+[workspace.dependencies]
+# Shared dependency versions managed at the workspace level
+rust-mc-sim = { git = "https://github.com/sorcerer86pt/Rust-MC-SimulationLib", features = ["parallel"] }
 faer = "0.22"
-hdf5-pure = "0.1"
-rayon = "1"
 ndarray = "0.16"
-ndarray-npy = "0.9"
+serde = { version = "1", features = ["derive"] }
+cudarc = { version = "0.19", features = ["cuda-version-from-build-system", "cublas", "nccl"] }
+rayon = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
-smallvec = { version = "1", features = ["const_generics", "union"] }
-num-complex = "0.4"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-cudarc = { version = "0.19", optional = true, features = ["cuda-version-from-build-system", "cublas", "nccl"] }
 
-[features]
-default = []
-cuda = ["cudarc"]
-# Static geometry previewer (window via minifb). Opens a top-down
-# CSG slice for visual sanity checks before launching transport.
-preview = ["rust-mc-sim/preview"]
-
-[dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-
-[lints.clippy]
-# Correctness / safety lints kept on. Style-oriented pedantic lints
-# are too noisy for a numerical codebase (single-char physics
-# identifiers like E/A/Q, long literals for constants, similar names
-# like e_cm/e_cm_out are intentional and documented).
+[workspace.lints.clippy]
+# Physics-specific lint overrides applied across the entire workspace
 unwrap_used = "deny"
 undocumented_unsafe_blocks = "warn"
-# Keep the cast lints that catch real bugs off — every XS lookup does
-# idx-from-usize casts that are safe by construction.
 cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 module_name_repetitions = "allow"
-# Numerical-code idioms that clippy flags but are deliberate here:
-#   - Matrix / per-axis loops genuinely need the index (CRAM solver,
-#     Gauss-Jordan, lattice axis dispatch, FSR walks).
-#   - Transcendental constants (CRAM IPF poles/residues, Gauss-
-#     Legendre nodes/weights) need every digit of f64 precision —
-#     clippy's "excessive precision" treats them like typos.
-#   - Documentation prose: aligned doc list continuations, lazy
-#     continuations after a colon are intentional for readability of
-#     physics derivations.
-#   - Test fixtures that produce small `vec![…]` arrays — converting
-#     to `[…]` saves two characters and obscures the intent.
-#   - Per-step Tallies are typically built incrementally
-#     (`Tallies::default()` then `.mesh_flux = Some(…)`); clippy's
-#     `field_reassign_with_default` would force struct-update syntax.
-#   - Transport / variance-reduction functions take many arguments
-#     by physics necessity (XS, geometry, RNG, tallies, …).
 needless_range_loop = "allow"
 excessive_precision = "allow"
 useless_vec = "allow"
@@ -78,6 +38,43 @@ too_many_arguments = "allow"
 collapsible_if = "allow"
 collapsible_match = "allow"
 double_comparisons = "allow"
+
+[package]
+name = "open-rust-mc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Inherited from workspace
+rust-mc-sim = { workspace = true }
+faer = { workspace = true }
+ndarray = { workspace = true }
+serde = { workspace = true }
+rayon = { workspace = true }
+clap = { workspace = true }
+thiserror = { workspace = true }
+cudarc = { workspace = true, optional = true }
+
+# Local-only dependencies
+hdf5-pure = "0.1"
+ndarray-npy = "0.9"
+smallvec = { version = "1", features = ["const_generics", "union"] }
+num-complex = "0.4"
+serde_json = "1"
+
+[features]
+default = []
+cuda = ["cudarc"]
+preview = ["rust-mc-sim/preview"]
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+
+[lints]
+workspace = true
+
+# --- Binaries ---
 
 [[bin]]
 name = "gpu_compton_validate"
@@ -134,9 +131,15 @@ name = "xs_provider_diff"
 name = "reconstruction"
 harness = false
 
+# --- Profiles ---
+
 [profile.release]
 opt-level = 3
-lto = "thin"
+lto = "fat"           # Full Link Time Optimization for cross-crate physics speed
+codegen-units = 1     # Slower compile, but better optimization boundary
+panic = "abort"       # Smaller binary, slightly faster execution by removing unwinding
+strip = "symbols"     # Remove symbols to keep the production binary lean
 
 [profile.bench]
 inherits = "release"
+debug = true          # Enable debug symbols for profiling (perf/samply)
