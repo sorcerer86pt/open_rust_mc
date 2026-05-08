@@ -440,12 +440,36 @@ bindings (`-p open-rust-mc-py`) clean.
 - **Photon depletion / activation transport.** Separate from
   neutron depletion — would track activation products and their
   decay photons over time.
-- **Full PWR depletion bench.** With `chains/pwr_actinides.json`
-  + extended `NUCLIDE_SPECS` (Pu239/Pu240/Pu241/Pu242/Np ZAIDs),
-  run `deplete_pwr` over a 30-50 GWd/MTU burnup history,
-  compare U-235 / Pu-239 / Xe-135 / Sm-149 trajectories vs
-  OpenMC's depletion solver on the same chain. The framework is
-  in place; the long run + comparison is the substantial part.
+- ~~**Full PWR depletion bench.**~~ **First comparison done
+  2026-05-08 — surfaced a real chain-calibration finding.**
+  Side-by-side run (`outputs/depletion_rust_vs_openmc.md`) on the
+  same PWR pin cell + same `pwr_actinides.json` chain at
+  4 steps × 48 h × 200 W/cm. OpenMC harness lives in
+  `scripts/openmc_pwr_depletion.py` (auto-builds an OpenMC
+  `chain.xml` from our JSON via the new `build_chain_from_json`).
+
+  Rust U-235 burn rate is **9× faster** than OpenMC's. Diagnosis:
+  the chain JSON ships *thermal-spectrum* one-group cross
+  sections (σ_f(U-235) = 583.5 b at 0.0253 eV), while OpenMC's
+  `CoupledOperator` collapses the actual cell flux spectrum to
+  one group on the fly (~40-60 b for the PWR pin's hard
+  spectrum). 9× ≈ 583/55. Cross-channel agreement follows the
+  same pattern: Xe-135/U-235 = 1.24× (σ_Xe is spectrum-flat),
+  Pu-239 = 2.6×, Pu-240 = 8.2×, Sm-149 = 2.8×. The Rust
+  depletion mechanics (CRAM-48, predictor-corrector,
+  BurnupMapping) are correct; the fix is to feed
+  flux-spectrum-averaged one-group XS into the chain instead of
+  thermal values — either via on-the-fly per-step tallies (the
+  textbook approach OpenMC uses) or via a pre-computed PWR-
+  spectrum chain JSON. Detailed breakdown + remediation path in
+  the artifact.
+
+  16-step (32 d) Rust standalone run shipped at
+  `outputs/deplete_pwr_actinides_32d.txt`: Pu-239/U-235 = 9.8 %,
+  Sm-149/U-235 = 1.62e-4 (saturated), Xe-135/U-235 = 1.64e-5
+  (saturated), ΔU-235 = -50 % at 32 d (over-burned for the
+  reasons above; the trajectories are qualitatively correct,
+  just compressed in time vs OpenMC).
 
 ### Documentation / housekeeping
 
