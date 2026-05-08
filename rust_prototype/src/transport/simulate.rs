@@ -674,6 +674,7 @@ fn apply_urr_equivalence_correction<XS: XsProvider>(
     dancoff: f64,
     mean_chord_cm: f64,
     micro_xs: &mut [MicroXs; MAX_NUCLIDES],
+    micro_xs_smooth: &[MicroXs; MAX_NUCLIDES],
     micro_totals: &mut [f64; MAX_NUCLIDES],
     n_nuclides: usize,
 ) {
@@ -699,44 +700,36 @@ fn apply_urr_equivalence_correction<XS: XsProvider>(
         }
         sigma_0 /= nuc.atom_density;
 
-        // Apply correction to the resonance-bearing channels only.
-        let scale_elastic = if micro_xs[i].elastic > 0.0 {
-            apply_equivalence_correction(
-                micro_xs[i].elastic,
-                sigma_0,
-                nuc.atom_density,
-                mean_chord_cm,
-                dancoff,
-            ) / micro_xs[i].elastic
-        } else {
-            1.0
-        };
-        let scale_fission = if micro_xs[i].fission > 0.0 {
-            apply_equivalence_correction(
-                micro_xs[i].fission,
-                sigma_0,
-                nuc.atom_density,
-                mean_chord_cm,
-                dancoff,
-            ) / micro_xs[i].fission
-        } else {
-            1.0
-        };
-        let scale_capture = if micro_xs[i].capture > 0.0 {
-            apply_equivalence_correction(
-                micro_xs[i].capture,
-                sigma_0,
-                nuc.atom_density,
-                mean_chord_cm,
-                dancoff,
-            ) / micro_xs[i].capture
-        } else {
-            1.0
-        };
-
-        micro_xs[i].elastic *= scale_elastic;
-        micro_xs[i].fission *= scale_fission;
-        micro_xs[i].capture *= scale_capture;
+        // Hwang superposition: shield only the resonance-fluctuation
+        // part of each channel, leaving the smooth off-resonance
+        // baseline (potential elastic, smooth s-wave capture)
+        // unshielded. `apply_equivalence_correction` returns
+        // `σ_smooth + (σ_URR − σ_smooth) · σ_0/(σ_0+σ_e)`.
+        let smooth = &micro_xs_smooth[i];
+        micro_xs[i].elastic = apply_equivalence_correction(
+            micro_xs[i].elastic,
+            smooth.elastic,
+            sigma_0,
+            nuc.atom_density,
+            mean_chord_cm,
+            dancoff,
+        );
+        micro_xs[i].fission = apply_equivalence_correction(
+            micro_xs[i].fission,
+            smooth.fission,
+            sigma_0,
+            nuc.atom_density,
+            mean_chord_cm,
+            dancoff,
+        );
+        micro_xs[i].capture = apply_equivalence_correction(
+            micro_xs[i].capture,
+            smooth.capture,
+            sigma_0,
+            nuc.atom_density,
+            mean_chord_cm,
+            dancoff,
+        );
         micro_xs[i].total = micro_xs[i].elastic
             + micro_xs[i].inelastic
             + micro_xs[i].n2n
@@ -891,11 +884,17 @@ fn transport_particle<XS: XsProvider>(
             let urr_xi = rng.uniform();
             let n_nuclides = material.nuclides.len();
             let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+            let mut micro_xs_smooth = [MicroXs::default(); MAX_NUCLIDES];
             let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
             // Track thermal scattering XS addition per nuclide
             let mut thermal_xs_add = [0.0_f64; MAX_NUCLIDES];
             for (i, nuc) in material.nuclides.iter().enumerate() {
                 let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+                // Snapshot the smooth (pre-URR-PT) XS — Hwang
+                // superposition needs this baseline so the URR
+                // equivalence correction shields only the
+                // resonance-fluctuation part of each channel.
+                micro_xs_smooth[i] = xs;
                 xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
 
                 // S(α,β) thermal scattering: replace free-atom elastic XS
@@ -943,6 +942,7 @@ fn transport_particle<XS: XsProvider>(
                         dancoff,
                         mean_chord,
                         &mut micro_xs,
+                        &micro_xs_smooth,
                         &mut micro_totals,
                         n_nuclides,
                     );
@@ -1656,9 +1656,12 @@ fn transport_particle_delta<XS: XsProvider>(
             let urr_xi = rng.uniform();
             let n_nuclides = material.nuclides.len();
             let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
+            let mut micro_xs_smooth = [MicroXs::default(); MAX_NUCLIDES];
             let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
             for (i, nuc) in material.nuclides.iter().enumerate() {
                 let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
+                // Snapshot pre-URR-PT smooth XS for Hwang superposition.
+                micro_xs_smooth[i] = xs;
                 xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
                 if disable_delayed_neutrons {
                     xs.delayed_nu_bar = 0.0;
@@ -1686,6 +1689,7 @@ fn transport_particle_delta<XS: XsProvider>(
                         dancoff,
                         mean_chord,
                         &mut micro_xs,
+                        &micro_xs_smooth,
                         &mut micro_totals,
                         n_nuclides,
                     );

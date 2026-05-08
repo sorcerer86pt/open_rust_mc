@@ -157,36 +157,78 @@ pub fn mean_chord_cylinder(radius_cm: f64) -> f64 {
     2.0 * radius_cm
 }
 
-/// Apply the Stoker-Weiss / NJOY rational equivalence correction to
-/// an infinite-medium URR sample.
+/// Apply the Stoker-Weiss / NJOY rational equivalence correction to a
+/// URR cross-section sample using **Hwang superposition**.
 ///
-/// Returns `σ_∞ · σ_0 / (σ_0 + σ_e)`, where `σ_e = (1 − C)/(N·l̄)`.
+/// The Bondarenko shielding factor `f = σ_0 / (σ_0 + σ_e)` is the
+/// ratio between the shielded and dilute resonance integrals — it
+/// applies to the *resonance fluctuation* part of the URR sample,
+/// not to the entire sampled cross-section. The smooth off-resonance
+/// baseline (potential elastic, smooth s-wave capture) is unshielded
+/// in the heterogeneous problem because there is no resonance to
+/// shield away.
 ///
-/// `sigma_inf_barns` — infinite-medium URR cross-section, post-`apply_urr`.
-/// `sigma_0_barns`   — background XS per absorber atom (sum over OTHER
-///                     nuclides of `N_i · σ_t,i / N_abs`).
-/// `n_absorber_per_bcm` — atom density of the absorbing nuclide
-///                       in atoms / (barn·cm).
-/// `mean_chord_cm`   — average chord through the absorber region.
-/// `dancoff`         — geometric Dancoff factor `C ∈ [0, 1]`.
+/// Hwang's superposition method (NJOY PURR §13, MacFarlane 2017)
+/// keeps the smooth baseline intact and shields only the
+/// fluctuation:
+///
+/// ```text
+///   σ_eff = σ_smooth + (σ_URR − σ_smooth) · σ_0 / (σ_0 + σ_e)
+///         = σ_smooth + Δσ · f,    Δσ = σ_URR − σ_smooth
+/// ```
+///
+/// Equivalent to the prior implementation
+/// `σ_eff = σ_URR · σ_0/(σ_0+σ_e)` only in the limit
+/// `σ_smooth = 0` — i.e. when 100 % of the URR sample is resonance
+/// fluctuation. For U-238 in a PWR fuel pin at ~50 keV, the smooth
+/// elastic baseline is ~11 b out of a ~12 b URR sample, so applying
+/// the factor to the full sample over-shields by ~5-10×. Hwang
+/// recovers the textbook 2-15 % shielding at the same Dancoff and
+/// σ_0.
+///
+/// The shielded-fluctuation form preserves the right limits:
+///
+/// - `f → 1` (tight infinite lattice, σ_e → 0): Δσ unshielded,
+///   σ_eff → σ_URR. ✓
+/// - `f → 0` (isolated rod, σ_e → ∞): Δσ fully shielded,
+///   σ_eff → σ_smooth. ✓
+/// - `σ_URR = σ_smooth` (no resonance fluctuation): σ_eff =
+///   σ_smooth regardless of `f`. ✓
+/// - `σ_URR > σ_smooth` (resonance peak): σ_eff lies between
+///   σ_smooth and σ_URR, never below σ_smooth. ✓
+/// - `σ_URR < σ_smooth` (resonance trough): σ_eff lies between
+///   σ_URR and σ_smooth, never above σ_smooth. ✓
+///
+/// Parameters:
+/// - `sigma_urr_barns`   — URR-sampled cross-section, post-`apply_urr`.
+/// - `sigma_smooth_barns` — smooth baseline at the same energy, i.e.
+///                          the cross-section before `apply_urr`
+///                          modified it. Acts as the "no-resonance"
+///                          reference.
+/// - `sigma_0_barns`     — background XS per absorber atom.
+/// - `n_absorber_per_bcm` — atom density of the absorbing nuclide.
+/// - `mean_chord_cm`     — average chord through the absorber region.
+/// - `dancoff`           — geometric Dancoff factor `C ∈ [0, 1]`.
 pub fn apply_equivalence_correction(
-    sigma_inf_barns: f64,
+    sigma_urr_barns: f64,
+    sigma_smooth_barns: f64,
     sigma_0_barns: f64,
     n_absorber_per_bcm: f64,
     mean_chord_cm: f64,
     dancoff: f64,
 ) -> f64 {
     if dancoff >= 1.0 || n_absorber_per_bcm <= 0.0 || mean_chord_cm <= 0.0 {
-        return sigma_inf_barns;
+        return sigma_urr_barns;
     }
     // σ_e in barns: (1 − C) / (N [/(b·cm)] · l̄ [cm]) → barns.
     let sigma_e_barns = (1.0 - dancoff) / (n_absorber_per_bcm * mean_chord_cm);
-    // Avoid division by zero when both σ_0 and σ_e are zero.
     let denom = sigma_0_barns + sigma_e_barns;
     if denom <= 0.0 {
-        return sigma_inf_barns;
+        return sigma_urr_barns;
     }
-    sigma_inf_barns * sigma_0_barns / denom
+    let bondarenko_f = sigma_0_barns / denom;
+    let delta = sigma_urr_barns - sigma_smooth_barns;
+    sigma_smooth_barns + delta * bondarenko_f
 }
 
 /// Per-cell Dancoff cache. Indexed by `cell.id().0 as usize`. Cells
@@ -285,34 +327,67 @@ mod tests {
     use super::*;
 
     /// `C = 1.0` — equivalence reduces to identity. The infinite
-    /// lattice limit must leave `σ_∞` unchanged.
+    /// lattice limit must leave `σ_URR` unchanged regardless of the
+    /// smooth baseline.
     #[test]
     fn dancoff_one_means_identity_correction() {
-        let sigma_inf = 100.0;
-        let out = apply_equivalence_correction(sigma_inf, 8.0, 0.022, 0.82, 1.0);
-        assert_eq!(out, sigma_inf);
+        let sigma_urr = 100.0;
+        let sigma_smooth = 70.0;
+        let out =
+            apply_equivalence_correction(sigma_urr, sigma_smooth, 8.0, 0.022, 0.82, 1.0);
+        assert_eq!(out, sigma_urr);
     }
 
-    /// `C = 0.0` — isolated rod, full self-shielding correction.
-    /// For PWR-pin-like inputs `(σ_0 = 8 b, N = 0.022 / (b·cm),
-    /// l̄ = 0.82 cm)`, σ_e = 1 / (0.022 × 0.82) ≈ 55.4 b, so
-    /// σ_eff ≈ σ_∞ × 8 / (8 + 55.4) ≈ 0.126 σ_∞.
+    /// `C = 0.0` — isolated rod, full Hwang shielding. Only the
+    /// resonance fluctuation `Δσ = σ_URR − σ_smooth` is reduced;
+    /// the smooth baseline survives. With PWR-pin-like inputs,
+    /// `f = σ_0 / (σ_0 + σ_e) = 8/(8+55.4) ≈ 0.126`, so
+    /// `σ_eff = σ_smooth + (σ_URR − σ_smooth) · 0.126`.
     #[test]
     fn dancoff_zero_isolated_rod_strong_self_shielding() {
-        let sigma_inf = 100.0;
+        let sigma_urr = 100.0;
+        let sigma_smooth = 70.0;
         let sigma_0 = 8.0;
         let n_abs = 0.022;
         let l_bar = 0.82;
-        let out = apply_equivalence_correction(sigma_inf, sigma_0, n_abs, l_bar, 0.0);
+        let out =
+            apply_equivalence_correction(sigma_urr, sigma_smooth, sigma_0, n_abs, l_bar, 0.0);
         let sigma_e_expected = 1.0 / (n_abs * l_bar);
-        let expected = sigma_inf * sigma_0 / (sigma_0 + sigma_e_expected);
+        let f_expected = sigma_0 / (sigma_0 + sigma_e_expected);
+        let expected = sigma_smooth + (sigma_urr - sigma_smooth) * f_expected;
         assert!(
             (out - expected).abs() / expected < 1e-12,
             "got {out}, expected {expected}",
         );
-        // Sanity: the isolated-rod correction must be a strong
-        // reduction (well below 50 % of σ_∞ for these inputs).
-        assert!(out < 0.5 * sigma_inf, "isolated correction too weak: {out}");
+        // Hwang form keeps σ_eff ≥ σ_smooth when σ_URR > σ_smooth —
+        // it can't shield below the smooth baseline.
+        assert!(
+            out >= sigma_smooth - 1e-12,
+            "Hwang shouldn't drop below smooth baseline: {out} < {sigma_smooth}",
+        );
+        assert!(out < sigma_urr, "isolated correction too weak: {out}");
+    }
+
+    /// `σ_URR = σ_smooth` (no resonance fluctuation): the correction
+    /// is a no-op regardless of Dancoff or σ_0.
+    #[test]
+    fn no_fluctuation_no_correction() {
+        let s = 12.5;
+        let out = apply_equivalence_correction(s, s, 5.0, 0.022, 0.82, 0.27);
+        assert!((out - s).abs() / s < 1e-12, "got {out}, expected {s}");
+    }
+
+    /// Resonance trough (`σ_URR < σ_smooth`): Hwang pulls σ_eff back
+    /// toward σ_smooth — the shielded result lies between σ_URR and
+    /// σ_smooth, never below σ_URR.
+    #[test]
+    fn resonance_trough_pulled_toward_smooth() {
+        let sigma_urr = 5.0;
+        let sigma_smooth = 9.0;
+        let out =
+            apply_equivalence_correction(sigma_urr, sigma_smooth, 8.0, 0.022, 0.82, 0.27);
+        assert!(out >= sigma_urr - 1e-12 && out <= sigma_smooth + 1e-12,
+                "trough out of bounds: σ_URR={sigma_urr} ≤ {out} ≤ σ_smooth={sigma_smooth}");
     }
 
     /// Square-lattice Dancoff (Sauer first approximation): matches
@@ -378,8 +453,8 @@ mod tests {
     fn equivalence_invariant_under_n_l_bar_rescaling() {
         let n0 = 0.022;
         let l0 = 0.82;
-        let s1 = apply_equivalence_correction(50.0, 5.0, n0, l0, 0.3);
-        let s2 = apply_equivalence_correction(50.0, 5.0, 2.0 * n0, 0.5 * l0, 0.3);
+        let s1 = apply_equivalence_correction(50.0, 12.0, 5.0, n0, l0, 0.3);
+        let s2 = apply_equivalence_correction(50.0, 12.0, 5.0, 2.0 * n0, 0.5 * l0, 0.3);
         assert!(
             (s1 - s2).abs() / s1 < 1e-12,
             "scale invariance broken: {s1} vs {s2}",

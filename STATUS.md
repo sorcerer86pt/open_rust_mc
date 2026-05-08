@@ -205,47 +205,51 @@ bindings (`-p open-rust-mc-py`) clean.
   unchanged — its per-batch live-progress print would be lost
   without adding `verbose` support to `CudaRunner`.
 - ~~**OpenMC cross-validation on PWR pin cell with URR equivalence
-  on.**~~ **Done 2026-05-08 — root cause of the over-correction
-  identified, fix is a follow-on.**
+  on.**~~ **Done 2026-05-08 (fix landed).**
   3 seeds × 60 batches × 10 000 particles, SVD rank 5, 3.1 % UO₂
   pin cell @ 600 K / 900 K, identical geometry across both codes:
 
-  | Config           | k_inf    | σ (3 seeds) |
-  |------------------|----------|-------------|
-  | OpenMC 0.15.3    | 1.32773  | 0.00205     |
-  | Rust w/o URR-eq  | 1.32715  | 0.00153     |
-  | Rust w/ URR-eq   | 1.33479  | 0.00226     |
+  | Config                          | k_inf    | σ (3 seeds) |
+  |---------------------------------|----------|-------------|
+  | OpenMC 0.15.3                   | 1.32773  | 0.00205     |
+  | Rust w/o URR-eq                 | 1.32715  | 0.00153     |
+  | Rust w/ URR-eq (rational, old)  | 1.33479  | 0.00226     |
+  | **Rust w/ URR-eq (Hwang, fix)** | 1.32892  | 0.00095     |
 
-  Without URR equivalence Rust matches OpenMC at Δk = -58 pcm
-  (0.23σ_combined — baseline cross-check passes). With URR
-  equivalence, Rust shifts +764 pcm vs the no-eq baseline (and
-  +706 pcm vs OpenMC, 2.3σ_combined). Direction is correct (eq
-  reduces U-238 URR absorption → higher k_inf) but magnitude is
-  3-15× larger than the 50-200 pcm pre-implementation prediction.
+  Baseline cross-check (no URR-eq): Rust vs OpenMC Δk = -58 pcm
+  (0.23σ_combined — pass). The original rational form
+  `σ_eff = σ_URR · σ_0/(σ_0+σ_e)` shifted +764 pcm — 3-15× the
+  textbook 2-15 % shielding band — because it shielded the full
+  URR sample including U-238's smooth ~11.8 b potential elastic
+  baseline. Diagnosed via `scripts/urr_eq_dump.py`
+  (`outputs/urr_eq_dump.txt`): Carlvik-Pellaud C = 0.68, σ_e
+  = 17.4 b, σ_0 = 7.9 b — all correct; the formula's domain of
+  applicability was the bug.
 
-  Diagnostic dump (`scripts/urr_eq_dump.py`,
-  `outputs/urr_eq_dump.txt`) walks the math:
-  Carlvik-Pellaud C = 0.68 (correct, in published 0.5-0.85 band);
-  σ_e = (1−C)/(N·l̄) = 17.4 b (correct from formula); σ_0 = 7.9 b
-  (mostly from O-16, correct). The Rust factor σ_0/(σ_0+σ_e) =
-  **0.313 → 68.7 % reduction across all URR XS**. Textbook
-  Bondarenko shielding for U-238 PWR-URR is 2-15 % (Sanchez 1981
-  Table II, Stamm'ler 1983 §6.4, NJOY PURR benchmarks).
+  Fix: **Hwang superposition** (`apply_equivalence_correction`,
+  `transport/urr_equivalence.rs`):
 
-  **Root cause: the rational equivalence formula is being applied
-  to the full elastic / fission / capture URR samples instead of
-  only to the resonance-fluctuation contribution above the smooth
-  baseline.** U-238's URR-window elastic is dominated by smooth
-  potential scattering (~11.8 b averaged); its capture has a
-  ~0.3 b smooth s-wave baseline. Reducing those by 69 % over-
-  shields by ~5-10×. NJOY PURR avoids this via the Hwang
-  superposition method (apply factor to `σ_URR − σ_smooth`, not
-  to σ_URR); a quick alternative is gating the correction to
-  capture only.
+  ```text
+    σ_eff = σ_smooth + (σ_URR − σ_smooth) · σ_0 / (σ_0 + σ_e)
+  ```
+
+  The Bondarenko factor `σ_0/(σ_0+σ_e)` shields only the
+  resonance-fluctuation `Δσ = σ_URR − σ_smooth` above the
+  off-resonance baseline, leaving smooth potential scattering
+  and smooth s-wave capture intact (NJOY PURR §13). Threading
+  the smooth (pre-`apply_urr`) baseline through to the
+  equivalence pass adds one `[MicroXs; MAX_NUCLIDES]` snapshot
+  per collision in both surface and delta-tracking hot paths.
+
+  Result: shift = **+177 pcm** (in the textbook 50-200 pcm
+  band) and Rust k_inf = 1.32892 lands at 0.53σ_combined of the
+  OpenMC reference — consistent with OpenMC at the level of
+  3-seed MC noise.
 
   Artifacts:
   `outputs/pwr_pincell_no_urr_eq.txt`,
-  `outputs/pwr_pincell_with_urr_eq.txt`,
+  `outputs/pwr_pincell_with_urr_eq.txt` (old rational form),
+  `outputs/pwr_pincell_with_urr_eq_hwang.txt` (Hwang fix),
   `outputs/openmc_pwr_urr_ref.json`,
   `outputs/urr_eq_dump.txt`,
   `scripts/urr_eq_dump.py`.
