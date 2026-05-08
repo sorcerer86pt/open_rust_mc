@@ -1705,6 +1705,34 @@ fn transport_particle_delta<XS: XsProvider>(
             // Real collision — process exactly as surface tracking
             result.collisions += 1;
 
+            // Sutton-Brown-style track-length k-eff estimator under
+            // delta tracking. Surface tracking can score `w·d·ν·Σ_f`
+            // per cell-residence segment because each segment is in
+            // one cell; under Woodcock, segments cross materials
+            // silently and the per-cell-segment integrand isn't
+            // available. The unbiased equivalent is to score
+            // `w · ν·Σ_f(m,E) / Σ_t(m,E)` at each *real* collision:
+            //
+            //   E[score per unit length in material m] =
+            //     Σ_t(m,E) · [ν·Σ_f(m,E)/Σ_t(m,E)]  =  ν·Σ_f(m,E)
+            //
+            // which is the same integrand the surface-tracking k_track
+            // accumulates. Variance is comparable to the collision
+            // estimator (k_eff itself); the value is the cross-check
+            // it gives against k_eff. Closes the documented gap
+            // (k_track was 0 under delta tracking pre this change).
+            if sigma_real > 0.0 {
+                let mut macro_nu_sigma_f = 0.0_f64;
+                for (i, nuc) in material.nuclides.iter().enumerate() {
+                    macro_nu_sigma_f +=
+                        nuc.atom_density * micro_xs[i].nu_bar * micro_xs[i].fission;
+                }
+                if macro_nu_sigma_f > 0.0 {
+                    result.track_length_nu_sigf +=
+                        particle.weight * macro_nu_sigma_f / sigma_real;
+                }
+            }
+
             let macro_total = sigma_real;
             if macro_total <= 0.0 {
                 particle.kill();
@@ -2721,6 +2749,124 @@ mod tests {
         assert_ne!(
             k0, k1,
             "Different seeds must produce different batch sequences"
+        );
+    }
+
+    /// Two-material low-contrast test geometry that auto-selects
+    /// delta tracking, with both materials fissile so the
+    /// track-length estimator has fission events to score.
+    fn delta_tracking_two_material_problem() -> (
+        Vec<Surface>,
+        Vec<Cell>,
+        Vec<Material>,
+        ConstantXs,
+    ) {
+        let surfaces = vec![
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 5.0,
+                bc: BoundaryCondition::Transmission,
+            },
+            Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 8.7407,
+                bc: BoundaryCondition::Vacuum,
+            },
+        ];
+        let cells = vec![
+            Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_aabb(
+                crate::geometry::Aabb::new(
+                    Vec3::new(-5.0, -5.0, -5.0),
+                    Vec3::new(5.0, 5.0, 5.0),
+                ),
+            ),
+            Cell::new(
+                CellId(1),
+                cell::intersect_all(vec![cell::outside(0), cell::inside(1)]),
+                CellFill::Material(1),
+            )
+            .with_aabb(crate::geometry::Aabb::new(
+                Vec3::new(-8.7407, -8.7407, -8.7407),
+                Vec3::new(8.7407, 8.7407, 8.7407),
+            )),
+            Cell::new(CellId(2), cell::outside(1), CellFill::Void),
+        ];
+        let mut mat_inner = Material::new("inner", 294.0);
+        mat_inner.add_nuclide(0.04, 0);
+        let mut mat_outer = Material::new("outer", 294.0);
+        // Same nuclide index (0), different density → contrast 4×, in
+        // delta-tracking band.
+        mat_outer.add_nuclide(0.01, 0);
+        let materials = vec![mat_inner, mat_outer];
+        let xs = ConstantXs {
+            xs: vec![MicroXs {
+                total: 7.0,
+                elastic: 4.0,
+                inelastic: 0.0,
+                n2n: 0.0,
+                n3n: 0.0,
+                fission: 1.5,
+                capture: 1.5,
+                nu_bar: 2.43,
+                delayed_nu_bar: 0.0,
+                awr: 235.0,
+            }],
+        };
+        (surfaces, cells, materials, xs)
+    }
+
+    /// Verify the geometry above does pick delta tracking.
+    #[test]
+    fn delta_tracking_two_material_problem_picks_delta() {
+        let (_, cells, materials, xs) = delta_tracking_two_material_problem();
+        let mode = detect_tracking_mode(&cells, &materials, &xs, false);
+        assert!(
+            matches!(mode, TrackingMode::Delta(_)),
+            "low-contrast two-material problem must auto-select delta tracking",
+        );
+    }
+
+    /// k_track (track-length k-eff under delta tracking, Sutton-Brown
+    /// form) should agree with k_eff (collision estimator) within MC
+    /// noise. Pre-fix `k_track` was identically 0 under delta
+    /// tracking — this test would have caught that.
+    #[test]
+    fn delta_tracking_k_track_matches_k_eff() {
+        let (surfaces, cells, materials, xs) = delta_tracking_two_material_problem();
+        let config = SimConfig {
+            batches: 30,
+            inactive: 5,
+            particles_per_batch: 1000,
+            seed: 7,
+            auto_inactive: None,
+            verbose: false,
+            parallel: false,
+            tallies: Default::default(),
+            statepoint_path: None,
+            survival_biasing: None,
+            initial_source_bank: None,
+            weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
+        };
+        let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
+
+        let active: Vec<&BatchResult> = results.iter().filter(|r| r.active).collect();
+        assert!(!active.is_empty(), "no active batches");
+        let n = active.len() as f64;
+        let k_eff_mean: f64 = active.iter().map(|r| r.k_eff).sum::<f64>() / n;
+        let k_track_mean: f64 = active.iter().map(|r| r.k_track).sum::<f64>() / n;
+
+        // k_track must not be identically zero — that was the bug.
+        assert!(k_track_mean > 1e-3, "k_track is zero under delta tracking: {k_track_mean}");
+
+        // Within combined MC noise of k_eff (couple-percent at 25
+        // active batches × 1k particles).
+        let rel = (k_track_mean - k_eff_mean).abs() / k_eff_mean.max(1e-30);
+        assert!(
+            rel < 0.05,
+            "k_track {k_track_mean:.5} vs k_eff {k_eff_mean:.5} disagree by {:.2}% (>5%)",
+            rel * 100.0,
         );
     }
 }

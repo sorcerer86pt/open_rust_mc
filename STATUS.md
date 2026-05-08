@@ -281,12 +281,20 @@ bindings (`-p open-rust-mc-py`) clean.
   `src/bin/`, reuses the CPU `hex_minicore` geometry, runs the
   GPU recursive transport via the dispatch `CudaRunner`. k_inf
   parity confirmed at 71 pcm < 0.2σ_combined (see Quick wins).
-- **Track-length estimator under delta tracking.** Currently the
-  delta-tracking path leaves `k_track = 0` — the integrand can't
-  be reconstructed when the path crosses material boundaries
-  silently. The Sutton-Brown delta-tracking-compatible track-
-  length estimator (tally on real events with the local-cell
-  ν·σ_f) would close that gap.
+- ~~**Track-length estimator under delta tracking.**~~
+  **Done 2026-05-08.** `transport_particle_delta` now scores
+  `w · ν·Σ_f(m, E) / Σ_t(m, E)` at every real (post-acceptance)
+  collision — the unbiased Sutton-Brown collision form of the
+  track-length estimator. In expectation,
+  `Σ_t(m,E) · ν·Σ_f(m,E)/Σ_t(m,E) = ν·Σ_f(m,E)`, the same
+  integrand the surface-tracking path accumulates per
+  cell-residence segment, so the two `k_track` columns are
+  directly comparable. New unit tests
+  `delta_tracking_two_material_problem_picks_delta` and
+  `delta_tracking_k_track_matches_k_eff` exercise a low-contrast
+  two-material geometry that auto-selects delta tracking and
+  verify k_track is non-zero and agrees with k_eff within MC
+  noise. 320/320 lib tests green.
 - **Surface and mesh tallies under delta tracking.** Same issue
   as the track-length estimator. Currently the helpers are
   surface-tracking-only.
