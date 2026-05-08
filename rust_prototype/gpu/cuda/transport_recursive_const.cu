@@ -228,9 +228,8 @@ extern "C" __global__ void const_xs_transport_persistent(
             if (bc == GR_BC_REFLECTIVE) {
                 px += dx * dist; py += dy * dist; pz += dz * dist;
                 int t = (surf_idx >= 0) ? surf_type[surf_idx] : -1;
-                if (t == GR_SURF_PLANE_X) dx = -dx;
-                else if (t == GR_SURF_PLANE_Y) dy = -dy;
-                else if (t == GR_SURF_PLANE_Z) dz = -dz;
+                const double* sp = (surf_idx >= 0) ? surf_params + surf_idx * 8 : nullptr;
+                gr_reflect_direction(t, sp, &dx, &dy, &dz);
                 continue;
             }
             const double NUDGE = 1e-10;
@@ -314,9 +313,8 @@ extern "C" __global__ void const_xs_transport_persistent(
         if (bc == GR_BC_REFLECTIVE) {
             px += dx * dist; py += dy * dist; pz += dz * dist;
             int t = (surf_idx >= 0) ? surf_type[surf_idx] : -1;
-            if (t == GR_SURF_PLANE_X) dx = -dx;
-            else if (t == GR_SURF_PLANE_Y) dy = -dy;
-            else if (t == GR_SURF_PLANE_Z) dz = -dz;
+            const double* sp = (surf_idx >= 0) ? surf_params + surf_idx * 8 : nullptr;
+            gr_reflect_direction(t, sp, &dx, &dy, &dz);
             continue;
         }
         const double NUDGE = 1e-10;

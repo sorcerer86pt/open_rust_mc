@@ -176,6 +176,28 @@ __device__ __forceinline__ double gr_surf_eval(
     }
 }
 
+// Reflect a unit direction (dx, dy, dz) about a surface's outward
+// normal. Handles axis-aligned planes (single-component flip) and
+// arbitrary-orientation `GR_SURF_PLANE_GENERAL` planes whose params
+// store the unit normal in slots [0..3) and offset in slot [3].
+// Returns silently for surface types that don't support reflection
+// (sphere, cylinder) — the caller decides whether that's an error.
+__device__ __forceinline__ void gr_reflect_direction(
+    int surf_type, const double* p,
+    double* dx, double* dy, double* dz)
+{
+    if (surf_type == GR_SURF_PLANE_X) { *dx = -*dx; return; }
+    if (surf_type == GR_SURF_PLANE_Y) { *dy = -*dy; return; }
+    if (surf_type == GR_SURF_PLANE_Z) { *dz = -*dz; return; }
+    if (surf_type == GR_SURF_PLANE_GENERAL) {
+        double nx = p[0], ny = p[1], nz = p[2];
+        double d_dot_n = (*dx) * nx + (*dy) * ny + (*dz) * nz;
+        *dx -= 2.0 * d_dot_n * nx;
+        *dy -= 2.0 * d_dot_n * ny;
+        *dz -= 2.0 * d_dot_n * nz;
+    }
+}
+
 // ── Region eval — postfix stack machine ─────────────────────────────
 
 __device__ bool gr_cell_contains(

@@ -182,9 +182,8 @@ transport_recursive_persistent(
             if (bc == GR_BC_REFLECTIVE) {
                 px += dx * dist; py += dy * dist; pz += dz * dist;
                 int t = (surf_idx >= 0) ? surf_type[surf_idx] : -1;
-                if      (t == GR_SURF_PLANE_X) dx = -dx;
-                else if (t == GR_SURF_PLANE_Y) dy = -dy;
-                else if (t == GR_SURF_PLANE_Z) dz = -dz;
+                const double* sp = (surf_idx >= 0) ? surf_params + surf_idx * 8 : nullptr;
+                gr_reflect_direction(t, sp, &dx, &dy, &dz);
                 continue;
             }
             // transmission
@@ -360,9 +359,8 @@ transport_recursive_persistent(
             if (bc == GR_BC_REFLECTIVE) {
                 px += dx * d_s; py += dy * d_s; pz += dz * d_s;
                 int t = (surf_idx >= 0) ? surf_type[surf_idx] : -1;
-                if      (t == GR_SURF_PLANE_X) dx = -dx;
-                else if (t == GR_SURF_PLANE_Y) dy = -dy;
-                else if (t == GR_SURF_PLANE_Z) dz = -dz;
+                const double* sp = (surf_idx >= 0) ? surf_params + surf_idx * 8 : nullptr;
+                gr_reflect_direction(t, sp, &dx, &dy, &dz);
                 continue;
             }
             if (bc == GR_BC_VACUUM) {

@@ -271,15 +271,14 @@ extern "C" __global__ void multi_step_walk(
             break;
         }
         if (bc == GR_BC_REFLECTIVE) {
-            // axis-aligned reflection — pick which axis the surface is
-            // perpendicular to. Same simplification as the parity test
-            // — the assembly geometry only has axis-aligned reflective
-            // planes.
+            // Reflect about the surface normal. Axis-aligned planes flip
+            // a single direction component; arbitrary-orientation
+            // `GR_SURF_PLANE_GENERAL` (e.g. hex-lattice outer faces) use
+            // d' = d - 2 (d·n) n with n stored in the surface params.
             px += dx * dist; py += dy * dist; pz += dz * dist;
             int t = (surf >= 0) ? surf_type[surf] : -1;
-            if (t == GR_SURF_PLANE_X) dx = -dx;
-            else if (t == GR_SURF_PLANE_Y) dy = -dy;
-            else if (t == GR_SURF_PLANE_Z) dz = -dz;
+            const double* sp = (surf >= 0) ? surf_params + surf * 8 : nullptr;
+            gr_reflect_direction(t, sp, &dx, &dy, &dz);
             steps++;
             // stack unchanged on reflection
             continue;

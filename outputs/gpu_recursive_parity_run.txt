@@ -1,0 +1,157 @@
+GPU↔CPU recursive cell-find parity test
+
+=== Test 1 (find_cell): 2×2 lattice ===
+  geometry  : 2×2 lattice
+  surfaces  : 7, cells: 4, universes: 2, lattices: 1
+  points    : 200000 random points
+
+CPU find_cell_recursive: 16.8 ms (84.2 ns/pt)
+
+Building GPU context...
+GPU find_cell_batch:    4.3 ms (21.5 ns/pt)
+
+CPU deepest-cell histogram:
+  cell   0 : 2299
+  cell   1 : 5715
+  cell   3 : 191986
+
+=== 0 / 200000 points (0.0000%) DISAGREE ===
+
+All 200000 points agree. GPU recursive cell-find parity confirmed.
+
+=== Test 2 (find_cell): 17×17 PWR assembly ===
+  geometry  : 17×17 assembly
+  surfaces  : 9, cells: 9, universes: 3, lattices: 1
+  points    : 200000 random points
+
+CPU find_cell_recursive: 22.4 ms (111.9 ns/pt)
+
+Building GPU context...
+GPU find_cell_batch:    5.7 ms (28.5 ns/pt)
+
+CPU deepest-cell histogram:
+  cell   0 : 30869
+  cell   1 : 1300
+  cell   2 : 9278
+  cell   3 : 51432
+  cell   4 : 3071
+  cell   5 : 962
+  cell   6 : 4819
+  cell   8 : 98269
+
+=== 0 / 200000 points (0.0000%) DISAGREE ===
+
+All 200000 points agree. GPU recursive cell-find parity confirmed.
+
+=== Test 3 (trace_step): 2×2 lattice ===
+  geometry  : 2×2 lattice
+  surfaces  : 7, cells: 4, universes: 2, lattices: 1
+  particles : 50000 random (pos, dir) pairs
+
+CPU trace_step_recursive: 23.1 ms (461.5 ns/event)
+
+Building GPU context...
+GPU trace_step_batch:    5.8 ms (115.6 ns/event)
+
+  distance max-rel-err   : 8.354e-13
+  distance disagree (>1e-9): 0 / 50000  (0.0000%)
+  surface idx disagree   : 0 / 50000  (0.0000%)
+  bc disagree            : 0 / 50000  (0.0000%)
+  next-cell disagree     : 0 / 50000  (0.0000%)
+
+=== Test 4 (trace_step): 17×17 PWR assembly ===
+  geometry  : 17×17 assembly
+  surfaces  : 9, cells: 9, universes: 3, lattices: 1
+  particles : 50000 random (pos, dir) pairs
+
+CPU trace_step_recursive: 25.5 ms (510.5 ns/event)
+
+Building GPU context...
+GPU trace_step_batch:    4.2 ms (83.8 ns/event)
+
+  distance max-rel-err   : 9.263e-11
+  distance disagree (>1e-9): 0 / 50000  (0.0000%)
+  surface idx disagree   : 0 / 50000  (0.0000%)
+  bc disagree            : 0 / 50000  (0.0000%)
+  next-cell disagree     : 0 / 50000  (0.0000%)
+
+=== Test 5 (multi-step walk, 50 steps): 2×2 lattice ===
+  geometry  : 2×2 lattice
+  particles : 20000, max_steps: 50
+
+CPU multi_step_walk: 341.2 ms (341.2 ns/step)
+
+Building GPU context...
+GPU multi_step_walk: 14.1 ms (14.1 ns/step)
+  total steps: CPU 1000000, GPU 1000000
+
+  pos max-rel-err          : 3.756e-14
+  pos disagree (>1e-9)     : 0 / 20000  (0.0000%)
+  step-count disagree      : 0 / 20000  (0.0000%)
+  final-cell disagree      : 0 / 20000  (0.0000%)
+
+=== Test 6 (multi-step walk, 50 steps): 17×17 PWR assembly ===
+  geometry  : 17×17 assembly
+  particles : 20000, max_steps: 50
+
+CPU multi_step_walk: 370.4 ms (370.4 ns/step)
+
+Building GPU context...
+GPU multi_step_walk: 14.8 ms (14.8 ns/step)
+  total steps: CPU 1000000, GPU 1000000
+
+  pos max-rel-err          : 5.370e-14
+  pos disagree (>1e-9)     : 0 / 20000  (0.0000%)
+  step-count disagree      : 0 / 20000  (0.0000%)
+  final-cell disagree      : 0 / 20000  (0.0000%)
+
+=== Test 7 (find_cell): hex 1-ring mini-core ===
+  geometry  : hex 1-ring
+  surfaces  : 9, cells: 5, universes: 3, lattices: 0
+  points    : 200000 random points
+
+CPU find_cell_recursive: 29.2 ms (145.8 ns/pt)
+
+Building GPU context...
+GPU find_cell_batch:    4.4 ms (22.2 ns/pt)
+
+CPU deepest-cell histogram:
+  cell   0 : 21854
+  cell   1 : 35006
+  cell   3 : 126964
+  cell   4 : 16176
+
+=== 0 / 200000 points (0.0000%) DISAGREE ===
+
+All 200000 points agree. GPU recursive cell-find parity confirmed.
+
+=== Test 8 (trace_step): hex 1-ring mini-core ===
+  geometry  : hex 1-ring
+  surfaces  : 9, cells: 5, universes: 3, lattices: 0
+  particles : 50000 random (pos, dir) pairs
+
+CPU trace_step_recursive: 34.0 ms (680.5 ns/event)
+
+Building GPU context...
+GPU trace_step_batch:    5.6 ms (112.4 ns/event)
+
+  distance max-rel-err   : 7.106e-12
+  distance disagree (>1e-9): 0 / 50000  (0.0000%)
+  surface idx disagree   : 0 / 50000  (0.0000%)
+  bc disagree            : 0 / 50000  (0.0000%)
+  next-cell disagree     : 0 / 50000  (0.0000%)
+
+=== Test 9 (multi-step walk, 50 steps): hex 1-ring mini-core ===
+  geometry  : hex 1-ring
+  particles : 20000, max_steps: 50
+
+CPU multi_step_walk: 328.5 ms (328.5 ns/step)
+
+Building GPU context...
+GPU multi_step_walk: 15.2 ms (15.2 ns/step)
+  total steps: CPU 999958, GPU 999958
+
+  pos max-rel-err          : 7.774e-2
+  pos disagree (>1e-9)     : 19 / 20000  (0.0950%)
+  step-count disagree      : 0 / 20000  (0.0000%)
+  final-cell disagree      : 0 / 20000  (0.0000%)

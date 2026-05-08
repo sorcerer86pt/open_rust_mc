@@ -28,8 +28,9 @@ bindings (`-p open-rust-mc-py`) clean.
 - HexLattice transport on **CPU** (descent + trace_step + grid-
   distance dispatch) and on **GPU** (CUDA device functions, 8
   uploaded SoA buffers, 5 kernel signatures). CPU validated end-
-  to-end via `hex_minicore`; GPU compiles clean, on-device
-  parity test pending CUDA hardware.
+  to-end via `hex_minicore`; GPU on-device parity confirmed on
+  RTX A1000 (`outputs/gpu_recursive_parity_run.txt`,
+  Tests 7–9, 2026-05-08).
 
 ### Cross sections
 - SVD-compressed reaction kernels (continuous-T via Ducru).
@@ -175,11 +176,24 @@ bindings (`-p open-rust-mc-py`) clean.
 
 ### Quick wins (hours to a day each)
 
-- **Hex on GPU runtime parity test on real hardware.** Tests
-  added (Tests 7-9 in `gpu_recursive_parity` for find_cell /
-  trace_step / multi_step_walk on a 1-ring hex mini-core);
-  compiles under `--features cuda`; on-device validation pending
-  CUDA hardware.
+- ~~**Hex on GPU runtime parity test on real hardware.**~~
+  **Done 2026-05-08, RTX A1000 Laptop GPU.** Geometry-primitive
+  parity (Tests 7–9 in `gpu_recursive_parity` for find_cell /
+  trace_step / multi_step_walk on a 1-ring hex mini-core) and
+  full-physics k_inf parity both confirmed:
+
+  - Geometry primitives: 0/200 000, 0/50 000, 0/20 000 disagreement
+    after fixing arbitrary-orientation reflection (`gr_reflect_direction`
+    helper added in `geom_recursive.cu`; previously only axis-aligned
+    `GR_SURF_PLANE_X/Y/Z` were reflected — hex sides are
+    `GR_SURF_PLANE_GENERAL`). Speedups 6.6× / 6.1× / 21.6× vs CPU.
+  - Eigenvalue: new `gpu_hex_minicore` binary using the
+    dispatch `CudaRunner`. CPU k_inf = 1.36009 ± 0.00137, GPU
+    k_inf = 1.35938 ± 0.00341 (4 seeds × 60 batches × 5 000
+    particles, rank 5). Δ = 71 pcm < 0.2σ_combined.
+  - Artifacts: `outputs/gpu_recursive_parity_run.txt`,
+    `outputs/gpu_hex_minicore_4seeds.txt`,
+    `outputs/cpu_hex_minicore_4seeds.txt`.
 - **Binary refactors to use `EigenvalueRunner`.** `hex_minicore`
   uses `CpuRunner.run()`; godiva / pwr_pincell / pwr_assembly /
   gpu_assembly_keff still call `simulate::run_eigenvalue` directly.
@@ -205,10 +219,11 @@ bindings (`-p open-rust-mc-py`) clean.
   the SB dispatch would extend variance reduction to PWR's
   thermal physics. Net win is small for PWR (H1 has no fission)
   but cleans up the code path.
-- **Hex on GPU validated end-to-end on a real eigenvalue.** Once
-  hardware is available: build a `gpu_hex_minicore` binary that
-  reuses the CPU `hex_minicore` geometry and runs the GPU
-  recursive transport. Compare k_inf to the CPU result.
+- ~~**Hex on GPU validated end-to-end on a real eigenvalue.**~~
+  **Done 2026-05-08.** `gpu_hex_minicore` binary lives in
+  `src/bin/`, reuses the CPU `hex_minicore` geometry, runs the
+  GPU recursive transport via the dispatch `CudaRunner`. k_inf
+  parity confirmed at 71 pcm < 0.2σ_combined (see Quick wins).
 - **Track-length estimator under delta tracking.** Currently the
   delta-tracking path leaves `k_track = 0` — the integrand can't
   be reconstructed when the path crosses material boundaries
