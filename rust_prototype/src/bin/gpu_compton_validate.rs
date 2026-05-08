@@ -33,8 +33,8 @@ use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::photon::coherent::coherent_scatter;
 use open_rust_mc::photon::compton::{compton_scatter, compton_scatter_free};
 use open_rust_mc::photon::gpu::{
-    GpuComptonContext, GpuComptonDopplerCtx, GpuComptonVarECtx, GpuPairContext,
-    GpuPhotoelectricCtx, GpuRayleighContext,
+    DEFAULT_GPU_MAX_FLUOR_PER_THREAD, GpuComptonContext, GpuComptonDopplerCtx, GpuComptonVarECtx,
+    GpuPairContext, GpuPhotoelectricCtx, GpuRayleighContext,
 };
 use open_rust_mc::photon::pair::{PAIR_THRESHOLD_EV, pair_produce};
 use open_rust_mc::photon::photoelectric::{DEFAULT_PHOTON_CUTOFF_EV, photoelectric_absorb};
@@ -352,12 +352,10 @@ fn test_rayleigh(elem: &PhotonElement, sym: &str, e_in: f64) -> bool {
 // ---- Photoelectric (Phase 1: primary photoelectron only) ----------------
 //
 // We compare GPU's `T_e_primary = E_in - B_struck` and `struck` designator
-// against the CPU `photoelectric_absorb`'s primary fields.  The GPU does not
-// run the EADL cascade, so the secondary fluorescence-photon bank and the
-// portion of `local_deposition` coming from the cascade are not compared
-// here. The struck-shell distribution is the meaningful parity check —
-// if GPU samples shells correctly, the cascade physics on top is identical
-// to the CPU side and can be added in a follow-up kernel.
+// against the CPU `photoelectric_absorb`'s primary fields. The full EADL
+// relaxation cascade is now on GPU as well — phase 2 is checked by
+// `test_photoelectric_cascade` below: mean local deposition, mean fluorescence
+// multiplicity, and a fluorescence-energy histogram parity vs. CPU.
 
 fn test_photoelectric_phase1(elem: &PhotonElement, sym: &str, e_in: f64) -> bool {
     let ctx = GpuPhotoelectricCtx::new(elem).expect("gpu pe ctx");
@@ -401,6 +399,115 @@ fn test_photoelectric_phase1(elem: &PhotonElement, sym: &str, e_in: f64) -> bool
 
     let pass = ((m_c - m_g) / m_c.abs().max(1.0)).abs() < 5e-3 && (chi2.is_nan() || chi2 < 2.0);
     let label = format!("PE-phase1[{} {:>5.1}MeV]", sym, e_in / 1e6);
+    print_row(
+        &label,
+        m_c,
+        m_g,
+        s_c,
+        s_g,
+        chi2,
+        t_cpu * 1e9 / N as f64,
+        t_gpu * 1e9 / N as f64,
+        pass,
+    );
+    pass
+}
+
+// ---- Photoelectric (full EADL cascade) -----------------------------------
+
+// Phase 2 of photoelectric: each particle's struck-subshell hole is decayed
+// via the EADL transition table (radiative fluorescence + Auger / Coster-
+// Kronig) until all holes reach shells with no transition data. CPU runs
+// `photoelectric_absorb`; GPU runs `cascade_batch` after `sample_batch`.
+//
+// CPU and GPU use independent RNG streams in the cascade (the GPU uses a
+// distinct particle-id offset to keep phase 1 and phase 2 streams separate).
+// Statistical agreement is the pass criterion, not bit-exact:
+//   - mean local deposition agrees < 0.5 %
+//   - mean fluorescence count per history agrees < 5 % (or both < 0.05)
+//   - reduced χ² of a fluorescence-energy histogram ≤ 2.0
+
+fn test_photoelectric_cascade(elem: &PhotonElement, sym: &str, e_in: f64) -> bool {
+    let ctx = GpuPhotoelectricCtx::new(elem).expect("gpu pe ctx");
+    let _ = ctx.full_cascade_batch(
+        e_in,
+        BATCH_ID,
+        4096,
+        DEFAULT_PHOTON_CUTOFF_EV,
+        DEFAULT_GPU_MAX_FLUOR_PER_THREAD,
+    ); // warmup
+
+    let t0 = Instant::now();
+    let cpu: Vec<(f64, Vec<f64>)> = (0..N)
+        .into_par_iter()
+        .map(|tid| {
+            let mut rng = Rng::for_particle(BATCH_ID, tid as u64);
+            let o = photoelectric_absorb(elem, e_in, DEFAULT_PHOTON_CUTOFF_EV, &mut rng);
+            (o.local_deposition, o.fluorescence_photons)
+        })
+        .collect();
+    let t_cpu = t0.elapsed().as_secs_f64();
+
+    let t0 = Instant::now();
+    let g = ctx
+        .full_cascade_batch(
+            e_in,
+            BATCH_ID,
+            N,
+            DEFAULT_PHOTON_CUTOFF_EV,
+            DEFAULT_GPU_MAX_FLUOR_PER_THREAD,
+        )
+        .expect("gpu cascade launch");
+    let t_gpu = t0.elapsed().as_secs_f64();
+
+    // Mean local deposition.
+    let local_cpu: Vec<f64> = cpu.iter().map(|(l, _)| *l).collect();
+    let m_c = mean(&local_cpu);
+    let m_g = mean(&g.local_dep);
+    let s_c = std_dev(&local_cpu, m_c);
+    let s_g = std_dev(&g.local_dep, m_g);
+
+    // Mean fluorescence count per history.
+    let n_fluor_cpu_total: usize = cpu.iter().map(|(_, f)| f.len()).sum();
+    let n_fluor_gpu_total: i64 = g.n_fluor.iter().map(|&n| n as i64).sum();
+    let mean_n_cpu = n_fluor_cpu_total as f64 / N as f64;
+    let mean_n_gpu = n_fluor_gpu_total as f64 / N as f64;
+
+    // Histogram fluorescence energies (50 bins from 0 to e_in).
+    let n_bins = 50_usize;
+    let mut h_cpu = vec![0u64; n_bins];
+    let mut h_gpu = vec![0u64; n_bins];
+    let bin_w = e_in / n_bins as f64;
+    for (_, fluor) in &cpu {
+        for &ev in fluor {
+            let b = ((ev / bin_w) as usize).min(n_bins - 1);
+            h_cpu[b] += 1;
+        }
+    }
+    for tid in 0..N {
+        let nf = g.n_fluor[tid] as usize;
+        let base = tid * g.max_fluor_per_thread;
+        for k in 0..nf.min(g.max_fluor_per_thread) {
+            let ev = g.fluor_ev[base + k];
+            let b = ((ev / bin_w) as usize).min(n_bins - 1);
+            h_gpu[b] += 1;
+        }
+    }
+    let chi2 = reduced_chi2(&h_cpu, &h_gpu);
+
+    let local_match = ((m_c - m_g) / m_c.abs().max(1.0)).abs() < 5e-3;
+    let n_match = (mean_n_cpu - mean_n_gpu).abs()
+        < (0.05_f64).max(0.05 * mean_n_cpu.max(mean_n_gpu));
+    let chi2_match = chi2.is_nan() || chi2 < 2.0;
+    let pass = local_match && n_match && chi2_match;
+
+    let label = format!(
+        "PE-cascade[{} {:>5.1}MeV n̄fluor={:.2}/{:.2}]",
+        sym,
+        e_in / 1e6,
+        mean_n_cpu,
+        mean_n_gpu,
+    );
     print_row(
         &label,
         m_c,
@@ -520,6 +627,7 @@ fn main() -> ExitCode {
         // and 1 MeV (M/N shells contribute more).
         for &e_in in &[100_000.0_f64, 1_000_000.0_f64] {
             all_pass &= test_photoelectric_phase1(&elem, sym, e_in);
+            all_pass &= test_photoelectric_cascade(&elem, sym, e_in);
         }
     }
 

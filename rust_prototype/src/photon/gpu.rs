@@ -588,6 +588,130 @@ extern "C" __global__ void photoelectric_phase1_batch(
     struck_out[tid] = chosen + 1;  // EADL designator = idx+1
 }
 
+// ---- EADL relaxation cascade (photoelectric phase 2) ----------------
+//
+// Walks the per-thread hole stack mirroring the CPU
+// `photoelectric_absorb` cascade. Each thread holds:
+//   - hole_stack[16]: bounded stack of EADL designators (typical
+//                     cascade depth is 2-6; 16 is generous).
+//   - fluor[max_fluor_per_thread]: emitted fluorescence photons
+//                     (energy in eV) above `photon_cutoff`.
+//
+// Stack overflow: the CPU cascade has no fixed depth so an overflow
+// is possible in pathological cases. When it happens we fall back to
+// "deposit B_hole locally" — one extra eV of mis-attribution per
+// dropped designator, far below transport sensitivity.
+//
+// Transition data:
+//   binding_ev[n_shells]            shared with phase 1
+//   trans_off[n_shells]             starting row in trans_flat
+//   trans_count[n_shells]           rows per shell
+//   trans_flat[total_rows * 4]      [primary, secondary, energy, prob]
+//
+// Outputs:
+//   local_out[tid]      total local deposition incl. photoelectron KE
+//   n_fluor_out[tid]    count of emitted fluorescence photons
+//   fluor_out[tid * max_fluor_per_thread + i]
+//                       energies of emitted photons (i < n_fluor)
+
+#define EADL_MAX_HOLE_STACK 16
+
+extern "C" __global__ void relaxation_cascade_batch(
+    const double* __restrict__ binding_ev,
+    const int*    __restrict__ trans_off,
+    const int*    __restrict__ trans_count,
+    const double* __restrict__ trans_flat,
+    int n_shells,
+    int max_fluor_per_thread,
+    double photon_cutoff,
+    u64 batch_id,
+    const int*    __restrict__ struck_in,
+    const double* __restrict__ photoel_ke,
+    double* __restrict__ local_out,
+    int*    __restrict__ n_fluor_out,
+    double* __restrict__ fluor_out,
+    int n_particles)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_particles) return;
+
+    int struck = struck_in[tid];
+    double local = (struck >= 1) ? photoel_ke[tid] : 0.0;
+    int n_fluor = 0;
+
+    if (struck < 1) {
+        local_out[tid] = local;
+        n_fluor_out[tid] = 0;
+        return;
+    }
+
+    // Independent RNG stream from phase 1: same batch_id, but offset
+    // the particle id so we don't reuse phase 1's draws.
+    PCG rng;
+    pcg_for_particle(&rng, batch_id, (u64)tid + 0x4EAD1Cull);
+
+    int hole_stack[EADL_MAX_HOLE_STACK];
+    int sp = 0;
+    hole_stack[sp++] = struck;
+
+    while (sp > 0) {
+        int hole = hole_stack[--sp];
+        int idx = hole - 1;
+        if (idx < 0 || idx >= n_shells) continue;
+
+        int cnt = trans_count[idx];
+        if (cnt == 0) {
+            local += binding_ev[idx];
+            continue;
+        }
+
+        double xi = pcg_uniform(&rng);
+        int off = trans_off[idx];
+        double cdf = 0.0;
+        int chosen = -1;
+        for (int k = 0; k < cnt; ++k) {
+            cdf += trans_flat[(off + k) * 4 + 3];
+            if (xi < cdf) { chosen = k; break; }
+        }
+        if (chosen < 0) {
+            // Fell through (probabilities sum < 1) — hole persists.
+            local += binding_ev[idx];
+            continue;
+        }
+
+        int primary   = (int)(trans_flat[(off + chosen) * 4 + 0] + 0.5);
+        int secondary = (int)(trans_flat[(off + chosen) * 4 + 1] + 0.5);
+        double t_e    = trans_flat[(off + chosen) * 4 + 2];
+
+        if (secondary == 0) {
+            // Radiative fluorescence.
+            if (t_e >= photon_cutoff) {
+                if (n_fluor < max_fluor_per_thread) {
+                    fluor_out[tid * max_fluor_per_thread + n_fluor] = t_e;
+                    n_fluor++;
+                } else {
+                    // Out of fluorescence slots: deposit locally.
+                    local += t_e;
+                }
+            } else {
+                local += t_e;
+            }
+            if (sp < EADL_MAX_HOLE_STACK) hole_stack[sp++] = primary;
+            else local += binding_ev[(primary - 1 < n_shells && primary >= 1) ? primary - 1 : 0];
+        } else {
+            // Auger / Coster-Kronig: deposit electron KE.
+            local += t_e;
+            if (sp < EADL_MAX_HOLE_STACK) hole_stack[sp++] = primary;
+            else local += binding_ev[(primary - 1 < n_shells && primary >= 1) ? primary - 1 : 0];
+            if (sp < EADL_MAX_HOLE_STACK) hole_stack[sp++] = secondary;
+            else local += binding_ev[(secondary - 1 < n_shells && secondary >= 1) ? secondary - 1 : 0];
+        }
+    }
+
+    local_out[tid] = local;
+    n_fluor_out[tid] = n_fluor;
+}
+
 // ---- Pair production (Bethe-Heitler) --------------------------------
 //
 // Threshold 2 m_e c² = 1.022 MeV. ε ∈ [0,1] sampled by rejection from
@@ -976,14 +1100,44 @@ extern "C" __global__ void pair_bh_batch(
         pub struck: Vec<i32>,
     }
 
+    /// Output of the full photoelectric + EADL cascade pipeline.
+    pub struct GpuPhotoelectricCascadeBatch {
+        /// EADL designator (1-based) of the struck subshell.
+        pub struck: Vec<i32>,
+        /// Total local deposition (eV) per particle: photoelectron KE
+        /// + below-cutoff fluorescence + Auger + residual binding
+        /// energies of dead-end holes.
+        pub local_dep: Vec<f64>,
+        /// Number of fluorescence photons emitted by each particle.
+        pub n_fluor: Vec<i32>,
+        /// Per-thread fluorescence-photon energy slots, length
+        /// `n_particles * max_fluor_per_thread`. Only the first
+        /// `n_fluor[tid]` entries per thread are valid.
+        pub fluor_ev: Vec<f64>,
+        /// Slots per thread reserved in `fluor_ev` (matches the
+        /// constructor argument).
+        pub max_fluor_per_thread: usize,
+    }
+
+    /// Default cap on fluorescence photons per history. Heaviest
+    /// elements (Z = 92, U) typically produce 0-3 above-cutoff
+    /// photons per cascade; 8 is generous and bounds shared memory
+    /// per thread.
+    pub const DEFAULT_GPU_MAX_FLUOR_PER_THREAD: usize = 8;
+
     pub struct GpuPhotoelectricCtx {
         _ctx: Arc<CudaContext>,
         stream: Arc<CudaStream>,
         func: CudaFunction,
+        cascade_func: CudaFunction,
         d_master_e: CudaSlice<f64>,
         d_pe_total: CudaSlice<f64>,
         d_pe_xs_flat: CudaSlice<f64>,
         d_binding: CudaSlice<f64>,
+        // EADL relaxation cascade tables.
+        d_trans_off: CudaSlice<i32>,
+        d_trans_count: CudaSlice<i32>,
+        d_trans_flat: CudaSlice<f64>,
         n_master: i32,
         n_shells: i32,
     }
@@ -993,6 +1147,7 @@ extern "C" __global__ void pair_bh_batch(
             let ctx = CudaContext::new(0)?;
             let module = build_module(&ctx)?;
             let func = module.load_function("photoelectric_phase1_batch")?;
+            let cascade_func = module.load_function("relaxation_cascade_batch")?;
             let stream = ctx.default_stream();
 
             let n_master = elem.energy.len();
@@ -1009,19 +1164,46 @@ extern "C" __global__ void pair_bh_batch(
                 binding.push(shell.binding_energy);
             }
 
+            // Flatten EADL transitions: per shell, append all rows into
+            // one big f64 array; record (offset, count) per shell so
+            // the kernel can slice.
+            let mut trans_off = Vec::with_capacity(n_shells);
+            let mut trans_count = Vec::with_capacity(n_shells);
+            let mut trans_flat: Vec<f64> = Vec::new();
+            for shell in &elem.subshells {
+                trans_off.push(trans_flat.len() as i32 / 4);
+                trans_count.push(shell.transitions.len() as i32);
+                for t in &shell.transitions {
+                    trans_flat.extend_from_slice(t);
+                }
+            }
+            // alloc_zeros doesn't accept zero-length slices on some
+            // backends; pad with a single sentinel row when no element
+            // shell has transitions (only happens for H/He-like data).
+            if trans_flat.is_empty() {
+                trans_flat.extend_from_slice(&[0.0; 4]);
+            }
+
             let d_master_e = stream.clone_htod(&elem.energy)?;
             let d_pe_total = stream.clone_htod(&elem.photoelectric_xs)?;
             let d_pe_xs_flat = stream.clone_htod(&pe_xs_flat)?;
             let d_binding = stream.clone_htod(&binding)?;
+            let d_trans_off = stream.clone_htod(&trans_off)?;
+            let d_trans_count = stream.clone_htod(&trans_count)?;
+            let d_trans_flat = stream.clone_htod(&trans_flat)?;
 
             Ok(Self {
                 _ctx: ctx,
                 stream,
                 func,
+                cascade_func,
                 d_master_e,
                 d_pe_total,
                 d_pe_xs_flat,
                 d_binding,
+                d_trans_off,
+                d_trans_count,
+                d_trans_flat,
                 n_master: n_master as i32,
                 n_shells: n_shells as i32,
             })
@@ -1063,6 +1245,96 @@ extern "C" __global__ void pair_bh_batch(
                 t_e: self.stream.clone_dtoh(&d_t)?,
                 struck: self.stream.clone_dtoh(&d_struck)?,
             })
+        }
+
+        /// Run the EADL relaxation cascade on a per-thread batch of
+        /// (struck subshell, photoelectron KE) inputs. Each thread
+        /// walks an independent hole stack; the cascade RNG stream is
+        /// independent of phase 1's (different particle-id offset).
+        ///
+        /// `photon_cutoff_ev` is the energy threshold below which
+        /// emitted fluorescence photons are killed and their energy
+        /// deposited locally (matches the CPU `photon_cutoff` in
+        /// `photoelectric_absorb`).
+        ///
+        /// Returns combined per-thread local deposition + flattened
+        /// fluorescence-energy table.
+        pub fn cascade_batch(
+            &self,
+            struck: &[i32],
+            photoel_ke: &[f64],
+            photon_cutoff_ev: f64,
+            batch_id: u64,
+            max_fluor_per_thread: usize,
+        ) -> Result<GpuPhotoelectricCascadeBatch, Box<dyn std::error::Error>> {
+            assert_eq!(struck.len(), photoel_ke.len());
+            let n = struck.len();
+
+            let d_struck = self.stream.memcpy_stod(struck)?;
+            let d_te = self.stream.memcpy_stod(photoel_ke)?;
+            let mut d_local: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
+            let mut d_n_fluor: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
+            let mut d_fluor: CudaSlice<f64> =
+                self.stream.alloc_zeros(n * max_fluor_per_thread)?;
+
+            let block: u32 = 256;
+            let grid = (n as u32 + block - 1) / block;
+            let cfg = LaunchConfig {
+                grid_dim: (grid, 1, 1),
+                block_dim: (block, 1, 1),
+                shared_mem_bytes: 0,
+            };
+            let max_fluor_i32 = max_fluor_per_thread as i32;
+            let n_i32 = n as i32;
+            unsafe {
+                self.stream
+                    .launch_builder(&self.cascade_func)
+                    .arg(&self.d_binding)
+                    .arg(&self.d_trans_off)
+                    .arg(&self.d_trans_count)
+                    .arg(&self.d_trans_flat)
+                    .arg(&self.n_shells)
+                    .arg(&max_fluor_i32)
+                    .arg(&photon_cutoff_ev)
+                    .arg(&batch_id)
+                    .arg(&d_struck)
+                    .arg(&d_te)
+                    .arg(&mut d_local)
+                    .arg(&mut d_n_fluor)
+                    .arg(&mut d_fluor)
+                    .arg(&n_i32)
+                    .launch(cfg)?;
+            }
+            Ok(GpuPhotoelectricCascadeBatch {
+                struck: struck.to_vec(),
+                local_dep: self.stream.clone_dtoh(&d_local)?,
+                n_fluor: self.stream.clone_dtoh(&d_n_fluor)?,
+                fluor_ev: self.stream.clone_dtoh(&d_fluor)?,
+                max_fluor_per_thread,
+            })
+        }
+
+        /// Convenience: run phase 1 (sample subshell + photoelectron
+        /// KE) then phase 2 (EADL cascade) end-to-end, returning the
+        /// full cascade output. Mirrors a single-element-energy call to
+        /// the CPU `photoelectric_absorb` over `n` independent
+        /// histories.
+        pub fn full_cascade_batch(
+            &self,
+            energy_in: f64,
+            batch_id: u64,
+            n: usize,
+            photon_cutoff_ev: f64,
+            max_fluor_per_thread: usize,
+        ) -> Result<GpuPhotoelectricCascadeBatch, Box<dyn std::error::Error>> {
+            let phase1 = self.sample_batch(energy_in, batch_id, n)?;
+            self.cascade_batch(
+                &phase1.struck,
+                &phase1.t_e,
+                photon_cutoff_ev,
+                batch_id,
+                max_fluor_per_thread,
+            )
         }
     }
 
@@ -1132,7 +1404,7 @@ extern "C" __global__ void pair_bh_batch(
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    GpuComptonBatch, GpuComptonContext, GpuComptonDopplerBatch, GpuComptonDopplerCtx,
-    GpuComptonVarECtx, GpuPairBatch, GpuPairContext, GpuPhotoelectricBatch, GpuPhotoelectricCtx,
-    GpuRayleighBatch, GpuRayleighContext,
+    DEFAULT_GPU_MAX_FLUOR_PER_THREAD, GpuComptonBatch, GpuComptonContext, GpuComptonDopplerBatch,
+    GpuComptonDopplerCtx, GpuComptonVarECtx, GpuPairBatch, GpuPairContext, GpuPhotoelectricBatch,
+    GpuPhotoelectricCascadeBatch, GpuPhotoelectricCtx, GpuRayleighBatch, GpuRayleighContext,
 };

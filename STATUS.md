@@ -338,10 +338,28 @@ bindings (`-p open-rust-mc-py`) clean.
 - **Doppler-broadened coherent elastic scattering.** Bragg-edge
   treatment beyond the standard S(α,β) tables. Needs per-material
   crystallographic data + phonon spectrum integration.
-- **EADL relaxation cascade on GPU.** Photoelectric phase 1 is
-  on GPU; the fluorescence + Auger cascade is CPU-only because
-  the SoA / thread-divergence design isn't worked out. Roughly
-  one week once a clean SoA layout is sketched.
+- ~~**EADL relaxation cascade on GPU.**~~ **Done 2026-05-08.**
+  New `relaxation_cascade_batch` CUDA kernel mirrors
+  `photoelectric_absorb` byte-for-byte: per-thread fixed-size
+  hole stack (16 entries — typical cascade depth is 2-6) and
+  per-thread fluorescence buffer (8 entries, configurable via
+  `DEFAULT_GPU_MAX_FLUOR_PER_THREAD`). Transition tables
+  flattened into `trans_off[n_shells]` /
+  `trans_count[n_shells]` / `trans_flat[total_rows × 4]` and
+  uploaded once per element alongside the existing phase-1 PE
+  data. `GpuPhotoelectricCtx::cascade_batch` /
+  `full_cascade_batch` expose the kernel from Rust.
+
+  Validation in `gpu_compton_validate` (CPU vs GPU at N = 1 M
+  histories, RTX A1000): all 8 cases pass. Means agree < 0.01 %
+  across H / O / Zr / U at 0.1 / 1.0 MeV. Mean fluorescence
+  multiplicity matches to 3 decimal places (Zr: 0.67 → 0.68
+  CPU/GPU; U at 1 MeV: 1.24 → 1.24); fluorescence-energy
+  histogram χ²_red ≤ 1.6 in all heavy-element cases (light
+  elements have no above-cutoff fluorescence and the histogram
+  is degenerate). 322/322 lib tests green on default and
+  `--features cuda`. `outputs/gpu_photon_validate.txt` now
+  records cascade rows alongside the existing PE-phase1 ones.
 - **Event-based GPU transport.** Current `transport_recursive`
   is history-based (one particle birth-to-death per thread).
   Tramm 2024 reports event-based is ~6× faster on GPU;
