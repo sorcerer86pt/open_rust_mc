@@ -19,12 +19,13 @@ use clap::Parser;
 
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
-use open_rust_mc::geometry::{Aabb, Vec3};
+use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
 use open_rust_mc::hdf5_reader;
 use open_rust_mc::thermal::ThermalScatteringData;
+use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
 use open_rust_mc::transport::hybrid_xs::{HybridSvdWmpXsProvider, HybridTableWmpXsProvider};
 use open_rust_mc::transport::material::Material;
-use open_rust_mc::transport::simulate::{self, SimConfig, XsProvider};
+use open_rust_mc::transport::simulate::{SimConfig, XsProvider};
 use open_rust_mc::transport::tally::{MeshFluxTally, SurfaceCurrentTally, Tallies};
 use open_rust_mc::transport::xs_provider;
 use open_rust_mc::wmp::WindowedMultipole;
@@ -284,6 +285,8 @@ fn run_multi_seed<XS: XsProvider>(
     load_ms: f64,
 ) -> BenchmarkResult {
     let inactive = args.inactive.min(args.batches.saturating_sub(1));
+    let geometry =
+        Geometry::from_slices(surfaces, cells).expect("pwr pincell geometry must validate");
     let total_histories = (args.batches - inactive) as u64 * args.particles as u64;
     let mut seed_results = Vec::with_capacity(args.seeds as usize);
 
@@ -334,8 +337,12 @@ fn run_multi_seed<XS: XsProvider>(
             urr_equivalence: None,
         };
         let t_calib = Instant::now();
-        let (calib_results, _) =
-            simulate::run_eigenvalue(&calib_config, surfaces, cells, materials, xs_provider);
+        let calib_runner = CpuRunner {
+            geometry: &geometry,
+            materials,
+            xs_provider,
+        };
+        let calib_results = calib_runner.run(&calib_config).batches;
         let n_vox: usize = ww_dims.iter().product();
         let mut flux = vec![0.0_f64; n_vox];
         let mut n_active_calib = 0_u32;
@@ -449,8 +456,12 @@ fn run_multi_seed<XS: XsProvider>(
         }
 
         let t1 = Instant::now();
-        let (results, _) =
-            simulate::run_eigenvalue(&config, surfaces, cells, materials, xs_provider);
+        let runner = CpuRunner {
+            geometry: &geometry,
+            materials,
+            xs_provider,
+        };
+        let results = runner.run(&config).batches;
         let sim_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let active: Vec<f64> = results

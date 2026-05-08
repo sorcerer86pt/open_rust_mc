@@ -81,6 +81,8 @@ use open_rust_mc::photon::transport::transport_history_csg;
 use open_rust_mc::thermal::ThermalScatteringData;
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::rng::Rng;
+use open_rust_mc::geometry::Geometry;
+use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
 use open_rust_mc::transport::simulate::{self, SimConfig};
 use open_rust_mc::transport::xs_provider::{self, TableXsProvider};
 
@@ -227,8 +229,16 @@ fn main() -> ExitCode {
         urr_equivalence: None,
     };
     let t1 = Instant::now();
-    let (batch_results, k_eff) =
-        simulate::run_eigenvalue(&config, &surfaces, &cells, &materials_n, &xs);
+    let geometry =
+        Geometry::from_slices(&surfaces, &cells).expect("pwr gamma heating geometry must validate");
+    let runner = CpuRunner {
+        geometry: &geometry,
+        materials: &materials_n,
+        xs_provider: &xs,
+    };
+    let outcome = runner.run(&config);
+    let batch_results = outcome.batches;
+    let k_eff = outcome.k_eff;
     let neutron_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
     // Aggregate the photon source bank across ACTIVE batches only

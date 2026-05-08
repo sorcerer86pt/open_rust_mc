@@ -194,10 +194,16 @@ bindings (`-p open-rust-mc-py`) clean.
   - Artifacts: `outputs/gpu_recursive_parity_run.txt`,
     `outputs/gpu_hex_minicore_4seeds.txt`,
     `outputs/cpu_hex_minicore_4seeds.txt`.
-- **Binary refactors to use `EigenvalueRunner`.** `hex_minicore`
-  uses `CpuRunner.run()`; godiva / pwr_pincell / pwr_assembly /
-  gpu_assembly_keff still call `simulate::run_eigenvalue` directly.
-  Optional cleanup; no behaviour change.
+- ~~**Binary refactors to use `EigenvalueRunner`.**~~
+  **Mostly done 2026-05-08.** `hex_minicore`, `gpu_hex_minicore`,
+  `godiva`, `pwr_pincell`, `pwr_assembly`, `pwr_gamma_heating`
+  now drive the eigenvalue loop through
+  `transport::dispatch::{CpuRunner, CudaRunner}.run(&config)`.
+  No behaviour change; `cargo test --lib --release` 316/316
+  green; smoke runs of godiva (k≈1.0) and pwr_pincell (k≈1.327)
+  match the documented values. `gpu_assembly_keff` deliberately
+  unchanged — its per-batch live-progress print would be lost
+  without adding `verbose` support to `CudaRunner`.
 - **OpenMC cross-validation on PWR pin cell with URR equivalence
   on.** We ship Carlvik-Pellaud Dancoff for square lattices with
   validated asymptotic limits, but haven't yet measured the
