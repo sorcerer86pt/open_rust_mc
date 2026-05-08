@@ -204,11 +204,51 @@ bindings (`-p open-rust-mc-py`) clean.
   match the documented values. `gpu_assembly_keff` deliberately
   unchanged — its per-batch live-progress print would be lost
   without adding `verbose` support to `CudaRunner`.
-- **OpenMC cross-validation on PWR pin cell with URR equivalence
-  on.** We ship Carlvik-Pellaud Dancoff for square lattices with
-  validated asymptotic limits, but haven't yet measured the
-  predicted ~50-200 pcm shift on the existing PWR pin cell vs a
-  reference run with `enable_resonance_equivalence` on.
+- ~~**OpenMC cross-validation on PWR pin cell with URR equivalence
+  on.**~~ **Done 2026-05-08 — root cause of the over-correction
+  identified, fix is a follow-on.**
+  3 seeds × 60 batches × 10 000 particles, SVD rank 5, 3.1 % UO₂
+  pin cell @ 600 K / 900 K, identical geometry across both codes:
+
+  | Config           | k_inf    | σ (3 seeds) |
+  |------------------|----------|-------------|
+  | OpenMC 0.15.3    | 1.32773  | 0.00205     |
+  | Rust w/o URR-eq  | 1.32715  | 0.00153     |
+  | Rust w/ URR-eq   | 1.33479  | 0.00226     |
+
+  Without URR equivalence Rust matches OpenMC at Δk = -58 pcm
+  (0.23σ_combined — baseline cross-check passes). With URR
+  equivalence, Rust shifts +764 pcm vs the no-eq baseline (and
+  +706 pcm vs OpenMC, 2.3σ_combined). Direction is correct (eq
+  reduces U-238 URR absorption → higher k_inf) but magnitude is
+  3-15× larger than the 50-200 pcm pre-implementation prediction.
+
+  Diagnostic dump (`scripts/urr_eq_dump.py`,
+  `outputs/urr_eq_dump.txt`) walks the math:
+  Carlvik-Pellaud C = 0.68 (correct, in published 0.5-0.85 band);
+  σ_e = (1−C)/(N·l̄) = 17.4 b (correct from formula); σ_0 = 7.9 b
+  (mostly from O-16, correct). The Rust factor σ_0/(σ_0+σ_e) =
+  **0.313 → 68.7 % reduction across all URR XS**. Textbook
+  Bondarenko shielding for U-238 PWR-URR is 2-15 % (Sanchez 1981
+  Table II, Stamm'ler 1983 §6.4, NJOY PURR benchmarks).
+
+  **Root cause: the rational equivalence formula is being applied
+  to the full elastic / fission / capture URR samples instead of
+  only to the resonance-fluctuation contribution above the smooth
+  baseline.** U-238's URR-window elastic is dominated by smooth
+  potential scattering (~11.8 b averaged); its capture has a
+  ~0.3 b smooth s-wave baseline. Reducing those by 69 % over-
+  shields by ~5-10×. NJOY PURR avoids this via the Hwang
+  superposition method (apply factor to `σ_URR − σ_smooth`, not
+  to σ_URR); a quick alternative is gating the correction to
+  capture only.
+
+  Artifacts:
+  `outputs/pwr_pincell_no_urr_eq.txt`,
+  `outputs/pwr_pincell_with_urr_eq.txt`,
+  `outputs/openmc_pwr_urr_ref.json`,
+  `outputs/urr_eq_dump.txt`,
+  `scripts/urr_eq_dump.py`.
 - ~~**`pwr_actinides.json` end-to-end run.**~~ **Done 2026-05-08.**
   `deplete_pwr` now wires all 17 chain ZAIDs into transport
   (0 chain-only); the actinide buildup nuclides (U-236/237/239,

@@ -1,0 +1,353 @@
+=== open_rust_mc — PWR Pin Cell Benchmark ===
+
+Data dir:     ../data/endfb-vii.1-hdf5/neutron
+Mode:         Svd
+SVD rank:     5
+Batches:      60 (15 inactive + 45 active)
+Particles:    10000/batch
+Histories:    450000 per run (45 active batches x 10000 particles)
+Nuclides:     9 (U235, U238, O16, H1, Zr90-94)
+Materials:    3 (UO2 fuel, Zircaloy clad, H2O moderator)
+Seeds:        3 (independent runs for statistical confidence)
+S(a,b):       c_H_in_H2O (if available in data_dir)
+
+── Loading nuclear data (SVD, rank=5) ──
+  Loading ../data/endfb-vii.1-hdf5/neutron\U235.h5 (rank=5)...
+    AWR = 233.025 (6 temps, 83114 energy pts)
+    nu-bar(E): 79 pts, 2.437 @ thermal, 2.533 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 20 energies
+    Elastic angular dist: 49 energies, CM=true
+    URR: 19 energies, 20 bands, 2250–25000 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.0048 b
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 83114 energy pts × 7 channels = 4545.3 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\U238.h5 (rank=5)...
+    AWR = 236.006 (6 temps, 185903 energy pts)
+    nu-bar(E): 10 pts, 2.492 @ thermal, 2.563 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 25 energies
+    Elastic angular dist: 38 energies, CM=true
+    URR: 18 energies, 20 bands, 20000–149029 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.6824 b
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 185903 energy pts × 7 channels = 10166.6 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\H1.h5 (rank=5)...
+    AWR = 0.999 (6 temps, 590 energy pts)
+    Elastic angular dist: 96 energies, CM=true
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=102 (capture) rank=5
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    Pointwise XS: 590 energy pts × 7 channels = 32.3 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr90.h5 (rank=5)...
+    AWR = 89.132 (6 temps, 5263 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 66 energies, CM=true
+    URR: 13 energies, 20 bands, 53500–100000 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.2997 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 5263 energy pts × 7 channels = 287.8 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr91.h5 (rank=5)...
+    AWR = 90.125 (6 temps, 12167 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 63 energies, CM=true
+    URR: 15 energies, 20 bands, 10000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.2315 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 12167 energy pts × 7 channels = 665.4 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr92.h5 (rank=5)...
+    AWR = 91.115 (6 temps, 14161 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 68 energies, CM=true
+    URR: 3 energies, 20 bands, 71000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.1795 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 14161 energy pts × 7 channels = 774.4 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\Zr94.h5 (rank=5)...
+    AWR = 93.100 (6 temps, 13810 energy pts)
+    Discrete levels: 13/13 (continuum=true, angle_dists=12)
+    Elastic angular dist: 62 energies, CM=true
+    URR: 2 energies, 20 bands, 90000–100000 eV
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 13 levels, CDF=20.4 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.0950 b
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    Pointwise XS: 13810 energy pts × 7 channels = 755.2 KB
+  Loading ../data/endfb-vii.1-hdf5/neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  S(a,b): loaded c_H_in_H2O (9 temperatures)
+  Loaded in 20771 ms  |  XS memory: 526907.0 KB (9 nuclides)
+  URR equivalence ON: cell 0 fuel, C = 0.6799, l̄ = 0.8192 cm, absorber xs_idx=1 (U-238)
+  Seed 0:   Tracking: SURFACE (heterogeneous but contrast=646.4x too high for delta tracking)
+  Batch    1: k=1.28140  k_t=1.29772  H=8.7264  coll=308203  fiss=5237  leak=0  therm=87655  surf=1254080
+  Batch    2: k=1.32510  k_t=1.32632  H=8.7224  coll=297393  fiss=5371  leak=0  therm=83548  surf=1331091
+  Batch    3: k=1.33800  k_t=1.38025  H=8.7414  coll=301057  fiss=5453  leak=0  therm=86440  surf=1334103
+  Batch    4: k=1.33610  k_t=1.35522  H=8.7231  coll=299178  fiss=5459  leak=0  therm=85316  surf=1335749
+  Batch    5: k=1.33670  k_t=1.33347  H=8.7400  coll=297170  fiss=5453  leak=0  therm=83341  surf=1343248
+  Batch    6: k=1.33930  k_t=1.31295  H=8.7276  coll=295532  fiss=5454  leak=0  therm=83100  surf=1326990
+  Batch    7: k=1.33030  k_t=1.33987  H=8.7268  coll=297634  fiss=5396  leak=0  therm=83666  surf=1331877
+  Batch    8: k=1.35500  k_t=1.34242  H=8.7279  coll=299792  fiss=5490  leak=0  therm=85919  surf=1333138
+  Batch    9: k=1.36530  k_t=1.35796  H=8.7369  coll=300491  fiss=5556  leak=0  therm=86096  surf=1337049
+  Batch   10: k=1.33030  k_t=1.32473  H=8.7372  coll=297979  fiss=5393  leak=0  therm=83532  surf=1333904
+  Batch   11: k=1.35680  k_t=1.32222  H=8.7303  coll=295584  fiss=5506  leak=0  therm=82915  surf=1330212
+  Batch   12: k=1.33470  k_t=1.33063  H=8.7347  coll=296034  fiss=5415  leak=0  therm=83470  surf=1320540
+  Batch   13: k=1.33900  k_t=1.32890  H=8.7374  coll=296099  fiss=5454  leak=0  therm=82860  surf=1333437
+  Batch   14: k=1.35840  k_t=1.35286  H=8.7161  coll=299160  fiss=5538  leak=0  therm=85230  surf=1339063
+  Batch   15: k=1.33390  k_t=1.33356  H=8.7195  coll=297354  fiss=5415  leak=0  therm=84045  surf=1333678
+  Batch   16: k=1.33720  k_t=1.36239  H=8.7435  coll=298040  fiss=5446  leak=0  therm=84056  surf=1335621 *
+  Batch   17: k=1.32960  k_t=1.34091  H=8.7305  coll=298419  fiss=5409  leak=0  therm=84483  surf=1336632 *
+  Batch   18: k=1.35610  k_t=1.32396  H=8.7449  coll=296177  fiss=5500  leak=0  therm=83268  surf=1333389 *
+  Batch   19: k=1.36270  k_t=1.30869  H=8.7220  coll=296329  fiss=5524  leak=0  therm=82527  surf=1329337 *
+  Batch   20: k=1.34040  k_t=1.34390  H=8.7362  coll=297846  fiss=5433  leak=0  therm=84944  surf=1330721 *
+  Batch   21: k=1.35490  k_t=1.34884  H=8.7211  coll=298623  fiss=5499  leak=0  therm=84621  surf=1333878 *
+  Batch   22: k=1.36380  k_t=1.37228  H=8.7274  coll=299970  fiss=5529  leak=0  therm=86324  surf=1343860 *
+  Batch   23: k=1.32950  k_t=1.29991  H=8.7247  coll=294375  fiss=5423  leak=0  therm=81567  surf=1333752 *
+  Batch   24: k=1.34850  k_t=1.35521  H=8.7339  coll=298886  fiss=5474  leak=0  therm=85396  surf=1334672 *
+  Batch   25: k=1.33600  k_t=1.31484  H=8.7234  coll=294918  fiss=5443  leak=0  therm=82659  surf=1325277 *
+  Batch   26: k=1.35560  k_t=1.31846  H=8.7335  coll=295795  fiss=5493  leak=0  therm=82427  surf=1332452 *
+  Batch   27: k=1.31660  k_t=1.33799  H=8.7221  coll=297325  fiss=5372  leak=0  therm=84192  surf=1333061 *
+  Batch   28: k=1.34540  k_t=1.34090  H=8.7290  coll=299403  fiss=5452  leak=0  therm=84915  surf=1334783 *
+  Batch   29: k=1.31860  k_t=1.29960  H=8.7293  coll=293364  fiss=5360  leak=0  therm=81308  surf=1318967 *
+  Batch   30: k=1.33650  k_t=1.31749  H=8.7309  coll=295325  fiss=5449  leak=0  therm=82870  surf=1324932 *
+  Batch   31: k=1.34210  k_t=1.36998  H=8.7344  coll=301653  fiss=5417  leak=0  therm=87171  surf=1342646 *
+  Batch   32: k=1.32660  k_t=1.30731  H=8.7231  coll=294790  fiss=5404  leak=0  therm=82072  surf=1320735 *
+  Batch   33: k=1.35010  k_t=1.38027  H=8.7191  coll=301989  fiss=5480  leak=0  therm=86498  surf=1356281 *
+  Batch   34: k=1.34940  k_t=1.36304  H=8.7335  coll=298369  fiss=5460  leak=0  therm=86016  surf=1330707 *
+  Batch   35: k=1.34020  k_t=1.34259  H=8.7368  coll=298942  fiss=5455  leak=0  therm=84863  surf=1341067 *
+  Batch   36: k=1.30490  k_t=1.30874  H=8.7194  coll=296162  fiss=5321  leak=0  therm=83017  surf=1328608 *
+  Batch   37: k=1.34560  k_t=1.33903  H=8.7317  coll=298106  fiss=5471  leak=0  therm=83922  surf=1335350 *
+  Batch   38: k=1.31740  k_t=1.33255  H=8.7227  coll=296986  fiss=5386  leak=0  therm=84289  surf=1329268 *
+  Batch   39: k=1.33660  k_t=1.34230  H=8.7265  coll=297587  fiss=5452  leak=0  therm=84756  surf=1330573 *
+  Batch   40: k=1.31800  k_t=1.33045  H=8.7231  coll=296968  fiss=5360  leak=0  therm=83517  surf=1334465 *
+  Batch   41: k=1.32610  k_t=1.35136  H=8.7300  coll=298113  fiss=5383  leak=0  therm=84705  surf=1327175 *
+  Batch   42: k=1.34010  k_t=1.33723  H=8.7175  coll=296976  fiss=5454  leak=0  therm=84444  surf=1334858 *
+  Batch   43: k=1.34930  k_t=1.33145  H=8.7358  coll=298601  fiss=5487  leak=0  therm=84181  surf=1338104 *
+  Batch   44: k=1.35350  k_t=1.33592  H=8.7454  coll=299210  fiss=5515  leak=0  therm=84623  surf=1344585 *
+  Batch   45: k=1.32940  k_t=1.32064  H=8.7129  coll=295309  fiss=5444  leak=0  therm=83863  surf=1325627 *
+  Batch   46: k=1.32280  k_t=1.34244  H=8.7261  coll=297183  fiss=5362  leak=0  therm=83857  surf=1336591 *
+  Batch   47: k=1.33400  k_t=1.32667  H=8.7413  coll=295690  fiss=5413  leak=0  therm=82762  surf=1333086 *
+  Batch   48: k=1.32820  k_t=1.32074  H=8.7379  coll=294305  fiss=5385  leak=0  therm=82287  surf=1324361 *
+  Batch   49: k=1.31400  k_t=1.33338  H=8.7295  coll=296559  fiss=5354  leak=0  therm=83947  surf=1329293 *
+  Batch   50: k=1.32300  k_t=1.34498  H=8.7276  coll=296473  fiss=5381  leak=0  therm=83639  surf=1335956 *
+  Batch   51: k=1.35240  k_t=1.33420  H=8.7384  coll=296550  fiss=5484  leak=0  therm=83866  surf=1332921 *
+  Batch   52: k=1.33360  k_t=1.34208  H=8.7284  coll=297499  fiss=5398  leak=0  therm=84713  surf=1331886 *
+  Batch   53: k=1.35200  k_t=1.34614  H=8.7346  coll=298104  fiss=5500  leak=0  therm=83768  surf=1334969 *
+  Batch   54: k=1.32950  k_t=1.34383  H=8.7222  coll=298633  fiss=5402  leak=0  therm=84018  surf=1341428 *
+  Batch   55: k=1.35980  k_t=1.34510  H=8.7319  coll=297184  fiss=5521  leak=0  therm=83750  surf=1338058 *
+  Batch   56: k=1.32800  k_t=1.33660  H=8.7300  coll=297825  fiss=5419  leak=0  therm=83694  surf=1341043 *
+  Batch   57: k=1.31900  k_t=1.32917  H=8.7344  coll=295842  fiss=5387  leak=0  therm=82801  surf=1335209 *
+  Batch   58: k=1.32480  k_t=1.35065  H=8.7433  coll=299287  fiss=5423  leak=0  therm=85236  surf=1338387 *
+  Batch   59: k=1.34060  k_t=1.35451  H=8.7351  coll=297879  fiss=5452  leak=0  therm=84807  surf=1326165 *
+  Batch   60: k=1.33700  k_t=1.31256  H=8.7351  coll=293933  fiss=5420  leak=0  therm=82209  surf=1328417 *
+k=1.33688 +/- 0.00214  37376ms  (83057.6 ns/particle)
+  Seed 1:   Tracking: SURFACE (heterogeneous but contrast=646.4x too high for delta tracking)
+  Batch    1: k=1.28120  k_t=1.28146  H=8.7233  coll=305742  fiss=5266  leak=0  therm=85541  surf=1250483
+  Batch    2: k=1.34560  k_t=1.31600  H=8.7235  coll=294490  fiss=5433  leak=0  therm=82165  surf=1327420
+  Batch    3: k=1.33470  k_t=1.31950  H=8.7262  coll=296568  fiss=5418  leak=0  therm=83158  surf=1333517
+  Batch    4: k=1.32390  k_t=1.33713  H=8.7340  coll=298344  fiss=5375  leak=0  therm=83917  surf=1338878
+  Batch    5: k=1.32710  k_t=1.31914  H=8.7338  coll=296167  fiss=5421  leak=0  therm=82952  surf=1334964
+  Batch    6: k=1.34040  k_t=1.33404  H=8.7384  coll=295292  fiss=5444  leak=0  therm=83720  surf=1329435
+  Batch    7: k=1.34720  k_t=1.34124  H=8.7376  coll=296990  fiss=5482  leak=0  therm=83757  surf=1330481
+  Batch    8: k=1.32550  k_t=1.32372  H=8.7338  coll=297587  fiss=5389  leak=0  therm=83747  surf=1330890
+  Batch    9: k=1.33250  k_t=1.35300  H=8.7328  coll=298033  fiss=5405  leak=0  therm=85096  surf=1328652
+  Batch   10: k=1.31480  k_t=1.33003  H=8.7397  coll=295319  fiss=5340  leak=0  therm=82760  surf=1322643
+  Batch   11: k=1.33270  k_t=1.34463  H=8.7255  coll=298154  fiss=5400  leak=0  therm=84991  surf=1331302
+  Batch   12: k=1.31270  k_t=1.34647  H=8.7352  coll=300330  fiss=5359  leak=0  therm=85265  surf=1342398
+  Batch   13: k=1.32900  k_t=1.33477  H=8.7217  coll=298693  fiss=5407  leak=0  therm=84283  surf=1341233
+  Batch   14: k=1.33510  k_t=1.33250  H=8.7169  coll=296437  fiss=5421  leak=0  therm=83896  surf=1325550
+  Batch   15: k=1.32980  k_t=1.31975  H=8.7352  coll=295754  fiss=5431  leak=0  therm=82700  surf=1325007
+  Batch   16: k=1.32280  k_t=1.33073  H=8.7228  coll=294989  fiss=5360  leak=0  therm=82732  surf=1326623 *
+  Batch   17: k=1.33250  k_t=1.32829  H=8.7380  coll=297220  fiss=5403  leak=0  therm=84133  surf=1335008 *
+  Batch   18: k=1.33550  k_t=1.33429  H=8.7306  coll=297264  fiss=5454  leak=0  therm=84772  surf=1317025 *
+  Batch   19: k=1.31380  k_t=1.36048  H=8.7328  coll=299137  fiss=5356  leak=0  therm=85004  surf=1345584 *
+  Batch   20: k=1.30830  k_t=1.33717  H=8.7260  coll=298650  fiss=5333  leak=0  therm=84021  surf=1331735 *
+  Batch   21: k=1.33960  k_t=1.32968  H=8.7326  coll=297542  fiss=5454  leak=0  therm=83380  surf=1337939 *
+  Batch   22: k=1.31170  k_t=1.31638  H=8.7205  coll=294088  fiss=5345  leak=0  therm=82189  surf=1322793 *
+  Batch   23: k=1.32940  k_t=1.32202  H=8.7244  coll=295289  fiss=5411  leak=0  therm=83238  surf=1320574 *
+  Batch   24: k=1.32590  k_t=1.31642  H=8.7433  coll=294676  fiss=5398  leak=0  therm=82918  surf=1315507 *
+  Batch   25: k=1.33070  k_t=1.32344  H=8.7217  coll=297289  fiss=5432  leak=0  therm=83333  surf=1335296 *
+  Batch   26: k=1.35160  k_t=1.35966  H=8.7294  coll=299530  fiss=5512  leak=0  therm=85842  surf=1331541 *
+  Batch   27: k=1.34030  k_t=1.34582  H=8.7275  coll=296714  fiss=5443  leak=0  therm=84629  surf=1326879 *
+  Batch   28: k=1.31000  k_t=1.33646  H=8.7259  coll=297495  fiss=5307  leak=0  therm=84563  surf=1335720 *
+  Batch   29: k=1.33240  k_t=1.35128  H=8.7420  coll=299056  fiss=5422  leak=0  therm=84433  surf=1340841 *
+  Batch   30: k=1.32820  k_t=1.33350  H=8.7265  coll=298440  fiss=5394  leak=0  therm=84293  surf=1341726 *
+  Batch   31: k=1.33430  k_t=1.34803  H=8.7214  coll=297295  fiss=5464  leak=0  therm=84322  surf=1327184 *
+  Batch   32: k=1.31010  k_t=1.32937  H=8.7277  coll=297749  fiss=5329  leak=0  therm=83775  surf=1336789 *
+  Batch   33: k=1.33010  k_t=1.35498  H=8.7230  coll=297533  fiss=5409  leak=0  therm=84450  surf=1333404 *
+  Batch   34: k=1.34890  k_t=1.33176  H=8.7380  coll=297712  fiss=5489  leak=0  therm=83804  surf=1337056 *
+  Batch   35: k=1.32800  k_t=1.37422  H=8.7300  coll=303203  fiss=5416  leak=0  therm=87044  surf=1352920 *
+  Batch   36: k=1.30690  k_t=1.30651  H=8.7339  coll=294387  fiss=5310  leak=0  therm=82198  surf=1324540 *
+  Batch   37: k=1.35270  k_t=1.33301  H=8.7260  coll=296340  fiss=5481  leak=0  therm=83807  surf=1333051 *
+  Batch   38: k=1.33910  k_t=1.33733  H=8.7268  coll=298665  fiss=5439  leak=0  therm=84388  surf=1327036 *
+  Batch   39: k=1.33820  k_t=1.34853  H=8.7331  coll=296811  fiss=5422  leak=0  therm=83599  surf=1332156 *
+  Batch   40: k=1.32340  k_t=1.36254  H=8.7251  coll=299616  fiss=5369  leak=0  therm=86221  surf=1331989 *
+  Batch   41: k=1.34130  k_t=1.33561  H=8.7306  coll=297234  fiss=5469  leak=0  therm=83493  surf=1335587 *
+  Batch   42: k=1.32540  k_t=1.33872  H=8.7354  coll=298005  fiss=5408  leak=0  therm=84318  surf=1341048 *
+  Batch   43: k=1.33080  k_t=1.33572  H=8.7264  coll=296104  fiss=5417  leak=0  therm=83586  surf=1324893 *
+  Batch   44: k=1.32080  k_t=1.31731  H=8.7321  coll=296197  fiss=5379  leak=0  therm=83562  surf=1332631 *
+  Batch   45: k=1.33230  k_t=1.33152  H=8.7372  coll=298333  fiss=5429  leak=0  therm=84178  surf=1335924 *
+  Batch   46: k=1.33230  k_t=1.32658  H=8.7313  coll=295779  fiss=5404  leak=0  therm=82028  surf=1327936 *
+  Batch   47: k=1.33690  k_t=1.32688  H=8.7272  coll=296032  fiss=5432  leak=0  therm=83835  surf=1329078 *
+  Batch   48: k=1.32230  k_t=1.31950  H=8.7297  coll=295636  fiss=5372  leak=0  therm=82716  surf=1327732 *
+  Batch   49: k=1.32250  k_t=1.34096  H=8.7314  coll=296385  fiss=5393  leak=0  therm=83281  surf=1332288 *
+  Batch   50: k=1.34020  k_t=1.33328  H=8.7405  coll=296860  fiss=5441  leak=0  therm=83491  surf=1336073 *
+  Batch   51: k=1.32620  k_t=1.33757  H=8.7331  coll=298504  fiss=5419  leak=0  therm=84350  surf=1340804 *
+  Batch   52: k=1.33570  k_t=1.33189  H=8.7351  coll=298768  fiss=5435  leak=0  therm=84569  surf=1337381 *
+  Batch   53: k=1.35430  k_t=1.31693  H=8.7345  coll=296966  fiss=5503  leak=0  therm=82904  surf=1335483 *
+  Batch   54: k=1.32820  k_t=1.34673  H=8.7280  coll=297425  fiss=5410  leak=0  therm=83748  surf=1326011 *
+  Batch   55: k=1.32800  k_t=1.30988  H=8.7428  coll=294468  fiss=5413  leak=0  therm=82609  surf=1325363 *
+  Batch   56: k=1.35140  k_t=1.33557  H=8.7320  coll=298947  fiss=5505  leak=0  therm=85359  surf=1334458 *
+  Batch   57: k=1.33750  k_t=1.34528  H=8.7453  coll=298713  fiss=5454  leak=0  therm=84719  surf=1336776 *
+  Batch   58: k=1.34910  k_t=1.34082  H=8.7390  coll=296332  fiss=5471  leak=0  therm=84625  surf=1323659 *
+  Batch   59: k=1.35410  k_t=1.32739  H=8.7400  coll=295885  fiss=5496  leak=0  therm=83283  surf=1334648 *
+  Batch   60: k=1.36390  k_t=1.34378  H=8.7330  coll=296271  fiss=5526  leak=0  therm=84361  surf=1325139 *
+k=1.33239 +/- 0.00198  19191ms  (42646.0 ns/particle)
+  Seed 2:   Tracking: SURFACE (heterogeneous but contrast=646.4x too high for delta tracking)
+  Batch    1: k=1.29230  k_t=1.26568  H=8.7250  coll=306650  fiss=5305  leak=0  therm=86058  surf=1255504
+  Batch    2: k=1.34160  k_t=1.30523  H=8.7300  coll=293552  fiss=5444  leak=0  therm=81582  surf=1318726
+  Batch    3: k=1.32370  k_t=1.32950  H=8.7259  coll=295287  fiss=5375  leak=0  therm=82524  surf=1327568
+  Batch    4: k=1.32010  k_t=1.33334  H=8.7158  coll=297852  fiss=5374  leak=0  therm=84056  surf=1335242
+  Batch    5: k=1.35070  k_t=1.35779  H=8.7265  coll=299477  fiss=5507  leak=0  therm=85176  surf=1342982
+  Batch    6: k=1.33310  k_t=1.33335  H=8.7294  coll=297726  fiss=5411  leak=0  therm=83965  surf=1331127
+  Batch    7: k=1.32240  k_t=1.34640  H=8.7251  coll=296908  fiss=5397  leak=0  therm=82828  surf=1333344
+  Batch    8: k=1.33390  k_t=1.33068  H=8.7241  coll=296525  fiss=5435  leak=0  therm=83205  surf=1332382
+  Batch    9: k=1.31910  k_t=1.32205  H=8.7309  coll=295234  fiss=5380  leak=0  therm=83090  surf=1325657
+  Batch   10: k=1.33790  k_t=1.33173  H=8.7408  coll=296588  fiss=5437  leak=0  therm=83820  surf=1335537
+  Batch   11: k=1.32360  k_t=1.32306  H=8.7249  coll=296215  fiss=5390  leak=0  therm=83199  surf=1334682
+  Batch   12: k=1.33210  k_t=1.31649  H=8.7303  coll=294973  fiss=5427  leak=0  therm=83393  surf=1321194
+  Batch   13: k=1.33920  k_t=1.32490  H=8.7344  coll=296527  fiss=5445  leak=0  therm=83466  surf=1335966
+  Batch   14: k=1.33850  k_t=1.34311  H=8.7269  coll=298262  fiss=5451  leak=0  therm=83442  surf=1337397
+  Batch   15: k=1.32710  k_t=1.33029  H=8.7334  coll=296279  fiss=5411  leak=0  therm=83233  surf=1322425
+  Batch   16: k=1.32540  k_t=1.35158  H=8.7294  coll=299670  fiss=5388  leak=0  therm=85316  surf=1343039 *
+  Batch   17: k=1.33680  k_t=1.32584  H=8.7294  coll=297759  fiss=5415  leak=0  therm=84194  surf=1331098 *
+  Batch   18: k=1.34320  k_t=1.32486  H=8.7179  coll=297295  fiss=5472  leak=0  therm=83435  surf=1331228 *
+  Batch   19: k=1.35570  k_t=1.35115  H=8.7268  coll=297285  fiss=5510  leak=0  therm=84707  surf=1329222 *
+  Batch   20: k=1.34200  k_t=1.32362  H=8.7265  coll=296463  fiss=5469  leak=0  therm=83666  surf=1335601 *
+  Batch   21: k=1.33250  k_t=1.32614  H=8.7278  coll=297698  fiss=5425  leak=0  therm=83400  surf=1337162 *
+  Batch   22: k=1.33670  k_t=1.32607  H=8.7278  coll=295540  fiss=5443  leak=0  therm=82415  surf=1336860 *
+  Batch   23: k=1.33290  k_t=1.38014  H=8.7280  coll=300586  fiss=5392  leak=0  therm=87220  surf=1335310 *
+  Batch   24: k=1.33100  k_t=1.32768  H=8.7255  coll=294986  fiss=5398  leak=0  therm=82900  surf=1333604 *
+  Batch   25: k=1.33160  k_t=1.31046  H=8.7398  coll=294934  fiss=5428  leak=0  therm=82543  surf=1316719 *
+  Batch   26: k=1.33760  k_t=1.32989  H=8.7263  coll=295201  fiss=5430  leak=0  therm=83822  surf=1321938 *
+  Batch   27: k=1.34380  k_t=1.35529  H=8.7325  coll=301165  fiss=5458  leak=0  therm=86457  surf=1340122 *
+  Batch   28: k=1.32270  k_t=1.32058  H=8.7271  coll=295729  fiss=5398  leak=0  therm=82975  surf=1328732 *
+  Batch   29: k=1.34300  k_t=1.34270  H=8.7457  coll=298210  fiss=5485  leak=0  therm=84638  surf=1327090 *
+  Batch   30: k=1.32250  k_t=1.34202  H=8.7479  coll=296416  fiss=5368  leak=0  therm=83850  surf=1334543 *
+  Batch   31: k=1.31910  k_t=1.29963  H=8.7287  coll=295256  fiss=5373  leak=0  therm=81818  surf=1332008 *
+  Batch   32: k=1.34910  k_t=1.32393  H=8.7297  coll=297703  fiss=5472  leak=0  therm=84120  surf=1334498 *
+  Batch   33: k=1.33170  k_t=1.33004  H=8.7228  coll=298699  fiss=5410  leak=0  therm=84347  surf=1333828 *
+  Batch   34: k=1.33160  k_t=1.33461  H=8.7221  coll=297180  fiss=5417  leak=0  therm=84873  surf=1326338 *
+  Batch   35: k=1.32360  k_t=1.34665  H=8.7214  coll=299838  fiss=5396  leak=0  therm=85038  surf=1345482 *
+  Batch   36: k=1.32670  k_t=1.30997  H=8.7280  coll=295471  fiss=5380  leak=0  therm=82592  surf=1322804 *
+  Batch   37: k=1.33530  k_t=1.33504  H=8.7362  coll=297831  fiss=5407  leak=0  therm=84546  surf=1329292 *
+  Batch   38: k=1.35040  k_t=1.34523  H=8.7290  coll=298064  fiss=5483  leak=0  therm=84505  surf=1333508 *
+  Batch   39: k=1.32440  k_t=1.32027  H=8.7316  coll=295502  fiss=5396  leak=0  therm=82893  surf=1330337 *
+  Batch   40: k=1.33670  k_t=1.30679  H=8.7253  coll=294831  fiss=5424  leak=0  therm=82053  surf=1327165 *
+  Batch   41: k=1.33290  k_t=1.32868  H=8.7253  coll=295340  fiss=5419  leak=0  therm=82483  surf=1326870 *
+  Batch   42: k=1.34420  k_t=1.35968  H=8.7346  coll=301187  fiss=5474  leak=0  therm=86200  surf=1342572 *
+  Batch   43: k=1.33260  k_t=1.31149  H=8.7296  coll=294050  fiss=5447  leak=0  therm=81715  surf=1322626 *
+  Batch   44: k=1.33230  k_t=1.35434  H=8.7206  coll=299760  fiss=5435  leak=0  therm=85321  surf=1345811 *
+  Batch   45: k=1.30630  k_t=1.32436  H=8.7394  coll=295755  fiss=5315  leak=0  therm=82467  surf=1331374 *
+  Batch   46: k=1.34760  k_t=1.34889  H=8.7184  coll=299100  fiss=5468  leak=0  therm=84700  surf=1345596 *
+  Batch   47: k=1.33440  k_t=1.35702  H=8.7296  coll=297102  fiss=5438  leak=0  therm=83532  surf=1337174 *
+  Batch   48: k=1.32170  k_t=1.33013  H=8.7361  coll=295159  fiss=5385  leak=0  therm=83029  surf=1322751 *
+  Batch   49: k=1.30310  k_t=1.32163  H=8.7268  coll=296502  fiss=5316  leak=0  therm=84075  surf=1332117 *
+  Batch   50: k=1.31800  k_t=1.33489  H=8.7376  coll=297002  fiss=5364  leak=0  therm=84226  surf=1324092 *
+  Batch   51: k=1.32520  k_t=1.33059  H=8.7187  coll=298259  fiss=5389  leak=0  therm=84845  surf=1332352 *
+  Batch   52: k=1.34420  k_t=1.32628  H=8.7504  coll=296946  fiss=5454  leak=0  therm=83674  surf=1331285 *
+  Batch   53: k=1.34960  k_t=1.30831  H=8.7264  coll=295268  fiss=5501  leak=0  therm=81799  surf=1331274 *
+  Batch   54: k=1.33170  k_t=1.33448  H=8.7303  coll=296240  fiss=5420  leak=0  therm=83631  surf=1327425 *
+  Batch   55: k=1.36240  k_t=1.37665  H=8.7286  coll=299989  fiss=5520  leak=0  therm=85710  surf=1343646 *
+  Batch   56: k=1.33170  k_t=1.32652  H=8.7164  coll=295928  fiss=5440  leak=0  therm=82529  surf=1334565 *
+  Batch   57: k=1.35100  k_t=1.34817  H=8.7446  coll=297406  fiss=5454  leak=0  therm=84032  surf=1333934 *
+  Batch   58: k=1.34430  k_t=1.36280  H=8.7400  coll=300028  fiss=5447  leak=0  therm=86101  surf=1337386 *
+  Batch   59: k=1.34960  k_t=1.37467  H=8.7310  coll=300738  fiss=5512  leak=0  therm=86215  surf=1344581 *
+  Batch   60: k=1.35090  k_t=1.34038  H=8.7171  coll=298181  fiss=5505  leak=0  therm=83965  surf=1332839 *
+k=1.33510 +/- 0.00184  24475ms  (54389.8 ns/particle)
+
+============================================================
+RESULTS — PWR Pin Cell
+============================================================
+  SVD (rank=5):
+    k_inf            = 1.33479 +/- 0.00226
+    ns/particle      = 60031.14 +/- 20788.07 (3 seeds)
+    Total sim time   = 81042 ms (3 runs)
+    Load time        = 20771 ms
+    XS memory        = 526907.0 KB
