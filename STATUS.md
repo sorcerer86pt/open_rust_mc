@@ -65,6 +65,29 @@ bindings (`-p open-rust-mc-py`) clean.
   pitch-sweep moderation curve.
 - Delayed-neutron yields ν_d(E) loaded per nuclide.
 
+### Adjoint photon Monte Carlo (CADIS, real CE)
+- `crate::photon::compton::adjoint_compton_scatter` — inverted
+  Klein-Nishina sampler (Wagner-Haghighat 1998 / Lewis-Miller
+  §10.3). Given a post-collision energy `E_out` returns the
+  pre-collision `E_in` and scattering cosine μ from the transposed
+  KN kernel. Rejection ceiling is the analytic supremum
+  `2π · r_e²` (proven and empirically scanned in
+  `adjoint_compton_envelope_bound`). Conditional density at fixed
+  E_out matches the analytic `KN_dcs/dμ(E_in, μ_kin)` curve to
+  χ²_red < 2.5 across 25 bins from 200 k samples.
+- `crate::transport::adjoint_photon` — slab-geometry adjoint
+  walker. Composes the adjoint Compton with self-adjoint Rayleigh
+  + photoelectric / pair termination ("absorption-as-source")
+  into a track-length tally on a `(z, E)` mesh. Output:
+  `ImportanceMap` directly consumable by
+  `WeightWindow::from_flux` for the existing CADIS pipeline.
+  End-to-end test on a 100-cm water slab at 1 MeV produces a
+  diffusion-like ψ̂*(z) peaked at mid-slab with measurable
+  up-scatter contribution above the birth-energy bin (571 k vs
+  144 k integrated track length). Replacing the random-ray FW
+  proxy in `shield_slab` with this walker is the next integration
+  step.
+
 ### Time-dependent kinetics
 - **Point-kinetics** (`transport::kinetics`) with 6-group
   delayed-neutron precursors. Crank-Nicolson 7×7 ODE solver
