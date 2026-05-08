@@ -269,13 +269,21 @@ bindings (`-p open-rust-mc-py`) clean.
 
 ### Medium-effort (1-2 weeks each)
 
-- **Survival biasing in the thermal-scatter path.** Currently the
-  analog branch in `transport_particle` for S(α,β) collisions
-  doesn't go through `dispatch_real_collision` — it has its own
-  path via `process_non_thermal_collision`. Routing it through
-  the SB dispatch would extend variance reduction to PWR's
-  thermal physics. Net win is small for PWR (H1 has no fission)
-  but cleans up the code path.
+- ~~**Survival biasing in the thermal-scatter path.**~~
+  **Done 2026-05-08.** The use-thermal-but-non-thermal sub-branch
+  in `transport_particle` (a real reaction on a S(α,β) nuclide
+  — fission / capture / inelastic, not a thermal scatter) now
+  routes through `dispatch_real_collision` instead of the
+  dedicated `process_non_thermal_collision` helper. SB is now
+  uniform across all collision paths: thermal scatters stay
+  analog (no fission/capture to bias), every other reaction —
+  including capture on H-1 below 3.75 eV — goes through
+  implicit-capture + Russian roulette when SB is enabled.
+  `process_non_thermal_collision` deleted. PWR pin cell smoke
+  (50 batches × 5 000 particles × 3 seeds): k_inf agrees
+  with/without SB at 0.58σ_combined (1.32763 ± 0.00263 vs
+  1.32960 ± 0.00218); SB lowers σ slightly. 322/322 lib tests
+  green.
 - ~~**Hex on GPU validated end-to-end on a real eigenvalue.**~~
   **Done 2026-05-08.** `gpu_hex_minicore` binary lives in
   `src/bin/`, reuses the CPU `hex_minicore` geometry, runs the

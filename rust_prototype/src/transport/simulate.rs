@@ -1053,10 +1053,21 @@ fn transport_particle<XS: XsProvider>(
 
                     let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
 
-                    // Check if this nuclide+energy qualifies for thermal scattering
+                    // Thermal scattering branch: roll once for thermal
+                    // vs non-thermal reaction on the S(α,β) nuclide.
+                    // Pre-fix: the non-thermal branch went through a
+                    // separate `process_non_thermal_collision` →
+                    // `process_collision` path that didn't honour
+                    // survival biasing. Now both branches that don't
+                    // resolve to a thermal scatter route through
+                    // `dispatch_real_collision`, the single SB-aware
+                    // entry point. Net result: implicit-capture +
+                    // Russian roulette extends to PWR's H-1 capture
+                    // events (small contribution but the variance
+                    // reduction now applies uniformly).
                     let use_thermal = thermal_xs_add[nuc_idx] > 0.0;
+                    let mut handled_as_thermal_scatter = false;
                     if use_thermal {
-                        // Thermal scattering: sample from S(α,β)
                         let tsl = xs_provider
                             .thermal_scattering(xs_kernel_idx)
                             .expect("thermal data");
@@ -1064,11 +1075,13 @@ fn transport_particle<XS: XsProvider>(
                         let xi_reaction = rng.uniform() * micro_xs[nuc_idx].total;
 
                         if xi_reaction < thermal_xs_add[nuc_idx] {
-                            // Thermal scattering event
+                            // Thermal scattering event: sample E_out / μ
+                            // directly from S(α,β); no fission/capture
+                            // bookkeeping, so survival biasing doesn't
+                            // apply (nothing to bias — analog scatter).
                             result.thermal_scatters += 1;
                             let (e_out, mu) = tsl.sample(particle.energy, t_idx, &mut rng);
                             particle.energy = e_out;
-                            // Apply scattering angle
                             let phi = 2.0 * std::f64::consts::PI * rng.uniform();
                             let sin_mu = (1.0 - mu * mu).max(0.0).sqrt();
                             let d = particle.dir;
@@ -1094,71 +1107,23 @@ fn transport_particle<XS: XsProvider>(
                                     mu * sign,
                                 );
                             }
-                            // Continue — this was a scatter
-                        } else {
-                            // Non-thermal reaction (fission, capture, inelastic, etc.)
-                            // Process normally but with elastic = 0
-                            let outcome = process_non_thermal_collision(
-                                &mut particle,
-                                &micro_xs[nuc_idx],
-                                xs_kernel_idx,
-                                xs_provider,
-                                cell.temperature,
-                                &mut rng,
-                            );
-                            match outcome {
-                                CollisionOutcome::Scatter => {}
-                                CollisionOutcome::InelasticScatter { q_value_ev } => {
-                                    result.photon_events.push(PhotonSourceEvent {
-                                        cell_idx: particle.cell_idx as u32,
-                                        pos: [particle.pos.x, particle.pos.y, particle.pos.z],
-                                        energy: q_value_ev.abs(),
-                                        mt: 4,
-                                    });
-                                }
-                                CollisionOutcome::Absorption => {
-                                    result.absorptions += 1;
-                                    result.capture_cells.push(particle.cell_idx);
-                                    sample_photon_products(
-                                        xs_provider,
-                                        xs_kernel_idx,
-                                        ABSORPTION_PHOTON_MTS,
-                                        &particle,
-                                        &mut rng,
-                                        &mut result.photon_events,
-                                    );
-                                }
-                                CollisionOutcome::Fission { sites } => {
-                                    result.fissions += 1;
-                                    result.fission_sites.extend(sites);
-                                    sample_photon_products(
-                                        xs_provider,
-                                        xs_kernel_idx,
-                                        FISSION_PHOTON_MTS,
-                                        &particle,
-                                        &mut rng,
-                                        &mut result.photon_events,
-                                    );
-                                }
-                                CollisionOutcome::Multiplicity { secondaries } => {
-                                    for s in secondaries {
-                                        pending.push(Particle::new(
-                                            s.pos,
-                                            s.dir,
-                                            s.energy,
-                                            particle.cell_idx,
-                                        ));
-                                    }
-                                }
-                            }
+                            handled_as_thermal_scatter = true;
                         }
-                    } else {
-                        // Standard collision processing (no thermal scattering)
+                        // else: fall through — non-thermal reaction on
+                        // the thermal nuclide (capture / fission /
+                        // inelastic). The MicroXs already has elastic
+                        // zeroed (line ~910), so dispatch_real_collision
+                        // sees the right channel weights.
+                    }
+
+                    if !handled_as_thermal_scatter {
+                        // Single SB-aware dispatch — applies to both
+                        // the !use_thermal nuclides and the
+                        // use_thermal-but-non-thermal sub-branch above.
                         let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
                         let level_xs =
                             xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
                         let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
-
                         let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
                         let inelastic_data = if !level_info.is_empty() {
                             Some(InelasticData {
@@ -1412,52 +1377,6 @@ fn dispatch_real_collision<XS: XsProvider>(
             }
         }
     }
-}
-
-/// Process a non-thermal collision for a nuclide where thermal scattering
-/// replaced elastic. The elastic channel is zero, so only inelastic/fission/capture remain.
-fn process_non_thermal_collision<XS: XsProvider>(
-    particle: &mut Particle,
-    xs: &MicroXs,
-    xs_kernel_idx: usize,
-    xs_provider: &XS,
-    temperature: f64,
-    rng: &mut Rng,
-) -> CollisionOutcome {
-    let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
-    let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
-    let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
-    let level_angles = xs_provider.discrete_level_angles(xs_kernel_idx);
-
-    let inelastic_data = if !level_info.is_empty() {
-        Some(InelasticData {
-            levels: &level_info,
-            level_xs: &level_xs,
-            has_continuum: has_cont,
-            level_angles,
-        })
-    } else {
-        None
-    };
-
-    let elastic_angle = xs_provider.elastic_angular_dist(xs_kernel_idx);
-    let fission_edist = xs_provider.fission_energy_dist(xs_kernel_idx);
-    let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
-    let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
-    let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
-
-    collision::process_collision(
-        particle,
-        xs,
-        inelastic_data.as_ref(),
-        elastic_angle,
-        fission_edist,
-        continuum_edist,
-        n2n_edist,
-        n3n_edist,
-        temperature,
-        rng,
-    )
 }
 
 /// Transport a single particle using Woodcock delta tracking.
