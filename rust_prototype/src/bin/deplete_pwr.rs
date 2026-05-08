@@ -390,6 +390,7 @@ fn load_xs(args: &Args) -> xs_provider::SvdXsProvider {
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: vec![],
+                partial_kernels: vec![],
             });
         }
     }
@@ -482,10 +483,16 @@ fn run_eigenvalue(
     // the geometry's cells × all NUCLIDE_SPECS slots × the four
     // depletable MTs we track in the chain (fission, capture,
     // (n,2n), (n,3n)).
+    // MT list: fission, capture, (n,2n), (n,3n) drive the chain;
+    // (n,p) and (n,α) flow through `partial_xs` for granular reporting
+    // — they don't drive depletion (already folded into capture for
+    // the absorption sampler) but `collapsed_reaction_xs` will collapse
+    // them per-cell so the chain JSON can carry them if any future
+    // chain wants explicit (n,p) / (n,α) yields.
     let rr = open_rust_mc::transport::tally::ReactionRateTally::new(
         cells.len(),
         NUCLIDE_SPECS.len(),
-        vec![18, 102, 16, 17],
+        vec![18, 102, 16, 17, 103, 107],
     );
     tallies.reaction_rate = Some(rr.clone());
 

@@ -213,8 +213,8 @@ pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure:
             // Pad short rows with zeros (defensive; well-formed runs
             // always emit the right length).
             for i in 0..sp.n_surface_bins {
-                pos_flat.push(*b.surface_current_pos.get(i).unwrap_or(&0.0));
-                neg_flat.push(*b.surface_current_neg.get(i).unwrap_or(&0.0));
+                pos_flat.push(*b.tallies.surface_current_pos.get(i).unwrap_or(&0.0));
+                neg_flat.push(*b.tallies.surface_current_neg.get(i).unwrap_or(&0.0));
             }
         }
         fb.create_dataset("surface_current_pos")
@@ -231,7 +231,7 @@ pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure:
         let mut flux_flat = Vec::with_capacity(total);
         for b in sp.batches {
             for i in 0..sp.n_mesh_voxels {
-                flux_flat.push(*b.mesh_flux.get(i).unwrap_or(&0.0));
+                flux_flat.push(*b.tallies.mesh_flux.get(i).unwrap_or(&0.0));
             }
         }
         fb.create_dataset("mesh_flux")
@@ -268,11 +268,13 @@ mod tests {
             captures_by_cell: vec![],
             photon_events: Vec::<PhotonSourceEvent>::new(),
             k_track: k - 0.001,
-            surface_current_pos: vec![0.5; n_surf],
-            surface_current_neg: vec![0.3; n_surf],
-            mesh_flux: vec![1.25; n_vox],
-            rr_flux: vec![],
-            rr_rate: vec![],
+            tallies: crate::transport::tally::BatchTallies {
+                surface_current_pos: vec![0.5; n_surf],
+                surface_current_neg: vec![0.3; n_surf],
+                mesh_flux: vec![1.25; n_vox],
+                rr_flux: vec![],
+                rr_rate: vec![],
+            },
         }
     }
 

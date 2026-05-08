@@ -448,6 +448,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_kernels: Vec::new(),
             });
         } else {
             kernels.push(xs_provider::load_nuclide(

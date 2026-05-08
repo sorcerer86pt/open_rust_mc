@@ -284,6 +284,10 @@ impl XsProvider for HybridSvdWmpXsProvider {
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         self.inner.thermal_scattering(nuclide_idx)
     }
+
+    fn partial_xs(&self, nuclide_idx: usize, energy: f64, mt: u32) -> Option<f64> {
+        self.inner.partial_xs(nuclide_idx, energy, mt)
+    }
 }
 
 // ── ACE + WMP hybrid (industry baseline) ───────────────────────────────
@@ -493,5 +497,9 @@ impl XsProvider for HybridTableWmpXsProvider {
 
     fn thermal_scattering(&self, nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         self.inner.thermal_scattering(nuclide_idx)
+    }
+
+    fn partial_xs(&self, nuclide_idx: usize, energy: f64, mt: u32) -> Option<f64> {
+        self.inner.partial_xs(nuclide_idx, energy, mt)
     }
 }

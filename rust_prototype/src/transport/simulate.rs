@@ -21,7 +21,7 @@ use crate::thermal::ThermalScatteringData;
 use crate::transport::material::Material;
 use crate::transport::particle::{FissionBank, FissionSite, Particle};
 use crate::transport::rng::Rng;
-use crate::transport::tally::{ParticleTallies, Tallies};
+use crate::transport::tally::{BatchTallies, ParticleTallies, Tallies};
 
 /// Maximum nuclides per material for stack-allocated XS buffers.
 /// Godiva has 3, the basic PWR pin cell has 8, the actinides-chain
@@ -425,6 +425,20 @@ pub trait XsProvider: Send + Sync {
     fn delayed_nu_bar_at(&self, _nuclide_idx: usize, _energy: f64) -> f64 {
         0.0
     }
+
+    /// Microscopic XS for a single ENDF MT not exposed via [`MicroXs`]
+    /// — used by the per-MT reaction-rate tally so granular channels
+    /// (e.g. MT=103 (n,p), MT=107 (n,α)) can be reported separately
+    /// without changing the hot-path lookup contract. Returns `None`
+    /// when the provider does not stock that MT for `nuclide_idx`,
+    /// or when the requested MT is already covered by a `MicroXs`
+    /// field (caller is expected to read it from there).
+    ///
+    /// Default `None` keeps `ConstantXs` and other test providers
+    /// inert. Real providers override.
+    fn partial_xs(&self, _nuclide_idx: usize, _energy: f64, _mt: u32) -> Option<f64> {
+        None
+    }
 }
 
 /// Simple constant cross-section provider for testing.
@@ -480,26 +494,10 @@ pub struct BatchResult {
     /// Surface-tracking only — under delta tracking the path crosses
     /// material boundaries silently, so this field stays 0.
     pub k_track: f64,
-    /// Per-bin J+ (forward) surface current — sum of `particle.weight`
-    /// over crossings with `dir · normal ≥ 0`. Length matches the
-    /// `SimConfig.tallies.surface_current` bin count, or empty when
-    /// the tally is disabled. Net current = `pos - neg`; total = `pos + neg`.
-    pub surface_current_pos: Vec<f64>,
-    /// Per-bin J- (backward) surface current — `dir · normal < 0`.
-    pub surface_current_neg: Vec<f64>,
-    /// Per-voxel track-length flux: Σ_segments w · d (cm·source⁻¹).
-    /// Length = `SimConfig.tallies.mesh_flux.n_voxels()`, or empty
-    /// when the mesh tally is disabled.
-    pub mesh_flux: Vec<f64>,
-    /// Per-cell flux numerator for the reaction-rate tally:
-    /// `Σ_segments w · d`. Length = `n_cells`, or empty when the
-    /// reaction-rate tally is disabled.
-    pub rr_flux: Vec<f64>,
-    /// Per-(cell, xs_idx, mt_slot) rate numerator:
-    /// `Σ_segments w · d · σ_micro,MT(E_local)`. Length =
-    /// `n_cells × n_xs_idx × n_mts`, flat index
-    /// `(c·n_xs_idx + n)·n_mts + m`. Empty when disabled.
-    pub rr_rate: Vec<f64>,
+    /// Reduced per-batch tally output (surface currents, mesh flux,
+    /// reaction-rate numerators). Each `Vec` inside is empty when the
+    /// matching tally is disabled in `SimConfig.tallies`.
+    pub tallies: BatchTallies,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -528,42 +526,15 @@ impl EntropyMesh {
 
     /// Compute Shannon entropy (bits) of the fission-site spatial
     /// distribution on this mesh. Returns `0.0` if the bank is empty.
-    ///
-    /// H = -Σ p_i log_2 p_i, where p_i is the fraction of sites in
-    /// bin i. Upper bound is log_2(n^3).
+    /// Thin wrapper over [`rust_mc_sim::transport::simulate::shannon_entropy_xyz`]
+    /// — the math lives there now; this method just adapts the
+    /// engine's `FissionSite` slice to the position-iterator API.
     pub fn entropy(&self, sites: &[FissionSite]) -> f64 {
-        let total = sites.len();
-        if total == 0 {
-            return 0.0;
-        }
-        let n3 = self.n * self.n * self.n;
-        let mut counts = vec![0u32; n3];
-        let dx = (self.hi[0] - self.lo[0]) / self.n as f64;
-        let dy = (self.hi[1] - self.lo[1]) / self.n as f64;
-        let dz = (self.hi[2] - self.lo[2]) / self.n as f64;
-        let inv_dx = if dx > 0.0 { 1.0 / dx } else { 0.0 };
-        let inv_dy = if dy > 0.0 { 1.0 / dy } else { 0.0 };
-        let inv_dz = if dz > 0.0 { 1.0 / dz } else { 0.0 };
-
-        for s in sites {
-            let ix =
-                (((s.pos.x - self.lo[0]) * inv_dx) as isize).clamp(0, self.n as isize - 1) as usize;
-            let iy =
-                (((s.pos.y - self.lo[1]) * inv_dy) as isize).clamp(0, self.n as isize - 1) as usize;
-            let iz =
-                (((s.pos.z - self.lo[2]) * inv_dz) as isize).clamp(0, self.n as isize - 1) as usize;
-            counts[ix * self.n * self.n + iy * self.n + iz] += 1;
-        }
-
-        let inv_n = 1.0 / total as f64;
-        let mut h = 0.0_f64;
-        for &c in &counts {
-            if c > 0 {
-                let p = c as f64 * inv_n;
-                h -= p * p.log2();
-            }
-        }
-        h
+        rust_mc_sim::transport::simulate::shannon_entropy_xyz(
+            sites.iter().map(|s| [s.pos.x, s.pos.y, s.pos.z]),
+            (self.lo, self.hi),
+            self.n,
+        )
     }
 }
 
@@ -1022,6 +993,15 @@ fn transport_particle<XS: XsProvider>(
                         }
                         let base = (cell_idx * rr.n_xs_idx + xs_idx) * n_mts;
                         for (m, &mt) in rr.mts.iter().enumerate() {
+                            // MTs covered by MicroXs go straight from
+                            // the cached lookup. MTs not in MicroXs
+                            // (notably MT=103 (n,p), MT=107 (n,α))
+                            // route through `partial_xs`, which the
+                            // SVD and Table providers populate from
+                            // their own per-MT kernels. `partial_xs`
+                            // returning None means the channel isn't
+                            // stocked for this nuclide → contribute 0
+                            // (e.g. light nuclides have no (n,α)).
                             let sigma = match mt {
                                 18 => micro_xs[i].fission,
                                 102 => micro_xs[i].capture,
@@ -1029,7 +1009,9 @@ fn transport_particle<XS: XsProvider>(
                                 17 => micro_xs[i].n3n,
                                 2 => micro_xs[i].elastic,
                                 4 => micro_xs[i].inelastic,
-                                _ => 0.0,
+                                other => xs_provider
+                                    .partial_xs(xs_idx, particle.energy, other)
+                                    .unwrap_or(0.0),
                             };
                             result.tallies.rr_rate[base + m] += w_d * sigma;
                         }
@@ -1947,7 +1929,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             source_bank.iter().enumerate().map(transport_one).collect()
         };
 
-        // Reduce: merge per-particle results
+        // Reduce: merge per-particle results.
         let mut fission_bank = FissionBank::new();
         let mut leakage = 0_u32;
         let mut absorptions = 0_u32;
@@ -1958,14 +1940,9 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         let mut captures_by_cell = vec![0.0_f64; cells.len()];
         let mut photon_events: Vec<PhotonSourceEvent> = Vec::new();
         let mut track_length_sum = 0.0_f64;
-        let n_surf_bins = config.tallies.n_surface_bins();
-        let n_mesh_voxels = config.tallies.n_mesh_voxels();
-        let (rr_flux_size, rr_rate_size) = config.tallies.reaction_rate_size();
-        let mut surface_current_pos = vec![0.0_f64; n_surf_bins];
-        let mut surface_current_neg = vec![0.0_f64; n_surf_bins];
-        let mut mesh_flux = vec![0.0_f64; n_mesh_voxels];
-        let mut rr_flux_acc = vec![0.0_f64; rr_flux_size];
-        let mut rr_rate_acc = vec![0.0_f64; rr_rate_size];
+        // All five tally Vecs in one struct; `accumulate` is a no-op
+        // for any disabled channel since both sides are empty.
+        let mut batch_tallies = BatchTallies::new(&config.tallies);
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1982,29 +1959,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 }
             }
             photon_events.extend(pr.photon_events);
-            // Reduce per-particle tallies into batch totals. When the
-            // tally is disabled both vecs are empty so `zip` is a no-op.
-            for (b, v) in surface_current_pos
-                .iter_mut()
-                .zip(pr.tallies.surface_current_pos.iter())
-            {
-                *b += v;
-            }
-            for (b, v) in surface_current_neg
-                .iter_mut()
-                .zip(pr.tallies.surface_current_neg.iter())
-            {
-                *b += v;
-            }
-            for (b, v) in mesh_flux.iter_mut().zip(pr.tallies.mesh_flux.iter()) {
-                *b += v;
-            }
-            for (b, v) in rr_flux_acc.iter_mut().zip(pr.tallies.rr_flux.iter()) {
-                *b += v;
-            }
-            for (b, v) in rr_rate_acc.iter_mut().zip(pr.tallies.rr_rate.iter()) {
-                *b += v;
-            }
+            batch_tallies.accumulate(&pr.tallies);
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -2025,11 +1980,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             captures_by_cell,
             photon_events,
             k_track,
-            surface_current_pos,
-            surface_current_neg,
-            mesh_flux,
-            rr_flux: rr_flux_acc,
-            rr_rate: rr_rate_acc,
+            tallies: batch_tallies,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
@@ -2887,7 +2838,7 @@ mod tests {
         let total: f64 = results
             .iter()
             .filter(|r| r.active)
-            .map(|r| r.mesh_flux.iter().sum::<f64>())
+            .map(|r| r.tallies.mesh_flux.iter().sum::<f64>())
             .sum();
         assert!(
             total > 0.0,
@@ -2900,7 +2851,7 @@ mod tests {
         // populated, so the threshold is forgiving but conclusive.)
         let mut populated = 0;
         for r in results.iter().filter(|r| r.active) {
-            for &v in &r.mesh_flux {
+            for &v in &r.tallies.mesh_flux {
                 if v > 0.0 {
                     populated += 1;
                     break;
@@ -2946,8 +2897,8 @@ mod tests {
         let mut total_pos = 0.0_f64;
         let mut total_neg = 0.0_f64;
         for r in results.iter().filter(|r| r.active) {
-            total_pos += r.surface_current_pos.iter().sum::<f64>();
-            total_neg += r.surface_current_neg.iter().sum::<f64>();
+            total_pos += r.tallies.surface_current_pos.iter().sum::<f64>();
+            total_neg += r.tallies.surface_current_neg.iter().sum::<f64>();
         }
         assert!(
             total_pos + total_neg > 0.0,

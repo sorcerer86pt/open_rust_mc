@@ -51,7 +51,7 @@ pub fn voxel_flux_per_source(batches: &[BatchResult], mesh: &MeshFluxTally) -> V
         n_active += 1;
         // Track lengths per voxel summed by the engine across all
         // particles in this batch — dimension `cm × weight`.
-        for (out, &v) in flux.iter_mut().zip(r.mesh_flux.iter()) {
+        for (out, &v) in flux.iter_mut().zip(r.tallies.mesh_flux.iter()) {
             *out += v;
         }
         // Source-particle count per batch. The engine writes
@@ -158,13 +158,15 @@ pub fn collapsed_reaction_xs(
         if !b.active {
             continue;
         }
-        if b.rr_flux.len() != n_cells || b.rr_rate.len() != n_cells * stride {
+        if b.tallies.rr_flux.len() != n_cells
+            || b.tallies.rr_rate.len() != n_cells * stride
+        {
             continue;
         }
         n_active += 1;
-        flux_sum += b.rr_flux[target_cell];
+        flux_sum += b.tallies.rr_flux[target_cell];
         let base = target_cell * stride;
-        for (acc, &v) in rate_sum.iter_mut().zip(&b.rr_rate[base..base + stride]) {
+        for (acc, &v) in rate_sum.iter_mut().zip(&b.tallies.rr_rate[base..base + stride]) {
             *acc += v;
         }
     }
@@ -205,11 +207,13 @@ mod tests {
             captures_by_cell: vec![],
             photon_events: vec![],
             k_track: 0.0,
-            surface_current_pos: vec![],
-            surface_current_neg: vec![],
-            mesh_flux,
-            rr_flux: vec![],
-            rr_rate: vec![],
+            tallies: crate::transport::tally::BatchTallies {
+                surface_current_pos: vec![],
+                surface_current_neg: vec![],
+                mesh_flux,
+                rr_flux: vec![],
+                rr_rate: vec![],
+            },
         }
     }
 

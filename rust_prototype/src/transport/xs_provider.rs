@@ -100,6 +100,15 @@ pub struct NuclideKernels {
     /// capture / fission / inelastic γ spectrum at each neutron
     /// reaction site for coupled neutron-photon tallies.
     pub photon_products: Vec<(u32, hdf5_reader::PhotonProduct)>,
+    /// Partial reaction kernels for MTs not exposed via `MicroXs`.
+    /// Currently populated for MT=103 (n,p) and MT=107 (n,α) when the
+    /// HDF5 file evaluates them — used by the per-MT reaction-rate
+    /// tally for granular reporting (the (n,p)/(n,α) channels are
+    /// *also* folded into `MicroXs.capture` via the `total - partials`
+    /// residual so collision sampling is unchanged). Empty when the
+    /// nuclide has no thresholded charged-particle channels (most
+    /// light isotopes).
+    pub partial_kernels: Vec<(u32, ReactionKernel)>,
 }
 
 /// A discrete inelastic level with its cross-section kernel and Q-value.
@@ -456,6 +465,12 @@ impl XsProvider for SvdXsProvider {
     fn photon_products(&self, nuclide_idx: usize) -> &[(u32, hdf5_reader::PhotonProduct)] {
         &self.nuclides[nuclide_idx].photon_products
     }
+
+    fn partial_xs(&self, nuclide_idx: usize, energy: f64, mt: u32) -> Option<f64> {
+        let nuc = self.nuclides.get(nuclide_idx)?;
+        let (_, kernel) = nuc.partial_kernels.iter().find(|(m, _)| *m == mt)?;
+        Some(kernel.lookup(energy).max(0.0))
+    }
 }
 
 /// Build an SVD kernel for one reaction of one nuclide from HDF5 data.
@@ -520,6 +535,39 @@ fn build_kernel_from_reader(
 ) -> Option<ReactionKernel> {
     let data = reader.read_reaction(mt).ok()?;
     build_kernel_from_data(&data, svd_rank, temp_idx, shared_grid, &reader.temperatures)
+}
+
+/// MTs whose XS is loaded as a partial-kernel side table for the
+/// per-MT reaction-rate tally — granular reporting of charged-particle
+/// emission channels that ENDF folds into "absorption" alongside
+/// MT=102 (n,γ).
+///
+/// MT=103 = (n,p) — proton emission (threshold reaction).
+/// MT=107 = (n,α) — alpha emission (threshold reaction).
+///
+/// Both are absorption-equivalent for the neutron (it disappears),
+/// already accounted for in `MicroXs.capture` via the
+/// `total - partials` residual fold; the side kernels only exist so
+/// the tally hook can split them out for reporting.
+pub const TALLY_PARTIAL_MTS: &[u32] = &[103, 107];
+
+/// Build SVD partial kernels for `TALLY_PARTIAL_MTS`. Skips MTs the
+/// HDF5 file does not evaluate (light isotopes have no (n,α)). Empty
+/// vector when no MT in the list is evaluated.
+fn build_partial_kernels<F>(
+    reader: &NuclideFileReader,
+    builder: F,
+) -> Vec<(u32, ReactionKernel)>
+where
+    F: Fn(&NuclideFileReader, u32) -> Option<ReactionKernel>,
+{
+    let mut out = Vec::new();
+    for &mt in TALLY_PARTIAL_MTS {
+        if let Some(k) = builder(reader, mt) {
+            out.push((mt, k));
+        }
+    }
+    out
 }
 
 /// Build a ReactionKernel from a (possibly synthetic) NuclideData.
@@ -1029,6 +1077,7 @@ pub fn load_nuclide_with_policy(
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_kernels: Vec::new(),
             };
         }
     };
@@ -1254,6 +1303,15 @@ pub fn load_nuclide_with_policy(
 
     let pointwise_xs = reader.compute_pointwise_xs(temp_idx);
 
+    // Partial kernels for MTs not exposed via MicroXs. Loaded only for
+    // tally-relevant channels — currently MT=103 (n,p) and MT=107
+    // (n,α). Both are threshold reactions; lookup yields 0 below the
+    // threshold even after SVD reconstruction. Light isotopes return
+    // None and contribute an empty entry.
+    let partial_kernels = build_partial_kernels(&reader, |r, mt| {
+        build_kernel_from_reader(r, mt, svd_rank, temp_idx, &shared_grid)
+    });
+
     NuclideKernels {
         elastic,
         total_table,
@@ -1280,6 +1338,7 @@ pub fn load_nuclide_with_policy(
         n3n_edist,
         urr_tables,
         photon_products: load_photon_products(&reader),
+        partial_kernels,
     }
 }
 
@@ -1324,6 +1383,12 @@ pub struct NuclideTableData {
     /// capture / fission / inelastic γ spectrum at each neutron
     /// reaction site for coupled neutron-photon tallies.
     pub photon_products: Vec<(u32, hdf5_reader::PhotonProduct)>,
+    /// Partial pointwise tables for MTs not exposed via `MicroXs`.
+    /// Currently populated for MT=103 (n,p) and MT=107 (n,α) when the
+    /// HDF5 file evaluates them — used by the per-MT reaction-rate
+    /// tally for granular reporting. Empty when the nuclide has no
+    /// thresholded charged-particle channels.
+    pub partial_tables: Vec<(u32, StochTempTable)>,
 }
 
 impl NuclideTableData {
@@ -1579,10 +1644,35 @@ impl XsProvider for TableXsProvider {
     fn photon_products(&self, nuclide_idx: usize) -> &[(u32, hdf5_reader::PhotonProduct)] {
         &self.nuclides[nuclide_idx].photon_products
     }
+
+    fn partial_xs(&self, nuclide_idx: usize, energy: f64, mt: u32) -> Option<f64> {
+        let nuc = self.nuclides.get(nuclide_idx)?;
+        let (_, table) = nuc.partial_tables.iter().find(|(m, _)| *m == mt)?;
+        Some(table.lookup(energy).max(0.0))
+    }
 }
 
 /// Build a pointwise table for one reaction using a shared energy grid.
 /// Returns a single-temp `StochTempTable` (no stochastic pick).
+/// Build pointwise partial tables for `TALLY_PARTIAL_MTS` (analogue of
+/// `build_partial_kernels` for the table provider). Skips MTs the
+/// HDF5 file does not evaluate.
+fn build_partial_tables<F>(
+    reader: &NuclideFileReader,
+    builder: F,
+) -> Vec<(u32, StochTempTable)>
+where
+    F: Fn(&NuclideFileReader, u32) -> Option<StochTempTable>,
+{
+    let mut out = Vec::new();
+    for &mt in TALLY_PARTIAL_MTS {
+        if let Some(t) = builder(reader, mt) {
+            out.push((mt, t));
+        }
+    }
+    out
+}
+
 fn build_table_from_reader(
     reader: &NuclideFileReader,
     mt: u32,
@@ -1700,6 +1790,7 @@ pub fn load_nuclide_table(
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_tables: Vec::new(),
             };
         }
     };
@@ -1811,6 +1902,10 @@ pub fn load_nuclide_table(
         println!("    MT=102 (capture)");
     }
 
+    let partial_tables = build_partial_tables(&reader, |r, mt| {
+        build_table_from_reader(r, mt, temp_idx, &shared_grid)
+    });
+
     NuclideTableData {
         elastic,
         total_table,
@@ -1833,6 +1928,7 @@ pub fn load_nuclide_table(
         n3n_edist,
         urr_tables,
         photon_products: load_photon_products(&reader),
+        partial_tables,
     }
 }
 
@@ -1885,6 +1981,7 @@ pub fn load_nuclide_table_at_temp(
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_tables: Vec::new(),
             };
         }
     };
@@ -2008,6 +2105,10 @@ pub fn load_nuclide_table_at_temp(
     }
     let capture = build_stoch_table_from_reader(&reader, 102, target_temp, &shared_grid);
 
+    let partial_tables = build_partial_tables(&reader, |r, mt| {
+        build_stoch_table_from_reader(r, mt, target_temp, &shared_grid)
+    });
+
     NuclideTableData {
         elastic,
         total_table,
@@ -2030,6 +2131,7 @@ pub fn load_nuclide_table_at_temp(
         n3n_edist,
         urr_tables,
         photon_products: load_photon_products(&reader),
+        partial_tables,
     }
 }
 
@@ -2087,6 +2189,7 @@ pub fn load_nuclide_at_temp(
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_kernels: Vec::new(),
             };
         }
     };
@@ -2239,6 +2342,10 @@ pub fn load_nuclide_at_temp(
             .collect::<Vec<f64>>()
     });
 
+    let partial_kernels = build_partial_kernels(&reader, |r, mt| {
+        build_kernel_at_temp(r, mt, svd_rank, target_temp, &shared_grid)
+    });
+
     NuclideKernels {
         elastic,
         total_table,
@@ -2266,6 +2373,7 @@ pub fn load_nuclide_at_temp(
         n3n_edist,
         urr_tables,
         photon_products: load_photon_products(&reader),
+        partial_kernels,
     }
 }
 
@@ -2690,5 +2798,78 @@ mod tests {
                 w[1],
             );
         }
+    }
+
+    /// Build a stub `NuclideKernels` carrying only the partial-kernel
+    /// entries needed for the per-MT tally test. Other fields stay at
+    /// their natural empty / None defaults — the partial-XS lookup
+    /// path doesn't touch them.
+    fn make_nuclide_with_partials(partials: Vec<(u32, ReactionKernel)>) -> NuclideKernels {
+        NuclideKernels {
+            elastic: None,
+            total_table: None,
+            total_xs_raw: None,
+            missing_xs: None,
+            pointwise_xs: None,
+            inelastic: None,
+            n2n: None,
+            n3n: None,
+            fission: None,
+            capture: None,
+            awr: 1.0,
+            nu_bar_const: 0.0,
+            nu_bar_table: None,
+            delayed_nu_bar_table: None,
+            discrete_levels: vec![],
+            inelastic_cdf: None,
+            discrete_level_angles: vec![],
+            has_continuum_inelastic: false,
+            elastic_angle: None,
+            fission_energy_dist: None,
+            inelastic_continuum_edist: None,
+            n2n_edist: None,
+            n3n_edist: None,
+            urr_tables: None,
+            photon_products: vec![],
+            partial_kernels: partials,
+        }
+    }
+
+    /// `partial_xs` reports the synthetic 1/√E law for MT=103, returns
+    /// `None` for an MT we did not stock, and is robust to an unknown
+    /// nuclide index. This is the contract the per-MT reaction-rate
+    /// tally hook in `simulate.rs` relies on.
+    #[test]
+    fn svd_partial_xs_dispatches_by_mt() {
+        use crate::transport::simulate::XsProvider;
+
+        let grid = vec![0.001_f64, 0.01, 0.1, 1.0, 10.0];
+        let np_kernel = make_inv_sqrt_kernel(grid.clone(), 5.0);
+        let nuc = make_nuclide_with_partials(vec![(103, np_kernel)]);
+
+        let provider = SvdXsProvider {
+            nuclides: vec![nuc],
+            thermal: vec![None],
+        };
+
+        // On-grid MT=103 lookup hits the σ = 5/√E law exactly.
+        for &e in &grid {
+            let sigma = provider.partial_xs(0, e, 103).expect("MT=103 stocked");
+            let expected = 5.0_f64 / e.sqrt();
+            assert!(
+                (sigma - expected).abs() / expected < 1e-12,
+                "partial_xs(0, {e}, 103) = {sigma}, expected {expected}",
+            );
+        }
+
+        // MT=107 was not stocked — must return None so the tally hook
+        // contributes 0 for nuclides that don't evaluate (n,α).
+        assert!(provider.partial_xs(0, 1.0, 107).is_none());
+
+        // Unknown MT — same contract.
+        assert!(provider.partial_xs(0, 1.0, 999).is_none());
+
+        // Out-of-range nuclide index — must not panic, must return None.
+        assert!(provider.partial_xs(99, 1.0, 103).is_none());
     }
 }

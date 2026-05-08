@@ -164,6 +164,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, f64) {
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: vec![],
+                partial_kernels: vec![],
             });
             continue;
         }

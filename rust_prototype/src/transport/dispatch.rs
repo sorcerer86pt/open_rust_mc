@@ -201,9 +201,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 captures_by_cell: vec![],
                 photon_events: vec![],
                 k_track: 0.0,
-                surface_current_pos: vec![],
-                surface_current_neg: vec![],
-                mesh_flux: vec![],
+                tallies: crate::transport::tally::BatchTallies::default(),
             });
 
             // Normalize fission bank → next-batch source.

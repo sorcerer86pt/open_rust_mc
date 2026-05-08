@@ -357,7 +357,7 @@ fn run_multi_seed<XS: XsProvider>(
                 continue;
             }
             n_active_calib += 1;
-            for (b, v) in flux.iter_mut().zip(r.mesh_flux.iter()) {
+            for (b, v) in flux.iter_mut().zip(r.tallies.mesh_flux.iter()) {
                 *b += v;
             }
         }
@@ -700,6 +700,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_kernels: Vec::new(),
             });
         } else {
             let offset_here = resolve_offset_for(nuc_idx, args);
@@ -918,6 +919,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
                 n3n_edist: None,
                 urr_tables: None,
                 photon_products: Vec::new(),
+                partial_tables: Vec::new(),
             });
         } else {
             match resolve_offset_for(nuc_idx, args) {

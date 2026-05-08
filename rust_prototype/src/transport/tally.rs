@@ -338,6 +338,68 @@ impl ParticleTallies {
     }
 }
 
+/// Batch-reduced tally output. Same shape as [`ParticleTallies`],
+/// but semantically distinct — these are the per-batch sums of
+/// every particle's accumulator, written into [`BatchResult`] for
+/// downstream consumers (statepoint serialiser, depletion driver,
+/// per-cell weight-window builder, …).
+///
+/// Every `Vec` is **sized to zero** when the corresponding tally is
+/// disabled in [`Tallies`]; consumers can probe `.is_empty()` instead
+/// of carrying parallel `Option`s. The `accumulate` helper reduces
+/// a per-particle tally into the batch sum element-wise; the
+/// `len()`-vs-zero gate makes it a no-op for disabled channels.
+#[derive(Debug, Clone, Default)]
+pub struct BatchTallies {
+    /// J⁺ per surface tally bin, summed across the batch.
+    pub surface_current_pos: Vec<f64>,
+    /// J⁻ per surface tally bin, summed across the batch.
+    pub surface_current_neg: Vec<f64>,
+    /// Per-voxel track-length flux, summed across the batch.
+    pub mesh_flux: Vec<f64>,
+    /// Per-cell flux numerator for the reaction-rate tally.
+    pub rr_flux: Vec<f64>,
+    /// Per-(cell, xs_idx, mt_slot) rate numerator.
+    pub rr_rate: Vec<f64>,
+}
+
+impl BatchTallies {
+    /// Allocate zero-initialised buffers sized for the active tallies
+    /// in `cfg`. Disabled tallies get empty vectors so the accumulator
+    /// loops below short-circuit on `len()` without an extra branch.
+    pub fn new(cfg: &Tallies) -> Self {
+        let (rr_flux_size, rr_rate_size) = cfg.reaction_rate_size();
+        Self {
+            surface_current_pos: vec![0.0; cfg.n_surface_bins()],
+            surface_current_neg: vec![0.0; cfg.n_surface_bins()],
+            mesh_flux: vec![0.0; cfg.n_mesh_voxels()],
+            rr_flux: vec![0.0; rr_flux_size],
+            rr_rate: vec![0.0; rr_rate_size],
+        }
+    }
+
+    /// Element-wise add a per-particle tally. Skips channels where
+    /// either side is empty (disabled tally) so this stays cheap on
+    /// the hot reduction path.
+    pub fn accumulate(&mut self, p: &ParticleTallies) {
+        for (b, v) in self.surface_current_pos.iter_mut().zip(&p.surface_current_pos) {
+            *b += v;
+        }
+        for (b, v) in self.surface_current_neg.iter_mut().zip(&p.surface_current_neg) {
+            *b += v;
+        }
+        for (b, v) in self.mesh_flux.iter_mut().zip(&p.mesh_flux) {
+            *b += v;
+        }
+        for (b, v) in self.rr_flux.iter_mut().zip(&p.rr_flux) {
+            *b += v;
+        }
+        for (b, v) in self.rr_rate.iter_mut().zip(&p.rr_rate) {
+            *b += v;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
