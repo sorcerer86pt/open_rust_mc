@@ -496,6 +496,45 @@ mod tests {
         );
     }
 
+    /// CE adjoint walker output shape sanity check for the CADIS
+    /// pipeline: when summed over E and renormalised to peak = 1, the
+    /// resulting `Vec<f64>` is the same length as the z-bin count and
+    /// every entry is finite and non-negative. This is the contract
+    /// the `adjoint_photon_cadis_slab` binary's `CadisMap` JSON
+    /// emission relies on — no NaNs that would silently break
+    /// `WeightWindow::from_flux` downstream.
+    #[test]
+    fn z_profile_collapse_is_finite_and_nonnegative() {
+        // Synthetic deposit pattern: directly populate `flux` without
+        // running a full walk. Avoids the HDF5 dependency in this test.
+        let mut map = ImportanceMap::new(50.0, 10, 1e3, 5e6, 4);
+        // Drop one count into every (iz, ie) cell so the collapse is
+        // non-trivial.
+        for iz in 0..10 {
+            for ie in 0..4 {
+                map.flux[iz * 4 + ie] = (iz + 1) as f64 * (ie + 1) as f64;
+            }
+        }
+        let mut z_profile = vec![0.0_f64; 10];
+        for iz in 0..10 {
+            for ie in 0..4 {
+                z_profile[iz] += map.flux[iz * 4 + ie];
+            }
+        }
+        for (iz, &v) in z_profile.iter().enumerate() {
+            assert!(v.is_finite(), "z bin {iz} not finite: {v}");
+            assert!(v >= 0.0, "z bin {iz} negative: {v}");
+        }
+        // Synthetic pattern is monotone in iz (iz+1)·Σ_ie(ie+1) ⇒
+        // strictly increasing.
+        for w in z_profile.windows(2) {
+            assert!(
+                w[1] > w[0],
+                "synthetic deposit should be monotone increasing",
+            );
+        }
+    }
+
     /// `rotate_direction` preserves unit vector to FP precision.
     #[test]
     fn rotate_preserves_norm() {

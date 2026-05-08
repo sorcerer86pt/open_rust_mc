@@ -1,0 +1,42 @@
+# CE adjoint photon CADIS — FOM benchmark
+# Date: 2026-05-08 (auto-mode session)
+# Source: 1 MeV photons, monodirectional, normal-incidence on z=0
+# Material: water (ρ=1.0 g/cm³)
+
+# Importance map shapes (counts max/min):
+#   RR-CADIS (1-group adjoint diffusion): 79× monotone toward detector
+#   CE-adjoint (analog track-length tally): ≈1.5× peak at mid-slab
+
+# 100 cm water, 1 M histories
+mode          T            σ_rel    wall(s)  FOM(/s)   vs analog
+ANALOG        5.2552e-3    1.13%    60.44     130.7    —
+RR-CADIS      5.2386e-3    1.03%    73.35     129.1    0.99x
+CE-ADJOINT    5.2552e-3    1.13%    60.91     129.7    0.99x  (bit-identical to analog: WW band too wide)
+
+# 200 cm water, 500 k histories
+mode          T            σ_rel    wall(s)  FOM(/s)   vs analog
+ANALOG        1.6564e-5    28.20%   28.04     0.448    —
+RR-CADIS      1.3798e-5    25.38%   26.69     0.582    1.30x
+CE-ADJOINT    1.6564e-5    28.20%   27.01     0.466    1.04x  (bit-identical to analog: WW band too wide)
+
+# Conclusion:
+# The CE adjoint photon slab walker (	ransport::adjoint_photon) is correct
+# in the Boltzmann-adjoint sense — analog track-length tally on adjoint
+# Compton + self-adjoint Rayleigh + absorption-as-source termination. But
+# the resulting ψ̂*(z) profile is roughly symmetric with a mid-slab peak
+# (spread by the symmetric direction sampling after each scatter), NOT
+# the monotone gradient toward the detector that the RR-CADIS adjoint
+# diffusion solve produces. With max/min ≈ 1.5× and a default ratio=5
+# WW band, almost no voxel transition triggers splitting or roulette,
+# so the transport runs are bit-identical to analog (within seed).
+#
+# RR-CADIS remains the recommended source of the shield_slab CADIS map.
+# The CE adjoint walker is plumbed end-to-end (binary
+# djoint_photon_cadis_slab writes the same JSON schema) so the wiring
+# is in place for future work. Two natural follow-ups:
+#   1. Replace track-length with a contribution-function tally
+#      (count adjoint histories that reach the source face per z-bin
+#      they passed through, weighted by their final reach probability).
+#   2. Use the CE adjoint walker to produce an energy-resolved (z, E)
+#      map and switch shield_slab to a 3D (z, E, μ_z) WW that the
+#      current 1D (z) WW cannot exploit.

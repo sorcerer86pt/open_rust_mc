@@ -400,6 +400,46 @@ mod tests {
         assert!((raw - with_excl).abs() / raw.max(1e-30) < 1e-15);
     }
 
+    /// Deep-penetration sanity: at ~21 mfp the per-collision NEE
+    /// kernel must stay finite and positive. Previous numerical
+    /// glitches (e.g. underflow in `exp(-tau)` from `f64::INFINITY`
+    /// when `mu_z` flips negative inside the integrand without the
+    /// `1[mu_z > 0]` gate) produced silent zero / NaN at deep z. This
+    /// is the regression fence for task #5: NEE has to keep working
+    /// at 300 cm water, where analog gives zero transmitted in any
+    /// finite-history Monte Carlo.
+    #[test]
+    fn compton_forward_transmission_finite_at_deep_penetration() {
+        let mat = match try_load_water_material() {
+            Some(m) => m,
+            None => return,
+        };
+        // 300 cm water at 1 MeV: ~21 mfp. Pick a collision near the
+        // detector face — the kernel here drives the dominant
+        // last-only estimator contribution that delivers FOM > 0.1
+        // where analog gives 0.
+        let v = compton_forward_transmission(
+            &mat,
+            1.0e6,
+            295.0,
+            300.0,
+            MU_AXIAL_FORWARD,
+            NEE_NO_EXCLUSION,
+        );
+        assert!(v.is_finite(), "NEE underflowed to non-finite at deep z: {v}");
+        assert!(
+            v > 0.0,
+            "NEE returned zero contribution at z=295/300 — coverage gap",
+        );
+        // Order-of-magnitude bound: ~0.5 × E_in × exp(-Σ_t · 5 cm) ≈
+        // 0.5 × 1e6 × exp(-0.353) ≈ 3.5e5 eV. Loose envelope to
+        // tolerate 16-point GL truncation + bound-correction shape.
+        assert!(
+            v > 1.0e3 && v < 1.0e6,
+            "NEE at z=295/300 outside reasonable envelope: {v}",
+        );
+    }
+
     #[test]
     fn compton_forward_transmission_is_zero_past_detector() {
         let mat = match try_load_water_material() {
