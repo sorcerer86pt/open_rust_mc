@@ -2,6 +2,7 @@
 
 pub mod dispatch;
 pub mod hybrid_xs;
+pub mod kinetics;
 pub mod material;
 pub mod nuclides;
 pub mod particle;

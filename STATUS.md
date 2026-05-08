@@ -65,6 +65,21 @@ bindings (`-p open-rust-mc-py`) clean.
   pitch-sweep moderation curve.
 - Delayed-neutron yields ν_d(E) loaded per nuclide.
 
+### Time-dependent kinetics
+- **Point-kinetics** (`transport::kinetics`) with 6-group
+  delayed-neutron precursors. Crank-Nicolson 7×7 ODE solver
+  (A-stable on the prompt-mode stiffness). Keepin / Hetrick-Roberts
+  six-group constants for U-235 thermal, U-238 fast, Pu-239 thermal
+  fission shipped as constants; `blend()` combines weighted nuclide
+  contributions for mixed cores. Closed-form `prompt_jump_ratio`
+  and `inhour_period` (Newton on the inhour equation) for analytic
+  cross-check. Demo binary `point_kinetics_demo` runs step / ramp /
+  scram reactivity profiles, emits CSV. Validation: equilibrium is
+  a fixed point (1e-6 drift over 1 s); prompt-jump matches analytic
+  to <5 %; **late-time period at ρ=50 ¢ matches inhour equation
+  to −0.37 %** (`outputs/pk_step_50c.csv` + the validation in
+  `scripts/`); 10 unit tests green.
+
 ### Transport
 - Eigenvalue power iteration with rayon parallel transport.
 - Surface tracking and Woodcock delta tracking, auto-detected
