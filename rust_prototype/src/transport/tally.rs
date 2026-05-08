@@ -192,6 +192,90 @@ impl MeshFluxTally {
     }
 }
 
+/// Per-(cell, xs_idx, MT) reaction-rate tally that lets the depletion
+/// driver collapse `<σ_i,MT> = ∫ σ(E) φ(E) dE / ∫ φ(E) dE` from the
+/// actual cell flux spectrum, instead of consuming the
+/// thermal-spectrum one-group XS shipped in the chain JSON.
+///
+/// Track-length form. Per Woodcock-segment of length `d` at energy
+/// `E` in cell `c` with weight `w`:
+///   - flux contribution per cell:           `w · d`
+///   - rate contribution per (cell, nuc, mt): `w · d · σ_micro,mt(E, nuc)`
+/// Collapse: `<σ_micro,mt>_c = Σ rate / Σ flux`. Standard SCALE /
+/// Serpent / OpenMC approach.
+///
+/// Storage layout: flat `n_cells × n_xs_idx × n_mts` for the rate
+/// numerator; flat `n_cells` for the flux denominator. The `mts`
+/// vector (e.g. `[18, 102, 16, 17]`) drives which channels are
+/// tallied; lookup converts an MT to a slot via `mts.iter().position`.
+#[derive(Debug, Clone)]
+pub struct ReactionRateTally {
+    pub n_cells: usize,
+    pub n_xs_idx: usize,
+    pub mts: Vec<u32>,
+    /// Slot count per (cell, nuc) — equal to `mts.len()`.
+    pub n_mts: usize,
+    /// `[c]: Σ_segments w · d`
+    pub flux_w_d: Vec<f64>,
+    /// `[(c, nuc, mt)]: Σ_segments w · d · σ_micro,mt`
+    pub rate_w_d_sigma: Vec<f64>,
+}
+
+impl ReactionRateTally {
+    pub fn new(n_cells: usize, n_xs_idx: usize, mts: Vec<u32>) -> Self {
+        let n_mts = mts.len();
+        Self {
+            n_cells,
+            n_xs_idx,
+            mts,
+            n_mts,
+            flux_w_d: vec![0.0; n_cells],
+            rate_w_d_sigma: vec![0.0; n_cells * n_xs_idx * n_mts.max(1)],
+        }
+    }
+
+    /// Linear index for (cell, xs_idx, mt_slot).
+    #[inline]
+    pub fn linear(&self, cell: usize, xs_idx: usize, mt_slot: usize) -> Option<usize> {
+        if cell >= self.n_cells || xs_idx >= self.n_xs_idx || mt_slot >= self.n_mts {
+            return None;
+        }
+        Some((cell * self.n_xs_idx + xs_idx) * self.n_mts + mt_slot)
+    }
+
+    /// Slot index for MT (e.g. 18 → 0). Returns `None` when the MT
+    /// isn't tracked by this tally.
+    #[inline]
+    pub fn mt_slot(&self, mt: u32) -> Option<usize> {
+        self.mts.iter().position(|&m| m == mt)
+    }
+
+    /// Spectrum-averaged microscopic XS for `(cell, xs_idx, mt)` in
+    /// barns. Returns `None` when the cell saw no flux yet (denominator
+    /// zero) or the MT isn't on this tally's list.
+    pub fn collapsed_xs_barns(&self, cell: usize, xs_idx: usize, mt: u32) -> Option<f64> {
+        let mt_slot = self.mt_slot(mt)?;
+        let flux = *self.flux_w_d.get(cell)?;
+        if flux <= 0.0 {
+            return None;
+        }
+        let idx = self.linear(cell, xs_idx, mt_slot)?;
+        let rate = *self.rate_w_d_sigma.get(idx)?;
+        Some(rate / flux)
+    }
+
+    /// Reset all bins to zero. Use between depletion steps so the
+    /// next eigenvalue solve collapses against its own flux spectrum.
+    pub fn reset(&mut self) {
+        for f in &mut self.flux_w_d {
+            *f = 0.0;
+        }
+        for r in &mut self.rate_w_d_sigma {
+            *r = 0.0;
+        }
+    }
+}
+
 /// Bundle of optional tallies passed to the eigenvalue solver. None
 /// of the fields are required; the transport loop tests each `Option`
 /// once per particle and skips the tally otherwise.
@@ -199,6 +283,7 @@ impl MeshFluxTally {
 pub struct Tallies {
     pub surface_current: Option<SurfaceCurrentTally>,
     pub mesh_flux: Option<MeshFluxTally>,
+    pub reaction_rate: Option<ReactionRateTally>,
 }
 
 impl Tallies {
@@ -208,6 +293,16 @@ impl Tallies {
 
     pub fn n_mesh_voxels(&self) -> usize {
         self.mesh_flux.as_ref().map_or(0, |m| m.n_voxels())
+    }
+
+    /// Storage size of the per-particle reaction-rate tally —
+    /// `n_cells + n_cells × n_xs_idx × n_mts` doubles. Returns 0 when
+    /// the reaction-rate tally is disabled.
+    pub fn reaction_rate_size(&self) -> (usize, usize) {
+        match self.reaction_rate.as_ref() {
+            Some(t) => (t.n_cells, t.n_cells * t.n_xs_idx * t.n_mts.max(1)),
+            None => (0, 0),
+        }
     }
 }
 
@@ -222,14 +317,21 @@ pub struct ParticleTallies {
     pub surface_current_neg: Vec<f64>,
     /// Track-length flux per voxel (weight × distance through voxel).
     pub mesh_flux: Vec<f64>,
+    /// Per-cell flux numerator for the reaction-rate tally.
+    pub rr_flux: Vec<f64>,
+    /// Per-(cell, xs_idx, mt_slot) rate numerator for the reaction-rate tally.
+    pub rr_rate: Vec<f64>,
 }
 
 impl ParticleTallies {
     pub fn new(tallies: &Tallies) -> Self {
+        let (rr_flux_size, rr_rate_size) = tallies.reaction_rate_size();
         Self {
             surface_current_pos: vec![0.0; tallies.n_surface_bins()],
             surface_current_neg: vec![0.0; tallies.n_surface_bins()],
             mesh_flux: vec![0.0; tallies.n_mesh_voxels()],
+            rr_flux: vec![0.0; rr_flux_size],
+            rr_rate: vec![0.0; rr_rate_size],
         }
     }
 }

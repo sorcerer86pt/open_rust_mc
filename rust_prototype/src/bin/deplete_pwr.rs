@@ -467,10 +467,21 @@ fn run_eigenvalue(
     Vec<open_rust_mc::transport::simulate::BatchResult>,
     f64,
     MeshFluxTally,
+    open_rust_mc::transport::tally::ReactionRateTally,
 ) {
     let mut tallies = Tallies::default();
     let mesh = MeshFluxTally::from_aabb(fuel_aabb, [4, 4, 1]);
     tallies.mesh_flux = Some(mesh.clone());
+    // Reaction-rate tally for chain-XS spectrum collapse. Mirrors
+    // the geometry's cells × all NUCLIDE_SPECS slots × the four
+    // depletable MTs we track in the chain (fission, capture,
+    // (n,2n), (n,3n)).
+    let rr = open_rust_mc::transport::tally::ReactionRateTally::new(
+        cells.len(),
+        NUCLIDE_SPECS.len(),
+        vec![18, 102, 16, 17],
+    );
+    tallies.reaction_rate = Some(rr.clone());
 
     let cfg = SimConfig {
         batches: args.batches,
@@ -490,7 +501,7 @@ fn run_eigenvalue(
     };
 
     let (results, k_eff) = simulate::run_eigenvalue(&cfg, surfaces, cells, materials, provider);
-    (results, k_eff, mesh)
+    (results, k_eff, mesh, rr)
 }
 
 fn main() {
@@ -514,7 +525,7 @@ fn main() {
     println!();
 
     let provider = load_xs(&args);
-    let chain = match &args.chain {
+    let mut chain = match &args.chain {
         Some(path) => {
             println!("  Loading chain from {}", path.display());
             let spec = ChainSpec::from_file(path).expect("failed to load chain JSON");
@@ -597,7 +608,7 @@ fn main() {
 
     for step in 0..=args.steps {
         let t_run = Instant::now();
-        let (batches, k_eff, mesh) = run_eigenvalue(
+        let (batches, k_eff, mesh, rr_template) = run_eigenvalue(
             &args,
             &surfaces,
             &cells,
@@ -614,6 +625,56 @@ fn main() {
         // volume / N_source), multiplying by Q recovers n/cm²/s.
         let q = power_normalized_source(target_power, f_per_source, E_PER_FISSION_J);
         let phi_physical = phi_per_source * q;
+
+        // **Spectrum-collapsed one-group XS** — overrides the
+        // thermal-spectrum values shipped in `chains/pwr_actinides.json`
+        // with the actual cell-flux-spectrum-averaged σ collapsed
+        // from the eigenvalue's reaction-rate tally. Cell 0 = fuel.
+        // For every (xs_idx, MT) the tally saw, look up the
+        // corresponding ZAID via NUCLIDE_INFO and update the chain's
+        // reaction entry in-place.
+        let collapsed = open_rust_mc::depletion::flux::collapsed_reaction_xs(
+            &batches,
+            &rr_template,
+            /* fuel cell */ 0,
+        );
+        for ((xs_idx, mt), sigma_barns) in &collapsed {
+            // Map xs_idx → ZAID via NUCLIDE_INFO. Use the FIRST
+            // material_idx == 0 (fuel) entry — water-side O-16 is a
+            // separate xs_idx with its own collapsed value but lives
+            // outside the depletion chain (fuel-O is the only one we
+            // chain).
+            let Some(&(zaid, _mat)) = NUCLIDE_INFO.get(*xs_idx) else {
+                continue;
+            };
+            // Skip non-fuel materials' entries.
+            if NUCLIDE_INFO[*xs_idx].1 != 0 {
+                continue;
+            }
+            if let Some(rxn) = chain.reactions.get_mut(&(zaid, *mt)) {
+                rxn.xs_barns = *sigma_barns;
+            }
+        }
+        if step == 0 {
+            // Diagnostic at the first step: print the collapsed
+            // values for the dominant chain reactions so the operator
+            // can spot pathologies (e.g. σ_f(U-235) = 583 b would
+            // indicate the spectrum collapse isn't taking effect).
+            let probe = |zaid: u32, mt: u32, label: &str| {
+                if let Some(rxn) = chain.reactions.get(&(zaid, mt)) {
+                    eprintln!("    {label:<24} ⟨σ⟩ = {:>8.3} b  (chain JSON: see file)", rxn.xs_barns);
+                }
+            };
+            eprintln!("  Spectrum-collapsed one-group XS at fuel cell (step 0):");
+            probe(92235, 18, "U-235  fission");
+            probe(92235, 102, "U-235  capture");
+            probe(92238, 18, "U-238  fission");
+            probe(92238, 102, "U-238  capture");
+            probe(94239, 18, "Pu-239 fission");
+            probe(94239, 102, "Pu-239 capture");
+            probe(54135, 102, "Xe-135 capture");
+            probe(62149, 102, "Sm-149 capture");
+        }
 
         let n_u235 = chain_composition[chain.index_of_zaid(ZAID_U235).unwrap()];
         let n_xe135 = chain_composition[chain.index_of_zaid(ZAID_XE135).unwrap()];
@@ -666,7 +727,7 @@ fn main() {
         let flux_at = |predicted: &[f64]| {
             let mut clone = materials.clone();
             mapping.push(predicted, &mut clone);
-            let (eoc_batches, _eoc_k, eoc_mesh) = run_eigenvalue(
+            let (eoc_batches, _eoc_k, eoc_mesh, _eoc_rr) = run_eigenvalue(
                 &args,
                 &surfaces,
                 &cells,

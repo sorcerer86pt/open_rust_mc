@@ -130,6 +130,61 @@ pub fn mean_fissions_per_source(batches: &[BatchResult]) -> f64 {
     (sum_fissions as f64) / ((n_active * n_per_batch) as f64)
 }
 
+/// Collapse the per-(cell, xs_idx, MT) reaction-rate tally over
+/// active batches into a one-group `<σ>` (barns) per nuclide-MT for
+/// a single target cell. Used by `deplete_pwr` to override the
+/// thermal-spectrum chain XS with the actual cell-flux-spectrum-
+/// averaged value at every depletion step.
+///
+/// Returns a `Vec<((xs_idx, mt), <σ_barns>)>` for every
+/// `(xs_idx, mt)` slot whose tally has non-zero flux.
+pub fn collapsed_reaction_xs(
+    batches: &[crate::transport::simulate::BatchResult],
+    rr_template: &crate::transport::tally::ReactionRateTally,
+    target_cell: usize,
+) -> Vec<((usize, u32), f64)> {
+    let n_xs_idx = rr_template.n_xs_idx;
+    let n_mts = rr_template.n_mts;
+    let n_cells = rr_template.n_cells;
+    let stride = n_xs_idx * n_mts;
+    if target_cell >= n_cells {
+        return Vec::new();
+    }
+
+    let mut flux_sum = 0.0_f64;
+    let mut rate_sum = vec![0.0_f64; stride];
+    let mut n_active = 0usize;
+    for b in batches {
+        if !b.active {
+            continue;
+        }
+        if b.rr_flux.len() != n_cells || b.rr_rate.len() != n_cells * stride {
+            continue;
+        }
+        n_active += 1;
+        flux_sum += b.rr_flux[target_cell];
+        let base = target_cell * stride;
+        for k in 0..stride {
+            rate_sum[k] += b.rr_rate[base + k];
+        }
+    }
+    if n_active == 0 || flux_sum <= 0.0 {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(stride);
+    for xs_idx in 0..n_xs_idx {
+        for (m, &mt) in rr_template.mts.iter().enumerate() {
+            let r = rate_sum[xs_idx * n_mts + m];
+            if r <= 0.0 {
+                continue;
+            }
+            out.push(((xs_idx, mt), r / flux_sum));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +208,8 @@ mod tests {
             surface_current_pos: vec![],
             surface_current_neg: vec![],
             mesh_flux,
+            rr_flux: vec![],
+            rr_rate: vec![],
         }
     }
 

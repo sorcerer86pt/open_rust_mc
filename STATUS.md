@@ -471,6 +471,21 @@ bindings (`-p open-rust-mc-py`) clean.
   reasons above; the trajectories are qualitatively correct,
   just compressed in time vs OpenMC).
 
+  **Update 2026-05-08 — spectrum-collapse fix landed.**
+  `transport::tally::ReactionRateTally` accumulates
+  `<σ_i,MT> = Σ w·d·σ(E) / Σ w·d` per (cell, xs_idx, MT) per step,
+  collapsed via `depletion::flux::collapsed_reaction_xs`, fed
+  into the chain at the start of each burnup step. Diagnostic
+  dump from `deplete_pwr`: σ_f(U-235) collapses from 583.5 b
+  thermal to **47.3 b** at PWR-pin spectrum (matches the published
+  burnup-credit value); σ_a(Xe-135) from 2.65 Mb to 222 kb;
+  Pu-239 fission from 748 b to 126 b. Post-fix vs OpenMC at 8 d:
+  ΔU-235 = −1.27 % (Rust) vs −1.64 % (OpenMC), agreement **0.77×**
+  (was 9.0×). All chain channels now within 0.59-0.94× of OpenMC,
+  most within 10-25 %. Detailed comparison:
+  `outputs/depletion_collapsed_vs_openmc.md`. ICSBEP burnup-credit
+  sub-suite (Saxton, LWBR) is unblocked.
+
 ### Documentation / housekeeping
 
 - **OpenMC cross-validation of the Python path beyond γ-heating.**

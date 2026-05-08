@@ -270,6 +270,8 @@ mod tests {
             surface_current_pos: vec![0.5; n_surf],
             surface_current_neg: vec![0.3; n_surf],
             mesh_flux: vec![1.25; n_vox],
+            rr_flux: vec![],
+            rr_rate: vec![],
         }
     }
 

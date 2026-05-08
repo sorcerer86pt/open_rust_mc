@@ -491,6 +491,15 @@ pub struct BatchResult {
     /// Length = `SimConfig.tallies.mesh_flux.n_voxels()`, or empty
     /// when the mesh tally is disabled.
     pub mesh_flux: Vec<f64>,
+    /// Per-cell flux numerator for the reaction-rate tally:
+    /// `Σ_segments w · d`. Length = `n_cells`, or empty when the
+    /// reaction-rate tally is disabled.
+    pub rr_flux: Vec<f64>,
+    /// Per-(cell, xs_idx, mt_slot) rate numerator:
+    /// `Σ_segments w · d · σ_micro,MT(E_local)`. Length =
+    /// `n_cells × n_xs_idx × n_mts`, flat index
+    /// `(c·n_xs_idx + n)·n_mts + m`. Empty when disabled.
+    pub rr_rate: Vec<f64>,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -993,6 +1002,39 @@ fn transport_particle<XS: XsProvider>(
                     particle.weight,
                     &mut result.tallies.mesh_flux,
                 );
+            }
+            // Reaction-rate tally for chain-XS spectrum collapse:
+            //   numerator   per (cell, xs_idx, MT): Σ w·d·σ_micro,MT
+            //   denominator per cell:                Σ w·d
+            // Track-length form is exact for the one-group XS
+            // collapse; collision-estimator form would have higher
+            // variance for non-rare reactions like (n,γ).
+            if let Some(rr) = tallies.reaction_rate.as_ref() {
+                let cell_idx = particle.cell_idx;
+                if cell_idx < rr.n_cells {
+                    let w_d = particle.weight * advance_dist;
+                    result.tallies.rr_flux[cell_idx] += w_d;
+                    let n_mts = rr.n_mts;
+                    for (i, nuc) in material.nuclides.iter().take(n_nuclides).enumerate() {
+                        let xs_idx = nuc.xs_kernel_idx;
+                        if xs_idx >= rr.n_xs_idx {
+                            continue;
+                        }
+                        let base = (cell_idx * rr.n_xs_idx + xs_idx) * n_mts;
+                        for (m, &mt) in rr.mts.iter().enumerate() {
+                            let sigma = match mt {
+                                18 => micro_xs[i].fission,
+                                102 => micro_xs[i].capture,
+                                16 => micro_xs[i].n2n,
+                                17 => micro_xs[i].n3n,
+                                2 => micro_xs[i].elastic,
+                                4 => micro_xs[i].inelastic,
+                                _ => 0.0,
+                            };
+                            result.tallies.rr_rate[base + m] += w_d * sigma;
+                        }
+                    }
+                }
             }
 
             match trace {
@@ -1921,9 +1963,12 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         let mut track_length_sum = 0.0_f64;
         let n_surf_bins = config.tallies.n_surface_bins();
         let n_mesh_voxels = config.tallies.n_mesh_voxels();
+        let (rr_flux_size, rr_rate_size) = config.tallies.reaction_rate_size();
         let mut surface_current_pos = vec![0.0_f64; n_surf_bins];
         let mut surface_current_neg = vec![0.0_f64; n_surf_bins];
         let mut mesh_flux = vec![0.0_f64; n_mesh_voxels];
+        let mut rr_flux_acc = vec![0.0_f64; rr_flux_size];
+        let mut rr_rate_acc = vec![0.0_f64; rr_rate_size];
 
         for pr in particle_results {
             fission_bank.sites.extend(pr.fission_sites);
@@ -1957,6 +2002,12 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             for (b, v) in mesh_flux.iter_mut().zip(pr.tallies.mesh_flux.iter()) {
                 *b += v;
             }
+            for (b, v) in rr_flux_acc.iter_mut().zip(pr.tallies.rr_flux.iter()) {
+                *b += v;
+            }
+            for (b, v) in rr_rate_acc.iter_mut().zip(pr.tallies.rr_rate.iter()) {
+                *b += v;
+            }
         }
 
         let k_batch = fission_bank.len() as f64 / n as f64;
@@ -1980,6 +2031,8 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             surface_current_pos,
             surface_current_neg,
             mesh_flux,
+            rr_flux: rr_flux_acc,
+            rr_rate: rr_rate_acc,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
