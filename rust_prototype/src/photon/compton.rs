@@ -271,14 +271,33 @@ pub fn adjoint_compton_scatter(
     }
 
     // Flat-on-E_in envelope on [E_out, e_in_hi]. Acceptance ratio
-    // `KN_dcs(E_in, μ_kin) / envelope_ceiling`. The Klein-Nishina
-    // differential dσ/dμ = 2π · dσ/dΩ peaks at the forward direction
-    // (μ = 1) where dσ/dΩ → r_e² (k' → 1), so dσ/dμ ≤ 2π·r_e² ≈
-    // 6.28·r_e² across the whole kinematic curve. Ceiling = 8·r_e²
-    // gives ~25 % headroom for FP safety; rejection efficiency is
-    // ~50 % at moderate (μ ≈ 0.5) angles, ~80 % at backscatter.
+    // `KN_dcs(E_in, μ_kin) / envelope_ceiling`.
+    //
+    // **Tight analytic bound** on dσ_KN/dμ over the entire (E_in, μ)
+    // domain. With `ε = E_out/E_in = 1/(1 + α(1−μ)) ∈ (0, 1]`:
+    //
+    //     dσ/dμ = π · r_e² · (ε + ε³ − ε² · (1 − μ²))
+    //
+    // For fixed ε, ∂/∂μ = 2π·r_e² · ε²·μ has its only critical
+    // point at μ = 0 (a minimum); the maxima on the closed interval
+    // are at the endpoints |μ| = 1 → 1−μ² = 0:
+    //
+    //     dσ/dμ |_{|μ|=1} = π · r_e² · (ε + ε³)
+    //
+    // The function g(ε) = ε + ε³ is strictly monotone on (0, 1] —
+    // g′(ε) = 1 + 3ε² > 0 — so its supremum on the kinematic domain
+    // is at ε = 1 (E_in = E_out, no scatter / forward peak):
+    //
+    //     dσ/dμ |_{ε=1, μ=1} = π · r_e² · 2 = 2π · r_e² ≈ 6.2832 r_e²
+    //
+    // Achievable: at the bottom of the sampling interval (E_in →
+    // E_out, μ → 1) the rejection acceptance hits 100 %. We use the
+    // exact analytic bound `2π · r_e²` as the ceiling; no fudge
+    // factor is needed — verified by `adjoint_compton_envelope_bound`
+    // which scans 10⁶ points on plausible kinematic curves and
+    // checks no `klein_nishina_dcs_dmu` value exceeds the ceiling.
     let inv_lo = 1.0 / energy_out;
-    let envelope_ceiling = 8.0 * R_E_SQ_CM2;
+    let envelope_ceiling = 2.0 * std::f64::consts::PI * R_E_SQ_CM2;
     let e_in_span = e_in_hi - energy_out;
 
     let mut attempts = 0_u32;
@@ -1078,6 +1097,44 @@ mod tests {
         assert!(
             (mu2_sampled - mu2_analytic).abs() < 5e-3,
             "<μ²>: sampled {mu2_sampled}, analytic {mu2_analytic}"
+        );
+    }
+
+    /// **Envelope-ceiling bound check.** The adjoint Compton sampler
+    /// uses `2π · r_e²` as the rejection ceiling for
+    /// `klein_nishina_dcs_dmu`. The analytic derivation gives this
+    /// as the exact supremum (achieved at ε = E_out/E_in = 1, |μ| = 1
+    /// — the no-scatter forward limit). This test scans a dense
+    /// (E_in, μ) lattice across ranges that bracket every adjoint
+    /// sampling case (E_in from 1 keV to 100 MeV, μ ∈ [-1, 1]) and
+    /// verifies no `klein_nishina_dcs_dmu` evaluation exceeds the
+    /// ceiling. Belt-and-suspenders against a future code change to
+    /// `klein_nishina_dcs_dmu` silently invalidating the bound.
+    #[test]
+    fn adjoint_compton_envelope_bound() {
+        let ceiling = 2.0 * std::f64::consts::PI * R_E_SQ_CM2;
+        const N_E: usize = 1_000;
+        const N_MU: usize = 1_000;
+        let log_e_lo = (1.0e3_f64).ln(); // 1 keV
+        let log_e_hi = (1.0e8_f64).ln(); // 100 MeV
+        for i in 0..N_E {
+            let log_e = log_e_lo + (log_e_hi - log_e_lo) * (i as f64 / (N_E - 1) as f64);
+            let e_in = log_e.exp();
+            for j in 0..N_MU {
+                let mu = -1.0 + 2.0 * (j as f64 / (N_MU - 1) as f64);
+                let dcs = klein_nishina_dcs_dmu(e_in, mu);
+                assert!(
+                    dcs <= ceiling * (1.0 + 1.0e-12),
+                    "KN_dcs/dμ = {dcs:e} exceeds envelope ceiling {ceiling:e} at E_in={e_in}, μ={mu}",
+                );
+            }
+        }
+        // Also pin the supremum: at (E_in arbitrary, μ = 1) we hit
+        // exactly 2π·r_e² (k' → 1, sin² → 0, prefactor → r_e²).
+        let dcs_forward_low_e = klein_nishina_dcs_dmu(1.0, 1.0);
+        assert!(
+            ((dcs_forward_low_e - ceiling) / ceiling).abs() < 1e-12,
+            "forward-limit dσ/dμ = {dcs_forward_low_e}, expected {ceiling}",
         );
     }
 
