@@ -38,13 +38,31 @@ bindings (`-p open-rust-mc-py`) clean.
   pseudo-interpolation between library temperatures).
 - Hybrid SVD + WMP and Table + WMP.
 - URR probability tables (`multiply_smooth=true|false`).
+- **`NuclideLibrary`** (`transport::nuclides`) — ZAID-keyed
+  catalog of structural / actinide / FP nuclides + on-demand
+  HDF5 metadata read (AWR + temperature columns) + nearest-
+  temperature selection. Replaces the per-binary
+  `NUCLIDE_SPECS: &[(&str, f64, f64, usize)]` tables with a
+  registry: binaries describe materials by ZAID + target
+  temperature, the library resolves the file path / AWR /
+  `temp_idx`. Catalog covers H/D/T, B-10/11, C-nat, O-16/17,
+  Zr-90/91/92/94/96, Fe-54/56/57/58, U-233 through Cm-247,
+  and the major FP poisons (I-135, Xe-135, Cs-135, Pm-149,
+  Sm-149, Gd-155, Gd-157).
+- **`ThermalLibrary`** (`transport::thermal_library`) — named
+  `c_*.h5` resolver covering H-in-H₂O, **D-in-D₂O** (heavy
+  water), graphite, ZrH (TRIGA), Be / BeO, polyethylene,
+  benzene, α-quartz, bound O / U in UO₂, methane (liquid /
+  solid), ortho/para H₂ and D₂, and Al-27 / Fe-56 metals.
 - **URR equivalence theory** (Stoker-Weiss / NJOY rational form):
   Carlvik-Pellaud Dancoff factor for square pin lattices, per-cell
   `(C, l̄)` cache, σ_eff correction wired into `apply_urr` for
   flagged absorber nuclides. `pwr_pincell --urr-equivalence`
   toggles it.
 - S(α,β) thermal scattering for H in H₂O (continuous inelastic
-  + discrete + coherent / incoherent elastic).
+  + discrete + coherent / incoherent elastic). D-in-D₂O
+  validated through `pwr_d2o_pincell` with an end-to-end
+  pitch-sweep moderation curve.
 - Delayed-neutron yields ν_d(E) loaded per nuclide.
 
 ### Transport
