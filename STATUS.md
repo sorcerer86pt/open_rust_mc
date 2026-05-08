@@ -65,6 +65,22 @@ bindings (`-p open-rust-mc-py`) clean.
   pitch-sweep moderation curve.
 - Delayed-neutron yields ν_d(E) loaded per nuclide.
 
+### Adjoint neutron Monte Carlo (CADIS, real CE)
+- `crate::transport::adjoint_neutron::adjoint_elastic_scatter` —
+  s-wave isotropic-CM elastic adjoint kernel for free-gas
+  scattering on a nucleus of arbitrary `awr ≈ A`. Inverts the
+  forward kinematics `E_out = E_in · ½ · ((1+α) + (1−α)·μ_cm)`,
+  samples `E_in` log-uniformly on `[E_out, E_out/α]` (or
+  `[E_out, e_in_max]` for hydrogen where α = 0), returns
+  `(E_in, μ_cm, μ_lab)`. The log-uniform sampling is exact for
+  constant `σ_s` (s-wave smooth region — valid for moderator
+  nuclei H/D/C/O outside resonances); resonance modulation is
+  layered on by the caller via rejection. Validation: 4 unit
+  tests covering kinematic invariant on carbon (5 000 samples,
+  rel-err < 1e-9), hydrogen log-uniform shape (200 k samples,
+  χ²_red < 2.0), carbon log-uniform-in-kinematic-range, and
+  forward-then-adjoint round trip.
+
 ### Adjoint photon Monte Carlo (CADIS, real CE)
 - `crate::photon::compton::adjoint_compton_scatter` — inverted
   Klein-Nishina sampler (Wagner-Haghighat 1998 / Lewis-Miller

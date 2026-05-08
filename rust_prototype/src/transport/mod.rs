@@ -1,5 +1,6 @@
 //! Transport module — particle state, transport loop, and event processing.
 
+pub mod adjoint_neutron;
 pub mod adjoint_photon;
 pub mod dispatch;
 pub mod hybrid_xs;
