@@ -292,10 +292,41 @@ Both RR-CADIS results unbiased within combined MC σ. Documented
 negative results: a "lite" detector-backward collision-density
 proxy was strictly *worse* than analog at every depth and was
 removed in favour of the random-ray adjoint; adaptive-ratio WW is
-indistinguishable from fixed `ratio=5` at 100 cm and worse at 200
-cm; 300 cm (≈21 mfp) under any naive WW configuration gives 0
-transmitted photons in 500 k histories — the textbook fix is
-continuous-splitting / DXTRAN-style point-detector estimators.
+indistinguishable from fixed `ratio=5` at 100 cm and worse at 200 cm.
+
+## Next-event estimator (DXTRAN-style)
+
+`shield_slab --next-event` enables a per-collision next-event /
+DXTRAN-style point-detector estimator (`src/photon/nee.rs`) for
+escape into the +z hemisphere. At every Compton collision the kernel
+contributes the deterministic expectation
+`(σ_compton/σ_total) · ∫ dμ_scat · σ_KN · S(x,Z) · E'(μ_scat) ·
+⟨exp(-Σ_t · (T-z)/μ_z)⟩_ψ` — bound-corrected via tabulated `S(x,Z)`,
+azimuthally averaged for arbitrary incoming `μ_in`, and 16-point
+Gauss-Legendre on both axes. MCNP-style exclusion-zone regularisation
+is plumbed via `--nee-exclusion-cm`.
+
+The shield_slab driver reports three estimator variants from a single
+transport run: full per-collision sum (unbiased, high variance),
+first-only (lower-bound, low variance), last-only (analog-flight
+contribution, medium variance). At **300 cm water (≈21 mfp)** where
+analog gives *zero transmitted photons* in 500 k or 2 M histories:
+
+| Estimator           | T (2M hist) | σ_rel  | FOM (/s) |
+|---------------------|------------:|-------:|---------:|
+| Analog              | 0           | ∞      | 0        |
+| Full per-coll sum   | 2.53e-7     | 98.25% | 1.52e-3  |
+| First-only + uncoll | 1.89e-9     | 26.17% | 2.14e-2  |
+| **Last-only + uncoll** | **7.22e-10** | **11.43%** | **0.112** |
+
+Last-only at 2 M histories delivers a usable transmission estimate
+at 21 mfp where analog is unrecoverable. Full data set in
+`outputs/nee_300cm_benchmark.txt`.
+
+Known follow-ons (not blocking deep-penetration tractability):
+Russian roulette on small NEE contributions to bound full-sum
+variance; Rayleigh + photoelectric-fluorescence next-event channels;
+combined CADIS WW + NEE for cumulative FOM gain.
 
 ## Hex lattice geometry
 
