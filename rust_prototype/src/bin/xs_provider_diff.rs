@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! Diff every XsProvider trait method between SvdXsProvider and
 //! TableXsProvider for the 9 PWR nuclides at thermal/resonance/fast
 //! energies. Prints the first method/energy where they differ
@@ -233,8 +239,8 @@ fn main() {
             "  PRE-URR  Tab: el={:.6e} fis={:.6e} cap={:.6e} tot={:.6e} inel={:.6e}",
             t.elastic, t.fission, t.capture, t.total, t.inelastic
         );
-        let mut s2 = s.clone();
-        let mut t2 = t.clone();
+        let mut s2 = s;
+        let mut t2 = t;
         svd.apply_urr(1, &mut s2, 1000.0, 0.5);
         tab.apply_urr(1, &mut t2, 1000.0, 0.5);
         println!(

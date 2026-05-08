@@ -52,6 +52,32 @@ cast_possible_truncation = "allow"
 cast_precision_loss = "allow"
 cast_sign_loss = "allow"
 module_name_repetitions = "allow"
+# Numerical-code idioms that clippy flags but are deliberate here:
+#   - Matrix / per-axis loops genuinely need the index (CRAM solver,
+#     Gauss-Jordan, lattice axis dispatch, FSR walks).
+#   - Transcendental constants (CRAM IPF poles/residues, Gauss-
+#     Legendre nodes/weights) need every digit of f64 precision —
+#     clippy's "excessive precision" treats them like typos.
+#   - Documentation prose: aligned doc list continuations, lazy
+#     continuations after a colon are intentional for readability of
+#     physics derivations.
+#   - Test fixtures that produce small `vec![…]` arrays — converting
+#     to `[…]` saves two characters and obscures the intent.
+#   - Per-step Tallies are typically built incrementally
+#     (`Tallies::default()` then `.mesh_flux = Some(…)`); clippy's
+#     `field_reassign_with_default` would force struct-update syntax.
+#   - Transport / variance-reduction functions take many arguments
+#     by physics necessity (XS, geometry, RNG, tallies, …).
+needless_range_loop = "allow"
+excessive_precision = "allow"
+useless_vec = "allow"
+doc_overindented_list_items = "allow"
+doc_lazy_continuation = "allow"
+field_reassign_with_default = "allow"
+too_many_arguments = "allow"
+collapsible_if = "allow"
+collapsible_match = "allow"
+double_comparisons = "allow"
 
 [[bin]]
 name = "gpu_compton_validate"

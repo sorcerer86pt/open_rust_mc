@@ -1,3 +1,7 @@
+// Gauss-Legendre nodes / weights are transcendental constants that
+// genuinely need every digit of f64 precision; clippy's
+// "excessive precision" lint flags them as if they were typos.
+#![allow(clippy::excessive_precision)]
 //! Gauss-Legendre quadrature tables — single source of truth.
 //!
 //! Hardcoded transcribed tables are a correctness risk: a typo in any

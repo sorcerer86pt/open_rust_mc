@@ -69,6 +69,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::time::Instant;
 
+use open_rust_mc::geometry::Geometry;
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3, ray};
@@ -79,10 +80,9 @@ use open_rust_mc::photon::electron::{radiation_length_cm, track_integrate_electr
 use open_rust_mc::photon::material::PhotonMaterial;
 use open_rust_mc::photon::transport::transport_history_csg;
 use open_rust_mc::thermal::ThermalScatteringData;
+use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
 use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::rng::Rng;
-use open_rust_mc::geometry::Geometry;
-use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
 use open_rust_mc::transport::simulate::{self, SimConfig};
 use open_rust_mc::transport::xs_provider::{self, TableXsProvider};
 

@@ -199,8 +199,10 @@ impl MeshFluxTally {
 ///
 /// Track-length form. Per Woodcock-segment of length `d` at energy
 /// `E` in cell `c` with weight `w`:
-///   - flux contribution per cell:           `w · d`
-///   - rate contribution per (cell, nuc, mt): `w · d · σ_micro,mt(E, nuc)`
+///
+/// - flux contribution per cell:           `w · d`
+/// - rate contribution per (cell, nuc, mt): `w · d · σ_micro,mt(E, nuc)`
+///
 /// Collapse: `<σ_micro,mt>_c = Σ rate / Σ flux`. Standard SCALE /
 /// Serpent / OpenMC approach.
 ///

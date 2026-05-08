@@ -42,12 +42,8 @@ pub struct StatepointInputs<'a> {
 
 /// Write an HDF5 statepoint to `path`. Overwrites any existing file.
 pub fn write_statepoint(path: &Path, sp: &StatepointInputs<'_>) -> std::io::Result<()> {
-    let bytes = build_statepoint(sp).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("hdf5 build failed: {e:?}"),
-        )
-    })?;
+    let bytes = build_statepoint(sp)
+        .map_err(|e| std::io::Error::other(format!("hdf5 build failed: {e:?}")))?;
     std::fs::write(path, bytes)
 }
 
@@ -247,6 +243,11 @@ pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure:
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default
+)]
 mod tests {
     use super::*;
     use crate::geometry::Vec3;

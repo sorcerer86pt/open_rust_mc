@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! CP/PARAFAC analysis probe.
 //!
 //! Builds the σ(E, T, ℓ) 3-tensor for one or more nuclides from raw

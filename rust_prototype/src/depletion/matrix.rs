@@ -67,6 +67,7 @@ pub fn build_transmutation_matrix(inputs: &TransmutationInputs<'_>, dt_seconds: 
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::depletion::chain::{DecayBranch, DepletionChain, NuclideEntry};
@@ -151,7 +152,7 @@ mod tests {
         );
         let expected_rate_dt = 2.7 * 1.0e-24 * flux * dt;
         assert!((a[0] - (-expected_rate_dt)).abs() < 1e-15);
-        // U-239 row: A[1, 0] = +rate_dt.
-        assert!((a[1 * 2 + 0] - expected_rate_dt).abs() < 1e-15);
+        // U-239 row: A[1, 0] = +rate_dt (in row-major 2x2: index = 2).
+        assert!((a[2] - expected_rate_dt).abs() < 1e-15);
     }
 }

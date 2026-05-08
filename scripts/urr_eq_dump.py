@@ -4,7 +4,6 @@ window, then walks through what the Rust apply_equivalence_correction
 would do step by step. The goal is to attribute the +764 pcm Rust
 shift either to (a) numerics in Rust, (b) the formula's domain of
 applicability, or (c) the parameter choices."""
-import sys
 import h5py
 import numpy as np
 from math import pi, exp
@@ -87,7 +86,7 @@ print(f"  <sigma_t O-16>  over 20-150 keV: {sigma_t_o16:.3f} b (capture+elastic)
 N_U235 = 7.19e-4
 N_O16 = 4.6402e-2
 sigma_0 = (N_U235 * sigma_t_u235 + N_O16 * sigma_t_o16) / N_U238
-print(f"\nBackground sigma_0 (per U-238 atom) at ~50 keV:")
+print("\nBackground sigma_0 (per U-238 atom) at ~50 keV:")
 print(f"  N_U235 * sigma_t_U235 / N_U238 = {N_U235 * sigma_t_u235 / N_U238:.3f} b")
 print(f"  N_O16  * sigma_t_O16  / N_U238 = {N_O16 * sigma_t_o16 / N_U238:.3f} b")
 print(f"  sigma_0 = {sigma_0:.3f} b")
@@ -95,7 +94,7 @@ print()
 
 factor = sigma_0 / (sigma_0 + sigma_e)
 print(f"Rust correction factor sigma_0/(sigma_0+sigma_e) = {factor:.4f}")
-print(f"  applied uniformly to elastic, fission, capture of U-238 URR sample.")
+print("  applied uniformly to elastic, fission, capture of U-238 URR sample.")
 print(f"  -> URR XS of U-238 reduced to {100 * factor:.1f}% of dilute value")
 print(f"  -> {100 * (1 - factor):.1f}% effective reduction")
 print()

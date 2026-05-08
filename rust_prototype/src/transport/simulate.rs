@@ -674,7 +674,7 @@ const FISSION_PHOTON_MTS: &[u32] = &[18];
 /// corrected — equivalence only modulates the resonance-window
 /// contribution, which is concentrated in elastic + capture +
 /// fission for the U-238-class absorbers we care about.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 fn apply_urr_equivalence_correction<XS: XsProvider>(
     eq: &crate::transport::urr_equivalence::UrrEquivalence,
     material: &Material,
@@ -1530,8 +1530,7 @@ fn transport_particle_delta<XS: XsProvider>(
             // standard pragmatic limitation of surface-current under
             // delta tracking; reflective/vacuum boundaries are exact
             // because the segment stops there.
-            if let (Some(hit), Some(sct)) =
-                (trace.as_ref(), tallies.surface_current.as_ref())
+            if let (Some(hit), Some(sct)) = (trace.as_ref(), tallies.surface_current.as_ref())
                 && hit.distance < d_collision
                 && let Some(surf_idx) = hit.surface_idx
                 && let Some(bin) = sct.bin_for(surf_idx)
@@ -1738,12 +1737,10 @@ fn transport_particle_delta<XS: XsProvider>(
             if sigma_real > 0.0 {
                 let mut macro_nu_sigma_f = 0.0_f64;
                 for (i, nuc) in material.nuclides.iter().enumerate() {
-                    macro_nu_sigma_f +=
-                        nuc.atom_density * micro_xs[i].nu_bar * micro_xs[i].fission;
+                    macro_nu_sigma_f += nuc.atom_density * micro_xs[i].nu_bar * micro_xs[i].fission;
                 }
                 if macro_nu_sigma_f > 0.0 {
-                    result.track_length_nu_sigf +=
-                        particle.weight * macro_nu_sigma_f / sigma_real;
+                    result.track_length_nu_sigf += particle.weight * macro_nu_sigma_f / sigma_real;
                 }
             }
 
@@ -2227,6 +2224,12 @@ fn normalize_fission_bank(bank: &FissionBank, n: usize, batch: u32) -> Vec<Fissi
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::field_reassign_with_default,
+    clippy::needless_range_loop
+)]
 mod tests {
     use super::*;
     use crate::geometry::cell::{self, CellId};
@@ -2780,12 +2783,8 @@ mod tests {
     /// Two-material low-contrast test geometry that auto-selects
     /// delta tracking, with both materials fissile so the
     /// track-length estimator has fission events to score.
-    fn delta_tracking_two_material_problem() -> (
-        Vec<Surface>,
-        Vec<Cell>,
-        Vec<Material>,
-        ConstantXs,
-    ) {
+    fn delta_tracking_two_material_problem() -> (Vec<Surface>, Vec<Cell>, Vec<Material>, ConstantXs)
+    {
         let surfaces = vec![
             Surface::Sphere {
                 center: Vec3::new(0.0, 0.0, 0.0),
@@ -2800,10 +2799,7 @@ mod tests {
         ];
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_aabb(
-                crate::geometry::Aabb::new(
-                    Vec3::new(-5.0, -5.0, -5.0),
-                    Vec3::new(5.0, 5.0, 5.0),
-                ),
+                crate::geometry::Aabb::new(Vec3::new(-5.0, -5.0, -5.0), Vec3::new(5.0, 5.0, 5.0)),
             ),
             Cell::new(
                 CellId(1),
@@ -2993,7 +2989,10 @@ mod tests {
         let k_track_mean: f64 = active.iter().map(|r| r.k_track).sum::<f64>() / n;
 
         // k_track must not be identically zero — that was the bug.
-        assert!(k_track_mean > 1e-3, "k_track is zero under delta tracking: {k_track_mean}");
+        assert!(
+            k_track_mean > 1e-3,
+            "k_track is zero under delta tracking: {k_track_mean}"
+        );
 
         // Within combined MC noise of k_eff (couple-percent at 25
         // active batches × 1k particles).

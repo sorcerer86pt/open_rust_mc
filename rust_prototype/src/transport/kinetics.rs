@@ -60,6 +60,7 @@ impl DelayedGroups {
     /// Group-absolute fractions `β_i = β · (β_i / β)`.
     pub fn beta_i(&self) -> [f64; 6] {
         let mut out = [0.0; 6];
+        #[allow(clippy::needless_range_loop)]
         for i in 0..6 {
             out[i] = self.beta_total * self.fraction[i];
         }
@@ -125,7 +126,11 @@ pub fn blend(weighted: &[(DelayedGroups, f64)]) -> DelayedGroups {
     let mut fraction = [0.0_f64; 6];
     let mut decay_per_s = [0.0_f64; 6];
     for i in 0..6 {
-        fraction[i] = if beta_total > 0.0 { beta_i[i] / beta_total } else { 0.0 };
+        fraction[i] = if beta_total > 0.0 {
+            beta_i[i] / beta_total
+        } else {
+            0.0
+        };
         decay_per_s[i] = if beta_i[i] > 0.0 {
             lambda_beta_i[i] / beta_i[i]
         } else {
@@ -222,7 +227,11 @@ pub fn step_crank_nicolson(
     for i in 0..7 {
         for j in 0..7 {
             let mij = a[i][j];
-            lhs[i][j] = if i == j { 1.0 - half * mij } else { -half * mij };
+            lhs[i][j] = if i == j {
+                1.0 - half * mij
+            } else {
+                -half * mij
+            };
             rhs_mat[i][j] = if i == j { 1.0 + half * mij } else { half * mij };
         }
     }
@@ -342,6 +351,7 @@ pub fn prompt_jump_ratio(rho_step: f64, params: &PkParams) -> f64 {
 /// validate). The PK matrix is well-conditioned for `dt · max|A_ii|
 /// < 0.5`; outside that regime the prompt-mode singularity manifests
 /// as a near-zero pivot which is the right physics warning.
+#[allow(clippy::needless_range_loop)]
 fn solve_7x7(mut a: [[f64; 7]; 7], mut b: [f64; 7]) -> [f64; 7] {
     const N: usize = 7;
     for k in 0..N {
@@ -382,6 +392,7 @@ fn solve_7x7(mut a: [[f64; 7]; 7], mut b: [f64; 7]) -> [f64; 7] {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_range_loop)]
 mod tests {
     use super::*;
 
@@ -530,10 +541,7 @@ mod tests {
     /// β-rich fast contribution. Sanity check the magnitude.
     #[test]
     fn blend_pwr_mix_lifts_beta_above_u235_alone() {
-        let blended = blend(&[
-            (U235_THERMAL_KEEPIN, 0.95),
-            (U238_FAST_KEEPIN, 0.05),
-        ]);
+        let blended = blend(&[(U235_THERMAL_KEEPIN, 0.95), (U238_FAST_KEEPIN, 0.05)]);
         assert!(blended.beta_total > U235_THERMAL_KEEPIN.beta_total);
         assert!(blended.beta_total < 0.0080);
     }

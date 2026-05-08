@@ -136,8 +136,7 @@ pub fn klein_nishina_total(energy_in: f64) -> f64 {
     let log_oda = oda.ln();
     let two_pi_re_sq = 2.0 * std::f64::consts::PI * R_E_SQ_CM2;
     two_pi_re_sq
-        * ((opa / (alpha * alpha)) * (2.0 * opa / oda - log_oda / alpha)
-            + log_oda / (2.0 * alpha)
+        * ((opa / (alpha * alpha)) * (2.0 * opa / oda - log_oda / alpha) + log_oda / (2.0 * alpha)
             - (1.0 + 3.0 * alpha) / (oda * oda))
 }
 
@@ -152,8 +151,7 @@ pub fn klein_nishina_dcs_dmu(energy_in: f64, mu: f64) -> f64 {
     let alpha = energy_in / M_E_C2_EV;
     let k_prime = 1.0 / (1.0 + alpha * (1.0 - mu));
     let sin_sq = (1.0 - mu * mu).max(0.0);
-    let dsigma_domega =
-        0.5 * R_E_SQ_CM2 * k_prime * k_prime * (1.0 / k_prime + k_prime - sin_sq);
+    let dsigma_domega = 0.5 * R_E_SQ_CM2 * k_prime * k_prime * (1.0 / k_prime + k_prime - sin_sq);
     2.0 * std::f64::consts::PI * dsigma_domega
 }
 
@@ -260,7 +258,7 @@ pub fn adjoint_compton_scatter(
         f64::INFINITY
     };
     let e_in_hi = e_in_max.min(e_in_kin_max);
-    if !(e_in_hi > energy_out) {
+    if e_in_hi <= energy_out {
         // No kinematic room — forward scatter limit, return the
         // degenerate (E_in = E_out, μ = 1) sample.
         return AdjointComptonOutcome {
@@ -381,7 +379,12 @@ mod kn_helpers_tests {
         // [-1, 1] no longer resolves the peak. 1e-3 is sufficient
         // for the unit test — the production NEE integrator splits
         // the [-1, 1] range into segments to handle this.
-        for &(e, tol) in &[(1.0e3_f64, 1e-6), (1.0e5, 1e-6), (1.0e6, 1e-4), (5.0e6, 1e-3)] {
+        for &(e, tol) in &[
+            (1.0e3_f64, 1e-6),
+            (1.0e5, 1e-6),
+            (1.0e6, 1e-4),
+            (5.0e6, 1e-3),
+        ] {
             let mut acc = 0.0;
             for i in 0..16 {
                 acc += GL16_WEIGHTS[i] * klein_nishina_pdf(e, GL16_NODES[i]);
@@ -417,7 +420,10 @@ mod kn_helpers_tests {
         let thomson = (8.0 / 3.0) * std::f64::consts::PI * R_E_SQ_CM2;
         let kn_low = klein_nishina_total(1.0e3); // 1 keV
         let rel = ((kn_low - thomson) / thomson).abs();
-        assert!(rel < 0.01, "σ_KN(1 keV) = {kn_low}, Thomson = {thomson}, rel = {rel}");
+        assert!(
+            rel < 0.01,
+            "σ_KN(1 keV) = {kn_low}, Thomson = {thomson}, rel = {rel}"
+        );
     }
 
     #[test]
@@ -772,7 +778,9 @@ fn interp_linear(factor: &ScatteringFactor, x_query: f64) -> f64 {
     clippy::expect_used,
     clippy::double_comparisons,
     clippy::doc_lazy_continuation,
-    clippy::too_many_arguments
+    clippy::too_many_arguments,
+    clippy::needless_range_loop,
+    clippy::useless_vec
 )]
 mod tests {
     use super::*;

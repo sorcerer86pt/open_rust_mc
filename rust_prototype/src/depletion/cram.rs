@@ -1,3 +1,11 @@
+// The Pusa-2016 CRAM coefficients are transcendental constants that
+// genuinely need every digit of f64 precision — clippy's
+// "excessive precision" lint flags them as if they were typos. The
+// canonical values come from the OpenMC reference implementation
+// and are part of the algorithm's numerical correctness contract;
+// truncating them changes the matrix exponential. The blanket
+// allow at module scope is the standard remedy for that situation.
+#![allow(clippy::excessive_precision)]
 //! CRAM matrix exponential evaluator (IPF form), orders 16 and 48.
 //!
 //! Approximates `exp(A) · n` via the **Incomplete Partial

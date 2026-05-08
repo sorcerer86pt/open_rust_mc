@@ -50,9 +50,7 @@
 //!   reflective back face this misses some flux; documented as a
 //!   small bias.
 
-use crate::photon::compton::{
-    compton_e_out, klein_nishina_dcs_dmu, HC_EV_ANGSTROM,
-};
+use crate::photon::compton::{HC_EV_ANGSTROM, compton_e_out, klein_nishina_dcs_dmu};
 use crate::photon::data::ScatteringFactor;
 use crate::photon::material::PhotonMaterial;
 use crate::quadrature::integrate_gl16;
@@ -247,9 +245,12 @@ mod tests {
         };
         let e = 1.0e6;
         let t = 100.0;
-        let near_detector = compton_forward_transmission(&mat, e, 95.0, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
-        let middle = compton_forward_transmission(&mat, e, 50.0, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
-        let near_source = compton_forward_transmission(&mat, e, 5.0, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let near_detector =
+            compton_forward_transmission(&mat, e, 95.0, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let middle =
+            compton_forward_transmission(&mat, e, 50.0, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let near_source =
+            compton_forward_transmission(&mat, e, 5.0, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
         assert!(
             near_detector > middle && middle > near_source,
             "monotone: near={near_detector}, mid={middle}, far={near_source}"
@@ -271,7 +272,14 @@ mod tests {
         };
         let e = 1.0e6;
         let t = 100.0;
-        let at_face = compton_forward_transmission(&mat, e, t - 1.0e-9, t, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let at_face = compton_forward_transmission(
+            &mat,
+            e,
+            t - 1.0e-9,
+            t,
+            MU_AXIAL_FORWARD,
+            NEE_NO_EXCLUSION,
+        );
         assert!(
             at_face > 1.0e-3 * e && at_face < e,
             "expected 0.001E < {at_face} < {e}"
@@ -295,8 +303,7 @@ mod tests {
             let hc_inv = 1.0 / crate::photon::compton::HC_EV_ANGSTROM;
             const CM2_TO_BARNS: f64 = 1.0e24;
             let integrated = crate::quadrature::integrate_gl16(-1.0, 1.0, |mu| {
-                let dkn = crate::photon::compton::klein_nishina_dcs_dmu(e, mu)
-                    * CM2_TO_BARNS;
+                let dkn = crate::photon::compton::klein_nishina_dcs_dmu(e, mu) * CM2_TO_BARNS;
                 let x = e * hc_inv * (0.5 * (1.0 - mu)).sqrt();
                 let mut s_eff = 0.0;
                 for (n_e, elem) in &mat.entries {
@@ -320,9 +327,22 @@ mod tests {
             None => return,
         };
         for &z in &[5.0_f64, 50.0, 95.0] {
-            let raw = compton_forward_transmission(&mat, 1.0e6, z, 100.0, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
-            let zero_excl =
-                compton_forward_transmission(&mat, 1.0e6, z, 100.0, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+            let raw = compton_forward_transmission(
+                &mat,
+                1.0e6,
+                z,
+                100.0,
+                MU_AXIAL_FORWARD,
+                NEE_NO_EXCLUSION,
+            );
+            let zero_excl = compton_forward_transmission(
+                &mat,
+                1.0e6,
+                z,
+                100.0,
+                MU_AXIAL_FORWARD,
+                NEE_NO_EXCLUSION,
+            );
             assert!((raw - zero_excl).abs() < 1e-15);
         }
     }
@@ -339,7 +359,14 @@ mod tests {
             None => return,
         };
         // Pick R = 5 cm and z = 99 cm (deep inside exclusion zone).
-        let raw = compton_forward_transmission(&mat, 1.0e6, 99.0, 100.0, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let raw = compton_forward_transmission(
+            &mat,
+            1.0e6,
+            99.0,
+            100.0,
+            MU_AXIAL_FORWARD,
+            NEE_NO_EXCLUSION,
+        );
         let regularised =
             compton_forward_transmission(&mat, 1.0e6, 99.0, 100.0, MU_AXIAL_FORWARD, 5.0);
         assert!(
@@ -360,7 +387,14 @@ mod tests {
             None => return,
         };
         // R = 5 cm, z = 50 cm → T-z = 50 cm >> R, definitely outside.
-        let raw = compton_forward_transmission(&mat, 1.0e6, 50.0, 100.0, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let raw = compton_forward_transmission(
+            &mat,
+            1.0e6,
+            50.0,
+            100.0,
+            MU_AXIAL_FORWARD,
+            NEE_NO_EXCLUSION,
+        );
         let with_excl =
             compton_forward_transmission(&mat, 1.0e6, 50.0, 100.0, MU_AXIAL_FORWARD, 5.0);
         assert!((raw - with_excl).abs() / raw.max(1e-30) < 1e-15);
@@ -372,7 +406,14 @@ mod tests {
             Some(m) => m,
             None => return,
         };
-        let beyond = compton_forward_transmission(&mat, 1.0e6, 110.0, 100.0, MU_AXIAL_FORWARD, NEE_NO_EXCLUSION);
+        let beyond = compton_forward_transmission(
+            &mat,
+            1.0e6,
+            110.0,
+            100.0,
+            MU_AXIAL_FORWARD,
+            NEE_NO_EXCLUSION,
+        );
         assert_eq!(beyond, 0.0);
     }
 }

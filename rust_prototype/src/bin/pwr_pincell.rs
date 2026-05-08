@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! PWR pin cell eigenvalue benchmark — multi-material, multi-nuclide.
 //!
 //! Standard PWR fuel pin: UO2 fuel + Zircaloy clad + light water moderator.

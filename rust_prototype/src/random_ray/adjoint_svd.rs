@@ -372,6 +372,7 @@ pub mod reshape {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_range_loop)]
 mod tests {
     use super::*;
 
@@ -399,7 +400,11 @@ mod tests {
         let svd = AdjointSvd::compress(&mat, n_rows, n_cols, 1);
         let recon = svd.reconstruct();
         let err = recon_error(&mat, &recon);
-        assert!(err.max_rel < 1e-12, "rank-1 separable: max_rel={}", err.max_rel);
+        assert!(
+            err.max_rel < 1e-12,
+            "rank-1 separable: max_rel={}",
+            err.max_rel
+        );
         assert!(err.frob_rel < 1e-12);
         assert_eq!(svd.rank, 1);
     }
@@ -424,12 +429,19 @@ mod tests {
         let svd1 = AdjointSvd::compress(&mat, n_rows, n_cols, 1);
         let recon1 = svd1.reconstruct();
         let err1 = recon_error(&mat, &recon1);
-        assert!(err1.frob_rel > 1e-3, "rank 1 should not be exact for rank-2 matrix");
+        assert!(
+            err1.frob_rel > 1e-3,
+            "rank 1 should not be exact for rank-2 matrix"
+        );
 
         let svd2 = AdjointSvd::compress(&mat, n_rows, n_cols, 2);
         let recon2 = svd2.reconstruct();
         let err2 = recon_error(&mat, &recon2);
-        assert!(err2.max_rel < 1e-10, "rank-2 should be exact: max_rel={}", err2.max_rel);
+        assert!(
+            err2.max_rel < 1e-10,
+            "rank-2 should be exact: max_rel={}",
+            err2.max_rel
+        );
     }
 
     #[test]
@@ -481,7 +493,11 @@ mod tests {
         // Full-rank log10 SVD reconstructs to within numerical
         // precision of 10^x · 10^-x ≈ machine eps amplified by the
         // dynamic range — set a generous bound.
-        assert!(err.frob_rel < 1e-10, "log10 round-trip: frob_rel={}", err.frob_rel);
+        assert!(
+            err.frob_rel < 1e-10,
+            "log10 round-trip: frob_rel={}",
+            err.frob_rel
+        );
     }
 
     /// Picker should return Dense when the matrix is too small for
@@ -569,9 +585,15 @@ mod tests {
         match repr {
             AdjointRepr::Svd(s) => {
                 assert_eq!(s.space, SpaceMode::Log10);
-                assert!(s.rank <= 2, "log-space rank should stay tiny, got {}", s.rank);
+                assert!(
+                    s.rank <= 2,
+                    "log-space rank should stay tiny, got {}",
+                    s.rank
+                );
             }
-            AdjointRepr::Dense { .. } => panic!("log-space picker should compress wide-dynamic-range data"),
+            AdjointRepr::Dense { .. } => {
+                panic!("log-space picker should compress wide-dynamic-range data")
+            }
         }
     }
 
@@ -597,6 +619,10 @@ mod tests {
         let svd = AdjointSvd::compress(&phi, m, n, 1);
         let recon = svd.reconstruct();
         let err = recon_error(&phi, &recon);
-        assert!(err.frob_rel < 1e-12, "slab is rank 1 in xy_z reshape: {:?}", err);
+        assert!(
+            err.frob_rel < 1e-12,
+            "slab is rank 1 in xy_z reshape: {:?}",
+            err
+        );
     }
 }

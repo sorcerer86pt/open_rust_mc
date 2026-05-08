@@ -12,7 +12,7 @@
 //!   3. **Corrector (LI):** rebuild `Â = A(N̂, φ̂)` (linear-
 //!      interpolation flavour: average the BOC and EOC matrices),
 //!      integrate again with the averaged matrix:
-//!         `N(t + Δt) = exp(½ (A₀ + Â) · Δt) · N₀`.
+//!     `N(t + Δt) = exp(½ (A₀ + Â) · Δt) · N₀`.
 //!
 //! The corrector exists to remove the leading error from the
 //! constant-`A` predictor (~Δt² instead of Δt). It costs one extra
@@ -104,6 +104,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::depletion::chain::{DecayBranch, NuclideEntry};

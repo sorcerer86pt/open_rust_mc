@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! Depletion demo — Xe-135 equilibrium poisoning under PWR thermal flux.
 //!
 //! Classical reactor-physics benchmark for any depletion solver:

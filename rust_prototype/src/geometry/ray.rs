@@ -308,11 +308,10 @@ pub fn trace_step_recursive(
         let local_dir_d = local_dirs.as_ref().map(|v| v[depth]).unwrap_or(world_dir);
         if let Some(hit) =
             find_nearest_surface(local_pos, local_dir_d, &geom.surfaces, &surface_indices)
+            && hit.distance < best_dist
         {
-            if hit.distance < best_dist {
-                best_dist = hit.distance;
-                best_surface = Some(hit.surface_idx);
-            }
+            best_dist = hit.distance;
+            best_surface = Some(hit.surface_idx);
         }
     }
 

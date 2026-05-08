@@ -1,3 +1,4 @@
+#![allow(clippy::doc_overindented_list_items)]
 //! URR equivalence theory — Stoker-Weiss / NJOY spatial self-shielding.
 //!
 //! Probability-table URR sampling (the existing `apply_urr` path) is
@@ -333,8 +334,7 @@ mod tests {
     fn dancoff_one_means_identity_correction() {
         let sigma_urr = 100.0;
         let sigma_smooth = 70.0;
-        let out =
-            apply_equivalence_correction(sigma_urr, sigma_smooth, 8.0, 0.022, 0.82, 1.0);
+        let out = apply_equivalence_correction(sigma_urr, sigma_smooth, 8.0, 0.022, 0.82, 1.0);
         assert_eq!(out, sigma_urr);
     }
 
@@ -350,8 +350,7 @@ mod tests {
         let sigma_0 = 8.0;
         let n_abs = 0.022;
         let l_bar = 0.82;
-        let out =
-            apply_equivalence_correction(sigma_urr, sigma_smooth, sigma_0, n_abs, l_bar, 0.0);
+        let out = apply_equivalence_correction(sigma_urr, sigma_smooth, sigma_0, n_abs, l_bar, 0.0);
         let sigma_e_expected = 1.0 / (n_abs * l_bar);
         let f_expected = sigma_0 / (sigma_0 + sigma_e_expected);
         let expected = sigma_smooth + (sigma_urr - sigma_smooth) * f_expected;
@@ -384,10 +383,11 @@ mod tests {
     fn resonance_trough_pulled_toward_smooth() {
         let sigma_urr = 5.0;
         let sigma_smooth = 9.0;
-        let out =
-            apply_equivalence_correction(sigma_urr, sigma_smooth, 8.0, 0.022, 0.82, 0.27);
-        assert!(out >= sigma_urr - 1e-12 && out <= sigma_smooth + 1e-12,
-                "trough out of bounds: σ_URR={sigma_urr} ≤ {out} ≤ σ_smooth={sigma_smooth}");
+        let out = apply_equivalence_correction(sigma_urr, sigma_smooth, 8.0, 0.022, 0.82, 0.27);
+        assert!(
+            out >= sigma_urr - 1e-12 && out <= sigma_smooth + 1e-12,
+            "trough out of bounds: σ_URR={sigma_urr} ≤ {out} ≤ σ_smooth={sigma_smooth}"
+        );
     }
 
     /// Square-lattice Dancoff (Sauer first approximation): matches

@@ -153,7 +153,11 @@ impl ThermalLibrary {
         }
         match hdf5_reader::load_thermal_scattering(&path) {
             Ok(tsl) => Ok(Some(tsl)),
-            Err(e) => Err(format!("{} ({}): {e}", binding.description(), path.display())),
+            Err(e) => Err(format!(
+                "{} ({}): {e}",
+                binding.description(),
+                path.display()
+            )),
         }
     }
 
@@ -161,8 +165,12 @@ impl ThermalLibrary {
     /// that own the geometry and know which thermal data must exist.
     pub fn load_required(&self, binding: ThermalBinding) -> ThermalScatteringData {
         let path = self.path(binding);
-        hdf5_reader::load_thermal_scattering(&path)
-            .unwrap_or_else(|e| panic!("required thermal binding {} failed: {e}", binding.description()))
+        hdf5_reader::load_thermal_scattering(&path).unwrap_or_else(|e| {
+            panic!(
+                "required thermal binding {} failed: {e}",
+                binding.description()
+            )
+        })
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -171,6 +179,7 @@ impl ThermalLibrary {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

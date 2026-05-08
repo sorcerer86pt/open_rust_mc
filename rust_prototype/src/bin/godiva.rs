@@ -19,10 +19,10 @@ use std::time::Instant;
 
 use clap::Parser;
 
+use open_rust_mc::geometry::Geometry;
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId};
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
-use open_rust_mc::geometry::Geometry;
 use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
 use open_rust_mc::transport::hybrid_xs::HybridTableWmpXsProvider;
 use open_rust_mc::transport::material::Material;
@@ -290,8 +290,7 @@ fn run_multi_seed<XS: XsProvider>(
 
     // Build the Geometry once so the same instance feeds the WW
     // calibration run and every seed of the main loop.
-    let geometry =
-        Geometry::from_slices(surfaces, cells).expect("godiva geometry must validate");
+    let geometry = Geometry::from_slices(surfaces, cells).expect("godiva geometry must validate");
 
     // Optional restart: load the source bank from a previous
     // statepoint. Pre-converged source typically lets you drop most

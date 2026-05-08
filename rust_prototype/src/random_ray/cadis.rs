@@ -26,6 +26,7 @@ use super::solver::{AdjointFlag, RandomRaySolver, RaySolverConfig, SolverResult}
 /// detector response weights — pass `None` to group-sum ψ* uniformly,
 /// or `Some([R_g; n_groups])` for response-weighted importance
 /// (FW-CADIS proper). Length must match `library.n_groups`.
+#[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn weight_window_from_adjoint(
     geom: &Geometry,
     aabb: Aabb,

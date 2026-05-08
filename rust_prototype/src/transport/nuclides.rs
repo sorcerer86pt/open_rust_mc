@@ -62,7 +62,12 @@ impl ResolvedNuclide {
     /// prefer the named fields, but binaries mid-migration can use
     /// this to keep their existing loop bodies unchanged.
     pub fn as_legacy_spec(&self) -> (PathBuf, f64, f64, usize) {
-        (self.path.clone(), self.awr, self.nu_bar_const, self.temp_idx)
+        (
+            self.path.clone(),
+            self.awr,
+            self.nu_bar_const,
+            self.temp_idx,
+        )
     }
 }
 
@@ -87,59 +92,294 @@ struct CatalogEntry {
 /// existing on disk, which is caught immediately at load time.
 const CATALOG: &[CatalogEntry] = &[
     // Hydrogen / coolant
-    CatalogEntry { zaid: 1001, symbol: "H-1",    filename: "H1.h5",   nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 1002, symbol: "H-2 (D)", filename: "H2.h5",  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 1003, symbol: "H-3 (T)", filename: "H3.h5",  nu_bar_const: 0.0 },
+    CatalogEntry {
+        zaid: 1001,
+        symbol: "H-1",
+        filename: "H1.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 1002,
+        symbol: "H-2 (D)",
+        filename: "H2.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 1003,
+        symbol: "H-3 (T)",
+        filename: "H3.h5",
+        nu_bar_const: 0.0,
+    },
     // Light moderator / structural
-    CatalogEntry { zaid: 5010, symbol: "B-10",   filename: "B10.h5",  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 5011, symbol: "B-11",   filename: "B11.h5",  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 6000, symbol: "C-nat",  filename: "C0.h5",   nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 8016, symbol: "O-16",   filename: "O16.h5",  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 8017, symbol: "O-17",   filename: "O17.h5",  nu_bar_const: 0.0 },
+    CatalogEntry {
+        zaid: 5010,
+        symbol: "B-10",
+        filename: "B10.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 5011,
+        symbol: "B-11",
+        filename: "B11.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 6000,
+        symbol: "C-nat",
+        filename: "C0.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 8016,
+        symbol: "O-16",
+        filename: "O16.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 8017,
+        symbol: "O-17",
+        filename: "O17.h5",
+        nu_bar_const: 0.0,
+    },
     // Zircaloy-4 structural
-    CatalogEntry { zaid: 40090, symbol: "Zr-90", filename: "Zr90.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 40091, symbol: "Zr-91", filename: "Zr91.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 40092, symbol: "Zr-92", filename: "Zr92.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 40094, symbol: "Zr-94", filename: "Zr94.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 40096, symbol: "Zr-96", filename: "Zr96.h5", nu_bar_const: 0.0 },
+    CatalogEntry {
+        zaid: 40090,
+        symbol: "Zr-90",
+        filename: "Zr90.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 40091,
+        symbol: "Zr-91",
+        filename: "Zr91.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 40092,
+        symbol: "Zr-92",
+        filename: "Zr92.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 40094,
+        symbol: "Zr-94",
+        filename: "Zr94.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 40096,
+        symbol: "Zr-96",
+        filename: "Zr96.h5",
+        nu_bar_const: 0.0,
+    },
     // Iron / steel
-    CatalogEntry { zaid: 26054, symbol: "Fe-54", filename: "Fe54.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 26056, symbol: "Fe-56", filename: "Fe56.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 26057, symbol: "Fe-57", filename: "Fe57.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 26058, symbol: "Fe-58", filename: "Fe58.h5", nu_bar_const: 0.0 },
+    CatalogEntry {
+        zaid: 26054,
+        symbol: "Fe-54",
+        filename: "Fe54.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 26056,
+        symbol: "Fe-56",
+        filename: "Fe56.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 26057,
+        symbol: "Fe-57",
+        filename: "Fe57.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 26058,
+        symbol: "Fe-58",
+        filename: "Fe58.h5",
+        nu_bar_const: 0.0,
+    },
     // Actinides — uranium chain
-    CatalogEntry { zaid: 92233, symbol: "U-233", filename: "U233.h5", nu_bar_const: 2.49 },
-    CatalogEntry { zaid: 92234, symbol: "U-234", filename: "U234.h5", nu_bar_const: 2.49 },
-    CatalogEntry { zaid: 92235, symbol: "U-235", filename: "U235.h5", nu_bar_const: 2.43 },
-    CatalogEntry { zaid: 92236, symbol: "U-236", filename: "U236.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 92237, symbol: "U-237", filename: "U237.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 92238, symbol: "U-238", filename: "U238.h5", nu_bar_const: 2.49 },
-    CatalogEntry { zaid: 92239, symbol: "U-239", filename: "U239.h5", nu_bar_const: 0.0 },
+    CatalogEntry {
+        zaid: 92233,
+        symbol: "U-233",
+        filename: "U233.h5",
+        nu_bar_const: 2.49,
+    },
+    CatalogEntry {
+        zaid: 92234,
+        symbol: "U-234",
+        filename: "U234.h5",
+        nu_bar_const: 2.49,
+    },
+    CatalogEntry {
+        zaid: 92235,
+        symbol: "U-235",
+        filename: "U235.h5",
+        nu_bar_const: 2.43,
+    },
+    CatalogEntry {
+        zaid: 92236,
+        symbol: "U-236",
+        filename: "U236.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 92237,
+        symbol: "U-237",
+        filename: "U237.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 92238,
+        symbol: "U-238",
+        filename: "U238.h5",
+        nu_bar_const: 2.49,
+    },
+    CatalogEntry {
+        zaid: 92239,
+        symbol: "U-239",
+        filename: "U239.h5",
+        nu_bar_const: 0.0,
+    },
     // Actinides — neptunium / plutonium / americium / curium
-    CatalogEntry { zaid: 93237, symbol: "Np-237", filename: "Np237.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 93239, symbol: "Np-239", filename: "Np239.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 94238, symbol: "Pu-238", filename: "Pu238.h5", nu_bar_const: 2.90 },
-    CatalogEntry { zaid: 94239, symbol: "Pu-239", filename: "Pu239.h5", nu_bar_const: 2.88 },
-    CatalogEntry { zaid: 94240, symbol: "Pu-240", filename: "Pu240.h5", nu_bar_const: 2.79 },
-    CatalogEntry { zaid: 94241, symbol: "Pu-241", filename: "Pu241.h5", nu_bar_const: 2.95 },
-    CatalogEntry { zaid: 94242, symbol: "Pu-242", filename: "Pu242.h5", nu_bar_const: 2.81 },
-    CatalogEntry { zaid: 95241, symbol: "Am-241", filename: "Am241.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 95242, symbol: "Am-242", filename: "Am242.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 95243, symbol: "Am-243", filename: "Am243.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 96242, symbol: "Cm-242", filename: "Cm242.h5", nu_bar_const: 3.00 },
-    CatalogEntry { zaid: 96243, symbol: "Cm-243", filename: "Cm243.h5", nu_bar_const: 3.40 },
-    CatalogEntry { zaid: 96244, symbol: "Cm-244", filename: "Cm244.h5", nu_bar_const: 3.20 },
-    CatalogEntry { zaid: 96245, symbol: "Cm-245", filename: "Cm245.h5", nu_bar_const: 3.50 },
-    CatalogEntry { zaid: 96246, symbol: "Cm-246", filename: "Cm246.h5", nu_bar_const: 3.10 },
-    CatalogEntry { zaid: 96247, symbol: "Cm-247", filename: "Cm247.h5", nu_bar_const: 3.50 },
+    CatalogEntry {
+        zaid: 93237,
+        symbol: "Np-237",
+        filename: "Np237.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 93239,
+        symbol: "Np-239",
+        filename: "Np239.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 94238,
+        symbol: "Pu-238",
+        filename: "Pu238.h5",
+        nu_bar_const: 2.90,
+    },
+    CatalogEntry {
+        zaid: 94239,
+        symbol: "Pu-239",
+        filename: "Pu239.h5",
+        nu_bar_const: 2.88,
+    },
+    CatalogEntry {
+        zaid: 94240,
+        symbol: "Pu-240",
+        filename: "Pu240.h5",
+        nu_bar_const: 2.79,
+    },
+    CatalogEntry {
+        zaid: 94241,
+        symbol: "Pu-241",
+        filename: "Pu241.h5",
+        nu_bar_const: 2.95,
+    },
+    CatalogEntry {
+        zaid: 94242,
+        symbol: "Pu-242",
+        filename: "Pu242.h5",
+        nu_bar_const: 2.81,
+    },
+    CatalogEntry {
+        zaid: 95241,
+        symbol: "Am-241",
+        filename: "Am241.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 95242,
+        symbol: "Am-242",
+        filename: "Am242.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 95243,
+        symbol: "Am-243",
+        filename: "Am243.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 96242,
+        symbol: "Cm-242",
+        filename: "Cm242.h5",
+        nu_bar_const: 3.00,
+    },
+    CatalogEntry {
+        zaid: 96243,
+        symbol: "Cm-243",
+        filename: "Cm243.h5",
+        nu_bar_const: 3.40,
+    },
+    CatalogEntry {
+        zaid: 96244,
+        symbol: "Cm-244",
+        filename: "Cm244.h5",
+        nu_bar_const: 3.20,
+    },
+    CatalogEntry {
+        zaid: 96245,
+        symbol: "Cm-245",
+        filename: "Cm245.h5",
+        nu_bar_const: 3.50,
+    },
+    CatalogEntry {
+        zaid: 96246,
+        symbol: "Cm-246",
+        filename: "Cm246.h5",
+        nu_bar_const: 3.10,
+    },
+    CatalogEntry {
+        zaid: 96247,
+        symbol: "Cm-247",
+        filename: "Cm247.h5",
+        nu_bar_const: 3.50,
+    },
     // Fission product poisons
-    CatalogEntry { zaid: 53135, symbol: "I-135",  filename: "I135.h5",  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 54135, symbol: "Xe-135", filename: "Xe135.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 55135, symbol: "Cs-135", filename: "Cs135.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 61149, symbol: "Pm-149", filename: "Pm149.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62149, symbol: "Sm-149", filename: "Sm149.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 64155, symbol: "Gd-155", filename: "Gd155.h5", nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 64157, symbol: "Gd-157", filename: "Gd157.h5", nu_bar_const: 0.0 },
+    CatalogEntry {
+        zaid: 53135,
+        symbol: "I-135",
+        filename: "I135.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 54135,
+        symbol: "Xe-135",
+        filename: "Xe135.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 55135,
+        symbol: "Cs-135",
+        filename: "Cs135.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 61149,
+        symbol: "Pm-149",
+        filename: "Pm149.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62149,
+        symbol: "Sm-149",
+        filename: "Sm149.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 64155,
+        symbol: "Gd-155",
+        filename: "Gd155.h5",
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 64157,
+        symbol: "Gd-157",
+        filename: "Gd157.h5",
+        nu_bar_const: 0.0,
+    },
 ];
 
 /// Errors from `NuclideLibrary::resolve`.
@@ -223,10 +463,7 @@ impl NuclideLibrary {
         &self,
         zaids: &[(u32, f64)],
     ) -> Result<Vec<ResolvedNuclide>, NuclideLibraryError> {
-        zaids
-            .iter()
-            .map(|&(z, t)| self.resolve(z, t))
-            .collect()
+        zaids.iter().map(|&(z, t)| self.resolve(z, t)).collect()
     }
 
     /// True if `zaid` is in the catalog (file existence not checked).
@@ -239,23 +476,17 @@ impl NuclideLibrary {
         self.by_zaid.iter().map(|(z, e)| (*z, e.symbol))
     }
 
-    fn load_or_get_meta(
-        &self,
-        zaid: u32,
-        path: &Path,
-    ) -> Result<NuclideMeta, NuclideLibraryError> {
+    fn load_or_get_meta(&self, zaid: u32, path: &Path) -> Result<NuclideMeta, NuclideLibraryError> {
         if let Some(m) = self.cache.borrow().get(&zaid) {
             return Ok(m.clone());
         }
-        let reader = hdf5_reader::NuclideFileReader::open(path).map_err(|e| {
-            NuclideLibraryError::Hdf5Read(path.to_path_buf(), format!("{e}"))
-        })?;
-        let awr = reader.awr().unwrap_or_else(|_| {
-            // Fall back to A from the ZAID. AWR ≈ A is good enough as
-            // a fallback for cells where transport doesn't depend
-            // critically on the exact mass (kinematics scaling).
-            (zaid % 1000) as f64
-        });
+        let reader = hdf5_reader::NuclideFileReader::open(path)
+            .map_err(|e| NuclideLibraryError::Hdf5Read(path.to_path_buf(), format!("{e}")))?;
+        // Fall back to A from the ZAID when the HDF5 file lacks the
+        // `atomic_weight_ratio` attribute. AWR ≈ A is good enough as
+        // a fallback for cells where transport doesn't depend
+        // critically on the exact mass (kinematics scaling).
+        let awr = reader.awr().unwrap_or((zaid % 1000) as f64);
         let temperatures_k = reader.temperatures.clone();
         let meta = NuclideMeta {
             awr,
@@ -285,6 +516,7 @@ fn pick_temperature(temps_k: &[f64], target_k: f64) -> (usize, f64) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -317,9 +549,8 @@ mod tests {
     fn catalog_covers_pwr_and_actinides() {
         let lib = NuclideLibrary::from_data_dir(".");
         let pwr_must_have: &[u32] = &[
-            1001, 1002, 8016, 40090, 40091, 40092, 40094, 92235, 92238,
-            94239, 94240, 94241, 94242, 95241, 53135, 54135, 55135,
-            61149, 62149,
+            1001, 1002, 8016, 40090, 40091, 40092, 40094, 92235, 92238, 94239, 94240, 94241, 94242,
+            95241, 53135, 54135, 55135, 61149, 62149,
         ];
         for &zaid in pwr_must_have {
             assert!(

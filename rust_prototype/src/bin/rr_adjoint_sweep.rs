@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! Mesh-size sweep for the adjoint-flux SVD compression picker.
 //!
 //! For each `(n_x, n_y, n_z)` configuration, runs a real random-ray
@@ -31,7 +37,10 @@ use open_rust_mc::random_ray::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "rr_adjoint_sweep", about = "Mesh-size sweep for the adjoint-SVD picker")]
+#[command(
+    name = "rr_adjoint_sweep",
+    about = "Mesh-size sweep for the adjoint-SVD picker"
+)]
 struct Args {
     /// Slab thickness (cm).
     #[arg(long, default_value_t = 100.0)]
@@ -98,22 +107,46 @@ struct Args {
 
 fn build_slab_geometry(thickness_cm: f64, half_xy_cm: f64) -> Geometry {
     let surfaces = vec![
-        Surface::PlaneZ { z0: 0.0, bc: BoundaryCondition::Reflective },
-        Surface::PlaneZ { z0: thickness_cm, bc: BoundaryCondition::Vacuum },
-        Surface::PlaneX { x0: -half_xy_cm, bc: BoundaryCondition::Reflective },
-        Surface::PlaneX { x0: half_xy_cm, bc: BoundaryCondition::Reflective },
-        Surface::PlaneY { y0: -half_xy_cm, bc: BoundaryCondition::Reflective },
-        Surface::PlaneY { y0: half_xy_cm, bc: BoundaryCondition::Reflective },
+        Surface::PlaneZ {
+            z0: 0.0,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneZ {
+            z0: thickness_cm,
+            bc: BoundaryCondition::Vacuum,
+        },
+        Surface::PlaneX {
+            x0: -half_xy_cm,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneX {
+            x0: half_xy_cm,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneY {
+            y0: -half_xy_cm,
+            bc: BoundaryCondition::Reflective,
+        },
+        Surface::PlaneY {
+            y0: half_xy_cm,
+            bc: BoundaryCondition::Reflective,
+        },
     ];
     let inside = cell::intersect_all(vec![
-        cell::outside(0), cell::inside(1),
-        cell::outside(2), cell::inside(3),
-        cell::outside(4), cell::inside(5),
+        cell::outside(0),
+        cell::inside(1),
+        cell::outside(2),
+        cell::inside(3),
+        cell::outside(4),
+        cell::inside(5),
     ]);
     let outside = Region::Complement(Box::new(cell::intersect_all(vec![
-        cell::outside(0), cell::inside(1),
-        cell::outside(2), cell::inside(3),
-        cell::outside(4), cell::inside(5),
+        cell::outside(0),
+        cell::inside(1),
+        cell::outside(2),
+        cell::inside(3),
+        cell::outside(4),
+        cell::inside(5),
     ])));
     let cells = vec![
         Cell::new(CellId(0), inside, CellFill::Material(0)),
@@ -165,7 +198,10 @@ fn assert_mesh_is_physical(args: &Args, n: [usize; 3]) {
         "mesh {:?} has voxel edge {:.3} cm < mfp/8 = {:.3} cm. \
          Sub-mfp voxels carry no signal — refusing to run a \
          meaningless sweep entry. (mfp = 1/sigma_t = {:.2} cm)",
-        n, min_edge, floor, mfp
+        n,
+        min_edge,
+        floor,
+        mfp
     );
 }
 
@@ -218,9 +254,7 @@ fn run_one(args: &Args, n: [usize; 3]) -> String {
     let space = parse_picker_space(&args.picker_space);
     let repr = pick_representation(&phi, m, n_cols, args.max_rank, args.frob_tol, space);
     let (kind, rank, repr_space, comp_bytes, ratio, frob_err) = match &repr {
-        AdjointRepr::Dense { .. } => (
-            "dense", 0, "—".to_string(), dense_bytes, 1.0_f64, 0.0_f64,
-        ),
+        AdjointRepr::Dense { .. } => ("dense", 0, "—".to_string(), dense_bytes, 1.0_f64, 0.0_f64),
         AdjointRepr::Svd(s) => {
             let recon = s.reconstruct();
             let err = recon_error(&phi, &recon);
@@ -236,10 +270,13 @@ fn run_one(args: &Args, n: [usize; 3]) -> String {
     };
     format!(
         "{},{},{},{},{},{},{},{},{:.4},{},{},{:.4},{:.6e},{:.3}",
-        n[0], n[1], n[2],
+        n[0],
+        n[1],
+        n[2],
         n[0] * n[1] * n[2],
         reshape,
-        m, n_cols,
+        m,
+        n_cols,
         dense_bytes,
         args.frob_tol,
         kind,
@@ -258,7 +295,11 @@ fn best_factor_pair(n: usize) -> (usize, usize) {
             best = (m, n / m);
         }
     }
-    if best.0 > best.1 { (best.1, best.0) } else { best }
+    if best.0 > best.1 {
+        (best.1, best.0)
+    } else {
+        best
+    }
 }
 
 fn main() {
@@ -282,7 +323,10 @@ fn main() {
             let _ = writeln!(
                 err,
                 "# [{}/{}] running mesh {:?} = {} voxels ...",
-                idx + 1, total, n, n_voxels,
+                idx + 1,
+                total,
+                n,
+                n_voxels,
             );
             let _ = err.flush();
         }

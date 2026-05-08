@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! Integrated PWR pin-cell burnup driver — eigenvalue → flux → CRAM
 //! → composition update → repeat.
 //!
@@ -166,20 +172,20 @@ const NUCLIDE_SPECS: &[(&str, f64, f64, usize)] = &[
     ("O16.h5", 15.858, 0.0, 2),
     ("Xe135.h5", 133.748, 0.0, 2),
     // pwr_actinides chain — initial density 0, fed by CRAM each step.
-    ("U236.h5",  234.018, 0.0,  3),
-    ("U237.h5",  235.012, 0.0,  3),
-    ("U239.h5",  237.001, 0.0,  3),
-    ("Np237.h5", 235.012, 0.0,  3),
-    ("Np239.h5", 236.999, 0.0,  3),
+    ("U236.h5", 234.018, 0.0, 3),
+    ("U237.h5", 235.012, 0.0, 3),
+    ("U239.h5", 237.001, 0.0, 3),
+    ("Np237.h5", 235.012, 0.0, 3),
+    ("Np239.h5", 236.999, 0.0, 3),
     ("Pu239.h5", 236.999, 2.88, 3),
     ("Pu240.h5", 237.992, 2.79, 3),
     ("Pu241.h5", 238.978, 2.95, 3),
     ("Pu242.h5", 239.979, 2.81, 3),
-    ("Am241.h5", 238.986, 0.0,  3),
-    ("I135.h5",  133.750, 0.0,  3),
-    ("Cs135.h5", 133.747, 0.0,  3),
-    ("Pm149.h5", 147.639, 0.0,  3),
-    ("Sm149.h5", 147.638, 0.0,  3),
+    ("Am241.h5", 238.986, 0.0, 3),
+    ("I135.h5", 133.750, 0.0, 3),
+    ("Cs135.h5", 133.747, 0.0, 3),
+    ("Pm149.h5", 147.639, 0.0, 3),
+    ("Sm149.h5", 147.638, 0.0, 3),
 ];
 
 /// Per-`xs_kernel_idx` (zaid, material_idx) parallel to
@@ -584,18 +590,21 @@ fn main() {
     let zaid_pu239 = chain.index_of_zaid(94239);
     let zaid_pu240 = chain.index_of_zaid(94240);
     let zaid_sm149 = chain.index_of_zaid(62149);
-    let actinides_in_chain =
-        zaid_pu239.is_some() && zaid_pu240.is_some() && zaid_sm149.is_some();
+    let actinides_in_chain = zaid_pu239.is_some() && zaid_pu240.is_some() && zaid_sm149.is_some();
     if actinides_in_chain {
         println!(
             "  step    t [h]   k_eff   φ_fuel [n/cm²/s]   N_Xe/U235   N_Pu239/U235   N_Pu240/U235   N_Sm149/U235   ΔU235/U235"
         );
-        println!("  ----  -------  ------  ----------------  ----------  -------------  -------------  -------------  ----------");
+        println!(
+            "  ----  -------  ------  ----------------  ----------  -------------  -------------  -------------  ----------"
+        );
     } else {
         println!(
             "  step       t [h]    k_eff       φ_fuel [n/cm²/s]    N_Xe/N_U235     ΔN_U235/N_U235"
         );
-        println!("  -----  --------  --------  -----------------  --------------  ----------------");
+        println!(
+            "  -----  --------  --------  -----------------  --------------  ----------------"
+        );
     }
 
     let dt = args.hours_per_step * 3_600.0;
@@ -662,7 +671,10 @@ fn main() {
             // indicate the spectrum collapse isn't taking effect).
             let probe = |zaid: u32, mt: u32, label: &str| {
                 if let Some(rxn) = chain.reactions.get(&(zaid, mt)) {
-                    eprintln!("    {label:<24} ⟨σ⟩ = {:>8.3} b  (chain JSON: see file)", rxn.xs_barns);
+                    eprintln!(
+                        "    {label:<24} ⟨σ⟩ = {:>8.3} b  (chain JSON: see file)",
+                        rxn.xs_barns
+                    );
                 }
             };
             eprintln!("  Spectrum-collapsed one-group XS at fuel cell (step 0):");

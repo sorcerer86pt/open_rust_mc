@@ -131,6 +131,7 @@ impl RectLattice {
     /// Convention: at the boundary itself (distance zero) the function
     /// reports the distance to the *opposite* plane, not 0 — otherwise
     /// a particle sitting exactly on a grid line would never advance.
+    #[allow(clippy::needless_range_loop)]
     pub fn distance_to_grid(&self, pos: Vec3, dir: Vec3, current: [i32; 3]) -> f64 {
         let mut best = f64::INFINITY;
         for axis in 0..3 {

@@ -42,9 +42,9 @@
 
 use crate::geometry::Vec3;
 use crate::photon::coherent::coherent_scatter;
-use crate::photon::material::PhotonMaterial;
 use crate::photon::compton::adjoint_compton_scatter;
 use crate::photon::material::Channel;
+use crate::photon::material::PhotonMaterial;
 use crate::transport::rng::Rng;
 
 /// 2D `(z, E)` importance-map tally on a regular Cartesian mesh in
@@ -65,7 +65,13 @@ pub struct ImportanceMap {
 }
 
 impl ImportanceMap {
-    pub fn new(thickness_cm: f64, n_z_bins: usize, e_min: f64, e_max: f64, n_e_bins: usize) -> Self {
+    pub fn new(
+        thickness_cm: f64,
+        n_z_bins: usize,
+        e_min: f64,
+        e_max: f64,
+        n_e_bins: usize,
+    ) -> Self {
         Self {
             thickness_cm,
             n_z_bins,
@@ -326,6 +332,7 @@ fn rotate_direction(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_range_loop)]
 mod tests {
     use super::*;
 
@@ -381,10 +388,7 @@ mod tests {
         let ie = map.e_bin_of(energy).unwrap();
         for iz in 0..10 {
             let v = map.flux[map.linear(iz, ie).unwrap()];
-            assert!(
-                (v - 1.0).abs() < 1e-9,
-                "bin {iz}: got {v}, expected 1.0",
-            );
+            assert!((v - 1.0).abs() < 1e-9, "bin {iz}: got {v}, expected 1.0",);
         }
     }
 
@@ -417,7 +421,10 @@ mod tests {
         let h = PhotonElement::from_hdf5(&h_path).unwrap();
         let o = PhotonElement::from_hdf5(&o_path).unwrap();
         let molecule_density = 3.3428e-2;
-        let water = PhotonMaterial::new(vec![(2.0 * molecule_density, h), (1.0 * molecule_density, o)]);
+        let water = PhotonMaterial::new(vec![
+            (2.0 * molecule_density, h),
+            (1.0 * molecule_density, o),
+        ]);
 
         let cfg = AdjointSlabConfig {
             thickness_cm: 100.0,
@@ -439,9 +446,7 @@ mod tests {
             }
         }
         let total: f64 = z_profile.iter().sum();
-        eprintln!(
-            "adjoint walk z-profile (sum={total:.1}, normalised):",
-        );
+        eprintln!("adjoint walk z-profile (sum={total:.1}, normalised):",);
         for (iz, v) in z_profile.iter().enumerate() {
             let z_mid = (iz as f64 + 0.5) * cfg.thickness_cm / cfg.n_z_bins as f64;
             eprintln!("  z={z_mid:5.1}  ψ̂*={:8.1}  ({:.3}%)", v, 100.0 * v / total);
@@ -479,8 +484,7 @@ mod tests {
         let above_birth: f64 = e_profile.iter().skip(birth_bin + 1).sum();
         eprintln!(
             "  birth bin {birth_bin}: {:.1};  above-birth integrated: {:.1}",
-            e_profile[birth_bin],
-            above_birth,
+            e_profile[birth_bin], above_birth,
         );
         // Above-birth bins must contain at least *some* up-scatter
         // contribution.

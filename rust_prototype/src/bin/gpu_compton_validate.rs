@@ -496,8 +496,8 @@ fn test_photoelectric_cascade(elem: &PhotonElement, sym: &str, e_in: f64) -> boo
     let chi2 = reduced_chi2(&h_cpu, &h_gpu);
 
     let local_match = ((m_c - m_g) / m_c.abs().max(1.0)).abs() < 5e-3;
-    let n_match = (mean_n_cpu - mean_n_gpu).abs()
-        < (0.05_f64).max(0.05 * mean_n_cpu.max(mean_n_gpu));
+    let n_match =
+        (mean_n_cpu - mean_n_gpu).abs() < (0.05_f64).max(0.05 * mean_n_cpu.max(mean_n_gpu));
     let chi2_match = chi2.is_nan() || chi2 < 2.0;
     let pass = local_match && n_match && chi2_match;
 

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! Point-kinetics transient demo — exercises the new
 //! `transport::kinetics` module on canonical reactivity profiles
 //! that anchor against textbook closed-form values.
@@ -127,7 +133,10 @@ fn main() {
         Mode::Step => PkState::equilibrium(1.0, &params),
     };
 
-    eprintln!("# point_kinetics_demo  mode={:?}  Λ={:.3e} s", args.mode, params.gen_time);
+    eprintln!(
+        "# point_kinetics_demo  mode={:?}  Λ={:.3e} s",
+        args.mode, params.gen_time
+    );
     eprintln!(
         "# β = {:.5}    β_i = {:.4?}    λ_i = {:.4?} s⁻¹",
         groups.beta_total,

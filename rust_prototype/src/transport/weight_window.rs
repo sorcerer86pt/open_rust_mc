@@ -170,8 +170,7 @@ impl WeightWindow {
             }
             // log10(phi_max / phi_v) ≥ 0 because phi_v ≤ phi_max.
             let importance_decade = (phi_max / phi).log10().max(0.0);
-            let ratio_v =
-                (base_ratio * (1.0 + ratio_growth * importance_decade)).max(1.0);
+            let ratio_v = (base_ratio * (1.0 + ratio_growth * importance_decade)).max(1.0);
             let sqrt_ratio = ratio_v.sqrt();
             let w_target = w_ref * phi_max / phi;
             lower[i] = w_target / sqrt_ratio;

@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! 17×17 PWR fuel assembly demo.
 //!
 //! First geometry exercising the recursive-geometry machinery in
@@ -31,8 +37,8 @@ use open_rust_mc::geometry::universe::{Universe, UniverseId};
 use open_rust_mc::geometry::{Aabb, Geometry, Vec3};
 use open_rust_mc::hdf5_reader;
 use open_rust_mc::thermal::ThermalScatteringData;
-use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::dispatch::{CpuRunner, EigenvalueRunner};
+use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::simulate::SimConfig;
 use open_rust_mc::transport::xs_provider;
 
@@ -412,7 +418,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     let t0 = Instant::now();
 
     let mut kernels = Vec::new();
-    for (_nuc_idx, &(filename, awr, nu_bar, nuc_temp_idx)) in NUCLIDE_SPECS.iter().enumerate() {
+    for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS.iter() {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARN: {} not found — using zero kernel", path.display());

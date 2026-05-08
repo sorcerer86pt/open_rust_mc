@@ -131,6 +131,7 @@ pub fn adjoint_elastic_scatter(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::useless_vec)]
 mod tests {
     use super::*;
 
@@ -218,7 +219,10 @@ mod tests {
             let b = ((f * N_BINS as f64) as usize).min(N_BINS - 1);
             hist[b] += 1;
         }
-        assert_eq!(violations, 0, "{violations} samples outside kinematic range");
+        assert_eq!(
+            violations, 0,
+            "{violations} samples outside kinematic range"
+        );
         let total: u64 = hist.iter().sum();
         let expected = total as f64 / N_BINS as f64;
         let chi2: f64 = hist
@@ -251,8 +255,7 @@ mod tests {
         let mut rng = Rng::new(0xADC0E4, 0);
         for _ in 0..N {
             let e_in_fwd = (log_lo + rng.uniform() * (log_hi - log_lo)).exp();
-            let (e_out, _) =
-                elastic_scatter(e_in_fwd, Vec3::new(0.0, 0.0, 1.0), 0.999, &mut rng);
+            let (e_out, _) = elastic_scatter(e_in_fwd, Vec3::new(0.0, 0.0, 1.0), 0.999, &mut rng);
             // E_out should lie in [0, E_in_fwd] by hydrogen kinematics.
             assert!(e_out > 0.0 && e_out <= e_in_fwd * (1.0 + 1e-9));
             let o = adjoint_elastic_scatter(e_out, 0.999, E_IN_HI, &mut rng);

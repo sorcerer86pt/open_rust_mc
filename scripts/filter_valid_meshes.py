@@ -16,7 +16,6 @@ output CSV per Frobenius tolerance.
 from __future__ import annotations
 
 import csv
-import sys
 from pathlib import Path
 
 SLAB_CM = 100.0

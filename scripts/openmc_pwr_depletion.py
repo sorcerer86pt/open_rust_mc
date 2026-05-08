@@ -29,7 +29,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 import openmc
-from openmc.deplete import Chain, CoupledOperator, IndependentOperator, PredictorIntegrator
+from openmc.deplete import Chain, CoupledOperator, PredictorIntegrator
 
 DATA = "/mnt/c/Users/fog/madman_svd_experiment/data/endfb-vii.1-hdf5"
 

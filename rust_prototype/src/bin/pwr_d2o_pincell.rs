@@ -192,12 +192,30 @@ fn setup_geometry(pitch_cm: f64) -> (Vec<Surface>, Vec<Cell>) {
     // axially through ±∞ and particles never see the z-planes).
     let inside_box = || {
         cell::intersect_all(vec![
-            cell::Region::HalfSpace { surface_idx: 3, positive: true },
-            cell::Region::HalfSpace { surface_idx: 4, positive: false },
-            cell::Region::HalfSpace { surface_idx: 5, positive: true },
-            cell::Region::HalfSpace { surface_idx: 6, positive: false },
-            cell::Region::HalfSpace { surface_idx: 7, positive: true },
-            cell::Region::HalfSpace { surface_idx: 8, positive: false },
+            cell::Region::HalfSpace {
+                surface_idx: 3,
+                positive: true,
+            },
+            cell::Region::HalfSpace {
+                surface_idx: 4,
+                positive: false,
+            },
+            cell::Region::HalfSpace {
+                surface_idx: 5,
+                positive: true,
+            },
+            cell::Region::HalfSpace {
+                surface_idx: 6,
+                positive: false,
+            },
+            cell::Region::HalfSpace {
+                surface_idx: 7,
+                positive: true,
+            },
+            cell::Region::HalfSpace {
+                surface_idx: 8,
+                positive: false,
+            },
         ])
     };
 
@@ -257,9 +275,8 @@ fn main() {
         (ZAID_ZR94, T_CLAD_K), // xs_idx 7
         (ZAID_O16, T_MOD_K),   // xs_idx 8 — second O-16 column at 600 K
     ];
-    let resolved: Vec<ResolvedNuclide> = lib
-        .resolve_many(zaids)
-        .expect("nuclide resolution failed");
+    let resolved: Vec<ResolvedNuclide> =
+        lib.resolve_many(zaids).expect("nuclide resolution failed");
 
     println!("\n── NuclideLibrary resolution ──");
     for (i, r) in resolved.iter().enumerate() {
@@ -278,15 +295,7 @@ fn main() {
     let t0 = Instant::now();
     let kernels: Vec<_> = resolved
         .iter()
-        .map(|r| {
-            xs_provider::load_nuclide(
-                &r.path,
-                args.rank,
-                r.temp_idx,
-                r.awr,
-                r.nu_bar_const,
-            )
-        })
+        .map(|r| xs_provider::load_nuclide(&r.path, args.rank, r.temp_idx, r.awr, r.nu_bar_const))
         .collect();
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  loaded {} nuclides in {load_ms:.0} ms", kernels.len());
@@ -383,20 +392,25 @@ fn main() {
 
     let n = k_per_seed.len() as f64;
     let k_mean = k_per_seed.iter().sum::<f64>() / n;
-    let k_var = k_per_seed
-        .iter()
-        .map(|k| (k - k_mean).powi(2))
-        .sum::<f64>()
-        / (n - 1.0).max(1.0);
+    let k_var = k_per_seed.iter().map(|k| (k - k_mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
     let k_std = k_var.sqrt();
     let total_t_ms: f64 = t_per_seed.iter().sum();
     let ns_per_p = total_t_ms * 1e6 / (total_histories * args.seeds as u64) as f64;
 
     println!("\n============================================================");
-    println!("  RESULT — D₂O pin cell ({:.2}% U-235)", args.enrichment * 100.0);
+    println!(
+        "  RESULT — D₂O pin cell ({:.2}% U-235)",
+        args.enrichment * 100.0
+    );
     println!("============================================================");
-    println!("  k_inf       = {k_mean:.5} +/- {k_std:.5}  ({} seeds)", args.seeds);
-    println!("  Histories   = {} per seed × {} seeds", total_histories, args.seeds);
+    println!(
+        "  k_inf       = {k_mean:.5} +/- {k_std:.5}  ({} seeds)",
+        args.seeds
+    );
+    println!(
+        "  Histories   = {} per seed × {} seeds",
+        total_histories, args.seeds
+    );
     println!("  Sim time    = {total_t_ms:.0} ms");
     println!("  ns/particle = {ns_per_p:.1}");
 }

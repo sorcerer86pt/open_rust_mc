@@ -1,3 +1,9 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::manual_is_multiple_of,
+    clippy::needless_borrow
+)]
 //! Phase 1 benchmark: SVD-compress the random-ray adjoint flux for
 //! weight-window storage (Evans 2020 method).
 //!
@@ -245,7 +251,11 @@ fn run_real_slab(args: &Args, log: &mut Vec<String>) {
     // Pick reshape based on mesh dimensionality.
     let (m, n_cols, reshape_label) = if n_x * n_y > 1 {
         // 3D mesh: reshape [n_x*n_y, n_z] (Evans 2020 streaming-axis layout).
-        (n_x * n_y, n_z, format!("[n_x*n_y, n_z] = [{} × {}]", n_x * n_y, n_z))
+        (
+            n_x * n_y,
+            n_z,
+            format!("[n_x*n_y, n_z] = [{} × {}]", n_x * n_y, n_z),
+        )
     } else {
         // 1D mesh: factor n_z into a 2D matrix so SVD has something
         // to chew on.
@@ -255,7 +265,16 @@ fn run_real_slab(args: &Args, log: &mut Vec<String>) {
     println!("Reshape: {reshape_label}");
     log.push(format!("Reshape: {reshape_label}"));
 
-    bench_compression(&phi, m, n_cols, args.max_rank, args.frob_tol, &args.picker_space, "regime1_real_slab", log);
+    bench_compression(
+        &phi,
+        m,
+        n_cols,
+        args.max_rank,
+        args.frob_tol,
+        &args.picker_space,
+        "regime1_real_slab",
+        log,
+    );
 }
 
 fn run_synthetic_upscale(args: &Args, log: &mut Vec<String>) {
@@ -284,10 +303,8 @@ fn run_synthetic_upscale(args: &Args, log: &mut Vec<String>) {
     for ix in 0..n_xy {
         for iy in 0..n_xy {
             // Mild transverse perturbation: rank-2 component.
-            let xperturb =
-                ((ix as f64 + 0.5) / n_xy as f64 - 0.5).powi(2) * 0.05;
-            let yperturb =
-                ((iy as f64 + 0.5) / n_xy as f64 - 0.5).powi(2) * 0.05;
+            let xperturb = ((ix as f64 + 0.5) / n_xy as f64 - 0.5).powi(2) * 0.05;
+            let yperturb = ((iy as f64 + 0.5) / n_xy as f64 - 0.5).powi(2) * 0.05;
             for iz in 0..n_z {
                 let idx = (ix * n_xy + iy) * n_z + iz;
                 phi[idx] = z_profile[iz] * (1.0 + xperturb + yperturb);
@@ -302,11 +319,17 @@ fn run_synthetic_upscale(args: &Args, log: &mut Vec<String>) {
         "Reshape [n_x*n_y, n_z] = [{} × {}] (streaming-axis layout)",
         m, n_cols
     );
-    log.push(format!(
-        "Reshape [n_x*n_y, n_z] = [{} × {}]",
-        m, n_cols
-    ));
-    bench_compression(&phi, m, n_cols, args.max_rank, args.frob_tol, &args.picker_space, "regime2_upscale_xy_z", log);
+    log.push(format!("Reshape [n_x*n_y, n_z] = [{} × {}]", m, n_cols));
+    bench_compression(
+        &phi,
+        m,
+        n_cols,
+        args.max_rank,
+        args.frob_tol,
+        &args.picker_space,
+        "regime2_upscale_xy_z",
+        log,
+    );
 }
 
 fn run_pincell(args: &Args, log: &mut Vec<String>) {
@@ -325,12 +348,8 @@ fn run_pincell(args: &Args, log: &mut Vec<String>) {
     )
     .expect("fuel mgxs");
     let scatter_mod = vec![0.6, 0.4, 0.001, 1.5];
-    let moderator = MaterialMgxs::nonfissionable(
-        vec![1.05, 1.6],
-        vec![0.005, 0.01],
-        scatter_mod,
-    )
-    .expect("mod mgxs");
+    let moderator = MaterialMgxs::nonfissionable(vec![1.05, 1.6], vec![0.005, 0.01], scatter_mod)
+        .expect("mod mgxs");
     let library = MgxsLibrary::new(vec![fuel, moderator]).expect("lib");
 
     let pitch = 1.26_f64;
@@ -376,14 +395,8 @@ fn run_pincell(args: &Args, log: &mut Vec<String>) {
         cell::outside(4),
         cell::inside(5),
     ]);
-    let fuel_region = Region::Intersection(
-        Box::new(bounding.clone()),
-        Box::new(cell::inside(6)),
-    );
-    let mod_region = Region::Intersection(
-        Box::new(bounding.clone()),
-        Box::new(cell::outside(6)),
-    );
+    let fuel_region = Region::Intersection(Box::new(bounding.clone()), Box::new(cell::inside(6)));
+    let mod_region = Region::Intersection(Box::new(bounding.clone()), Box::new(cell::outside(6)));
     let outside_region = Region::Complement(Box::new(bounding));
     let cells = vec![
         Cell::new(CellId(0), fuel_region, CellFill::Material(0)),
@@ -413,7 +426,10 @@ fn run_pincell(args: &Args, log: &mut Vec<String>) {
     let result = solver.run(&cfg);
     println!(
         "Pin-cell adjoint solved: {} FSRs × {} groups = {} entries (k_eff={:.5})",
-        result.n_fsrs, result.n_groups, result.phi.len(), result.k_eff
+        result.n_fsrs,
+        result.n_groups,
+        result.phi.len(),
+        result.k_eff
     );
     log.push(format!(
         "Pin-cell adjoint solved: {} FSRs × {} groups (k_eff={:.5})",

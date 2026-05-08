@@ -164,8 +164,8 @@ pub fn collapsed_reaction_xs(
         n_active += 1;
         flux_sum += b.rr_flux[target_cell];
         let base = target_cell * stride;
-        for k in 0..stride {
-            rate_sum[k] += b.rr_rate[base + k];
+        for (acc, &v) in rate_sum.iter_mut().zip(&b.rr_rate[base..base + stride]) {
+            *acc += v;
         }
     }
     if n_active == 0 || flux_sum <= 0.0 {

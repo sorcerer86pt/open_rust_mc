@@ -1,3 +1,4 @@
+#![allow(clippy::needless_range_loop, clippy::collapsible_if)]
 //! Random Ray solver — forward + adjoint, multigroup, flat source.
 //!
 //! Top-level loop:
@@ -871,6 +872,7 @@ fn surface_normal_at(surface: &crate::geometry::Surface, p: Vec3) -> Vec3 {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
     use crate::geometry::cell::{self, CellFill, CellId, Region};

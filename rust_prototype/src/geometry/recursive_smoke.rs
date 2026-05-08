@@ -16,6 +16,7 @@
 //!      array, so k-inf must agree within MC noise.
 
 #![cfg(test)]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use crate::geometry::cell::{self, Cell, CellFill, CellId, Region};
 use crate::geometry::coord::CoordStackExt;

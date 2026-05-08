@@ -70,7 +70,7 @@ use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{Aabb, Vec3};
 use open_rust_mc::photon::PhotonElement;
 use open_rust_mc::photon::material::PhotonMaterial;
-use open_rust_mc::photon::transport::{transport_history_csg_with_ww_nee, NeeConfig};
+use open_rust_mc::photon::transport::{NeeConfig, transport_history_csg_with_ww_nee};
 use open_rust_mc::transport::rng::Rng;
 use open_rust_mc::transport::weight_window::WeightWindow;
 
@@ -500,7 +500,12 @@ fn main() -> Result<(), String> {
                 cum += contrib;
                 println!(
                     "    coll {:>3}: z={:>6.2} cm  E_in={:.3e} eV  Δ={:.3e} eV  cum={:.3e} eV  cum/E_src={:.3e}",
-                    i, z, e_in, contrib, cum, cum / source_energy_ev
+                    i,
+                    z,
+                    e_in,
+                    contrib,
+                    cum,
+                    cum / source_energy_ev
                 );
             }
             // Compare with analog: the photon either physically
@@ -593,9 +598,7 @@ fn main() -> Result<(), String> {
         println!("  full-sum (= total)      = {:.4e}", total_per_src);
         println!();
         println!("  ── Three-way estimator comparison ──");
-        println!(
-            "  Estimator           |  T          | σ_rel    | FOM (/s)"
-        );
+        println!("  Estimator           |  T          | σ_rel    | FOM (/s)");
         println!(
             "  full per-coll sum    | {:.4e} | {:>5.2}%  | {:.3e}",
             total_per_src,

@@ -15,9 +15,7 @@
 #[cfg(not(feature = "cuda"))]
 fn main() {
     eprintln!("ERROR: this binary requires the 'cuda' feature.");
-    eprintln!(
-        "Build with: cargo run --release --features cuda --bin gpu_hex_minicore -- ..."
-    );
+    eprintln!("Build with: cargo run --release --features cuda --bin gpu_hex_minicore -- ...");
     std::process::exit(1);
 }
 
@@ -150,12 +148,15 @@ mod cuda_main {
         let cells = vec![
             Cell::new(CellId(0), cell::inside(0), CellFill::Material(0)).with_temperature(900.0),
             Cell::new(CellId(1), cell::between(0, 1), CellFill::Void),
-            Cell::new(CellId(2), cell::between(1, 2), CellFill::Material(1)).with_temperature(600.0),
+            Cell::new(CellId(2), cell::between(1, 2), CellFill::Material(1))
+                .with_temperature(600.0),
             Cell::new(CellId(3), cell::outside(2), CellFill::Material(2)).with_temperature(600.0),
-            Cell::new(CellId(4), outer.inside.clone(), CellFill::HexLattice(0)).with_aabb(Aabb::new(
-                Vec3::new(-circumradius, -inradius, -z_half),
-                Vec3::new(circumradius, inradius, z_half),
-            )),
+            Cell::new(CellId(4), outer.inside.clone(), CellFill::HexLattice(0)).with_aabb(
+                Aabb::new(
+                    Vec3::new(-circumradius, -inradius, -z_half),
+                    Vec3::new(circumradius, inradius, z_half),
+                ),
+            ),
             Cell::new(
                 CellId(5),
                 cell::Region::Complement(Box::new(outer.inside)),
@@ -290,7 +291,10 @@ mod cuda_main {
             ));
         }
         let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        println!("  Loaded {} nuclides in {load_ms:.0} ms", NUCLIDE_SPECS.len());
+        println!(
+            "  Loaded {} nuclides in {load_ms:.0} ms",
+            NUCLIDE_SPECS.len()
+        );
 
         // ── Initialise GPU ────────────────────────────────────────────
         println!("\n── Initialising GPU ──");
@@ -403,11 +407,8 @@ mod cuda_main {
 
         let n_seeds = k_per_seed.len() as f64;
         let k_mean = k_per_seed.iter().sum::<f64>() / n_seeds;
-        let k_var = k_per_seed
-            .iter()
-            .map(|k| (k - k_mean).powi(2))
-            .sum::<f64>()
-            / (n_seeds - 1.0).max(1.0);
+        let k_var =
+            k_per_seed.iter().map(|k| (k - k_mean).powi(2)).sum::<f64>() / (n_seeds - 1.0).max(1.0);
         let k_std = k_var.sqrt();
 
         let total_t_ms: f64 = t_per_seed.iter().sum();
@@ -421,9 +422,15 @@ mod cuda_main {
             args.rank
         );
         println!("========================================================");
-        println!("  k_inf       = {k_mean:.5} +/- {k_std:.5}  ({} seed{})",
-            args.seeds, if args.seeds == 1 { "" } else { "s" });
-        println!("  Histories   = {} per seed × {} seeds", total_histories, args.seeds);
+        println!(
+            "  k_inf       = {k_mean:.5} +/- {k_std:.5}  ({} seed{})",
+            args.seeds,
+            if args.seeds == 1 { "" } else { "s" }
+        );
+        println!(
+            "  Histories   = {} per seed × {} seeds",
+            total_histories, args.seeds
+        );
         println!("  Sim time    = {total_t_ms:.0} ms");
         println!("  ns/particle = {ns_per_p:.1}");
         println!("\n  Compare to CPU `hex_minicore` with same args.");

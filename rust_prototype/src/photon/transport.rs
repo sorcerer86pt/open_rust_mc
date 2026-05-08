@@ -359,6 +359,7 @@ pub fn deflect(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
 ///
 /// A source outside the modelled geometry is returned immediately as
 /// fully escaped energy.
+#[allow(clippy::too_many_arguments)]
 pub fn transport_history_csg(
     source_pos: Vec3,
     source_dir: Vec3,
@@ -529,20 +530,17 @@ pub fn transport_history_csg_with_ww_nee(
 
     // Uncollided source-flight contribution to NEE tally.
     if let Some(nee_cfg) = nee {
-        let cell_idx = start_stack
-            .last()
-            .map(|c| c.cell_idx as usize)
-            .unwrap_or(0);
-        if let CellFill::Material(m) = cells[cell_idx].fill {
-            if let Some(mat) = materials.get(m as usize).and_then(|o| o.as_ref()) {
-                let uncoll = crate::photon::nee::uncollided_forward_transmission(
-                    mat,
-                    source_energy,
-                    source_pos.z,
-                    nee_cfg.detector_z_cm,
-                );
-                result.nee_tally += source_weight * uncoll;
-            }
+        let cell_idx = start_stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+        if let CellFill::Material(m) = cells[cell_idx].fill
+            && let Some(mat) = materials.get(m as usize).and_then(|o| o.as_ref())
+        {
+            let uncoll = crate::photon::nee::uncollided_forward_transmission(
+                mat,
+                source_energy,
+                source_pos.z,
+                nee_cfg.detector_z_cm,
+            );
+            result.nee_tally += source_weight * uncoll;
         }
     }
 
@@ -728,15 +726,14 @@ fn transport_one_csg(
                 // multiplies by photon weight. Analog accumulators are
                 // unchanged — both estimators run in parallel.
                 if let Some(nee_cfg) = nee {
-                    let nee_compton =
-                        crate::photon::nee::compton_forward_transmission(
-                            material,
-                            energy,
-                            pos.z,
-                            nee_cfg.detector_z_cm,
-                            dir.z,
-                            nee_cfg.exclusion_cm,
-                        );
+                    let nee_compton = crate::photon::nee::compton_forward_transmission(
+                        material,
+                        energy,
+                        pos.z,
+                        nee_cfg.detector_z_cm,
+                        dir.z,
+                        nee_cfg.exclusion_cm,
+                    );
                     let contribution = weight * nee_compton;
                     result.nee_tally += contribution;
                     if nee_cfg.trace {
