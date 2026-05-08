@@ -295,9 +295,18 @@ bindings (`-p open-rust-mc-py`) clean.
   two-material geometry that auto-selects delta tracking and
   verify k_track is non-zero and agrees with k_eff within MC
   noise. 320/320 lib tests green.
-- **Surface and mesh tallies under delta tracking.** Same issue
-  as the track-length estimator. Currently the helpers are
-  surface-tracking-only.
+- ~~**Surface and mesh tallies under delta tracking.**~~
+  **Done 2026-05-08.** `transport_particle_delta` now deposits
+  mesh flux per Woodcock segment (Amanatides-Woo voxel walker,
+  same `MeshFluxTally::deposit` helper as surface tracking) and
+  tallies surface currents on the first boundary the segment
+  hits — exact for vacuum and reflective BCs (segment ends at
+  the surface) and pragmatic for transmission BCs (subsequent
+  silently-crossed surfaces in the same Woodcock step are
+  skipped, the standard limitation under delta tracking). New
+  unit tests `delta_tracking_mesh_flux_populates` and
+  `delta_tracking_surface_currents_populate` confirm both
+  helpers are wired. 322/322 lib tests green.
 
 ### Substantial (months each — research-grade)
 

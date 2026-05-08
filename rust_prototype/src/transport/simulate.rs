@@ -1532,8 +1532,61 @@ fn transport_particle_delta<XS: XsProvider>(
                 geometry,
             );
 
+            // How far the particle actually moves this Woodcock step.
+            // The vacuum branch advances to the surface, the reflective
+            // branch up to the surface, the transmission branch through
+            // the surface for the full Woodcock distance, and the
+            // free-advance branch the full d_collision.
+            let advance_dist = match &trace {
+                Some(hit) if hit.distance < d_collision => match hit.bc {
+                    BoundaryCondition::Vacuum | BoundaryCondition::Reflective => hit.distance,
+                    BoundaryCondition::Transmission => d_collision,
+                },
+                _ => d_collision,
+            };
+
+            // Mesh flux tally — deposit `w · advance_dist` over the
+            // segment the particle traverses this Woodcock step.
+            // Amanatides-Woo deposit handles axis-aligned voxel walks;
+            // the integrand is the same as in surface tracking even if
+            // the segment crosses materials silently.
+            if let Some(mesh) = tallies.mesh_flux.as_ref() {
+                mesh.deposit(
+                    particle.pos,
+                    particle.dir,
+                    advance_dist,
+                    particle.weight,
+                    &mut result.tallies.mesh_flux,
+                );
+            }
+
+            // Surface current tally on the FIRST boundary the segment
+            // hits. Reflective and transmission BCs both produce real
+            // surface crossings; vacuum kills the history at the
+            // boundary but the crossing still counts. Subsequent
+            // surfaces beyond `hit.distance` along the same Woodcock
+            // step (only possible for transmission) are not tallied —
+            // standard pragmatic limitation of surface-current under
+            // delta tracking; reflective/vacuum boundaries are exact
+            // because the segment stops there.
+            if let (Some(hit), Some(sct)) =
+                (trace.as_ref(), tallies.surface_current.as_ref())
+                && hit.distance < d_collision
+                && let Some(surf_idx) = hit.surface_idx
+                && let Some(bin) = sct.bin_for(surf_idx)
+            {
+                let crossing_pos = particle.pos + particle.dir * hit.distance;
+                let n = surfaces[surf_idx].normal_at(crossing_pos);
+                if particle.dir.dot(n) >= 0.0 {
+                    result.tallies.surface_current_pos[bin] += particle.weight;
+                } else {
+                    result.tallies.surface_current_neg[bin] += particle.weight;
+                }
+            }
+
             match trace {
                 Some(hit) if hit.distance < d_collision => {
+                    result.surface_crossings += 1;
                     match hit.bc {
                         BoundaryCondition::Vacuum => {
                             particle.kill();
@@ -2823,6 +2876,116 @@ mod tests {
         assert!(
             matches!(mode, TrackingMode::Delta(_)),
             "low-contrast two-material problem must auto-select delta tracking",
+        );
+    }
+
+    /// Mesh-flux tally must populate non-trivially under delta
+    /// tracking (pre-fix the helper only fired on the surface-tracking
+    /// path; voxels stayed at zero on PWR pin / heterogeneous
+    /// geometries that auto-select Woodcock). Sanity check: total
+    /// flux summed over voxels equals the total tracked path length
+    /// times the source weight, modulo whatever path lies outside the
+    /// mesh (the test geometry's source sits inside the mesh, so the
+    /// equality is approximate but tight).
+    #[test]
+    fn delta_tracking_mesh_flux_populates() {
+        let (surfaces, cells, materials, xs) = delta_tracking_two_material_problem();
+        let mesh = crate::transport::tally::MeshFluxTally::new(
+            [-5.0, -5.0, -5.0],
+            [2.5, 2.5, 2.5],
+            [4, 4, 4],
+        );
+        let mut tallies = Tallies::default();
+        tallies.mesh_flux = Some(mesh);
+
+        let config = SimConfig {
+            batches: 8,
+            inactive: 2,
+            particles_per_batch: 500,
+            seed: 11,
+            auto_inactive: None,
+            verbose: false,
+            parallel: false,
+            tallies,
+            statepoint_path: None,
+            survival_biasing: None,
+            initial_source_bank: None,
+            weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
+        };
+        let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
+
+        let total: f64 = results
+            .iter()
+            .filter(|r| r.active)
+            .map(|r| r.mesh_flux.iter().sum::<f64>())
+            .sum();
+        assert!(
+            total > 0.0,
+            "mesh flux is zero under delta tracking — tally helper isn't wired",
+        );
+
+        // At least half the voxels should have non-zero flux given a
+        // 5 cm radius source inside a 10 cm cube mesh and 6 active
+        // batches × 500 particles. (Pre-fix this would be 0 voxels
+        // populated, so the threshold is forgiving but conclusive.)
+        let mut populated = 0;
+        for r in results.iter().filter(|r| r.active) {
+            for &v in &r.mesh_flux {
+                if v > 0.0 {
+                    populated += 1;
+                    break;
+                }
+            }
+        }
+        assert!(populated > 0, "no active batch deposited mesh flux");
+    }
+
+    /// Surface-current tally must score boundary crossings under delta
+    /// tracking. Vacuum / reflective boundaries hit before the
+    /// Woodcock collision distance are real crossings; pre-fix the
+    /// surface-current helper was silently no-op on the delta path.
+    #[test]
+    fn delta_tracking_surface_currents_populate() {
+        let (surfaces, cells, materials, xs) = delta_tracking_two_material_problem();
+        // Tally the inner sphere (idx 0, the material interface) and
+        // the outer sphere (idx 1, the vacuum boundary). Both are real
+        // crossings under delta tracking even though the inner one is
+        // transmission.
+        let surf_tally = crate::transport::tally::SurfaceCurrentTally::new(vec![0, 1]);
+        let mut tallies = Tallies::default();
+        tallies.surface_current = Some(surf_tally);
+
+        let config = SimConfig {
+            batches: 8,
+            inactive: 2,
+            particles_per_batch: 500,
+            seed: 13,
+            auto_inactive: None,
+            verbose: false,
+            parallel: false,
+            tallies,
+            statepoint_path: None,
+            survival_biasing: None,
+            initial_source_bank: None,
+            weight_window: None,
+            disable_delayed_neutrons: false,
+            urr_equivalence: None,
+        };
+        let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
+
+        let mut total_pos = 0.0_f64;
+        let mut total_neg = 0.0_f64;
+        for r in results.iter().filter(|r| r.active) {
+            total_pos += r.surface_current_pos.iter().sum::<f64>();
+            total_neg += r.surface_current_neg.iter().sum::<f64>();
+        }
+        assert!(
+            total_pos + total_neg > 0.0,
+            "surface currents are zero under delta tracking — pos+neg = {} + {}",
+            total_pos,
+            total_neg,
         );
     }
 
