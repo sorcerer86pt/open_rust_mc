@@ -1,0 +1,220 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "PU-MET-FAST-023.case-2",
+    "case_name": "",
+    "category": "PU-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.002,
+    "source": "ICSBEP Handbook, PU-MET-FAST-023.case-2 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/pu-met-fast-023/openmc/case-2",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-2",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 1.715,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 6.0,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 8.35,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 2,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "98% Pu-239 in delta phase",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 94239,
+            "label": "Pu-239",
+            "atom_density": 0.036603
+          },
+          {
+            "zaid": 94240,
+            "label": "Pu-240",
+            "atom_density": 0.00066913
+          },
+          {
+            "zaid": 31069,
+            "label": "Ga-69",
+            "atom_density": 0.0013197312479999999
+          },
+          {
+            "zaid": 31071,
+            "label": "Ga-71",
+            "atom_density": 0.000875868752
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 8.233267000000001e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.0001292446844
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 2.9848234e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 3.972252e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00028927
+          },
+          {
+            "zaid": 28058,
+            "label": "Ni-58",
+            "atom_density": 0.0013264103196
+          },
+          {
+            "zaid": 28060,
+            "label": "Ni-60",
+            "atom_density": 0.0005109308804
+          },
+          {
+            "zaid": 28061,
+            "label": "Ni-61",
+            "atom_density": 2.22098116e-05
+          },
+          {
+            "zaid": 28062,
+            "label": "Ni-62",
+            "atom_density": 7.081459800000001e-05
+          },
+          {
+            "zaid": 28064,
+            "label": "Ni-64",
+            "atom_density": 1.80343904e-05
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "c_Graphite",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.091842
+          }
+        ],
+        "thermal_files": [
+          "c_Graphite.h5"
+        ]
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

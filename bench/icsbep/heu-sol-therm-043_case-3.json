@@ -1,0 +1,209 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-SOL-THERM-043.case-3",
+    "case_name": "",
+    "category": "HEU-SOL-THERM",
+    "k_eff_reference": 0.999,
+    "k_eff_sigma": 0.0025,
+    "source": "ICSBEP Handbook, HEU-SOL-THERM-043.case-3 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/heu-sol-therm-043/openmc/case-3",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-3",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 34.5948,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 34.9148,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Uranium Oxyfluoride Solution",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 5.8643e-07
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 4.7739e-05
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 2.8625e-06
+          },
+          {
+            "zaid": 9019,
+            "label": "F-19",
+            "atom_density": 0.00010238
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.033319367172
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 1.2632828e-05
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.066459
+          }
+        ],
+        "thermal_files": [
+          "c_H_in_H2O.h5"
+        ]
+      },
+      {
+        "name": "1100 Aluminum",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 13027,
+            "label": "Al-27",
+            "atom_density": 0.059699
+          },
+          {
+            "zaid": 14028,
+            "label": "Si-28",
+            "atom_density": 0.000509126279536
+          },
+          {
+            "zaid": 14029,
+            "label": "Si-29",
+            "atom_density": 2.5851979831999998e-05
+          },
+          {
+            "zaid": 14030,
+            "label": "Si-30",
+            "atom_density": 1.7041740632e-05
+          },
+          {
+            "zaid": 29063,
+            "label": "Cu-63",
+            "atom_density": 3.5518206e-05
+          },
+          {
+            "zaid": 29065,
+            "label": "Cu-65",
+            "atom_density": 1.5845794e-05
+          },
+          {
+            "zaid": 30064,
+            "label": "Zn-64",
+            "atom_density": 1.2271848600000001e-05
+          },
+          {
+            "zaid": 30066,
+            "label": "Zn-66",
+            "atom_density": 6.9208534e-06
+          },
+          {
+            "zaid": 30067,
+            "label": "Zn-67",
+            "atom_density": 1.0083032e-06
+          },
+          {
+            "zaid": 30068,
+            "label": "Zn-68",
+            "atom_density": 4.604751e-06
+          },
+          {
+            "zaid": 30070,
+            "label": "Zn-70",
+            "atom_density": 1.522438e-07
+          },
+          {
+            "zaid": 25055,
+            "label": "Mn-55",
+            "atom_density": 1.4853e-05
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

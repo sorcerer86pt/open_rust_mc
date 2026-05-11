@@ -28,6 +28,17 @@ data/
 
 # Agent / tool state
 .claude/
+.gitnexus/
+
+# OpenMC reference run artifacts — `scripts/openmc_heu_sol_therm.py`
+# regenerates model.xml from the NMC bundle; statepoint.h5 / summary.h5
+# are large binary outputs.
+scripts/openmc_run/statepoint.*.h5
+scripts/openmc_run/summary.h5
+scripts/openmc_run/tallies.out
+
+# Stray pointwise XS dump in repo root from an earlier diagnostic.
+/rust_prototype/svd
 
 # Compiled CUDA benchmarks
 cuda_bench/svd_gpu_bench

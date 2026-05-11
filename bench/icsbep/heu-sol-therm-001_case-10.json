@@ -1,0 +1,264 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-SOL-THERM-001.case-10",
+    "case_name": "",
+    "category": "HEU-SOL-THERM",
+    "k_eff_reference": 0.9993,
+    "k_eff_sigma": 0.0054,
+    "source": "ICSBEP Handbook, HEU-SOL-THERM-001.case-10 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/heu-sol-therm-001/openmc/case-10",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-10",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 25.345,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 25.665,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": -0.64,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 0.0,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 20.48,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 30.9,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": false
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 3,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 0,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": false
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 4,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": false
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Uranyl Nitrate Solution",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 1.6817e-06
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.00015266
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 7.0808e-07
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 8.6908e-06
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.034088075721
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 1.2924279e-05
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00039433
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.065247
+          }
+        ],
+        "thermal_files": [
+          "c_H_in_H2O.h5"
+        ]
+      },
+      {
+        "name": "Aluminum Tank",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 13027,
+            "label": "Al-27",
+            "atom_density": 0.059469
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

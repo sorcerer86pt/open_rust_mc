@@ -1,0 +1,248 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "IEU-MET-FAST-002",
+    "case_name": "",
+    "category": "IEU-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.003,
+    "source": "ICSBEP Handbook, IEU-MET-FAST-002 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/ieu-met-fast-002/openmc",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "(top-level)",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "PlaneZ",
+        "z0": 0.0,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 7.62,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 39.571,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 47.0894,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 19.05,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 26.6446,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 4,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 2,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "mat_1",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 8.443e-05
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.0077777
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.039671
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "mat_2",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 2.6433e-06
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.00034603
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.047711
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

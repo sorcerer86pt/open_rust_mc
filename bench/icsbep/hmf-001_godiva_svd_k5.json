@@ -1,0 +1,25 @@
+{
+  "_doc": "Same ICSBEP HEU-MET-FAST-001 case, but driving the engine through SVD k=5 (instead of pointwise Table). Two parallel manifests with shared k_ref let the regression CSV show that both providers pass the benchmark to within σ_exp — the headline number behind §pwr / §godiva in the paper.",
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-MET-FAST-001-svd5",
+    "case_name": "Godiva (SVD rank 5)",
+    "category": "HEU-MET-FAST",
+    "k_eff_reference": 1.0000,
+    "k_eff_sigma": 0.0010,
+    "source": "ICSBEP Handbook, HMF-001 — internal SVD-mode parallel of the canonical Table case"
+  },
+  "runner": {
+    "binary": "godiva",
+    "args": [
+      "--mode", "svd",
+      "--rank", "5",
+      "--batches", "150",
+      "--inactive", "20",
+      "--particles", "20000",
+      "--seeds", "3"
+    ],
+    "data_arg": "positional",
+    "k_label": "k_eff (collision)"
+  }
+}

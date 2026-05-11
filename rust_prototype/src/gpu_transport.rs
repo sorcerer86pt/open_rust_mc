@@ -695,8 +695,8 @@ impl GpuTransportContext {
                 .or(nuc.n3n.as_ref());
 
             if let Some(rk) = any_kernel {
-                all_grids_vec.extend_from_slice(rk.kernel.energies());
-                n_energies_vec[nuc_idx] = rk.kernel.n_energy() as i32;
+                all_grids_vec.extend_from_slice(rk.energies());
+                n_energies_vec[nuc_idx] = rk.n_energy() as i32;
             }
 
             // Each reaction
@@ -712,15 +712,54 @@ impl GpuTransportContext {
 
             for (rxn_idx, rxn_opt) in reactions.iter().enumerate() {
                 let key = nuc_idx * n_rxn + rxn_idx;
-                if let Some(rk) = rxn_opt {
-                    has_reaction_vec[key] = 1;
-                    basis_offsets_vec[key] = all_basis_vec.len() as i32;
-                    all_basis_vec.extend_from_slice(rk.kernel.basis_f64());
-                    coeffs_offsets_vec[key] = all_coeffs_vec.len() as i32;
-                    all_coeffs_vec.extend_from_slice(&rk.coeffs);
-                } else {
-                    basis_offsets_vec[key] = 0;
-                    coeffs_offsets_vec[key] = 0;
+                use crate::transport::xs_provider::ReactionKernel;
+                match rxn_opt {
+                    Some(ReactionKernel::Svd { kernel, coeffs }) => {
+                        has_reaction_vec[key] = 1;
+                        basis_offsets_vec[key] = all_basis_vec.len() as i32;
+                        all_basis_vec.extend_from_slice(kernel.basis_f64());
+                        coeffs_offsets_vec[key] = all_coeffs_vec.len() as i32;
+                        all_coeffs_vec.extend_from_slice(coeffs);
+                    }
+                    Some(ReactionKernel::Table { xs, .. }) => {
+                        // Adapt the Table variant into the uniform
+                        // rank-`rank` SVD layout the device kernel
+                        // expects:
+                        //   basis[e * rank + 0] = log10(xs[e])  (clamp to a
+                        //                                        large negative
+                        //                                        for zero-XS
+                        //                                        points)
+                        //   basis[e * rank + r] = 0   for r > 0
+                        //   coeffs[0]            = 1
+                        //   coeffs[r]            = 0   for r > 0
+                        // Reconstruction then collapses to
+                        //   log_xs = Σ_r basis_r · coeffs_r
+                        //          = log10(xs[e])
+                        // matching the Table semantics exactly. Slightly
+                        // higher device memory (rank× the bytes) than a
+                        // dedicated pointwise upload would, but no
+                        // device-kernel changes required and the CPU
+                        // already keeps SVD-and-Table parity for the
+                        // hot path.
+                        has_reaction_vec[key] = 1;
+                        basis_offsets_vec[key] = all_basis_vec.len() as i32;
+                        for &v in xs {
+                            let log10_v = if v > 0.0 { v.log10() } else { -300.0 };
+                            all_basis_vec.push(log10_v);
+                            for _ in 1..rank {
+                                all_basis_vec.push(0.0);
+                            }
+                        }
+                        coeffs_offsets_vec[key] = all_coeffs_vec.len() as i32;
+                        all_coeffs_vec.push(1.0);
+                        for _ in 1..rank {
+                            all_coeffs_vec.push(0.0);
+                        }
+                    }
+                    None => {
+                        basis_offsets_vec[key] = 0;
+                        coeffs_offsets_vec[key] = 0;
+                    }
                 }
             }
         }

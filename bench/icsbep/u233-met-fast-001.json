@@ -1,0 +1,93 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "U233-MET-FAST-001",
+    "case_name": "",
+    "category": "U233-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.001,
+    "source": "ICSBEP Handbook, U233-MET-FAST-001 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/u233-met-fast-001/openmc",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "(top-level)",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 5.9838,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "mat_1",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92233,
+            "label": "U-233",
+            "atom_density": 0.046712
+          },
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00059026
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 1.4281e-05
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.00028561
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

@@ -2,322 +2,456 @@
 
 ## What This Is
 
-A pure-Rust Monte Carlo neutron transport engine that replaces OpenMC's
-multi-gigabyte pointwise cross-section tables with SVD-compressed
-cache-resident reconstruction. The engine reads OpenMC HDF5 nuclear
-data files directly (via `hdf5-pure`, no C dependency) and runs
-eigenvalue simulations end-to-end.
+A pure-Rust Monte Carlo radiation transport engine. Originally an SVD
+cross-section compression experiment for neutron k-eigenvalue work
+(Godiva, PWR pin cell); now also a coupled neutron–photon transport
+code with depletion (CRAM-16/-48), variance reduction (weight windows,
+random-ray FW-CADIS), recursive universe geometry on CPU + CUDA, and
+a Python (PyO3) front-end.
+
+Reads OpenMC HDF5 nuclear data directly via `hdf5-pure` — no C
+dependency. The SVD compression line is still in tree (`kernel.rs`,
+`decompose.rs`, `XsMode::Svd`) and remains a head-to-head provider
+against pointwise tables / WMP / Hybrid; it's no longer the only
+thing the engine does.
+
+`origin/main` at `025c486`. Lib tests **287 / 287 green**. `cargo
+check` default and `cargo check --features cuda` both clean.
 
 ## How to read the numbers below
 
 Every row is tagged with one of:
 
-- `[micro]` = isolated kernel / spectrum / one-nuclide-one-reaction
-  measurement. Often optimistic; does NOT generalize.
+- `[micro]` = isolated kernel / spectrum / one-nuclide-one-reaction.
+  Optimistic; does NOT generalize.
 - `[godiva]` = end-to-end Godiva, 3 nuclides, fast spectrum.
-- `[pwr]` = end-to-end PWR pin cell, 9 nuclides, thermal spectrum,
-  S(α,β) on. This is the realistic deployment case.
-- `[projected]` = analytical or extrapolated, never measured at scale.
-  Treat as a hypothesis until a `[pwr]` row replaces it.
+- `[pwr]` = end-to-end PWR pin cell, 9 nuclides, thermal, S(α,β) on.
+- `[assembly]` = 17×17 PWR assembly (depth-3 recursive geometry).
+- `[hex]` = HexLattice mini-core (1- or 2-ring).
+- `[shield]` = photon shielding slab (`shield_slab`).
+- `[photon]` = γ-heating / pulse-height / coupled n–γ.
+- `[depletion]` = CRAM transmutation, fresh-corrector predictor.
+- `[projected]` = analytical or extrapolated. Hypothesis until a
+  scoped row replaces it.
 
-A number quoted without scope is a bug. The repeated pattern across
-this project: `[micro]` headline numbers shrink (or invert sign) when
-re-measured under `[pwr]`. Don't quote micro numbers in contexts
-where pwr-scope applies.
+A number quoted without scope is a bug. Repeated pattern: `[micro]`
+headlines shrink (or invert sign) under `[pwr]`/`[assembly]`.
 
 ## What We've Proven
 
 ### SVD compression (spectrum + reconstruction)
-- `[micro]` Singular spectrum decays 5 orders of magnitude across 8 values
-- `[micro]` 47/52 U-235 reactions are rank-1-compressible to machine epsilon.
-  **Caveat:** rank 1 is not a deployable rank for k_eff — production runs use
-  rank 5. The 47 figure does not translate to a deployment win.
-- `[micro]` Bit-exact match with OpenMC's Python API (relative error = 0)
-- `[godiva]` Godiva k_eff < 10 pcm deviation at all ranks (fission-only,
-  pre-coupling correction)
-- `[godiva]` Godiva k_eff 3.7 pcm with all reactions modified (k=4,
-  pre-coupling correction)
-- `[pwr]` PWR pin cell SVD(k=5) vs ACE+WMP: **5 pcm** at on-library 600 K
-  (paper, 100 b × 20 k × 1 seed). Earlier "60–93 pcm" was a partial-physics
-  measurement; replaced.
-- `[pwr]` Hybrid SVD+WMP in-engine memory: 519 MB at rank 5, vs pure SVD
-  518 MB and pointwise Table 103 MB. Hybrid is not a memory win at the
-  engine level on PWR; see paper §hybrid for the per-nuclide
-  representation-byte accounting where the picture differs.
+- `[micro]` U-235 singular spectrum decays 5 OoM across 8 values;
+  47/52 reactions rank-1 to machine ε. **Rank 1 is not deployable**
+  for k_eff; rank 5 is the production choice.
+- `[micro]` Bit-exact match with OpenMC's Python XS API.
+- `[godiva]` k_eff < 10 pcm at all ranks (fission-only); 3.7 pcm
+  with all reactions, k=4 (pre-coupling correction).
+- `[pwr]` SVD(k=5) vs ACE+WMP: **5 pcm** on-library 600 K
+  (paper, 100 b × 20 k × 1 seed).
+- `[pwr]` SVD memory is **larger** than Table at every rank
+  on-library. Memory win only appears off-library (Table needs two
+  temperature columns; SVD reconstructs from one).
 
-### Performance — what micro vs full transport actually says
-- `[micro]` SVD reconstruction kernel only, hot cache: 8–13× faster than
-  pointwise table (3–5 ns/pt vs 40 ns/pt). **Does not survive integration.**
-- `[godiva]` SVD rank-5 vs Table, full transport: 1.37×–1.90× CPU throughput
-  (paper §godiva, 10 seeds × 150 b × 50 k).
-- `[pwr]` SVD rank-5 vs Table, full transport: SVD **0.95× as fast as Table**
-  (sim 46.8 s vs 41.7 s, paper §pwr / `outputs/full_test_run/10_pwr_all_rank5.txt`).
-  The micro 8–13× does not appear here.
-- `[micro]` GPU 2.6–2.8× on RTX A1000 — kernel-only SVD reconstruction vs
-  CPU. **vs single-thread CPU.** Against 20-core rayon CPU, the integration
-  story is GPU SVD **1.3× slower** on Godiva (paper §gpu).
-- `[godiva]` Loading + SVD decompose: ~6 s for 3 nuclides
-- `[godiva]` Eigenvalue 80 b × 10 k: 633 ms (rayon parallel, old run; for current
-  paper-stat numbers see paper §godiva)
+### Coupled neutron–photon physics (validated)
+- `[photon]` Compton (KN + S(x,Z) + optional Doppler), Rayleigh,
+  photoelectric phase 1, Bethe-Heitler pair, full electron condensed-
+  history walk with Bethe-Bloch dE/dx + Highland MS + Seltzer-Berger
+  brems. Cs-137 pulse height, NIST water buildup factors, Hubbell
+  Compton spectrum all pass.
+- `[photon]` PWR γ-heating split (fuel/gap/clad/water) =
+  84.1 / 0.00 / 9.8 / 5.7 %; OpenMC 0.15.3 on same geometry
+  ≈ 85 / 0 / 9 / 6 % — every region within 1 pp.
 
-### Cross-isotope sharing (investigated, negative result)
-- Subspace angle > 85° at k=2 between U-235/U-238/Pu-239
-- Each nuclide needs its own SVD basis — not a problem, bases are small
+### Depletion (CRAM-16 / -48)
+- `[depletion]` Xe-135 equilibrium vs analytical: **1e-4 relative**.
+- `[depletion]` CRAM-48 matches CRAM-16 to 1e-13 on non-stiff; not
+  worse at `λ·Δt = 50`.
+- `[depletion]` `deplete_pwr` fresh-corrector (predictor + EOC-flux
+  corrector) wired end-to-end; full PWR bench vs OpenMC found a
+  chain-calibration issue (commit `8b7f594`), since closed by
+  on-the-fly chain-XS spectrum collapse (`fd530d0`).
 
-## Current State: k_eff = 1.00079 +/- 0.00038 (Godiva, real ENDF data)
+### Variance reduction
+- `[shield]` 100 cm water 1 MeV photons, RR-CADIS (random-ray
+  adjoint) FOM = **354/s vs analog 161.7/s** → **2.19×**.
+- `[shield]` 200 cm water: RR-CADIS FOM **1.52/s vs analog 0.351/s**
+  → **4.32×**. Means unbiased within combined σ.
+- `[shield]` Old "lite" detector-backward CADIS proxy: 0.69× / 0.20×
+  (worse than analog at both depths). Removed in this round.
+- `[godiva]` Survival biasing + Russian roulette: σ_track per seed
+  −28 %, FOM_track 354 → 500 (+41 %).
+- `[pwr]` Survival biasing on PWR pin cell: cross-seed σ on k_inf
+  −55 %, FOM_collision 412 → 1842 (4.5×).
 
-**Benchmark is ICSBEP HMF-001** (k = 1.0000 ± 100 pcm experimental).
-We get 1.00079 ± 0.00038 → **Δ_ICSBEP = +79 pcm, inside σ_exp. Pass.**
-OpenMC 0.15.3 on the same HDF5 gets 0.99901 (−99 pcm vs ICSBEP) — also
-inside σ_exp. Both codes straddle experiment from opposite sides;
-OpenMC is an independent cross-check, not the benchmark.
-5 seeds × 150 batches × 50k particles, CPU SVD k=5. See `resume.md`
-for the three transport fixes that closed +325 → +79 pcm.
+### Recursive geometry (CPU + GPU)
+- `[assembly]` 17×17 PWR depth-3 lattice runs end-to-end on CPU,
+  k_inf = 1.14958 ± 0.00318. Was inexpressible pre-refactor.
+- `[assembly]` Depth-3 is 1.07× slower than depth-1 with matched
+  physics — depth penalty is single-digit %, not the 16× earlier
+  apples-to-oranges claim.
+- `[hex]` 1-ring (7 pins) k_inf = 1.35829 ± 0.00329; 2-ring (19)
+  k_inf = 1.36424 ± 0.00399 — agree within 1 σ.
+- `[assembly]` GPU recursive transport (`const_xs_transport_persistent`):
+  **6.74× CPU speedup** at k within MC noise on RTX A1000. Cell-find
+  3.2–4.0×, trace-step 5.2–5.9×, multi-step walk **24×**, all
+  bit-exact (≤9.3e-11 max-rel-err) vs CPU on 200k–1M event sweeps.
 
-### Implemented (Priority 1 from previous round)
+### Random-ray TRRM (forward + adjoint)
+- `[micro]` 1-group infinite reflective box k_inf within 500 pcm of
+  analytic 1.25.
+- `[micro]` Adjoint-identity (fwd vs adjoint k): agree within 800 pcm.
+- `[micro]` MoC integrator τ→0 series vs analytic: 1e-12.
+- `[pwr]` `rr_pincell` 2-group UO₂+water: physically correct per-
+  region thermal/fast spectra; runs in ~12 s wall.
 
-**1. Energy-dependent nu-bar (DONE)**
-- Reads total ν̄(E) from HDF5 (prompt + delayed neutron yields)
-- U-235: 79-point table, 2.435 thermal → 2.530 @ 1 MeV → 3.836 @ 10 MeV
-- U-238: 10-point table, 2.483 thermal → 2.554 @ 1 MeV → 3.849 @ 10 MeV
-- U-234: falls back to constant (no neutron product in reaction_018)
-- Revealed that old k_eff=0.994 was coincidental (compensating errors)
+## Current State
 
-**2. Discrete inelastic levels MT=51-91 (DONE)**
-- Loads all 41 levels per nuclide with real Q-values from HDF5 attributes
-- SVD-compressed at rank 2, cross-sections used for level sampling
-- Proper two-body kinematics with exact Q-value per level
-- Impact on k_eff: negligible for Godiva (< 50 pcm)
+**Neutron k-eigenvalue (the original benchmark):**
+- `[godiva]` Rust SVD k=5: **1.00079 ± 0.00038**, ICSBEP HMF-001
+  (1.0000 ± 100 pcm) → **Δ_ICSBEP = +79 pcm, inside σ_exp. Pass.**
+- `[godiva]` OpenMC 0.15.3 same HDF5: 0.99901 → −99 pcm (cross-check).
+- `[pwr]` Rust Table vs OpenMC 0.15.3: 12 pcm. Rust SVD k=5 vs OpenMC:
+  −67 pcm.
 
-**3. Continuum inelastic MT=91 (DONE)**
-- Evaporation spectrum with nuclear temperature T = sqrt(E*/a)
-- Level density parameter a = A/8 MeV⁻¹
-- Detected automatically from HDF5 level enumeration
+**Test count progression:** 36 (original) → 148 (coupled n–γ) → 184 →
+198 (recursive phase 1) → 227 (track-length k / SB / WW / hex CPU+GPU
+/ shapes / dispatch) → 260 (depletion + CADIS-lite) → **287** (random-
+ray TRRM + adjoint + FW-CADIS gain delivered).
 
-**4. (n,3n) reaction MT=17 (DONE)**
-- SVD kernel loaded, banks 2 extra neutrons
-- Small cross-section, only at high energies (~10-20 pcm)
+## Features Implemented
 
-**5. Anisotropic scattering angular distributions (DONE)**
-- Reads tabular mu/cdf distributions from HDF5 with offsets attribute
-- Samples scattering cosine from energy-dependent CDF in CM frame
-- U-235: 49 energies, U-234: 53 energies, U-238: 38 energies
-- Impact: ~9400 pcm (from 1.059 down to 0.965) — massive
+### Neutron physics
+- Energy-dependent ν̄(E) from HDF5 (prompt + delayed yields).
+- Discrete inelastic MT=51–91 (real Q-values, two-body kinematics,
+  per-level SVD rank 2).
+- Continuum inelastic MT=91 (evaporation, T = √(E*/a), a = A/8).
+- (n,3n) MT=17, banks 2 extra neutrons.
+- Anisotropic scattering (tabular μ/CDF in CM frame from HDF5).
+- Data-driven fission outgoing-energy spectrum (replaces Watt).
+- URR probability tables (`multiply_smooth` true/false handled).
+- S(α,β) thermal scattering for H in H₂O (continuous inelastic
+  iwt=2, discrete iwt=0/1, coherent Bragg, incoherent Debye-Waller,
+  stochastic T interpolation).
+- Free-gas thermal scattering below 400·kT.
+- Delayed-neutron emission: per-nuclide β(E), soft Watt aggregate
+  delayed spectrum (a = 0.4 MeV). `[godiva]` closes Δ_ICSBEP
+  196 → 19 pcm.
+- URR equivalence theory (Carlvik-Pellaud Dancoff for square lattices,
+  `pwr_pincell --urr-equivalence`).
 
-**6. Data-driven fission energy spectrum (DONE)**
-- Reads continuous tabulated outgoing energy distributions from HDF5
-- Replaces hardcoded Watt spectrum (a=0.988, b=2.249)
-- U-235: 20 incident energies, U-238: 25 incident energies
-- Impact: ~4000 pcm (from 0.965 up to 1.006) — critical correction
+### Photon physics
+- Compton (KN + S(x,Z) + optional Doppler broadening from Compton
+  profiles), Rayleigh (form factor + Thomson rejection),
+  photoelectric phase 1 (subshell sampling), Bethe-Heitler pair.
+- Full electron condensed-history transport: Bethe-Bloch dE/dx
+  (per-element I from HDF5), Highland multiple scattering with
+  per-cell X₀, Seltzer-Berger bremsstrahlung single-event
+  emission with secondary γ banked back into the photon loop.
+- NEE (next-event estimator) for tallies.
+- Adjoint photon CADIS slab walker (CE adjoint Compton kernel).
 
-**7. URR probability tables (DONE)**
-- Reads probability tables from HDF5: energy grid + [N_E, 6, N_bands] table
-- Handles both `multiply_smooth=true` (factors) and `false` (absolute XS)
-- U-234: 26 energies, 1.5-100 keV; U-235: 19 energies, 2.25-25 keV; U-238: 18 energies, 20-149 keV
-- Impact: ~100-200 pcm improvement
+### Transport / VR / tallies
+- History-based + rayon-parallel CPU transport.
+- Track-length k_eff estimator alongside collision estimator
+  (`[godiva]` 3.9× lower seed-to-seed σ).
+- Survival biasing + Russian roulette (w_min=0.25, w_survive=1.0).
+- Forward weight windows (Cartesian mesh, split/roulette,
+  `max_split=8`, geometric-mean w_survive).
+- `WeightWindow::from_flux` (forward CADIS bootstrap from any flux).
+- `WeightWindow::from_flux_adaptive` (variable-band, didn't beat
+  fixed ratio empirically — flag retained behind `--ww-growth=0.0`).
+- Random-ray multigroup TRRM (`random_ray::*`): forward + adjoint,
+  cell-based or Cartesian FSRs with analytic or stochastic volume,
+  mortal or immortal-ray (Tramm-Siegel 2021), analytic MoC ODE step.
+- `rr_cadis_slab` produces the JSON `shield_slab --cadis-load`
+  consumes (`{thickness_cm, n_z_bins, counts}`).
+- Surface current tallies (J+ / J-), Cartesian mesh flux tallies
+  (Amanatides-Woo), HDF5 statepoint with restart (warm source bank).
+- Per-MT (n,p) / (n,α) tallies, BatchTallies cleanup, EntropyMesh
+  in shared math lib.
 
-### Honesty Test (implemented)
-- `--mode svd|table|both` flag on godiva binary
-- `TableXsProvider` — OpenMC-style pointwise table lookup, same physics
-- `--mode both` runs both providers back-to-back, prints comparison
-- At rank=5, SVD uses ~1.7x MORE memory per reaction than single-temp table
-  (basis stores `rank` values per energy point vs table's 1 value)
-- SVD memory advantage appears at rank≤1 (single-temp) or multi-temperature
-- Discrete levels (41 per nuclide) dominate memory for both approaches
-- OpenMC comparison script: `scripts/honesty_test.py` (WSL + conda)
+### Geometry
+- Recursive universes via `CoordStack` (`SmallVec<[Coord; 4]>`).
+- Per-universe surface restriction + opt-in BVH (≥8 cells with
+  finite AABBs) — 3.0× assembly speedup alone.
+- `Mat3` cell rotations propagate through descent; rotation-free
+  geometries pay zero overhead.
+- `RectLattice.material_overrides` (one pin universe across an
+  assembly with different enrichments/burnup tiers).
+- `HexLattice` (flat-top Y / pointy-top X), cube-coord rounding +
+  closed-form distance to grid; integrated into `find_cell_recursive`
+  and `trace_step_recursive`.
+- `geometry::shapes`: `rect_box`, `rect_box_split_bc`, `hex_boundary`,
+  `pin_cylinders` — used by all production binaries and exposed via
+  Python bindings.
 
-### S(α,β) Thermal Scattering (DONE — needs validation run)
+### Depletion
+- Bateman + CRAM-16 (Pusa 2016) + CRAM-48.
+- Chain JSON loader (3-way `yields` semantics: omitted / `{}` /
+  explicit). ENDF default yield inference.
+- `BurnupMapping` (table-driven chain↔material walker).
+- Predictor-corrector with fresh-corrector (clones materials,
+  runs eigenvalue at predicted composition for EOC flux).
+- On-the-fly chain-XS spectrum collapse — 9× to 0.77× vs OpenMC.
+- Chains shipped: `chains/partial_xe.json` (4 nuclides),
+  `chains/pwr_actinides.json` (17, U/Np/Pu + Xe/Sm fission products).
 
-**8. S(α,β) thermal scattering for H in H₂O (DONE)**
-- Reads OpenMC thermal scattering HDF5 files (e.g., `c_H_in_H2O.h5`)
-- Continuous inelastic (iwt=2): CDF sampling with lin-lin interpolation,
-  scaled energy bounds (OpenMC Eq 31-35), discrete cosine smearing
-- Discrete inelastic (iwt=0,1): equiprobable/skewed bin sampling
-- Coherent elastic: Bragg edge sampling (graphite, Be)
-- Incoherent elastic: Debye-Waller angle formula
-- Stochastic temperature interpolation (OpenMC method)
-- c_H_in_H2O: 9 temperatures (294-800K), 106 energies, ~50K E_out pts,
-  ~770K mu pts per temperature, loaded from 186 MB HDF5 file
-- Transport integration: replaces free-atom elastic XS below energy_max
-  (~3.75 eV) with thermal inelastic+elastic XS, samples S(α,β) for
-  collision outcomes
-- Impact: expected ~1000-5000 pcm for PWR pin cell (awaiting validation)
+### GPU (CUDA, NVRTC, on RTX A1000 laptop)
+- Recursive cell-find / trace-step / multi-step walk — bit-exact
+  vs CPU at ≤9.3e-11 max-rel-err, 3–24× speedups.
+- Constant-XS transport with collision + scatter + fission banking
+  (atomicAdd) — 6.74× speedup, k within MC noise (Δ = 592 pcm,
+  expected from float-rounding ordering ties).
+- Photon kernels: Compton (fixed-E + per-particle-E variant),
+  Rayleigh, pair. Persistent Compton history kernel: **2.22×** wall
+  vs 20-thread rayon CPU on 1M histories.
+- Random-ray persistent kernel scaffold (`gpu/cuda/random_ray_
+  persistent.cu`) — `cargo check --features cuda` clean. Runtime
+  parity test against CPU still pending (next-step work).
+- HexLattice GPU port (`077db2b`): full device functions
+  `gr_hex_*`, dispatched via `GR_FILL_HEX_LATTICE`. Compiles clean;
+  large-volume CPU↔GPU parity test on hex 1-ring is the obvious next
+  step (CPU `hex_lattice_descent_and_trace_smoke` already passes).
 
-**9. PWR pin cell multi-seed benchmarking (DONE)**
-- `--seeds N` flag for independent runs with confidence intervals
-- ns/particle timing, speedup ratios, memory comparison
-- Auto-loads `c_H_in_H2O.h5` for H1 nuclide in water material
-- 8 nuclides (U235, U238, O16, H1, Zr90-94), 3 materials
+### Python (PyO3)
+- `Scene` / `Material` / `Surface` / `PhotonMaterial` builders.
+- `run_eigenvalue`, `run_gamma_heating`.
+- `XsMode::{Table, Svd, HybridTableWmp, HybridSvdWmp}` per-sim
+  toggle, per-MT rank overrides.
+- Depletion: `Chain.from_file/from_str`, `CramOrder::{Order16, Order48}`,
+  `cram`, `deplete_constant_flux`, `deplete_with_flux_callback`
+  (FFI-safe Python flux closure), `Material.set_atom_density` /
+  `atom_density_of`.
+- `Scene.add_rect_box` / `add_hex_boundary` / `add_pin_cylinders`
+  return ready-to-parse region strings.
 
-## What Needs Fixing (Physics Gaps vs OpenMC)
+### Honesty test
+- `--mode svd|table|both|hybrid_table_wmp|hybrid_svd_wmp` flags on
+  benchmarks. `--mode both` runs back-to-back with comparison print.
+- OpenMC reference script: `scripts/honesty_test.py` (WSL + conda).
 
-### Priority 1 — Validate PWR pin cell with S(α,β) — DONE 2026-04-22
-- Rust Table vs OpenMC 0.15.3: **12 pcm** (within 1σ)
-- Rust SVD k=5 vs OpenMC: **−67 pcm** (within combined σ)
-- Rust SVD vs Rust Table: 59 pcm (compression cost)
-- S(α,β) impact on k_inf: ~300 pcm (disables → k_inf up)
-- Geometry/stats: 3.1% UO₂, 1.26 cm pitch, 100b × 20k × 3 seeds
-- Artifacts: `outputs/pwr_sab_on.txt`, `pwr_sab_off.txt`,
-  `openmc_pwr_ref.json`; writeup in `resume.md`
-- Caveats documented: SVD at rank 5 is 5× larger and 0.95× as
-  fast as Table for this all-reactions 9-nuclide problem; memory
-  win is rank ≤ 1 or hybrid SVD+WMP, not all-reactions rank-5.
+## What's Open / Research-Tier
 
-### Priority 2 — Event-based GPU transport
-- Current: history-based (one particle birth-to-death per thread)
-- Target: event-based (batch operations: sort→XS lookup→collide→compact)
-- Tramm et al. 2024: event-based is 6x faster than history-based on GPU
-- Sort particles by (material, energy) before XS lookup = critical optimization
-- Already have GPU SVD kernel (8.7x on RTX A1000), need event loop
+- **DXTRAN-style continuous splitting** for >14 mfp photon penetration.
+  All `(ratio, growth) ∈ {5,10,20} × {0,1,2,3}` at 300 cm give 0
+  transmitted in 500k — `max_split=8` ceiling bounds geometric WW.
+- **Full C5G7** (4 fuel × 7 groups × 17×17): data plumbing on top
+  of `random_ray::*`, no new solver code.
+- **HexLattice GPU runtime parity** vs CPU (large-volume sweep
+  equivalent to `hex_lattice_descent_and_trace_smoke`).
+- **Linear-source random-ray (1st-order)** — deferred; flat on a
+  fine mesh is equivalent for axis-aligned problems.
+- **Full PWR depletion bench vs OpenMC** (30–50 GWd/MTU on
+  `pwr_actinides.json` + Pu/Np HDF5). Chain-calibration issue
+  already addressed in `fd530d0`; the long-burn validation run
+  itself is pending.
+- **Per-precursor delayed-neutron groups** — only matters for
+  time-dependent kinetics, not static k-eff.
+- **EADL relaxation cascade on GPU** — long-flagged, still open.
+  Not on the critical path for current benchmarks.
+- **Source-distribution biasing** (sample initial pos from
+  importance CDF) — needed for the textbook 50–1000× Wagner-
+  Haghighat FOM on volume/angular sources. For `shield_slab`'s
+  monodirectional point beam the importance CDF degenerates.
+- **NIST ESTAR brems `S_rad` cross-check** — agrees with OpenMC's
+  formula identically but ratio to NIST is element-dependent
+  (0.72× H, 4.86× U). Layout vs ICRU-37 model question, doesn't
+  affect γ-heating to MC stats.
 
-### Priority 3 — Feature parity
+## Architecture Decisions
 
-**10. Photon transport**
-- OpenMC: full coupled neutron-photon transport
-- Not needed for k_eff but needed for dose/shielding calculations
+### Kept (working well)
+- **Enum dispatch for surfaces** (no vtable, jump table).
+- **SvdKernel with pre-multiplied basis** (hot path is pure FMA).
+- **PCG-64 PRNG** (fast, reproducible, parallel-safe, also on GPU
+  as PCG-XSH-RR per-thread).
+- **`hdf5-pure`** (no C dependency).
+- **`faer` for SVD** (SIMD, correct).
+- **`CoordStack` recursive geometry** — depth-1 is bit-identical
+  to the pre-refactor flat path; no fast-path special-case needed.
+- **`transport::dispatch::EigenvalueRunner`** hides CPU vs CUDA
+  backend choice.
 
-**11. Depletion / burnup**
-- Separate project — Chebyshev Rational Approximation Method (CRAM)
-  for matrix exponential of the transmutation matrix
-
-## Architecture Decisions Made
-
-### What works well (keep)
-- **Enum dispatch for surfaces** — zero-cost, no vtable, jump table
-- **SvdKernel with pre-multiplied basis** — hot path is pure FMA
-- **PCG-64 PRNG** — fast, reproducible, parallel-safe
-- **hdf5-pure** — no C dependency, reads OpenMC files correctly
-- **faer for SVD** — SIMD-optimised, correct results
-
-### What to improve
-- **Particle transport is history-based** — switch to event-based for
-  better branch prediction and GPU readiness
-- **Cell finding is linear scan** — BVH is built but not used in transport
-  loop yet (need to integrate)
-- **HDF5 file is re-read per reaction** — should load once and extract
-  all reactions in a single pass
-
-### Recently completed architecture improvements
-- **Rayon parallel transport** — 8.7x speedup (633 ms vs 5540 ms for Godiva)
-- **Free gas thermal scattering** — Maxwell-Boltzmann target velocity
-  sampling below 400*kT threshold (important for thermal systems)
+### Earlier "to improve" items — status
+- ~~"Cell finding is linear scan, BVH built but not used"~~ — wired
+  per-universe with the ≥8-cells gate.
+- ~~"HDF5 file re-read per reaction"~~ — single-pass per nuclide
+  via the per-nuclide loader.
+- "Particle transport is history-based" — still true on CPU;
+  GPU recursive transport is event-batched (find_cell_batch,
+  trace_step_batch, multi_step_walk).
 
 ## File Layout
 
 ```
-rust_prototype/
-  src/
-    lib.rs                      — crate root
-    geometry/
-      mod.rs                    — Vec3, re-exports
-      surface.rs                — 6 surface types (enum dispatch)
-      aabb.rs                   — AABB ray intersection (branchless)
-      cell.rs                   — CSG boolean regions
-      bvh.rs                    — Bounding Volume Hierarchy
-      ray.rs                    — ray tracing, cell finding
-      universe.rs               — cell grouping
-      lattice.rs                — rectangular lattice
-    physics/
-      collision.rs              — reaction sampling, fission yield
-      scatter.rs                — elastic + inelastic kinematics
-    transport/
-      particle.rs               — particle state, fission bank
-      rng.rs                    — PCG-64 generator
-      material.rs               — material composition, macro XS
-      simulate.rs               — k-eigenvalue power iteration
-      xs_provider.rs            — SVD kernel ↔ transport bridge
-    kernel.rs                   — SVD reconstruction (FMA + faer)
-    decompose.rs                — faer SVD computation
-    hdf5_reader.rs              — pure-Rust HDF5 reader + thermal loader
-    thermal.rs                  — S(α,β) data structures + sampling
-    compare.rs                  — error analysis
-    loader.rs                   — numpy .npy loader
-    nuclide.rs                  — nuclide data from .npy
-    table.rs                    — pointwise table (baseline)
-    error.rs                    — error types
-  src/bin/
-    godiva.rs                   — end-to-end Godiva eigenvalue
-    pwr_pincell.rs              — PWR pin cell (8 nuclides, S(α,β))
-    bench_mem.rs                — memory/speed comparison
-    validate_vs_openmc.rs       — bit-exact validation
-  benches/
-    reconstruction.rs           — criterion benchmarks
+rust_prototype/src/
+  lib.rs / main.rs                — crate roots
+  kernel.rs / decompose.rs / cp_decompose.rs
+                                  — SVD reconstruction / decomposition
+  hdf5_reader.rs                  — pure-Rust HDF5 + thermal loader
+  thermal.rs                      — S(α,β) sampling
+  table.rs / wmp.rs               — pointwise / Windowed Multipole providers
+  nuclide.rs / loader.rs          — nuclide data
+  compare.rs / error.rs
+  quadrature.rs / physics_constants.rs
+  gpu.rs / gpu_transport.rs / gpu_recursive.rs / gpu_random_ray.rs
+                                  — CUDA host-side wrappers
 
-scripts/                        — Python analysis pipeline
-  phase1_extraction.py          — extract XS from HDF5
-  phase2_svd_analysis.py        — SVD spectrum analysis
-  phase3_error_analysis.py      — regional error analysis
-  phase4_keff_benchmark.py      — OpenMC Godiva benchmark
-  phase4_multi_reaction_godiva.py — all-reaction Godiva
-  phase4_pwr_pincell.py         — PWR pin cell benchmark
-  phase5_3_windowed_svd.py      — per-window SVD analysis
-  phase5_all_reactions.py       — 52-reaction sweep
-  phase5_cross_isotope.py       — cross-isotope sharing
-  phase5_hybrid_svd_wmp.py      — SVD+WMP hybrid analysis
-  phase5_multi_reaction.py      — multi-reaction SVD
-  cache_feasibility_analysis.py — cache tier analysis
-  export_openmc_reference.py    — export OpenMC reference values
+  geometry/                       — recursive universe geometry
+    mod.rs surface.rs aabb.rs cell.rs bvh.rs ray.rs
+    universe.rs lattice.rs coord.rs scene.rs shapes.rs
+    recursive_smoke.rs
 
-cuda_bench/
-  svd_gpu_bench.cu              — GPU reconstruction benchmark
+  physics/
+    mod.rs collision.rs scatter.rs
 
-paper/
-  svd_cross_section_compression.tex  — manuscript (12 pages)
-  svd_cross_section_compression.pdf
+  transport/
+    mod.rs simulate.rs dispatch.rs
+    particle.rs rng.rs material.rs nuclides.rs
+    xs_provider.rs hybrid_xs.rs
+    thermal_library.rs urr_equivalence.rs
+    weight_window.rs tally.rs statepoint.rs kinetics.rs
+    adjoint_neutron.rs adjoint_photon.rs
+
+  photon/
+    mod.rs material.rs data.rs hdf5_reader.rs
+    compton.rs coherent.rs photoelectric.rs pair.rs
+    bremsstrahlung.rs electron.rs
+    transport.rs nee.rs gpu.rs
+
+  random_ray/                     — multigroup TRRM (Tramm 2018, immortal 2021)
+    mod.rs mgxs.rs fsr.rs integrator.rs solver.rs
+    cadis.rs adjoint_svd.rs
+
+  depletion/
+    mod.rs cram.rs chain.rs chain_io.rs
+    matrix.rs predictor_corrector.rs mapping.rs flux.rs
+
+  bin/                            — see "Binaries" below
 ```
+
+Subprojects:
+- `bindings/python/` — PyO3 (`open_rust_mc` Python package).
+- `cuda_bench/svd_gpu_bench.cu` — standalone GPU recon bench.
+- `paper/` — manuscript (TeX + PDF).
+- `scripts/` — Python analysis pipeline (phase1–5, honesty test,
+  OpenMC export, hex/depletion examples).
+- `chains/` — depletion chain JSONs.
+- `cuda/` (or `gpu/cuda/`) — kernel sources compiled via NVRTC.
+
+## Binaries
+
+Neutron k-eigenvalue:
+- `godiva` — Godiva sphere, 3 nuclides.
+- `pwr_pincell` — PWR pin cell, 9 nuclides + S(α,β).
+- `pwr_d2o_pincell` — heavy-water variant.
+- `pwr_assembly` — 17×17 (use `--shape N` for 3×3 / 5×5 / 7×7).
+- `hex_minicore` — N-ring hex array with hex reflective boundary.
+- `validate_vs_openmc` — bit-exact validation.
+- `bench_mem` / `pareto_bench` — memory/speed sweeps.
+- `xs_dump` / `xs_dump_godiva` / `xs_provider_diff` / `cp_analysis`
+   / `debug_trace` / `photon_dump` — diagnostics.
+
+Photon / shielding / coupled:
+- `pwr_gamma_heating` — PWR γ-heating with full ET + brems.
+- `cs137_pulse_height` — pulse-height validation.
+- `shield_slab` — fixed-source γ slab benchmark + WW consumer.
+- `adjoint_photon_cadis_slab` — CE adjoint photon walker.
+
+Random-ray:
+- `rr_pincell` — 2-group UO₂+water pin cell (forward + adjoint).
+- `rr_cadis_slab` — slab adjoint → CADIS JSON for `shield_slab`.
+- `rr_adjoint_svd` / `rr_adjoint_sweep` — SVD-on-adjoint experiments.
+
+Depletion:
+- `deplete_demo` — constant-flux Xe equilibrium.
+- `deplete_pwr` — transport-coupled fresh-corrector.
+
+GPU (`--features cuda`):
+- `gpu_bench` — SVD recon kernel sweep.
+- `gpu_cpu_bench` — CPU/GPU head-to-head.
+- `gpu_cpu_trace` / `gpu_recursive_parity` — geometry parity sweeps.
+- `gpu_recursive_keff` — recursive transport k-eigenvalue.
+- `gpu_const_xs_keff` — constant-XS GPU eigenvalue.
+- `gpu_assembly_keff` — full assembly on GPU.
+- `gpu_pwr_bench` — PWR pin cell on GPU.
+- `gpu_hex_minicore` — hex on GPU.
+- `gpu_compton_validate` / `gpu_compton_scaling` — photon GPU validation.
+- `gpu_photon_features` — KN+S(x,Z), Doppler, Rayleigh, pair.
+- `gpu_wmp_validate` — WMP provider on GPU.
+
+Kinetics:
+- `point_kinetics_demo` — point-kinetics ODE driver.
 
 ## Build & Run
 
-```bash
-# Build
-cd rust_prototype && cargo build --release
+```powershell
+# Build (Windows / PowerShell — primary dev env)
+cd rust_prototype; cargo build --release
 
-# Run all tests (36 tests)
+# All lib tests (287)
 cargo test --lib
 
-# Run Godiva with real nuclear data
-cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
+# Godiva, real ENDF data
+cargo run --release --bin godiva -- path\to\endfb-vii.1-hdf5\neutron `
   --rank 5 --batches 80 --inactive 15 --particles 10000
 
-# Honesty test: SVD vs pointwise table head-to-head
-cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
+# Honesty test (SVD vs Table head-to-head)
+cargo run --release --bin godiva -- path\to\endfb-vii.1-hdf5\neutron `
   --mode both --rank 5 --batches 150 --inactive 20 --particles 20000
 
-# PWR pin cell with S(α,β) thermal scattering
-cargo run --release --bin pwr_pincell -- path/to/endfb-vii.1-hdf5/neutron \
-  --mode both --rank 5 --batches 100 --inactive 20 --particles 20000
-
-# PWR pin cell full benchmark (multi-seed)
-cargo run --release --bin pwr_pincell -- path/to/endfb-vii.1-hdf5/neutron \
+# PWR pin cell with S(α,β), multi-seed
+cargo run --release --bin pwr_pincell -- path\to\endfb-vii.1-hdf5\neutron `
   --mode both --rank 5 --batches 150 --inactive 20 --particles 50000 --seeds 5
 
-# Table-only mode (OpenMC-style baseline)
-cargo run --release --bin godiva -- path/to/endfb-vii.1-hdf5/neutron \
-  --mode table --batches 150 --inactive 20 --particles 20000
+# 17×17 PWR assembly (depth-3 recursive geometry)
+cargo run --release --bin pwr_assembly -- path\to\endfb-vii.1-hdf5\neutron
 
-# GPU benchmark (requires --features cuda)
-cargo run --release --features cuda --bin gpu_bench -- \
-  path/to/endfb-vii.1-hdf5/neutron --rank 5 --particles 1000000
+# Hex minicore (1- or 2-ring)
+cargo run --release --bin hex_minicore -- path\to\endfb-vii.1-hdf5\neutron --rings 2
 
-# Full test suite (PowerShell)
-cd .. && .\run_pwr_tests.ps1              # all tests
-cd .. && .\run_pwr_tests.ps1 -Download    # download data + run tests
+# Photon γ-heating PWR
+cargo run --release --bin pwr_gamma_heating -- path\to\endfb-vii.1-hdf5 `
+  --batches 150 --inactive 20 --particles 50000 --photons 200000
+
+# Shielding + random-ray CADIS pipeline
+cargo run --release --bin rr_cadis_slab -- --thickness 100 `
+  --output outputs\cadis_water_100cm.json
+cargo run --release --bin shield_slab -- --thickness 100 --histories 1000000 `
+  --cadis-load outputs\cadis_water_100cm.json
+
+# Depletion (constant flux Xe equilibrium)
+cargo run --release --bin deplete_demo
+
+# Depletion (transport-coupled fresh-corrector)
+cargo run --release --bin deplete_pwr -- path\to\endfb-vii.1-hdf5\neutron
+
+# GPU (CUDA available on this machine — RTX A1000)
+cargo run --release --features cuda --bin gpu_recursive_keff -- `
+  path\to\endfb-vii.1-hdf5\neutron --particles 50000
+cargo run --release --features cuda --bin gpu_assembly_keff -- `
+  path\to\endfb-vii.1-hdf5\neutron
+
+# Full PWR test suite
+.\run_pwr_tests.ps1                # all tests
+.\run_pwr_tests.ps1 -Download      # download data + run
 ```
 
 ## Nuclear Data
 
-Download ENDF/B-VII.1 HDF5 from https://openmc.org/data/
-Extract to `data/endfb-vii.1-hdf5/`. Key files:
-- `neutron/U234.h5`, `U235.h5`, `U238.h5` (Godiva)
-- `neutron/H1.h5`, `O16.h5`, `Zr90.h5` (PWR pin cell)
-- `neutron/c_H_in_H2O.h5` (S(α,β) thermal scattering for H in water)
-- Full library: 444 nuclide files + thermal data, 5.8 GB
+ENDF/B-VII.1 HDF5 from https://openmc.org/data/, extracted to
+`data/endfb-vii.1-hdf5/`. Key files:
+- `neutron/U234.h5`, `U235.h5`, `U238.h5` (Godiva).
+- `neutron/H1.h5`, `O16.h5`, `Zr90-Zr96.h5` (PWR pin cell).
+- `neutron/c_H_in_H2O.h5` (S(α,β) for H in water, 9 T, 186 MB).
+- `photon/*.h5` (photon library: Compton, form factors, brems DCS,
+  per-element I_eV).
+- Full library: ~444 nuclide + thermal files, ~5.8 GB.
 
-## Rank-vs-memory-vs-precision sweep — what we actually measured
+## Rank-vs-memory-vs-precision sweep — what was measured
 
 ### Godiva, 3 nuclides, on-library 294 K (`outputs/sweep_svd_wins.csv`)
-80 b × 5 000 p × 3 seeds, `--discrete-rank 1`. Memory is in-engine
-working-set including all reactions and discrete levels.
+80 b × 5 000 p × 3 seeds, `--discrete-rank 1`.
 
 | rank | SVD mem | Table mem | WMP mem | SVD k_eff | Table k_eff | WMP k_eff | SVD ns/p |
 |-----:|--------:|----------:|--------:|----------:|------------:|----------:|---------:|
@@ -327,69 +461,32 @@ working-set including all reactions and discrete levels.
 | 5    | 164 MB  | 110 MB    | 107 MB  | 1.00358   | 1.00322     | 1.00372   | 904      |
 | 7    | 176 MB  | 110 MB    | 107 MB  | 1.00202   | 1.00322     | 1.00372   | 3 191    |
 
-**Reading:** SVD memory is *strictly larger than the Table baseline at
-every rank including rank 1*. Memory is monotone in rank. Precision
-gap to ACE+WMP is non-monotone in rank (rank 1 happens to land closest
-on Godiva — but rank 2/3 are unstable, rank 5 is the production choice).
-ns/p is roughly flat 750–905 from rank 1–5, then jumps at rank 7.
+SVD memory strictly larger than Table on-library at every rank.
 
-### Godiva stochastic 450 K (off-library)
-Same script, `--target-temp 450` (between 294 K and 600 K library cols).
+### Godiva off-library, stochastic 450 K
 
 | rank | SVD mem | Table mem | WMP mem | SVD k_eff | Table k_eff | WMP k_eff |
 |-----:|--------:|----------:|--------:|----------:|------------:|----------:|
 | 1    | 113 MB  | 222 MB    | 213 MB  | 0.99699   | 1.00472     | 1.00501   |
-| 2    | 126 MB  | 222 MB    | 213 MB  | 1.00430   | 1.00697     | 1.00501   |
-| 3    | 138 MB  | 222 MB    | 213 MB  | 1.00704   | 1.00282     | 1.00501   |
 | 5    | 164 MB  | 222 MB    | 213 MB  | 1.00372   | 1.00696     | 1.00501   |
-| 7    | 176 MB  | 222 MB    | 213 MB  | 1.00144   | 1.00471     | 1.00501   |
 
-**Reading:** off-library is the only regime where SVD beats Table on
-memory (164 MB vs 222 MB at rank 5 = 1.35× smaller). Table doubles
-because pseudo-interpolation loads two temperature columns; SVD
-reconstructs from one library plus Ducru weights. **This is the
-honest "where SVD wins" headline — off-library, not on-library.**
+Off-library is the regime where SVD wins on memory (1.35× smaller at
+rank 5) — Table doubles for pseudo-interpolation, SVD reconstructs
+from one library + Ducru weights.
 
-### PWR pin cell, 9 nuclides, on-library (`outputs/sweep_svd_wins_pwr.csv`)
-80 b × 5 000 p × 3 seeds, sequential run (no other CPU load),
-`--discrete-rank 1`. Same accounting as Godiva: all-reactions,
-all-nuclide engine working set.
+### PWR pin cell on-library (`outputs/sweep_svd_wins_pwr.csv`)
 
 | rank | SVD mem | Table mem | WMP mem | SVD k_inf | Table k_inf | WMP k_inf |
 |-----:|--------:|----------:|--------:|----------:|------------:|----------:|
 | 1    | 106 MB  | 103 MB    | 100 MB  | 0.871     | 1.327       | 1.329     |
-| 2    | 118 MB  | 103 MB    | 100 MB  | 1.409     | 1.327       | 1.329     |
 | 3    | 131 MB  | 103 MB    | 100 MB  | 1.321     | 1.327       | 1.329     |
 | 5    | 156 MB  | 103 MB    | 100 MB  | 1.328     | 1.327       | 1.329     |
 | 7    | 169 MB  | 103 MB    | 100 MB  | 1.328     | 1.327       | 1.329     |
 
-**Reading:** rank 1 collapses (no resonance self-shielding,
-46 000 pcm low); rank 2 overshoots (8 000 pcm high); rank 3
-recovers to within 800 pcm of WMP; rank 5 is the deployable
-floor at 170 pcm below WMP and 5 pcm above Table; rank 7
-buys nothing on precision and adds 13 MB. SVD is larger than
-Table at every rank, never wins on memory.
+Rank 5 = deployable floor (170 pcm below WMP, 5 pcm above Table).
 
-### PWR pin cell, 9 nuclides, off-library +150 K
-Same script, `--target-temp-offset 150`. Table doubles
-because pseudo-interpolation loads two library columns per nuclide.
-
-| rank | SVD mem | Table mem | WMP mem | SVD k_inf | Table k_inf | WMP k_inf |
-|-----:|--------:|----------:|--------:|----------:|------------:|----------:|
-| 1    | 106 MB  | 206 MB    | 200 MB  | 1.547     | 1.322       | 1.329     |
-| 2    | 118 MB  | 206 MB    | 200 MB  | 1.387     | 1.323       | 1.328     |
-| 3    | 131 MB  | 206 MB    | 200 MB  | 1.321     | 1.321       | 1.328     |
-| 5    | 156 MB  | 206 MB    | 200 MB  | 1.324     | 1.324       | 1.328     |
-| 7    | 169 MB  | 206 MB    | 200 MB  | 1.327     | 1.320       | 1.326     |
-
-**Reading:** off-library is the only PWR regime where SVD wins
-on memory (rank 5: 156 MB vs 206 MB = 1.32× smaller). SVD
-matches Table at rank 5 (5 pcm gap) and lands ~460 pcm below
-WMP. Earlier rank 5 single-point measurement that gave SVD
-518 MB was the all-rank build with discrete levels at full
-rank — this sweep uses `--discrete-rank 1` (production
-default), bringing memory back into the 100-200 MB band where
-the Pareto comparison is meaningful.
+### PWR pin cell off-library +150 K
+SVD wins memory at rank 5: 156 MB vs Table 206 MB = 1.32×.
 
 Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 
@@ -397,28 +494,38 @@ Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 
 | Metric | Scope | Value |
 |--------|-------|-------|
-| U-235 fission σ₂/σ₁ | `[micro]` | 7.7e-2 |
-| Reactions rank-1 to machine ε | `[micro]` | 47/52 (does not = deployable rank) |
+| Reactions rank-1 to machine ε | `[micro]` | 47/52 (≠ deployable rank) |
 | Reconstruction kernel speedup vs table | `[micro]` | 8–13× (does NOT survive integration) |
 | GPU SVD reconstruction kernel speedup | `[micro]` | 2.6–2.8× vs single-thread CPU |
 | Godiva SVD k=5 vs Table CPU throughput | `[godiva]` | 1.37×–1.90× (paper §godiva) |
 | PWR SVD k=5 vs Table CPU throughput | `[pwr]` | **0.95×** (SVD slightly slower) |
 | GPU SVD vs GPU pointwise (Godiva) | `[godiva]` | **0.77×** (GPU SVD 1.3× slower; paper §gpu) |
-| Hybrid SVD+WMP throughput vs CPU SVD | `[pwr]` | **0.49×** (2.06× slower; paper §hybrid) |
-| Hybrid in-engine memory vs Table (PWR) | `[pwr]` | **5.2× larger** (519 MB vs 100.6 MB) |
-| Hybrid representation-byte ratio (paper Table 5) | `[micro]` | 132.9× (per-nuclide accounting, NOT engine memory) |
-| Hybrid smooth-only rebuild memory reduction | `[pwr]` | 1.06× (519 → 488 MB) |
-| Godiva dk (fission SVD k=4, pre-coupling) | `[godiva]` | 6.9 pcm |
+| GPU recursive transport (const-XS) vs CPU | `[assembly]` | **6.74×** (RTX A1000) |
+| GPU multi-step walk vs CPU | `[assembly]` | **24×** at <1e-13 max-rel-err |
+| GPU Compton persistent kernel vs 20-thread CPU | `[photon]` | **2.22×** on 1M histories |
+| Hybrid SVD+WMP throughput vs CPU SVD | `[pwr]` | **0.49×** (2.06× slower) |
+| Hybrid in-engine memory vs Table | `[pwr]` | **5.2× larger** (519 MB vs 100.6 MB) |
 | Godiva dk (all rxn SVD k=4, pre-coupling) | `[godiva]` | 3.7 pcm |
-| PWR SVD k=5 vs ACE+WMP gap | `[pwr]` | 5 pcm (paper §pwr, on-library) |
+| PWR SVD k=5 vs ACE+WMP gap | `[pwr]` | 5 pcm (paper §pwr) |
 | ICSBEP HMF-001 (benchmark) | `[godiva]` | 1.0000 ± 100 pcm (σ_exp) |
 | Rust Godiva k_eff (SVD k=5) | `[godiva]` | 1.00079 ± 0.00038 |
 | **Δ_ICSBEP (pass criterion)** | `[godiva]` | **+79 pcm, inside σ_exp** |
 | OpenMC 0.15.3 Godiva k_eff (same HDF5) | `[godiva]` | 0.99901 ± 0.00038 |
-| OpenMC Δ_ICSBEP (cross-check) | `[godiva]` | −99 pcm, inside σ_exp |
 | Rust-vs-OpenMC (cross-code) | `[godiva]` | +178 pcm (not a benchmark) |
-| History: const nu-bar | `[godiva]` | 0.994 (coincidental) |
-| History: + E-dep nu-bar | `[godiva]` | 1.059 (+6500 pcm) |
-| History: + aniso scatter | `[godiva]` | 0.965 (-9400 pcm) |
-| History: + data fission | `[godiva]` | 1.006 (+4100 pcm) |
-| History: + URR + interp | `[godiva]` | 1.000 (-600 pcm) |
+| PWR Table vs OpenMC 0.15.3 | `[pwr]` | 12 pcm |
+| 17×17 assembly k_inf (depth-3) | `[assembly]` | 1.14958 ± 0.00318 |
+| Hex 1-ring (7 pins) k_inf | `[hex]` | 1.35829 ± 0.00329 |
+| Hex 2-ring (19 pins) k_inf | `[hex]` | 1.36424 ± 0.00399 |
+| Depth-3 vs depth-1 same physics | `[assembly]` | 1.07× slower (depth penalty single-digit %) |
+| Track-length k σ vs collision σ | `[godiva]` | **3.9× lower** seed-to-seed |
+| Survival biasing FOM_collision | `[pwr]` | **4.5×** (412 → 1842) |
+| Delayed neutrons Δ_ICSBEP improvement | `[godiva]` | 196 → 19 pcm |
+| RR-CADIS FOM 100 cm water 1 MeV γ | `[shield]` | **2.19×** vs analog |
+| RR-CADIS FOM 200 cm water 1 MeV γ | `[shield]` | **4.32×** vs analog |
+| Lite CADIS proxy (removed) | `[shield]` | 0.69× / 0.20× (worse than analog) |
+| PWR γ-heating fuel share (this code / OpenMC) | `[photon]` | 84.1% / ~85% (within 1 pp) |
+| Brems emitted at 1 MeV (PWR γ-heat run) | `[photon]` | 0.353% of source energy |
+| CRAM-16 vs analytical Xe equilibrium | `[depletion]` | 1e-4 relative |
+| CRAM-48 vs CRAM-16 (non-stiff) | `[depletion]` | 1e-13 relative |
+| Statepoint warm-restart speedup | `[godiva]` | 33% faster (1542 → 1022 ns/p) |
+| **Lib test count** | — | **287 / 287 green** |

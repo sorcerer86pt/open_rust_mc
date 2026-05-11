@@ -1,0 +1,655 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://open-rust-mc/geometry.schema.json",
+  "title": "open_rust_mc Geometry",
+  "description": "Complete scene definition for open_rust_mc. Loaded by Geometry::from_json, fed directly into the transport engine.",
+  "type": "object",
+  "required": ["surfaces", "cells", "universes", "materials", "root_universe_id"],
+  "additionalProperties": false,
+
+  "properties": {
+
+    "surfaces": {
+      "type": "array",
+      "description": "All surfaces in the geometry. Cells reference surfaces by zero-based index into this array.",
+      "items": { "$ref": "#/$defs/Surface" }
+    },
+
+    "cells": {
+      "type": "array",
+      "description": "All cells. Each cell defines a CSG region and what fills it (material, universe, lattice, or void).",
+      "items": { "$ref": "#/$defs/Cell" }
+    },
+
+    "universes": {
+      "type": "array",
+      "description": "Collections of cells that tile space. Universe 0 is typically the root.",
+      "items": { "$ref": "#/$defs/Universe" }
+    },
+
+    "rect_lattices": {
+      "type": "array",
+      "description": "Rectangular lattices (PWR/BWR assemblies, core maps). Optional — omit if none.",
+      "items": { "$ref": "#/$defs/RectLattice" }
+    },
+
+    "hex_lattices": {
+      "type": "array",
+      "description": "Hexagonal lattices (VVER cores, SFR assemblies). Optional — omit if none.",
+      "items": { "$ref": "#/$defs/HexLattice" }
+    },
+
+    "materials": {
+      "type": "array",
+      "description": "All materials. Cells reference materials by zero-based index into this array.",
+      "items": { "$ref": "#/$defs/Material" }
+    },
+
+    "root_universe_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "UniverseId.0 of the root universe. Transport starts here."
+    }
+  },
+
+  "$defs": {
+
+    "Vec3": {
+      "type": "array",
+      "items": { "type": "number" },
+      "minItems": 3,
+      "maxItems": 3,
+      "description": "[x, y, z] in cm"
+    },
+
+    "Mat3": {
+      "type": "array",
+      "description": "Row-major 3×3 rotation matrix: [[r00,r01,r02],[r10,r11,r12],[r20,r21,r22]]",
+      "items": {
+        "type": "array",
+        "items": { "type": "number" },
+        "minItems": 3,
+        "maxItems": 3
+      },
+      "minItems": 3,
+      "maxItems": 3
+    },
+
+    "BoundaryCondition": {
+      "type": "string",
+      "enum": ["Transmission", "Reflective", "Vacuum"],
+      "description": "Transmission = internal surface; Reflective = mirror; Vacuum = particle killed"
+    },
+
+    "Surface": {
+      "type": "object",
+      "required": ["type", "bc"],
+      "properties": {
+        "bc": { "$ref": "#/$defs/BoundaryCondition" }
+      },
+      "discriminator": { "propertyName": "type" },
+      "oneOf": [
+
+        {
+          "description": "General plane: normal · x = offset  (Ax + By + Cz = D)",
+          "required": ["type", "normal", "offset", "bc"],
+          "properties": {
+            "type":   { "const": "Plane" },
+            "normal": { "$ref": "#/$defs/Vec3", "description": "Unit normal (A, B, C)" },
+            "offset": { "type": "number",       "description": "D in Ax+By+Cz=D" },
+            "bc":     { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Axis-aligned plane: x = x0",
+          "required": ["type", "x0", "bc"],
+          "properties": {
+            "type": { "const": "PlaneX" },
+            "x0":  { "type": "number" },
+            "bc":  { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Axis-aligned plane: y = y0",
+          "required": ["type", "y0", "bc"],
+          "properties": {
+            "type": { "const": "PlaneY" },
+            "y0":  { "type": "number" },
+            "bc":  { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Axis-aligned plane: z = z0",
+          "required": ["type", "z0", "bc"],
+          "properties": {
+            "type": { "const": "PlaneZ" },
+            "z0":  { "type": "number" },
+            "bc":  { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Sphere: (x-cx)²+(y-cy)²+(z-cz)² = r²",
+          "required": ["type", "center", "radius", "bc"],
+          "properties": {
+            "type":   { "const": "Sphere" },
+            "center": { "$ref": "#/$defs/Vec3" },
+            "radius": { "type": "number", "exclusiveMinimum": 0 },
+            "bc":     { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Cylinder along Z: (x-cx)²+(y-cy)² = r²",
+          "required": ["type", "center_x", "center_y", "radius", "bc"],
+          "properties": {
+            "type":     { "const": "CylinderZ" },
+            "center_x": { "type": "number" },
+            "center_y": { "type": "number" },
+            "radius":   { "type": "number", "exclusiveMinimum": 0 },
+            "bc":       { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Cylinder along X: (y-cy)²+(z-cz)² = r²",
+          "required": ["type", "center_y", "center_z", "radius", "bc"],
+          "properties": {
+            "type":     { "const": "CylinderX" },
+            "center_y": { "type": "number" },
+            "center_z": { "type": "number" },
+            "radius":   { "type": "number", "exclusiveMinimum": 0 },
+            "bc":       { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Cylinder along Y: (x-cx)²+(z-cz)² = r²",
+          "required": ["type", "center_x", "center_z", "radius", "bc"],
+          "properties": {
+            "type":     { "const": "CylinderY" },
+            "center_x": { "type": "number" },
+            "center_z": { "type": "number" },
+            "radius":   { "type": "number", "exclusiveMinimum": 0 },
+            "bc":       { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Double-cone along Z, apex at (x0,y0,z0): (x-x0)²+(y-y0)² = r_sq·(z-z0)²  where r_sq = tan²(half-angle)",
+          "required": ["type", "x0", "y0", "z0", "r_sq", "bc"],
+          "properties": {
+            "type": { "const": "ConeZ" },
+            "x0":   { "type": "number" },
+            "y0":   { "type": "number" },
+            "z0":   { "type": "number" },
+            "r_sq": { "type": "number", "exclusiveMinimum": 0,
+                      "description": "tan²(half-angle). r_sq=1 → 45° cone." },
+            "bc":   { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Double-cone along X: (y-y0)²+(z-z0)² = r_sq·(x-x0)²",
+          "required": ["type", "x0", "y0", "z0", "r_sq", "bc"],
+          "properties": {
+            "type": { "const": "ConeX" },
+            "x0":   { "type": "number" },
+            "y0":   { "type": "number" },
+            "z0":   { "type": "number" },
+            "r_sq": { "type": "number", "exclusiveMinimum": 0 },
+            "bc":   { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Double-cone along Y: (x-x0)²+(z-z0)² = r_sq·(y-y0)²",
+          "required": ["type", "x0", "y0", "z0", "r_sq", "bc"],
+          "properties": {
+            "type": { "const": "ConeY" },
+            "x0":   { "type": "number" },
+            "y0":   { "type": "number" },
+            "z0":   { "type": "number" },
+            "r_sq": { "type": "number", "exclusiveMinimum": 0 },
+            "bc":   { "$ref": "#/$defs/BoundaryCondition" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "Region": {
+      "description": "CSG boolean expression tree. Leaves are HalfSpace; branches are Intersection, Union, Complement.",
+      "type": "object",
+      "required": ["op"],
+      "discriminator": { "propertyName": "op" },
+      "oneOf": [
+
+        {
+          "description": "Leaf: one side of a surface. positive=true → positive half-space (evaluate > 0).",
+          "required": ["op", "surface_idx", "positive"],
+          "properties": {
+            "op":          { "const": "HalfSpace" },
+            "surface_idx": { "type": "integer", "minimum": 0,
+                             "description": "Zero-based index into the top-level surfaces array" },
+            "positive":    { "type": "boolean" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Boolean AND: point must be in both sub-regions.",
+          "required": ["op", "left", "right"],
+          "properties": {
+            "op":    { "const": "Intersection" },
+            "left":  { "$ref": "#/$defs/Region" },
+            "right": { "$ref": "#/$defs/Region" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Boolean OR: point must be in either sub-region.",
+          "required": ["op", "left", "right"],
+          "properties": {
+            "op":    { "const": "Union" },
+            "left":  { "$ref": "#/$defs/Region" },
+            "right": { "$ref": "#/$defs/Region" }
+          },
+          "additionalProperties": false
+        },
+
+        {
+          "description": "Boolean NOT: point must NOT be in the sub-region.",
+          "required": ["op", "inner"],
+          "properties": {
+            "op":    { "const": "Complement" },
+            "inner": { "$ref": "#/$defs/Region" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "CellFill": {
+      "description": "What fills this cell: a material index, a nested universe, a rect lattice, a hex lattice, or void.",
+      "type": "object",
+      "required": ["type"],
+      "oneOf": [
+        {
+          "required": ["type", "material_idx"],
+          "properties": {
+            "type":         { "const": "Material" },
+            "material_idx": { "type": "integer", "minimum": 0,
+                              "description": "Zero-based index into the top-level materials array" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["type", "universe_id"],
+          "properties": {
+            "type":        { "const": "Universe" },
+            "universe_id": { "type": "integer", "minimum": 0,
+                             "description": "UniverseId.0 of the nested universe" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["type", "lattice_idx"],
+          "properties": {
+            "type":        { "const": "Lattice" },
+            "lattice_idx": { "type": "integer", "minimum": 0,
+                             "description": "Zero-based index into rect_lattices array" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["type", "hex_lattice_idx"],
+          "properties": {
+            "type":           { "const": "HexLattice" },
+            "hex_lattice_idx": { "type": "integer", "minimum": 0,
+                                 "description": "Zero-based index into hex_lattices array" }
+          },
+          "additionalProperties": false
+        },
+        {
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "Void" }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+
+    "Cell": {
+      "type": "object",
+      "required": ["id", "region", "fill"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer", "minimum": 0,
+          "description": "CellId.0 — unique within the geometry"
+        },
+        "region": { "$ref": "#/$defs/Region" },
+        "fill":   { "$ref": "#/$defs/CellFill" },
+        "temperature": {
+          "type": "number", "exclusiveMinimum": 0,
+          "default": 293.6,
+          "description": "Cell temperature in Kelvin. Used for Doppler/S(α,β) XS lookup."
+        },
+        "rotation": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/Mat3" }
+          ],
+          "default": null,
+          "description": "Row-major 3×3 rotation applied when descending into a Universe/Lattice fill. null = identity."
+        }
+      }
+    },
+
+    "Universe": {
+      "type": "object",
+      "required": ["id", "cell_indices"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "integer", "minimum": 0,
+          "description": "UniverseId.0 — must be unique"
+        },
+        "cell_indices": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "description": "Zero-based indices into the top-level cells array. Transport searches in order."
+        }
+      }
+    },
+
+    "MaterialOverrideMap": {
+      "type": "object",
+      "description": "Map from global cell index (string key) to material index (integer value). Overrides cell.fill for this lattice element only — enables one pin universe to carry different enrichments at different lattice positions.",
+      "additionalProperties": { "type": "integer", "minimum": 0 }
+    },
+
+    "RectLattice": {
+      "type": "object",
+      "required": ["origin", "pitch", "shape", "universes"],
+      "additionalProperties": false,
+      "properties": {
+        "origin": {
+          "$ref": "#/$defs/Vec3",
+          "description": "Lower-left-bottom corner of the lattice in cm"
+        },
+        "pitch": {
+          "$ref": "#/$defs/Vec3",
+          "description": "Element pitch in [x, y, z] in cm"
+        },
+        "shape": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 1 },
+          "minItems": 3, "maxItems": 3,
+          "description": "[nx, ny, nz] element counts"
+        },
+        "universes": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "description": "UniverseId.0 at each position, row-major over [ix][iy][iz]. Length must equal nx×ny×nz."
+        },
+        "material_overrides": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/MaterialOverrideMap" },
+              "description": "One MaterialOverrideMap per lattice element, in the same row-major order as universes. null = no overrides anywhere."
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+
+    "HexLattice": {
+      "type": "object",
+      "required": ["center", "pitch_xy", "pitch_z", "n_rings", "n_axial", "orientation", "universes"],
+      "additionalProperties": false,
+      "properties": {
+        "center": {
+          "$ref": "#/$defs/Vec3",
+          "description": "Centre of the hex lattice in world frame (cm)"
+        },
+        "pitch_xy": {
+          "type": "number", "exclusiveMinimum": 0,
+          "description": "Centre-to-centre distance to any of the 6 in-plane neighbours (cm). Equals √3 × side_length."
+        },
+        "pitch_z": {
+          "type": "number", "exclusiveMinimum": 0,
+          "description": "Axial layer pitch (cm)"
+        },
+        "n_rings": {
+          "type": "integer", "minimum": 0,
+          "description": "Number of hex rings. Ring 0 = centre only. Total in-plane = 1 + 3·N·(N+1)."
+        },
+        "n_axial": {
+          "type": "integer", "minimum": 1,
+          "description": "Number of axial layers"
+        },
+        "orientation": {
+          "type": "string",
+          "enum": ["Y", "X"],
+          "description": "Y = flat-top hex (VVER style, Y-axis is flat edge); X = pointy-top hex (X-axis is pointy)"
+        },
+        "universes": {
+          "type": "array",
+          "items": { "type": "integer", "minimum": 0 },
+          "description": "UniverseId.0 at each (q, r, z) position in axial-major row-major order over the doubled (2N+1)×(2N+1) grid. Corners outside the hex ring carry UniverseId 0 (never queried)."
+        },
+        "material_overrides": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "array",
+              "items": { "$ref": "#/$defs/MaterialOverrideMap" }
+            }
+          ],
+          "default": null
+        }
+      }
+    },
+
+    "NuclideEntry": {
+      "type": "object",
+      "required": ["hdf5_file", "atom_density"],
+      "additionalProperties": false,
+      "properties": {
+        "hdf5_file": {
+          "type": "string",
+          "description": "Path to the OpenMC-format HDF5 cross-section file for this nuclide, e.g. 'data/endfb-vii.1-hdf5/U235.h5'"
+        },
+        "atom_density": {
+          "type": "number", "minimum": 0,
+          "description": "Atom density in atoms / barn-cm"
+        },
+        "thermal_file": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string" }
+          ],
+          "default": null,
+          "description": "Path to S(α,β) thermal scattering HDF5 file, e.g. 'data/endfb-vii.1-hdf5/c_H_in_H2O.h5'. null = free-gas treatment."
+        }
+      }
+    },
+
+    "Material": {
+      "type": "object",
+      "required": ["name", "nuclides"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable label, e.g. 'UO2_3.1pct_900K'"
+        },
+        "temperature": {
+          "type": "number", "exclusiveMinimum": 0,
+          "default": 293.6,
+          "description": "Material temperature in Kelvin. Overridden by cell.temperature if both are set."
+        },
+        "nuclides": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/NuclideEntry" },
+          "minItems": 1
+        }
+      }
+    }
+  },
+
+  "examples": [
+    {
+      "_comment": "Godiva: bare HEU sphere, vacuum boundary",
+      "surfaces": [
+        { "type": "Sphere", "center": [0,0,0], "radius": 8.7407, "bc": "Vacuum" }
+      ],
+      "cells": [
+        { "id": 0, "region": { "op": "HalfSpace", "surface_idx": 0, "positive": false },
+          "fill": { "type": "Material", "material_idx": 0 }, "temperature": 293.6 },
+        { "id": 1, "region": { "op": "HalfSpace", "surface_idx": 0, "positive": true },
+          "fill": { "type": "Void" } }
+      ],
+      "universes": [
+        { "id": 0, "cell_indices": [0, 1] }
+      ],
+      "materials": [
+        {
+          "name": "HEU_metallic",
+          "temperature": 293.6,
+          "nuclides": [
+            { "hdf5_file": "data/endfb-vii.1-hdf5/U235.h5", "atom_density": 0.045155 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/U238.h5", "atom_density": 0.002428 }
+          ]
+        }
+      ],
+      "root_universe_id": 0
+    },
+
+    {
+      "_comment": "PWR fuel pin cell with H2O S(alpha,beta), reflective boundary",
+      "surfaces": [
+        { "type": "CylinderZ", "center_x": 0, "center_y": 0, "radius": 0.4096, "bc": "Transmission" },
+        { "type": "CylinderZ", "center_x": 0, "center_y": 0, "radius": 0.4180, "bc": "Transmission" },
+        { "type": "CylinderZ", "center_x": 0, "center_y": 0, "radius": 0.4750, "bc": "Transmission" },
+        { "type": "PlaneX", "x0": -0.63, "bc": "Reflective" },
+        { "type": "PlaneX", "x0":  0.63, "bc": "Reflective" },
+        { "type": "PlaneY", "y0": -0.63, "bc": "Reflective" },
+        { "type": "PlaneY", "y0":  0.63, "bc": "Reflective" }
+      ],
+      "cells": [
+        {
+          "id": 0,
+          "region": { "op": "HalfSpace", "surface_idx": 0, "positive": false },
+          "fill": { "type": "Material", "material_idx": 0 },
+          "temperature": 900.0
+        },
+        {
+          "id": 1,
+          "region": {
+            "op": "Intersection",
+            "left":  { "op": "HalfSpace", "surface_idx": 0, "positive": true },
+            "right": { "op": "HalfSpace", "surface_idx": 1, "positive": false }
+          },
+          "fill": { "type": "Material", "material_idx": 1 },
+          "temperature": 600.0
+        },
+        {
+          "id": 2,
+          "region": {
+            "op": "Intersection",
+            "left":  { "op": "HalfSpace", "surface_idx": 1, "positive": true },
+            "right": { "op": "HalfSpace", "surface_idx": 2, "positive": false }
+          },
+          "fill": { "type": "Material", "material_idx": 2 },
+          "temperature": 600.0
+        },
+        {
+          "id": 3,
+          "region": {
+            "op": "Intersection",
+            "left":  { "op": "HalfSpace", "surface_idx": 2, "positive": true },
+            "right": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left":  { "op": "HalfSpace", "surface_idx": 3, "positive": true },
+                "right": { "op": "HalfSpace", "surface_idx": 4, "positive": false }
+              },
+              "right": {
+                "op": "Intersection",
+                "left":  { "op": "HalfSpace", "surface_idx": 5, "positive": true },
+                "right": { "op": "HalfSpace", "surface_idx": 6, "positive": false }
+              }
+            }
+          },
+          "fill": { "type": "Material", "material_idx": 3 },
+          "temperature": 600.0
+        }
+      ],
+      "universes": [ { "id": 0, "cell_indices": [0, 1, 2, 3] } ],
+      "materials": [
+        {
+          "name": "UO2_3.1pct_900K",
+          "temperature": 900.0,
+          "nuclides": [
+            { "hdf5_file": "data/endfb-vii.1-hdf5/U235.h5", "atom_density": 7.0714e-4 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/U238.h5", "atom_density": 2.2050e-2 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/O16.h5",  "atom_density": 4.5514e-2 }
+          ]
+        },
+        {
+          "name": "He_gap",
+          "temperature": 600.0,
+          "nuclides": [
+            { "hdf5_file": "data/endfb-vii.1-hdf5/He4.h5", "atom_density": 2.4044e-4 }
+          ]
+        },
+        {
+          "name": "Zircaloy4_600K",
+          "temperature": 600.0,
+          "nuclides": [
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Zr90.h5",  "atom_density": 2.1827e-2 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Zr91.h5",  "atom_density": 4.7600e-3 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Zr92.h5",  "atom_density": 7.2758e-3 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Zr94.h5",  "atom_density": 7.3734e-3 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Zr96.h5",  "atom_density": 1.1879e-3 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Sn116.h5", "atom_density": 4.6734e-4 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Fe56.h5",  "atom_density": 1.3413e-4 },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/Cr52.h5",  "atom_density": 7.6093e-5 }
+          ]
+        },
+        {
+          "name": "H2O_600K",
+          "temperature": 600.0,
+          "nuclides": [
+            { "hdf5_file": "data/endfb-vii.1-hdf5/H1.h5",  "atom_density": 4.9457e-2,
+              "thermal_file": "data/endfb-vii.1-hdf5/c_H_in_H2O.h5" },
+            { "hdf5_file": "data/endfb-vii.1-hdf5/O16.h5", "atom_density": 2.4728e-2 }
+          ]
+        }
+      ],
+      "root_universe_id": 0
+    }
+  ]
+}

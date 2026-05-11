@@ -1,0 +1,352 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "IEU-MET-FAST-006.case-2",
+    "case_name": "",
+    "category": "IEU-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.0023,
+    "source": "ICSBEP Handbook, IEU-MET-FAST-006.case-2 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/ieu-met-fast-006/openmc/case-2",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-2",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 2.1,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 13.25,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 15.0,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 25.0,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 2,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 2,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 3,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "36 wt% U-235",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00015518
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.017161
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.02931
+          },
+          {
+            "zaid": 74180,
+            "label": "W-180",
+            "atom_density": 1.2865199999999999e-08
+          },
+          {
+            "zaid": 74182,
+            "label": "W-182",
+            "atom_density": 2.841065e-06
+          },
+          {
+            "zaid": 74183,
+            "label": "W-183",
+            "atom_density": 1.5341751e-06
+          },
+          {
+            "zaid": 74184,
+            "label": "W-184",
+            "atom_density": 3.2849144e-06
+          },
+          {
+            "zaid": 74186,
+            "label": "W-186",
+            "atom_density": 3.0479803e-06
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 7.2156524999999994e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.000113270313
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 2.6159055e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 3.48129e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00064888
+          },
+          {
+            "zaid": 29063,
+            "label": "Cu-63",
+            "atom_density": 0.00018501082500000003
+          },
+          {
+            "zaid": 29065,
+            "label": "Cu-65",
+            "atom_density": 8.253917500000001e-05
+          },
+          {
+            "zaid": 28058,
+            "label": "Ni-58",
+            "atom_density": 0.00019721197160999998
+          },
+          {
+            "zaid": 28060,
+            "label": "Ni-60",
+            "atom_density": 7.596569839e-05
+          },
+          {
+            "zaid": 28061,
+            "label": "Ni-61",
+            "atom_density": 3.3021763099999997e-06
+          },
+          {
+            "zaid": 28062,
+            "label": "Ni-62",
+            "atom_density": 1.0528783050000001e-05
+          },
+          {
+            "zaid": 28064,
+            "label": "Ni-64",
+            "atom_density": 2.68137064e-06
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Duralumin reflector #1",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 13027,
+            "label": "Al-27",
+            "atom_density": 0.052342
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 5.5988086e-05
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.0008788932152
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 2.02974772e-05
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 2.7012216e-06
+          },
+          {
+            "zaid": 29063,
+            "label": "Cu-63",
+            "atom_density": 0.00068191581
+          },
+          {
+            "zaid": 29065,
+            "label": "Cu-65",
+            "atom_density": 0.00030422418999999997
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Duralumin reflector #2",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 13027,
+            "label": "Al-27",
+            "atom_density": 0.052067
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 5.5694667000000004e-05
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.0008742871644000001
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 2.0191103400000002e-05
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 2.6870652e-06
+          },
+          {
+            "zaid": 29063,
+            "label": "Cu-63",
+            "atom_density": 0.0006783407550000001
+          },
+          {
+            "zaid": 29065,
+            "label": "Cu-65",
+            "atom_density": 0.000302629245
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

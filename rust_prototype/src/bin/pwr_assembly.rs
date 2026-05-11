@@ -422,34 +422,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
         let path = args.data_dir.join(filename);
         if !path.exists() {
             eprintln!("  WARN: {} not found — using zero kernel", path.display());
-            kernels.push(xs_provider::NuclideKernels {
-                elastic: None,
-                total_table: None,
-                total_xs_raw: None,
-                missing_xs: None,
-                pointwise_xs: None,
-                inelastic: None,
-                n2n: None,
-                n3n: None,
-                fission: None,
-                capture: None,
-                awr,
-                nu_bar_const: nu_bar,
-                nu_bar_table: None,
-                delayed_nu_bar_table: None,
-                discrete_levels: vec![],
-                inelastic_cdf: None,
-                discrete_level_angles: vec![],
-                has_continuum_inelastic: false,
-                elastic_angle: None,
-                fission_energy_dist: None,
-                inelastic_continuum_edist: None,
-                n2n_edist: None,
-                n3n_edist: None,
-                urr_tables: None,
-                photon_products: Vec::new(),
-                partial_kernels: Vec::new(),
-            });
+            kernels.push(xs_provider::NuclideKernels::empty(awr, nu_bar));
         } else {
             kernels.push(xs_provider::load_nuclide(
                 &path,

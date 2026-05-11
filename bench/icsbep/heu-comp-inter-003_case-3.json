@@ -1,0 +1,2042 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-COMP-INTER-003.case-3",
+    "case_name": "",
+    "category": "HEU-COMP-INTER",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.0056,
+    "source": "ICSBEP Handbook, HEU-COMP-INTER-003.case-3 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/heu-comp-inter-003/openmc/case-3",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-3",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "PlaneZ",
+        "z0": -1.27,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 0.0,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 5.08,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 7.42,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 7.5788,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 7.5998,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 9.6089,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 9.6299,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 9.6553,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 12.6274,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 12.6528,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 16.3582,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 16.3836,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 19.3842,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 19.4096,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 19.4306,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 21.4431,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 21.4641,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 21.6229,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 23.9629,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 24.9885,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 29.0429,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 30.0685,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 6.0325,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 6.35,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 7.505,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 7.5438,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 7.5489,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 7.6759,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 7.7013,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 10.0432,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 15.1409,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 31,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 4
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 25,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 5,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 3,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 4,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 25,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 6,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 5,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 7,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 5,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 6,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 25,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 9
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 8,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 5,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 25,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 9,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 6,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 7,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 10,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 7,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 11,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 9,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 25,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 6
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 12,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 8,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 9,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 25,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 13,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 9,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 10,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 14,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 10,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 11,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 23,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 15,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 10,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 11,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 23,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 24,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 16,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 10,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 11,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 24,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 17,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 11,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 12,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 18,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 12,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 13,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 25,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 5
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 19,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 12,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 13,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 25,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 20,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 13,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 14,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 21,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 14,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 15,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 22,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 15,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 16,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 25,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 10
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 23,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 15,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 16,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 25,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 24,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 16,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 17,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 25,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 17,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 18,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 25,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 26,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 17,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 18,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 25,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 27,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 18,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 19,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 4
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 28,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 19,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 21,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 29,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 21,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 22,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 26,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 30,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 2,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 20,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 29,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 30,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 4
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 31,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 22,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 26,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 27,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 32,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 22,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 27,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 28,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 3
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 33,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 22,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 28,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 29,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 34,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 2,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 29,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 30,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 35,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 20,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 22,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 29,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 30,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 36,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 22,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 30,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 31,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Aluminum",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 13027,
+            "label": "Al-27",
+            "atom_density": 0.060239
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Depleted Uranium",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 9.736e-05
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.047969
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "SAE 1020 Steel",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 0.00404865615
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.06355524318
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 0.00146776773
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 0.00019533293999999998
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00054977
+          },
+          {
+            "zaid": 25055,
+            "label": "Mn-55",
+            "atom_density": 0.00016969
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Fe",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 0.0050169973
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.07875612836
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 0.00181882246
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 0.00024205187999999997
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Be",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 4009,
+            "label": "Be-9",
+            "atom_density": 0.12295
+          }
+        ],
+        "thermal_files": [
+          "c_Be.h5"
+        ]
+      },
+      {
+        "name": "HEU, Can I",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00025279
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.02345
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 0.00011027
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013421
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.07385949533046
+          },
+          {
+            "zaid": 1002,
+            "label": "H-2",
+            "atom_density": 1.1504669540000001e-05
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.0008552057541299999
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 3.2424587e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00014562
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.0013543208841
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 4.9791159e-06
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 2.14377065e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 3.3652614580000005e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 7.7718563e-07
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 1.0342914000000001e-07
+          },
+          {
+            "zaid": 79197,
+            "label": "Au-197",
+            "atom_density": 0.0003398
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "HEU, Can II",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00025484
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.023409
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 0.00010757
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013371
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.07538425782696001
+          },
+          {
+            "zaid": 1002,
+            "label": "H-2",
+            "atom_density": 1.174217304e-05
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.00056681509563
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 2.1490437000000002e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00019893
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00019626842563
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 7.2157437e-07
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 2.2366477e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 3.5110585640000004e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 8.1085654e-07
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 1.0791012e-07
+          },
+          {
+            "zaid": 79197,
+            "label": "Au-197",
+            "atom_density": 0.00033787
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "HEU, Can III",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00025651
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.02355
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 0.00010829
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013584
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.06990211174938
+          },
+          {
+            "zaid": 1002,
+            "label": "H-2",
+            "atom_density": 1.088825062e-05
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.00048405647304
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 1.8352696e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00015288
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00020568381028
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 7.5618972e-07
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 6.058927e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 9.51121964e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 2.1965554e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 2.9232119999999997e-07
+          },
+          {
+            "zaid": 79197,
+            "label": "Au-197",
+            "atom_density": 0.00034242
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "HEU, Can IV",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00024873
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.022939
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 0.0001039
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013117
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.0727136738085
+          },
+          {
+            "zaid": 1002,
+            "label": "H-2",
+            "atom_density": 1.13261915e-05
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.00063688852773
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 2.4147227e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00015539
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.000243106228
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 8.93772e-07
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 1.19442575e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 1.8749929900000002e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 4.3301765e-07
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 5.76267e-08
+          },
+          {
+            "zaid": 79197,
+            "label": "Au-197",
+            "atom_density": 0.00034196
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "HEU, Can A",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00024557
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.02303
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 0.00010085
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013124
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.07027905303540001
+          },
+          {
+            "zaid": 1002,
+            "label": "H-2",
+            "atom_density": 1.09469646e-05
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.00060008248251
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 2.2751749e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 9.6792e-05
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00026208644785000006
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 9.6355215e-07
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 5.25202475e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 8.24455567e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 1.90402745e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 2.533911e-07
+          },
+          {
+            "zaid": 79197,
+            "label": "Au-197",
+            "atom_density": 0.00032844
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "HEU, Can B",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00025226
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.022951
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 0.00010055
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013058
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.0732285936024
+          },
+          {
+            "zaid": 1002,
+            "label": "H-2",
+            "atom_density": 1.14063976e-05
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.0004934129256
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 1.870744e-07
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00012804
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00022934681403
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 8.4318597e-07
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 3.9574157e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 6.212296324000001e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 1.4346901400000002e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 1.9093092e-07
+          },
+          {
+            "zaid": 79197,
+            "label": "Au-197",
+            "atom_density": 0.0003014
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

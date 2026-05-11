@@ -1,0 +1,155 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "PU-COMP-INTER-001",
+    "case_name": "",
+    "category": "PU-COMP-INTER",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.011,
+    "source": "ICSBEP Handbook, PU-COMP-INTER-001 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/pu-comp-inter-001/openmc",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "(top-level)",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 100.0,
+        "bc": "Reflective"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "mat_1",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 94239,
+            "label": "Pu-239",
+            "atom_density": 0.0002735
+          },
+          {
+            "zaid": 94240,
+            "label": "Pu-240",
+            "atom_density": 1.549e-05
+          },
+          {
+            "zaid": 94241,
+            "label": "Pu-241",
+            "atom_density": 1.072e-06
+          },
+          {
+            "zaid": 94242,
+            "label": "Pu-242",
+            "atom_density": 5.8e-08
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.0001077
+          },
+          {
+            "zaid": 5010,
+            "label": "B-10",
+            "atom_density": 0.00010151
+          },
+          {
+            "zaid": 5011,
+            "label": "B-11",
+            "atom_density": 0.00040859
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.0709
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.002705974047
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 1.025953e-06
+          },
+          {
+            "zaid": 20040,
+            "label": "Ca-40",
+            "atom_density": 0.00080267148
+          },
+          {
+            "zaid": 20042,
+            "label": "Ca-42",
+            "atom_density": 5.35716e-06
+          },
+          {
+            "zaid": 20043,
+            "label": "Ca-43",
+            "atom_density": 1.1178e-06
+          },
+          {
+            "zaid": 20044,
+            "label": "Ca-44",
+            "atom_density": 1.727208e-05
+          },
+          {
+            "zaid": 20046,
+            "label": "Ca-46",
+            "atom_density": 3.312e-08
+          },
+          {
+            "zaid": 20048,
+            "label": "Ca-48",
+            "atom_density": 1.5483599999999998e-06
+          }
+        ],
+        "thermal_files": [
+          "c_Graphite.h5"
+        ]
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

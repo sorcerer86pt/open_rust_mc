@@ -1,0 +1,655 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-MET-FAST-015",
+    "case_name": "",
+    "category": "HEU-MET-FAST",
+    "k_eff_reference": 0.9996,
+    "k_eff_sigma": 0.0017,
+    "source": "ICSBEP Handbook, HEU-MET-FAST-015 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/heu-met-fast-015/openmc",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "(top-level)",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "PlaneZ",
+        "z0": 0.0,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 0.21,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 5.17,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 6.17,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 6.22,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 6.43,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 11.39,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 13.0,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 9.995,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 9.8,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 1.75,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 0.6,
+        "bc": "Transmission"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 4,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 5,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 7,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 8,
+            "positive": true
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 9,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 3,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": true
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 5,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 4,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 10,
+            "positive": true
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 6,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 0,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 4,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 7,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 8,
+            "positive": true
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 7,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 5,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 7,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 8,
+            "positive": true
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 8,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 0,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 9,
+            "positive": true
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 9,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 8,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 10,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 11,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 6,
+              "positive": false
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 10,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Bottom HEU",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00056597
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.045774
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013381
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.0001027
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 2.9342484500000004e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 4.6061425540000005e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 1.06375919e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 1.4156682000000002e-07
+          },
+          {
+            "zaid": 74180,
+            "label": "W-180",
+            "atom_density": 1.46388e-09
+          },
+          {
+            "zaid": 74182,
+            "label": "W-182",
+            "atom_density": 3.232735e-07
+          },
+          {
+            "zaid": 74183,
+            "label": "W-183",
+            "atom_density": 1.7456769e-07
+          },
+          {
+            "zaid": 74184,
+            "label": "W-184",
+            "atom_density": 3.7377736e-07
+          },
+          {
+            "zaid": 74186,
+            "label": "W-186",
+            "atom_density": 3.4681757e-07
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Top HEU",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00056404
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.045708
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0013404
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00010256
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 2.93015695e-06
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 4.599719774e-05
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 1.06227589e-06
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 1.4136942e-07
+          },
+          {
+            "zaid": 74180,
+            "label": "W-180",
+            "atom_density": 1.46196e-09
+          },
+          {
+            "zaid": 74182,
+            "label": "W-182",
+            "atom_density": 3.2284950000000005e-07
+          },
+          {
+            "zaid": 74183,
+            "label": "W-183",
+            "atom_density": 1.7433873e-07
+          },
+          {
+            "zaid": 74184,
+            "label": "W-184",
+            "atom_density": 3.7328712e-07
+          },
+          {
+            "zaid": 74186,
+            "label": "W-186",
+            "atom_density": 3.4636269e-07
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Steel Diaphragm and Steel Plate",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 0.00474222385
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.07444277282
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 0.00171920827
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 0.00022879505999999998
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

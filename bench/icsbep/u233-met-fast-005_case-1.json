@@ -1,0 +1,144 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "U233-MET-FAST-005.case-1",
+    "case_name": "",
+    "category": "U233-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.003,
+    "source": "ICSBEP Handbook, U233-MET-FAST-005.case-1 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/u233-met-fast-005/openmc/case-1",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-1",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 5.0444,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 7.0891,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "U233 core",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92233,
+            "label": "U-233",
+            "atom_density": 0.047253
+          },
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00052705
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.00032975
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Beryllium reflector",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 4009,
+            "label": "Be-9",
+            "atom_density": 0.11984
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.0013770778896
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 5.221104000000001e-07
+          }
+        ],
+        "thermal_files": [
+          "c_Be.h5"
+        ]
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

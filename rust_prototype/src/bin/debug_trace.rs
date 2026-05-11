@@ -352,7 +352,7 @@ fn run_gpu_comparison(_args: &Args, provider: &xs_provider::SvdXsProvider) {
                 .as_ref()
                 .or(provider.nuclides[nuc_idx].fission.as_ref())
                 .or(provider.nuclides[nuc_idx].capture.as_ref())
-                .map_or(0, |rk| rk.kernel.energy_index(e));
+                .map_or(0, |rk| rk.energy_index(e));
             if gpu_idx != cpu_idx {
                 println!(
                     "  {} E={:.0e}: gpu_idx={} cpu_idx={} MISMATCH",

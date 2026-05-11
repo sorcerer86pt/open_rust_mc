@@ -1,0 +1,374 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-SOL-THERM-042.case-1",
+    "case_name": "",
+    "category": "HEU-SOL-THERM",
+    "k_eff_reference": 0.9957,
+    "k_eff_sigma": 0.0039,
+    "source": "ICSBEP Handbook, HEU-SOL-THERM-042.case-1 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/heu-sol-therm-042/openmc/case-1",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-1",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 77.3684,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 77.6986,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": -0.3302,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 0.0,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 45.1358,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 304.8,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 1,
+              "positive": false
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 2,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 3,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 0,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 1,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": false
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 3,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 4,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 0,
+              "positive": false
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 4,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 5,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Uranyl Nitrate Solution",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 4.676e-07
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 4.1337e-05
+          },
+          {
+            "zaid": 92236,
+            "label": "U-236",
+            "atom_density": 2.4286e-07
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 2.268e-06
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00012716
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.066231
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.033553278485999996
+          },
+          {
+            "zaid": 8017,
+            "label": "O-17",
+            "atom_density": 1.2721514e-05
+          }
+        ],
+        "thermal_files": [
+          "c_H_in_H2O.h5"
+        ]
+      },
+      {
+        "name": "SS-304 Tank",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 0.00340179
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.053400828000000004
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 0.001233258
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 0.000164124
+          },
+          {
+            "zaid": 6000,
+            "label": "C-0",
+            "atom_density": 0.00031687
+          },
+          {
+            "zaid": 24050,
+            "label": "Cr-50",
+            "atom_density": 0.0006758213000000001
+          },
+          {
+            "zaid": 24052,
+            "label": "Cr-52",
+            "atom_density": 0.01303254106
+          },
+          {
+            "zaid": 24053,
+            "label": "Cr-53",
+            "atom_density": 0.00147778554
+          },
+          {
+            "zaid": 24054,
+            "label": "Cr-54",
+            "atom_density": 0.00036785210000000004
+          },
+          {
+            "zaid": 28058,
+            "label": "Ni-58",
+            "atom_density": 0.006622044293699999
+          },
+          {
+            "zaid": 28060,
+            "label": "Ni-60",
+            "atom_density": 0.0025507996062999997
+          },
+          {
+            "zaid": 28061,
+            "label": "Ni-61",
+            "atom_density": 0.00011088149269999999
+          },
+          {
+            "zaid": 28062,
+            "label": "Ni-62",
+            "atom_density": 0.0003535387185
+          },
+          {
+            "zaid": 28064,
+            "label": "Ni-64",
+            "atom_density": 9.00358888e-05
+          },
+          {
+            "zaid": 42100,
+            "label": "Mo-100",
+            "atom_density": 0.00012079636800000001
+          },
+          {
+            "zaid": 42092,
+            "label": "Mo-92",
+            "atom_density": 0.000181603653
+          },
+          {
+            "zaid": 42094,
+            "label": "Mo-94",
+            "atom_density": 0.00011389123899999999
+          },
+          {
+            "zaid": 42095,
+            "label": "Mo-95",
+            "atom_density": 0.000196777581
+          },
+          {
+            "zaid": 42096,
+            "label": "Mo-96",
+            "atom_density": 0.000206695181
+          },
+          {
+            "zaid": 42097,
+            "label": "Mo-97",
+            "atom_density": 0.000118788054
+          },
+          {
+            "zaid": 42098,
+            "label": "Mo-98",
+            "atom_density": 0.00030114792400000003
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.00033841582542
+          },
+          {
+            "zaid": 7015,
+            "label": "N-15",
+            "atom_density": 1.24417458e-06
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

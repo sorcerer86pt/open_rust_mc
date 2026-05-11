@@ -75,11 +75,16 @@ mod cuda_main {
         let kernels =
             xs_provider::load_nuclide(&u235_path, args.rank, args.temp_idx, 233.025, 2.43);
 
-        let fission = kernels.fission.as_ref().expect("U-235 must have fission");
-        let basis = fission.kernel.basis_f64();
-        let coeffs = &fission.coeffs;
-        let n_e = fission.kernel.n_energy();
-        let rank = fission.kernel.rank();
+        let fission_rxn = kernels.fission.as_ref().expect("U-235 must have fission");
+        let (basis, coeffs, n_e, rank) = match fission_rxn {
+            xs_provider::ReactionKernel::Svd { kernel, coeffs } => {
+                (kernel.basis_f64(), coeffs, kernel.n_energy(), kernel.rank())
+            }
+            xs_provider::ReactionKernel::Table { .. } => {
+                panic!("gpu_bench expects SVD U-235 fission kernel")
+            }
+        };
+        let fission = fission_rxn;
 
         println!("  N_E = {n_e}, rank = {rank}");
         println!(
@@ -195,10 +200,12 @@ mod cuda_main {
                     None => continue,
                 };
 
-                let basis = kernel.kernel.basis_f64();
-                let coeffs = &kernel.coeffs;
-                let n_e = kernel.kernel.n_energy();
-                let rank = kernel.kernel.rank();
+                let (basis, coeffs, n_e, rank) = match kernel {
+                    xs_provider::ReactionKernel::Svd { kernel: k, coeffs: c } => {
+                        (k.basis_f64(), c, k.n_energy(), k.rank())
+                    }
+                    xs_provider::ReactionKernel::Table { .. } => continue,
+                };
 
                 let energy_indices = generate_random_indices(n_particles, n_e);
 

@@ -1,0 +1,303 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "PU-SOL-THERM-011.case-18-4",
+    "case_name": "",
+    "category": "PU-SOL-THERM",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.0052,
+    "source": "ICSBEP Handbook, PU-SOL-THERM-011.case-18-4 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/pu-sol-therm-011/openmc/case-18-4",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-18-4",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 22.6974,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 22.8244,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 22.8752,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 2,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Plutonium nitrate solution",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 94239,
+            "label": "Pu-239",
+            "atom_density": 5.7486e-05
+          },
+          {
+            "zaid": 94240,
+            "label": "Pu-240",
+            "atom_density": 2.5097e-06
+          },
+          {
+            "zaid": 7014,
+            "label": "N-14",
+            "atom_density": 0.0014414
+          },
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.06322
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.035333
+          },
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 7.7522235e-08
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 1.216933302e-06
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 2.8104297e-08
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 3.740166e-09
+          }
+        ],
+        "thermal_files": [
+          "c_H_in_H2O.h5"
+        ]
+      },
+      {
+        "name": "347 Stainless Steel",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 26054,
+            "label": "Fe-54",
+            "atom_density": 0.0035295617000000003
+          },
+          {
+            "zaid": 26056,
+            "label": "Fe-56",
+            "atom_density": 0.055406570440000004
+          },
+          {
+            "zaid": 26057,
+            "label": "Fe-57",
+            "atom_density": 0.00127957934
+          },
+          {
+            "zaid": 26058,
+            "label": "Fe-58",
+            "atom_density": 0.00017028852
+          },
+          {
+            "zaid": 24050,
+            "label": "Cr-50",
+            "atom_density": 0.0007246590999999999
+          },
+          {
+            "zaid": 24052,
+            "label": "Cr-52",
+            "atom_density": 0.013974329419999999
+          },
+          {
+            "zaid": 24053,
+            "label": "Cr-53",
+            "atom_density": 0.0015845767799999998
+          },
+          {
+            "zaid": 24054,
+            "label": "Cr-54",
+            "atom_density": 0.00039443469999999995
+          },
+          {
+            "zaid": 28058,
+            "label": "Ni-58",
+            "atom_density": 0.0067058469576
+          },
+          {
+            "zaid": 28060,
+            "label": "Ni-60",
+            "atom_density": 0.0025830802424
+          },
+          {
+            "zaid": 28061,
+            "label": "Ni-61",
+            "atom_density": 0.0001122847096
+          },
+          {
+            "zaid": 28062,
+            "label": "Ni-62",
+            "atom_density": 0.00035801278800000005
+          },
+          {
+            "zaid": 28064,
+            "label": "Ni-64",
+            "atom_density": 9.117530240000001e-05
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Cadmium",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 48106,
+            "label": "Cd-106",
+            "atom_density": 0.000576933
+          },
+          {
+            "zaid": 48108,
+            "label": "Cd-108",
+            "atom_density": 0.0004114992
+          },
+          {
+            "zaid": 48110,
+            "label": "Cd-110",
+            "atom_density": 0.005778598
+          },
+          {
+            "zaid": 48111,
+            "label": "Cd-111",
+            "atom_density": 0.005929203
+          },
+          {
+            "zaid": 48112,
+            "label": "Cd-112",
+            "atom_density": 0.0111721106
+          },
+          {
+            "zaid": 48113,
+            "label": "Cd-113",
+            "atom_density": 0.0056659918
+          },
+          {
+            "zaid": 48114,
+            "label": "Cd-114",
+            "atom_density": 0.0133246036
+          },
+          {
+            "zaid": 48116,
+            "label": "Cd-116",
+            "atom_density": 0.0034810608
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

@@ -1,0 +1,78 @@
+<?xml version='1.0' encoding='utf-8'?>
+<model>
+  <materials>
+    <material id="1" name="Uranyl Nitrate Solution" depletable="true" temperature="293.6">
+      <density units="sum"/>
+      <nuclide name="U234" ao="3.831e-06"/>
+      <nuclide name="U235" ao="0.00034777"/>
+      <nuclide name="U236" ao="1.613e-06"/>
+      <nuclide name="U238" ao="1.9798e-05"/>
+      <nuclide name="O16" ao="0.035023720976999996"/>
+      <nuclide name="O17" ao="1.3279022999999999e-05"/>
+      <nuclide name="N14" ao="0.00092307"/>
+      <nuclide name="H1" ao="0.06322"/>
+      <sab name="c_H_in_H2O"/>
+    </material>
+    <material id="2" name="SS-304 Tank" temperature="293.6">
+      <density units="sum"/>
+      <nuclide name="C0" ao="0.00026231"/>
+      <nuclide name="Si28" ao="0.00126981823424"/>
+      <nuclide name="Si29" ao="6.447774688e-05"/>
+      <nuclide name="Si30" ao="4.250401888e-05"/>
+      <nuclide name="P31" ao="3.853e-05"/>
+      <nuclide name="S32" ao="2.6879422086800002e-05"/>
+      <nuclide name="S33" ao="2.117445058e-07"/>
+      <nuclide name="S34" ao="1.1867098918000002e-06"/>
+      <nuclide name="S36" ao="4.1235156e-09"/>
+      <nuclide name="Cr50" ao="0.00073799825"/>
+      <nuclide name="Cr52" ao="0.01423156165"/>
+      <nuclide name="Cr53" ao="0.00161374485"/>
+      <nuclide name="Cr54" ao="0.00040169525"/>
+      <nuclide name="Mn55" ao="0.0011209"/>
+      <nuclide name="Fe54" ao="0.0034983494"/>
+      <nuclide name="Fe56" ao="0.05491660408"/>
+      <nuclide name="Fe57" ao="0.0012682638800000001"/>
+      <nuclide name="Fe58" ao="0.00016878264000000002"/>
+      <nuclide name="Ni58" ao="0.0051329982599999996"/>
+      <nuclide name="Ni60" ao="0.00197722174"/>
+      <nuclide name="Ni61" ao="8.594845999999999e-05"/>
+      <nuclide name="Ni62" ao="0.00027404130000000004"/>
+      <nuclide name="Ni64" ao="6.979024e-05"/>
+      <nuclide name="Mo100" ao="8.727018719999999e-07"/>
+      <nuclide name="Mo92" ao="1.312008387e-06"/>
+      <nuclide name="Mo94" ao="8.228152809999998e-07"/>
+      <nuclide name="Mo95" ao="1.421633499e-06"/>
+      <nuclide name="Mo96" ao="1.4932838989999997e-06"/>
+      <nuclide name="Mo97" ao="8.58192666e-07"/>
+      <nuclide name="Mo98" ao="2.1756643959999998e-06"/>
+    </material>
+  </materials>
+  <geometry>
+    <cell id="1" name="cell_1" material="2" region="-2 3 -4" temperature="293.6" universe="1"/>
+    <cell id="2" name="cell_2" material="2" region="1 -2 4 -6" temperature="293.6" universe="1"/>
+    <cell id="3" name="cell_3" material="1" region="-1 4 -5" temperature="293.6" universe="1"/>
+    <cell id="4" name="cell_4" material="void" region="-1 5 -6" temperature="293.6" universe="1"/>
+    <surface id="1" type="z-cylinder" coeffs="0.0 0.0 13.96"/>
+    <surface id="2" type="z-cylinder" boundary="vacuum" coeffs="0.0 0.0 14.28"/>
+    <surface id="3" type="z-plane" boundary="vacuum" coeffs="-0.64"/>
+    <surface id="4" type="z-plane" coeffs="0.0"/>
+    <surface id="5" type="z-plane" coeffs="31.2"/>
+    <surface id="6" type="z-plane" boundary="vacuum" coeffs="41.6"/>
+  </geometry>
+  <settings>
+    <run_mode>eigenvalue</run_mode>
+    <particles>50000</particles>
+    <batches>80</batches>
+    <inactive>20</inactive>
+    <source type="independent" strength="1.0" particle="neutron">
+      <space type="cylindrical" origin="0.0 0.0 0.0">
+        <r type="uniform" parameters="0.0 13.0"/>
+        <phi type="uniform" parameters="0.0 6.283185"/>
+        <z type="uniform" parameters="1.0 30.0"/>
+      </space>
+      <angle type="isotropic"/>
+      <energy type="watt" parameters="988000.0 2.249e-06"/>
+    </source>
+    <temperature_method>interpolation</temperature_method>
+  </settings>
+  </model>

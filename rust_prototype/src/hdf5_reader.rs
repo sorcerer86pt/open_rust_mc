@@ -483,6 +483,21 @@ impl NuclideFileReader {
         }
     }
 
+    /// Read the ENDF Q-value attribute for a single reaction. Returns
+    /// `None` if the reaction group isn't present in the HDF5 file or
+    /// it lacks the `Q_value` attribute. Q-values are stored in eV.
+    pub fn reaction_q_value(&self, mt: u32) -> Option<f64> {
+        let rxn_name = format!("reaction_{mt:03}");
+        let root = self.file.root();
+        let nuc = root.group(&self.nuclide_name).ok()?;
+        let rxn = nuc.group("reactions").ok()?.group(&rxn_name).ok()?;
+        let attrs = rxn.attrs().ok()?;
+        match attrs.get("Q_value")? {
+            hdf5_pure::AttrValue::F64(q) => Some(*q),
+            _ => None,
+        }
+    }
+
     /// Read the AWR attribute.
     pub fn awr(&self) -> Result<f64> {
         let root = self.file.root();
@@ -1100,11 +1115,196 @@ pub fn read_discrete_levels(path: &Path, awr: f64) -> Result<Vec<DiscreteLevelIn
 }
 
 /// Tabular outgoing energy distribution — for fission spectrum sampling.
+///
+/// Two storage paths are supported, dispatched at sample time:
+///
+/// * **Tabular** (ENDF Law 4 / Law 61, OpenMC `energy.type = "continuous"`):
+///   per-incident-energy lookup tables populate `energies` and
+///   `distributions`; `closed_form` is `None`.
+/// * **Closed-form law** (Watt, Maxwell, evaporation — ENDF Laws 9, 7, 11
+///   under OpenMC names `energy.type = "watt"|"maxwell"|"evaporation"`):
+///   the parameter tables live inside `closed_form`; `energies` /
+///   `distributions` are left empty. Sampling routes through the
+///   law-specific kernel. This branch landed when U-233's fission χ
+///   (Watt with energy-dependent a, b) was being silently dropped — see
+///   resume.md 2026-05-11, "U-233 deep-dive findings", task #20.
 pub struct EnergyDistribution {
-    /// Incident energy grid (eV).
+    /// Incident energy grid (eV) — tabular law only.
     pub energies: Vec<f64>,
-    /// Per-energy outgoing energy distribution (E_out, cdf) for inverse CDF sampling.
+    /// Per-energy outgoing distribution (E_out, pdf, cdf) — tabular law only.
     pub distributions: Vec<TabularEnergyDist>,
+    /// Closed-form fission spectrum law (Watt etc.), when present.
+    pub closed_form: Option<FissionEnergyLaw>,
+}
+
+/// Closed-form (parametric) outgoing-energy laws supported by the engine.
+///
+/// Each variant carries the ENDF-specified parameter tables verbatim
+/// from the HDF5 file; sampling is delegated to the variant's own
+/// kernel. The engine refuses to fall back to hardcoded defaults — if
+/// a new ENDF law shows up (Madland-Nix, mixture, ...), the reader
+/// emits a warning and `read_fission_edist_from_file` returns `None`
+/// so the failure is visible at load time rather than silently
+/// biasing k_eff with wrong-nuclide parameters.
+pub enum FissionEnergyLaw {
+    /// Watt spectrum (ENDF Law 11):
+    ///   χ(E_out | E_in) ∝ exp(−E_out/a(E_in)) · sinh(√(b(E_in)·E_out)),
+    ///   with the restriction E_out ≤ E_in − u.
+    Watt(WattLaw),
+    /// Maxwellian fission spectrum (ENDF Law 7):
+    ///   χ(E_out | E_in) ∝ √E_out · exp(−E_out / θ(E_in)),
+    ///   with E_out ≤ E_in − u.
+    Maxwell(MaxwellLaw),
+    /// Evaporation spectrum (ENDF Law 9):
+    ///   χ(E_out | E_in) ∝ E_out · exp(−E_out / θ(E_in)),
+    ///   with E_out ≤ E_in − u.
+    Evaporation(MaxwellLaw),
+}
+
+/// Maxwell / Evaporation parameter table (single 1D θ(E_in)).
+pub struct MaxwellLaw {
+    pub theta_energies: Vec<f64>,
+    pub theta_values: Vec<f64>,
+    /// Upper-bound restriction parameter (eV): `E_out ≤ E_in − u`.
+    pub u: f64,
+}
+
+impl MaxwellLaw {
+    fn theta_at(&self, e_in: f64) -> f64 {
+        WattLaw::lookup_lin_lin(&self.theta_energies, &self.theta_values, e_in)
+    }
+
+    /// Sample from the Maxwell spectrum χ(E) ∝ √E · exp(−E/θ), per
+    /// OpenMC `MaxwellEnergy::sample`: returns
+    /// E = −θ · (ln ξ₁ + cos²(πξ₂/2) · ln ξ₃),
+    /// with rejection if E > E_in − u.
+    pub fn sample_maxwell(&self, e_in: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
+        let theta = self.theta_at(e_in);
+        let max_e = (e_in - self.u).max(1e-5);
+        let mut tries = 0usize;
+        loop {
+            tries += 1;
+            let xi1 = rng.uniform().max(1e-30);
+            let xi2 = rng.uniform();
+            let xi3 = rng.uniform().max(1e-30);
+            let c = (std::f64::consts::FRAC_PI_2 * xi2).cos();
+            let e = -theta * (xi1.ln() + c * c * xi3.ln());
+            if e > 0.0 && e <= max_e {
+                return e.max(1e-5);
+            }
+            if tries > 100 {
+                return e.clamp(1e-5, max_e);
+            }
+        }
+    }
+
+    /// Sample from the Evaporation spectrum χ(E) ∝ E · exp(−E/θ), per
+    /// OpenMC `EvaporationEnergy::sample`:
+    /// E = −θ · ln(ξ₁ · ξ₂), with rejection if E > E_in − u.
+    pub fn sample_evaporation(&self, e_in: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
+        let theta = self.theta_at(e_in);
+        let max_e = (e_in - self.u).max(1e-5);
+        let mut tries = 0usize;
+        loop {
+            tries += 1;
+            let xi1 = rng.uniform().max(1e-30);
+            let xi2 = rng.uniform().max(1e-30);
+            let e = -theta * (xi1 * xi2).ln();
+            if e > 0.0 && e <= max_e {
+                return e.max(1e-5);
+            }
+            if tries > 100 {
+                return e.clamp(1e-5, max_e);
+            }
+        }
+    }
+}
+
+/// Watt-law parameter tables. The `a` and `b` 1D tables may have
+/// different incident-energy breakpoints in principle; we store them
+/// independently and look each up via lin-lin interpolation.
+pub struct WattLaw {
+    pub a_energies: Vec<f64>,
+    pub a_values: Vec<f64>,
+    pub b_energies: Vec<f64>,
+    pub b_values: Vec<f64>,
+    /// Upper-bound restriction parameter (eV): `E_out ≤ E_in − u`.
+    pub u: f64,
+}
+
+impl WattLaw {
+    fn lookup_lin_lin(grid: &[f64], values: &[f64], e: f64) -> f64 {
+        if grid.is_empty() {
+            return 0.0;
+        }
+        if values.len() != grid.len() {
+            return values.first().copied().unwrap_or(0.0);
+        }
+        if e <= grid[0] {
+            return values[0];
+        }
+        if e >= grid[grid.len() - 1] {
+            return values[values.len() - 1];
+        }
+        let i = match grid.binary_search_by(|x| {
+            x.partial_cmp(&e).unwrap_or(std::cmp::Ordering::Less)
+        }) {
+            Ok(i) => return values[i],
+            Err(i) => i.saturating_sub(1),
+        };
+        let frac = (e - grid[i]) / (grid[i + 1] - grid[i]);
+        values[i] + frac * (values[i + 1] - values[i])
+    }
+
+    /// Sample an outgoing fission-neutron energy from Watt(a, b).
+    ///
+    /// Derivation (from first principles, no appeal to authority):
+    ///
+    /// Watt PDF:  χ(E) = K · exp(−E/a) · sinh(√(b·E)),  E > 0.
+    /// Cranberg-Frankel decomposition: Watt(a, b) = Maxwell(a) shifted
+    /// by a²b/4 with a (2ξ−1)·√(a²b·W) jitter that has zero mean and
+    /// preserves the sinh tail. The decomposition can be derived by
+    /// completing the square in the moment-generating integral:
+    ///   ⟨E⟩ = ∫E·exp(−E/a)·sinh(√(bE)) dE / ∫exp(−E/a)·sinh(√(bE)) dE
+    ///       = (3/2)·a + a²b/4
+    /// matches exactly ⟨Maxwell(a)⟩ + a²b/4 = (3/2)·a + a²b/4.
+    ///
+    /// Maxwell(a) sampler (Coveyou–Macpherson):
+    ///   W = −a · (ln(ξ₁) + cos²(π·ξ₂/2) · ln(ξ₃))
+    ///   ⟨W⟩ = a · (1 + ⟨cos²(π·ξ/2)⟩ · 1) = a · (1 + 1/2) = 3a/2.
+    ///
+    /// Final Watt step: add the shift + jitter from a fourth uniform.
+    /// Verified end-to-end by `watt_validate` binary: empirical
+    /// ⟨E⟩, ⟨E²⟩ agree with closed-form analytic moments (computed by
+    /// numerical quadrature) to within 5/√N for N = 10⁶.
+    ///
+    /// Honours the `u` restriction by resampling until E_out ≤ E_in − u.
+    pub fn sample(&self, incident_energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
+        let a = Self::lookup_lin_lin(&self.a_energies, &self.a_values, incident_energy);
+        let b = Self::lookup_lin_lin(&self.b_energies, &self.b_values, incident_energy);
+        let max_e = (incident_energy - self.u).max(1e-5);
+        let mut tries = 0usize;
+        loop {
+            tries += 1;
+            let xi1 = rng.uniform().max(1e-300);
+            let xi2 = rng.uniform();
+            let xi3 = rng.uniform().max(1e-300);
+            let xi4 = rng.uniform();
+            let c = (std::f64::consts::FRAC_PI_2 * xi2).cos();
+            // W ~ Maxwell(a), ⟨W⟩ = 3a/2.
+            let w = -a * (xi1.ln() + c * c * xi3.ln());
+            let term = a * a * b / 4.0;
+            let e_out = w + term + (2.0 * xi4 - 1.0) * (a * a * b * w).sqrt();
+            if e_out > 0.0 && e_out <= max_e {
+                return e_out.max(1e-5);
+            }
+            // Safety valve: a (mis-)configured (a, b, u) tuple could
+            // make the acceptance band empty. After 100 tries, clamp.
+            if tries > 100 {
+                return e_out.clamp(1e-5, max_e);
+            }
+        }
+    }
 }
 
 /// Tabular outgoing energy distribution at a single incident energy.
@@ -1131,6 +1331,13 @@ impl EnergyDistribution {
     /// linearly-interpolated bounds [E_1, E_K] between both bins.
     /// Uses two random draws total (bin selection + CDF inversion).
     pub fn sample(&self, incident_energy: f64, rng: &mut crate::transport::rng::Rng) -> f64 {
+        if let Some(law) = &self.closed_form {
+            return match law {
+                FissionEnergyLaw::Watt(w) => w.sample(incident_energy, rng),
+                FissionEnergyLaw::Maxwell(m) => m.sample_maxwell(incident_energy, rng),
+                FissionEnergyLaw::Evaporation(m) => m.sample_evaporation(incident_energy, rng),
+            };
+        }
         if self.energies.is_empty() {
             return incident_energy;
         }
@@ -1400,6 +1607,7 @@ pub fn read_fission_energy_dist(path: &Path) -> Result<Option<EnergyDistribution
         return Ok(Some(EnergyDistribution {
             energies,
             distributions,
+            closed_form: None,
         }));
     }
 
@@ -1622,6 +1830,7 @@ fn read_photon_products_from_file(
             energy_dist: EnergyDistribution {
                 energies,
                 distributions,
+                closed_form: None,
             },
         });
     }
@@ -1667,6 +1876,7 @@ fn single_line_dist(e_gamma: f64) -> EnergyDistribution {
                 cdf: vec![0.0, 1.0],
             },
         ],
+        closed_form: None,
     }
 }
 
@@ -2469,16 +2679,69 @@ fn read_reaction_edist_from_file(
     Some(EnergyDistribution {
         energies,
         distributions,
+        closed_form: None,
     })
 }
 
+/// Helper: read a 2-row `(2, N)` Tabulated1D HDF5 dataset into
+/// `(x_grid, y_values)`. Returns `None` if the shape doesn't match.
+fn read_tabulated_1d(
+    parent: &hdf5_pure::Group<'_>,
+    name: &str,
+) -> Option<(Vec<f64>, Vec<f64>)> {
+    let ds = parent.dataset(name).ok()?;
+    let shape = ds.shape().ok()?;
+    if shape.len() != 2 || shape[0] != 2 {
+        return None;
+    }
+    let n = shape[1] as usize;
+    let raw = ds.read_f64().ok()?;
+    if raw.len() < 2 * n {
+        return None;
+    }
+    Some((raw[..n].to_vec(), raw[n..2 * n].to_vec()))
+}
+
+/// Read the prompt-neutron outgoing-energy distribution for fission
+/// (MT=18). Dispatches on the OpenMC `energy.type` attribute:
+///   * `"continuous"` → ENDF Law 4 / Law 61 (tabular CDF per E_in)
+///   * `"watt"`       → ENDF Law 11 (a(E_in), b(E_in), u)
+///   * `"maxwell"`    → ENDF Law 7  (θ(E_in), u)
+///   * `"evaporation"`→ ENDF Law 9  (θ(E_in), u)
+///
+/// Any other law (Madland-Nix, mixture, ...) emits a stderr warning
+/// and returns `None`. The engine refuses to substitute hardcoded
+/// defaults so silent k_eff bias from wrong-nuclide χ parameters is
+/// impossible: if a law is unsupported the caller MUST decide what to
+/// do, not the reader.
 fn read_fission_edist_from_file(
     file: &hdf5_pure::File,
     nuclide_name: &str,
 ) -> Option<EnergyDistribution> {
+    // Multi-chance fission convention: some nuclides (U-234, Th-232,
+    // and other "above-threshold" actinides) split MT=18 into MT=19
+    // (n,f), MT=20 (n,nf), MT=21 (n,2nf), MT=38 (n,3nf). The MT=18
+    // group is then a redundant sum with no neutron product — only
+    // photons. We try MT=18 first (where U-235 / U-238 / Pu-239 keep
+    // their prompt-neutron data), then fall back to MT=19 in priority
+    // order. MT=19 dominates below ~5 MeV and is a reasonable single
+    // surrogate for the merged distribution at higher energies.
+    for mt_name in &["reaction_018", "reaction_019"] {
+        if let Some(d) = try_read_fission_edist_for_reaction(file, nuclide_name, mt_name) {
+            return Some(d);
+        }
+    }
+    None
+}
+
+fn try_read_fission_edist_for_reaction(
+    file: &hdf5_pure::File,
+    nuclide_name: &str,
+    reaction_group: &str,
+) -> Option<EnergyDistribution> {
     let root = file.root();
     let nuc = root.group(nuclide_name).ok()?;
-    let rxn = nuc.group("reactions").ok()?.group("reaction_018").ok()?;
+    let rxn = nuc.group("reactions").ok()?.group(reaction_group).ok()?;
     let subgroups = rxn.groups().unwrap_or_default();
     for product_name in &subgroups {
         if !product_name.starts_with("product_") {
@@ -2495,51 +2758,121 @@ fn read_fission_edist_from_file(
             continue;
         }
         let edist = product.group("distribution_0").ok()?.group("energy").ok()?;
-        let energies = edist.dataset("energy").ok()?.read_f64().ok()?;
-        if energies.is_empty() {
-            continue;
-        }
-        let dist_ds = edist.dataset("distribution").ok()?;
-        let dist_shape = dist_ds.shape().ok()?;
-        let dist_raw = dist_ds.read_f64().ok()?;
-        if dist_shape.len() != 2 || dist_shape[0] != 3 {
-            continue;
-        }
-        let n_total = dist_shape[1] as usize;
-        let dist_attrs = dist_ds.attrs().unwrap_or_default();
-        let offsets: Vec<usize> =
-            if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
-                arr.iter().map(|&v| v as usize).collect()
-            } else {
-                let per_e = n_total / energies.len();
-                (0..energies.len()).map(|i| i * per_e).collect()
-            };
-        let e_out_values = &dist_raw[..n_total];
-        let pdf_values = &dist_raw[n_total..2 * n_total];
-        let cdf_values = &dist_raw[2 * n_total..3 * n_total];
-        let n_energies = energies.len();
-        let mut distributions = Vec::with_capacity(n_energies);
-        for i in 0..n_energies {
-            let start = offsets.get(i).copied().unwrap_or(0);
-            let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
-            if start >= end || start >= n_total {
-                distributions.push(TabularEnergyDist {
-                    e_out: vec![1e5, 2e6],
-                    pdf: vec![1.0, 1.0],
-                    cdf: vec![0.0, 1.0],
-                });
-            } else {
-                distributions.push(TabularEnergyDist {
-                    e_out: e_out_values[start..end].to_vec(),
-                    pdf: pdf_values[start..end].to_vec(),
-                    cdf: cdf_values[start..end].to_vec(),
+        let edist_attrs = edist.attrs().unwrap_or_default();
+        let law = match edist_attrs.get("type") {
+            Some(hdf5_pure::AttrValue::String(s)) => s.clone(),
+            _ => "continuous".to_string(),
+        };
+
+        match law.as_str() {
+            "continuous" => {
+                let energies = edist.dataset("energy").ok()?.read_f64().ok()?;
+                if energies.is_empty() {
+                    continue;
+                }
+                let dist_ds = edist.dataset("distribution").ok()?;
+                let dist_shape = dist_ds.shape().ok()?;
+                let dist_raw = dist_ds.read_f64().ok()?;
+                if dist_shape.len() != 2 || dist_shape[0] != 3 {
+                    continue;
+                }
+                let n_total = dist_shape[1] as usize;
+                let dist_attrs = dist_ds.attrs().unwrap_or_default();
+                let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) =
+                    dist_attrs.get("offsets")
+                {
+                    arr.iter().map(|&v| v as usize).collect()
+                } else {
+                    let per_e = n_total / energies.len();
+                    (0..energies.len()).map(|i| i * per_e).collect()
+                };
+                let e_out_values = &dist_raw[..n_total];
+                let pdf_values = &dist_raw[n_total..2 * n_total];
+                let cdf_values = &dist_raw[2 * n_total..3 * n_total];
+                let n_energies = energies.len();
+                let mut distributions = Vec::with_capacity(n_energies);
+                for i in 0..n_energies {
+                    let start = offsets.get(i).copied().unwrap_or(0);
+                    let end = offsets.get(i + 1).copied().unwrap_or(n_total).min(n_total);
+                    if start >= end || start >= n_total {
+                        distributions.push(TabularEnergyDist {
+                            e_out: vec![1e5, 2e6],
+                            pdf: vec![1.0, 1.0],
+                            cdf: vec![0.0, 1.0],
+                        });
+                    } else {
+                        distributions.push(TabularEnergyDist {
+                            e_out: e_out_values[start..end].to_vec(),
+                            pdf: pdf_values[start..end].to_vec(),
+                            cdf: cdf_values[start..end].to_vec(),
+                        });
+                    }
+                }
+                return Some(EnergyDistribution {
+                    energies,
+                    distributions,
+                    closed_form: None,
                 });
             }
+            "watt" => {
+                let (a_e, a_v) = read_tabulated_1d(&edist, "a").or_else(|| {
+                    eprintln!("warning: {nuclide_name}: Watt χ missing `a` table");
+                    None
+                })?;
+                let (b_e, b_v) = read_tabulated_1d(&edist, "b").or_else(|| {
+                    eprintln!("warning: {nuclide_name}: Watt χ missing `b` table");
+                    None
+                })?;
+                let u = match edist_attrs.get("u") {
+                    Some(hdf5_pure::AttrValue::F64(v)) => *v,
+                    _ => 0.0,
+                };
+                return Some(EnergyDistribution {
+                    energies: a_e.clone(),
+                    distributions: Vec::new(),
+                    closed_form: Some(FissionEnergyLaw::Watt(WattLaw {
+                        a_energies: a_e,
+                        a_values: a_v,
+                        b_energies: b_e,
+                        b_values: b_v,
+                        u,
+                    })),
+                });
+            }
+            "maxwell" | "evaporation" => {
+                let (t_e, t_v) = read_tabulated_1d(&edist, "theta").or_else(|| {
+                    eprintln!("warning: {nuclide_name}: {law} χ missing `theta` table");
+                    None
+                })?;
+                let u = match edist_attrs.get("u") {
+                    Some(hdf5_pure::AttrValue::F64(v)) => *v,
+                    _ => 0.0,
+                };
+                let inner = MaxwellLaw {
+                    theta_energies: t_e.clone(),
+                    theta_values: t_v,
+                    u,
+                };
+                let kind = if law == "maxwell" {
+                    FissionEnergyLaw::Maxwell(inner)
+                } else {
+                    FissionEnergyLaw::Evaporation(inner)
+                };
+                return Some(EnergyDistribution {
+                    energies: t_e,
+                    distributions: Vec::new(),
+                    closed_form: Some(kind),
+                });
+            }
+            other => {
+                eprintln!(
+                    "warning: {nuclide_name}: fission χ law `{other}` not yet supported in \
+                     hdf5_reader::read_fission_edist_from_file — returning None so the caller \
+                     can decide. NO HARDCODED FALLBACK."
+                );
+                return None;
+            }
         }
-        return Some(EnergyDistribution {
-            energies,
-            distributions,
-        });
     }
     None
 }
@@ -3255,6 +3588,7 @@ mod sampling_tests {
         EnergyDistribution {
             energies: incident.to_vec(),
             distributions: vec![split(low_bin_eout_cdf), split(high_bin_eout_cdf)],
+            closed_form: None,
         }
     }
 

@@ -22,10 +22,23 @@ pub struct MicroXs {
     pub n2n: f64,
     /// (n,3n) reaction (MT=17). Produces 3 outgoing neutrons.
     pub n3n: f64,
+    /// (n,4n) reaction (MT=37). Produces 4 outgoing neutrons. Q ≈
+    /// −18 to −24 MeV; threshold ~14 MeV. Dominant residual contributor
+    /// for U-233 at Jezebel-23 spectrum energies.
+    pub n4n: f64,
     /// Fission (MT=18).
     pub fission: f64,
     /// Radiative capture (MT=102).
     pub capture: f64,
+    /// (n,nα) reaction (MT=22). Threshold reaction on actinides;
+    /// produces one outgoing neutron + an absorbed α. Critical for
+    /// U-233 at 6–15 MeV.
+    pub n_nalpha: f64,
+    /// (n,2nα) reaction (MT=24). Produces two outgoing neutrons + an
+    /// absorbed α.
+    pub n_2nalpha: f64,
+    /// (n,np) reaction (MT=28). One outgoing neutron + absorbed proton.
+    pub n_np: f64,
     /// Average neutrons per fission (nu-bar), energy-dependent.
     /// This is the **total** yield (prompt + delayed).
     pub nu_bar: f64,
@@ -50,6 +63,25 @@ pub struct InelasticData<'a> {
     /// entry means "isotropic" — matches the old fallback. Aligns 1:1 with
     /// `levels` when populated.
     pub level_angles: &'a [Option<AngularDistribution>],
+}
+
+/// Per-nuclide data for the charged-particle-emission reactions
+/// (MT=22 / MT=24 / MT=28). Bundled to keep `process_collision`'s
+/// signature manageable. All fields default to "absent" (`None` edist,
+/// `0.0` Q) — that's the natural state when the HDF5 evaluation
+/// doesn't include the reaction. The XS itself lives on `MicroXs`.
+#[derive(Default, Clone, Copy)]
+pub struct ChargedParticleEdists<'a> {
+    /// MT=22 outgoing-energy distribution.
+    pub n_nalpha: Option<&'a EnergyDistribution>,
+    /// MT=22 ENDF Q-value (negative, eV).
+    pub q_n_nalpha: f64,
+    /// MT=24 outgoing-energy distribution.
+    pub n_2nalpha: Option<&'a EnergyDistribution>,
+    pub q_n_2nalpha: f64,
+    /// MT=28 outgoing-energy distribution.
+    pub n_np: Option<&'a EnergyDistribution>,
+    pub q_n_np: f64,
 }
 
 /// A neutron emitted into the current generation (not banked for the
@@ -95,6 +127,9 @@ pub enum CollisionOutcome {
 /// kinematics. If `None`, falls back to the simplified single-level model.
 /// `elastic_angle` provides anisotropic scattering angular distribution.
 /// `fission_edist` provides the fission outgoing energy spectrum from HDF5.
+/// `cp_edists` bundles the charged-particle-emission reaction data
+/// (MT=22 / MT=24 / MT=28). Pass `ChargedParticleEdists::default()` when
+/// the nuclide doesn't have those reactions.
 /// `temperature` is the cell temperature in Kelvin for free gas scattering.
 #[allow(clippy::too_many_arguments)]
 pub fn process_collision(
@@ -104,6 +139,7 @@ pub fn process_collision(
     elastic_angle: Option<&AngularDistribution>,
     fission_edist: Option<&EnergyDistribution>,
     continuum_edist: Option<&EnergyDistribution>,
+    cp_edists: ChargedParticleEdists<'_>,
     n2n_edist: Option<&EnergyDistribution>,
     n3n_edist: Option<&EnergyDistribution>,
     temperature: f64,
@@ -228,6 +264,113 @@ pub fn process_collision(
             },
         ];
         return CollisionOutcome::Multiplicity { secondaries };
+    }
+
+    // (n,4n) MT=37 — four neutrons emerge. Primary continues, three
+    // secondaries transport in the current generation. Same energy-
+    // sampling convention as (n,2n) / (n,3n): one independent draw
+    // per outgoing neutron from the MT=37 tabulated distribution,
+    // falling back to evaporation. Q ≈ −18 to −24 MeV for actinides;
+    // threshold ~14 MeV. Critical for U-233 Jezebel-23 where MT=37
+    // is the dominant residual contributor.
+    cum += xs.n4n;
+    if xi < cum {
+        let sample_e = |rng: &mut Rng| -> f64 {
+            // No dedicated MT=37 edist field on ChargedParticleEdists
+            // yet — uses evaporation. The dedicated wiring is a
+            // follow-up; the multiplicity (which dominates k_eff) is
+            // already correct.
+            sample_evaporation_energy(particle.energy, rng)
+        };
+        let e_primary = sample_e(rng);
+        let e_s1 = sample_e(rng);
+        let e_s2 = sample_e(rng);
+        let e_s3 = sample_e(rng);
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_primary;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        let (u1, v1, w1) = rng.isotropic_direction();
+        let (u2, v2, w2) = rng.isotropic_direction();
+        let (u3, v3, w3) = rng.isotropic_direction();
+        let secondaries = vec![
+            SecondaryNeutron {
+                pos: particle.pos,
+                dir: crate::geometry::Vec3::new(u1, v1, w1),
+                energy: e_s1,
+            },
+            SecondaryNeutron {
+                pos: particle.pos,
+                dir: crate::geometry::Vec3::new(u2, v2, w2),
+                energy: e_s2,
+            },
+            SecondaryNeutron {
+                pos: particle.pos,
+                dir: crate::geometry::Vec3::new(u3, v3, w3),
+                energy: e_s3,
+            },
+        ];
+        return CollisionOutcome::Multiplicity { secondaries };
+    }
+
+    // (n,nα) MT=22 — one outgoing neutron + an absorbed α particle.
+    // Q-value is large-negative (~5–8 MeV for actinides). Outgoing
+    // neutron energy from the ENDF MT=22 tabulated distribution when
+    // available, else evaporation. Isotropic emission. The α is
+    // absorbed (no transport tracking — energy goes into kerma).
+    cum += xs.n_nalpha;
+    if xi < cum {
+        let e_out = match cp_edists.n_nalpha {
+            Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+            None => sample_evaporation_energy(particle.energy, rng),
+        };
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_out;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        return CollisionOutcome::InelasticScatter {
+            q_value_ev: cp_edists.q_n_nalpha,
+        };
+    }
+
+    // (n,2nα) MT=24 — two outgoing neutrons + absorbed α. Primary
+    // continues at one sampled energy, secondary transports in
+    // current generation at another. Isotropic.
+    cum += xs.n_2nalpha;
+    if xi < cum {
+        let sample_e = |rng: &mut Rng| -> f64 {
+            match cp_edists.n_2nalpha {
+                Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+                None => sample_evaporation_energy(particle.energy, rng),
+            }
+        };
+        let e_primary = sample_e(rng);
+        let e_secondary = sample_e(rng);
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_primary;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        let (us, vs, ws) = rng.isotropic_direction();
+        return CollisionOutcome::Multiplicity {
+            secondaries: vec![SecondaryNeutron {
+                pos: particle.pos,
+                dir: crate::geometry::Vec3::new(us, vs, ws),
+                energy: e_secondary,
+            }],
+        };
+    }
+
+    // (n,np) MT=28 — one outgoing neutron + absorbed proton. Same
+    // single-secondary shape as (n,nα).
+    cum += xs.n_np;
+    if xi < cum {
+        let e_out = match cp_edists.n_np {
+            Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
+            None => sample_evaporation_energy(particle.energy, rng),
+        };
+        let (u, v, w) = rng.isotropic_direction();
+        particle.energy = e_out;
+        particle.dir = crate::geometry::Vec3::new(u, v, w);
+        return CollisionOutcome::InelasticScatter {
+            q_value_ev: cp_edists.q_n_np,
+        };
     }
 
     // Fission
@@ -523,25 +666,34 @@ pub fn sample_delayed_energy(rng: &mut Rng) -> f64 {
     }
 }
 
-/// Sample fission neutron energy from a Watt spectrum.
+/// Emit a fission outgoing-neutron energy when the nuclide's true
+/// χ(E_in, E_out) is unavailable (the HDF5 loader returned `None` for
+/// `fission_energy_dist`).
 ///
-/// P(E) ~ exp(-E/a) * sinh(sqrt(b*E))
-/// Using Cranberg parameters for U-235 thermal fission:
-///   a = 0.988 MeV, b = 2.249 /MeV
-pub fn sample_fission_energy(_incident_energy: f64, rng: &mut Rng) -> f64 {
-    let a = 988_000.0; // 0.988 MeV in eV
-    let b = 2.249e-6; // 2.249 /MeV in /eV
-
-    loop {
-        let e_prime = -a * rng.uniform().ln();
-        let term = a * a * b / 4.0;
-        let xi2 = rng.uniform();
-        let e = e_prime + term + (2.0 * xi2 - 1.0) * (a * a * b * e_prime).sqrt() / 2.0;
-
-        if e > 0.0 {
-            return e;
-        }
-    }
+/// Historically this was a Watt spectrum hardcoded to U-235 Cranberg
+/// (a = 0.988 MeV, b = 2.249 /MeV). That was silently wrong for every
+/// other fissile nuclide — most visibly U-233 in Jezebel-23, which
+/// uses a Watt with energy-dependent a(E), b(E) parameters and was
+/// biased by −2876 pcm. See `read_fission_edist_from_file` (which now
+/// supports continuous / watt / maxwell / evaporation) for the source
+/// of truth.
+///
+/// We deliberately do NOT substitute another nuclide's parameters
+/// here. If we reach this function, either the HDF5 file uses a law
+/// we haven't implemented yet (madland-nix, mixture, ...) — in which
+/// case the loader has emitted a warning — or there is a bug. Emit
+/// the neutron at the incident energy as a bounded degradation and
+/// flag it via `eprintln!` once per process so the operator notices.
+pub fn sample_fission_energy(incident_energy: f64, _rng: &mut Rng) -> f64 {
+    static WARN: std::sync::Once = std::sync::Once::new();
+    WARN.call_once(|| {
+        eprintln!(
+            "warning: fission χ unavailable for at least one collision — emitting at incident \
+             energy. Check `hdf5_reader::read_fission_edist_from_file` warnings; this used to \
+             silently use hardcoded U-235 Cranberg parameters and bias k_eff."
+        );
+    });
+    incident_energy.max(1e-5)
 }
 
 #[cfg(test)]
@@ -578,15 +730,19 @@ mod tests {
             inelastic: 0.0,
             n2n: 0.0,
             n3n: 0.0,
+            n4n: 0.0,
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(
-            &mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng,
+            &mut p, &xs, None, None, None, None, ChargedParticleEdists::default(), None, None, 0.0, &mut rng,
         );
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
@@ -601,15 +757,19 @@ mod tests {
             inelastic: 0.0,
             n2n: 0.0,
             n3n: 0.0,
+            n4n: 0.0,
             fission: 0.0,
             capture: 10.0,
             nu_bar: 0.0,
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(
-            &mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng,
+            &mut p, &xs, None, None, None, None, ChargedParticleEdists::default(), None, None, 0.0, &mut rng,
         );
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
@@ -624,15 +784,19 @@ mod tests {
             inelastic: 0.0,
             n2n: 0.0,
             n3n: 0.0,
+            n4n: 0.0,
             fission: 10.0,
             capture: 0.0,
             nu_bar: 2.43,
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             delayed_nu_bar: 0.0,
             awr: 235.0,
         };
         let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(
-            &mut p, &xs, None, None, None, None, None, None, 0.0, &mut rng,
+            &mut p, &xs, None, None, None, None, ChargedParticleEdists::default(), None, None, 0.0, &mut rng,
         );
         match outcome {
             CollisionOutcome::Fission { sites } => {
@@ -657,9 +821,13 @@ mod tests {
             inelastic: 10.0,
             n2n: 0.0,
             n3n: 0.0,
+            n4n: 0.0,
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             delayed_nu_bar: 0.0,
             awr: 235.0,
         };
@@ -696,6 +864,7 @@ mod tests {
             None,
             None,
             None,
+            ChargedParticleEdists::default(),
             None,
             None,
             0.0,
@@ -744,9 +913,13 @@ mod tests {
             inelastic: 1.0,
             n2n: 0.0,
             n3n: 0.0,
+            n4n: 0.0,
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             delayed_nu_bar: 0.0,
             awr: 235.0,
         };
@@ -781,6 +954,7 @@ mod tests {
                 None,
                 None,
                 None,
+                ChargedParticleEdists::default(),
                 None,
                 None,
                 0.0,
@@ -810,9 +984,13 @@ mod tests {
             inelastic: 1.0,
             n2n: 0.0,
             n3n: 0.0,
+            n4n: 0.0,
             fission: 0.0,
             capture: 0.0,
             nu_bar: 0.0,
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             delayed_nu_bar: 0.0,
             awr: 235.0,
         };
@@ -844,6 +1022,7 @@ mod tests {
                 None,
                 None,
                 None,
+                ChargedParticleEdists::default(),
                 None,
                 None,
                 0.0,

@@ -283,7 +283,28 @@ fn detect_tracking_mode<XS: XsProvider>(
             let mut macro_t = 0.0;
             for nuc in &mat.nuclides {
                 let xs = xs_provider.lookup(nuc.xs_kernel_idx, energy);
-                macro_t += nuc.atom_density * xs.total;
+                // The transport loop replaces the free-atom elastic XS
+                // with the S(α,β) total scattering whenever the nuclide
+                // has thermal data and E < energy_max. Including this
+                // increment in the majorant is required so the runtime
+                // σ_real never exceeds σ_majorant — otherwise Woodcock
+                // tracking under-samples collisions in the moderator and
+                // the system under-thermalises (HEU-SOL-THERM-001 lost
+                // ~1500 pcm to this before the fix).
+                let mut nuc_total = xs.total;
+                if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
+                    && energy < tsl.energy_max
+                    && energy > 0.0
+                {
+                    let n_t = tsl.kts.len().max(1);
+                    let mut tsl_max = 0.0_f64;
+                    for t_idx in 0..n_t {
+                        tsl_max = tsl_max.max(tsl.total_xs(energy, t_idx));
+                    }
+                    let delta = (tsl_max - xs.elastic).max(0.0);
+                    nuc_total += delta;
+                }
+                macro_t += nuc.atom_density * nuc_total;
             }
             mat_totals.push(macro_t);
         }
@@ -386,6 +407,18 @@ pub trait XsProvider: Send + Sync {
     /// ENDF MT=17 (n,3n) outgoing-energy distribution.
     fn n3n_edist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
         None
+    }
+
+    /// Charged-particle-emission reaction data (MT=22 / MT=24 / MT=28).
+    /// Returns the bundle that `process_collision` consumes when one
+    /// of those reactions is sampled. Default empty for providers that
+    /// don't load them — those reactions then have zero XS in
+    /// `MicroXs` and the dispatch branches never fire.
+    fn charged_particle_edists(
+        &self,
+        _nuclide_idx: usize,
+    ) -> crate::physics::collision::ChargedParticleEdists<'_> {
+        crate::physics::collision::ChargedParticleEdists::default()
     }
 
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
@@ -1165,6 +1198,7 @@ fn transport_particle<XS: XsProvider>(
                         let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
                         let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
                         let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
+                        let cp_edists = xs_provider.charged_particle_edists(xs_kernel_idx);
 
                         let micro = &micro_xs[nuc_idx];
                         dispatch_real_collision(
@@ -1178,6 +1212,7 @@ fn transport_particle<XS: XsProvider>(
                             continuum_edist,
                             n2n_edist,
                             n3n_edist,
+                            cp_edists,
                             cell.temperature,
                             &mut rng,
                             survival_biasing,
@@ -1234,6 +1269,7 @@ fn dispatch_real_collision<XS: XsProvider>(
     continuum_edist: Option<&EnergyDistribution>,
     n2n_edist: Option<&EnergyDistribution>,
     n3n_edist: Option<&EnergyDistribution>,
+    cp_edists: crate::physics::collision::ChargedParticleEdists<'_>,
     temperature: f64,
     rng: &mut Rng,
     survival_biasing: Option<&SurvivalBiasing>,
@@ -1356,6 +1392,7 @@ fn dispatch_real_collision<XS: XsProvider>(
         elastic_angle,
         fission_edist,
         continuum_edist,
+        cp_edists,
         n2n_edist,
         n3n_edist,
         temperature,
@@ -1653,11 +1690,34 @@ fn transport_particle_delta<XS: XsProvider>(
             let mut micro_xs = [MicroXs::default(); MAX_NUCLIDES];
             let mut micro_xs_smooth = [MicroXs::default(); MAX_NUCLIDES];
             let mut micro_totals = [0.0_f64; MAX_NUCLIDES];
+            // S(α,β) thermal-scattering XS swap-in. Mirrors the surface-
+            // tracking path (transport_particle:894-906). Pre-fix the
+            // delta tracker had no thermal handling — H-in-H2O fell back
+            // to free-atom MT=2 elastic, under-moderating thermal
+            // neutrons and biasing solution-benchmark k_eff downward
+            // by O(1500 pcm) on HEU-SOL-THERM-001 (vs OpenMC on the
+            // same data).
+            let mut thermal_xs_add = [0.0_f64; MAX_NUCLIDES];
             for (i, nuc) in material.nuclides.iter().enumerate() {
                 let mut xs = xs_provider.lookup(nuc.xs_kernel_idx, particle.energy);
                 // Snapshot pre-URR-PT smooth XS for Hwang superposition.
                 micro_xs_smooth[i] = xs;
                 xs_provider.apply_urr(nuc.xs_kernel_idx, &mut xs, particle.energy, urr_xi);
+
+                if let Some(tsl) = xs_provider.thermal_scattering(nuc.xs_kernel_idx)
+                    && particle.energy < tsl.energy_max
+                    && particle.energy > 0.0
+                {
+                    let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                    let thermal_total = tsl.total_xs(particle.energy, t_idx).max(0.0);
+                    if thermal_total > 0.0 {
+                        let delta = thermal_total - xs.elastic;
+                        xs.total += delta;
+                        thermal_xs_add[i] = thermal_total;
+                        xs.elastic = 0.0;
+                    }
+                }
+
                 if disable_delayed_neutrons {
                     xs.delayed_nu_bar = 0.0;
                 }
@@ -1737,6 +1797,58 @@ fn transport_particle_delta<XS: XsProvider>(
                 material.sample_nuclide(&micro_totals[..n_nuclides], macro_total, rng.uniform());
 
             let xs_kernel_idx = material.nuclides[nuc_idx].xs_kernel_idx;
+
+            // Thermal scattering branch: if this nuclide has S(α,β)
+            // attached and the energy is below the cutoff, the thermal
+            // total replaced the free-atom elastic. Roll thermal-vs-
+            // other-channel against `thermal_xs_add[nuc_idx]`; on
+            // thermal, sample (E_out, μ) from the bound-H kernel and
+            // skip the non-thermal dispatch.
+            let use_thermal = thermal_xs_add[nuc_idx] > 0.0;
+            let mut handled_as_thermal = false;
+            if use_thermal {
+                let tsl = xs_provider
+                    .thermal_scattering(xs_kernel_idx)
+                    .expect("thermal data");
+                let t_idx = tsl.select_temperature(cell.temperature, rng.uniform());
+                let xi_reaction = rng.uniform() * micro_xs[nuc_idx].total;
+                if xi_reaction < thermal_xs_add[nuc_idx] {
+                    result.thermal_scatters += 1;
+                    let (e_out, mu) = tsl.sample(particle.energy, t_idx, &mut rng);
+                    particle.energy = e_out;
+                    let phi = 2.0 * std::f64::consts::PI * rng.uniform();
+                    let sin_mu = (1.0 - mu * mu).max(0.0).sqrt();
+                    let d = particle.dir;
+                    let w2 = d.z * d.z;
+                    if w2 < 0.999 {
+                        let inv_sq = 1.0 / (1.0 - w2).sqrt();
+                        particle.dir = Vec3::new(
+                            mu * d.x
+                                + sin_mu
+                                    * (d.x * d.z * phi.cos() - d.y * phi.sin())
+                                    * inv_sq,
+                            mu * d.y
+                                + sin_mu
+                                    * (d.y * d.z * phi.cos() + d.x * phi.sin())
+                                    * inv_sq,
+                            mu * d.z - sin_mu * (1.0 - w2).sqrt() * phi.cos(),
+                        );
+                    } else {
+                        let sign = if d.z > 0.0 { 1.0 } else { -1.0 };
+                        particle.dir = Vec3::new(
+                            sin_mu * phi.cos(),
+                            sin_mu * phi.sin() * sign,
+                            mu * sign,
+                        );
+                    }
+                    handled_as_thermal = true;
+                }
+            }
+
+            if handled_as_thermal {
+                continue;
+            }
+
             let level_info = xs_provider.discrete_level_info(xs_kernel_idx);
             let level_xs = xs_provider.discrete_level_xs(xs_kernel_idx, particle.energy);
             let has_cont = xs_provider.has_continuum_inelastic(xs_kernel_idx);
@@ -1758,6 +1870,7 @@ fn transport_particle_delta<XS: XsProvider>(
             let continuum_edist = xs_provider.inelastic_continuum_edist(xs_kernel_idx);
             let n2n_edist = xs_provider.n2n_edist(xs_kernel_idx);
             let n3n_edist = xs_provider.n3n_edist(xs_kernel_idx);
+            let cp_edists = xs_provider.charged_particle_edists(xs_kernel_idx);
 
             dispatch_real_collision(
                 &mut particle,
@@ -1770,6 +1883,7 @@ fn transport_particle_delta<XS: XsProvider>(
                 continuum_edist,
                 n2n_edist,
                 n3n_edist,
+                cp_edists,
                 cell.temperature,
                 &mut rng,
                 survival_biasing,
@@ -2386,9 +2500,13 @@ mod tests {
                 inelastic: 0.0,
                 n2n: 0.0,
                 n3n: 0.0,
+                n4n: 0.0,
                 fission: 1.2,
                 capture: 0.1,
                 nu_bar: 2.43,
+                n_nalpha: 0.0,
+                n_2nalpha: 0.0,
+                n_np: 0.0,
                 delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],
@@ -2495,9 +2613,13 @@ mod tests {
                     inelastic: 0.0,
                     n2n: 0.0,
                     n3n: 0.0,
+                    n4n: 0.0,
                     fission: 2.0,
                     capture: 0.1,
                     nu_bar: 2.43,
+                    n_nalpha: 0.0,
+                    n_2nalpha: 0.0,
+                    n_np: 0.0,
                     delayed_nu_bar: 0.0,
                     awr: 235.0,
                 },
@@ -2507,9 +2629,13 @@ mod tests {
                     inelastic: 0.0,
                     n2n: 0.0,
                     n3n: 0.0,
+                    n4n: 0.0,
                     fission: 0.0,
                     capture: 4.0,
                     nu_bar: 0.0,
+                    n_nalpha: 0.0,
+                    n_2nalpha: 0.0,
+                    n_np: 0.0,
                     delayed_nu_bar: 0.0,
                     awr: 91.0,
                 },
@@ -2570,9 +2696,13 @@ mod tests {
                 inelastic: 0.0,
                 n2n: 0.0,
                 n3n: 0.0,
+                n4n: 0.0,
                 fission: 1.0,
                 capture: 1.0,
                 nu_bar: 2.43,
+                n_nalpha: 0.0,
+                n_2nalpha: 0.0,
+                n_np: 0.0,
                 delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],
@@ -2623,9 +2753,13 @@ mod tests {
                     inelastic: 0.0,
                     n2n: 0.0,
                     n3n: 0.0,
+                    n4n: 0.0,
                     fission: 5.0,
                     capture: 5.0,
                     nu_bar: 2.43,
+                    n_nalpha: 0.0,
+                    n_2nalpha: 0.0,
+                    n_np: 0.0,
                     delayed_nu_bar: 0.0,
                     awr: 235.0,
                 },
@@ -2635,9 +2769,13 @@ mod tests {
                     inelastic: 0.0,
                     n2n: 0.0,
                     n3n: 0.0,
+                    n4n: 0.0,
                     fission: 0.0,
                     capture: 0.1,
                     nu_bar: 0.0,
+                    n_nalpha: 0.0,
+                    n_2nalpha: 0.0,
+                    n_np: 0.0,
                     delayed_nu_bar: 0.0,
                     awr: 56.0,
                 },
@@ -2678,9 +2816,13 @@ mod tests {
                 inelastic: 0.0,
                 n2n: 0.0,
                 n3n: 0.0,
+                n4n: 0.0,
                 fission: 1.2,
                 capture: 0.1,
                 nu_bar: 2.43,
+                n_nalpha: 0.0,
+                n_2nalpha: 0.0,
+                n_np: 0.0,
                 delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],
@@ -2777,9 +2919,13 @@ mod tests {
                 inelastic: 0.0,
                 n2n: 0.0,
                 n3n: 0.0,
+                n4n: 0.0,
                 fission: 1.5,
                 capture: 1.5,
                 nu_bar: 2.43,
+                n_nalpha: 0.0,
+                n_2nalpha: 0.0,
+                n_np: 0.0,
                 delayed_nu_bar: 0.0,
                 awr: 235.0,
             }],

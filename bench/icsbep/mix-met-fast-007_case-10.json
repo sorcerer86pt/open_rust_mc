@@ -1,0 +1,183 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "MIX-MET-FAST-007.case-10",
+    "case_name": "",
+    "category": "MIX-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.0027,
+    "source": "ICSBEP Handbook, MIX-MET-FAST-007.case-10 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/mix-met-fast-007/openmc/case-10",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-10",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 3.417,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 4.6789,
+        "bc": "Transmission"
+      },
+      {
+        "type": "Sphere",
+        "center": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "radius": 10.7789,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 2,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "Pu core",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 94239,
+            "label": "Pu-239",
+            "atom_density": 0.045536
+          },
+          {
+            "zaid": 94240,
+            "label": "Pu-240",
+            "atom_density": 0.0027719
+          },
+          {
+            "zaid": 94241,
+            "label": "Pu-241",
+            "atom_density": 0.00017313
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "HEU",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.044401
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0032137
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Beryllium",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 4009,
+            "label": "Be-9",
+            "atom_density": 0.12295
+          }
+        ],
+        "thermal_files": [
+          "c_Be.h5"
+        ]
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

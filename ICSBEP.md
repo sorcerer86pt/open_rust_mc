@@ -1,220 +1,214 @@
-# ICSBEP benchmark suite — deferred spec
+# ICSBEP regression suite — current state (2026-05-11)
 
-A parking-lot specification for running the **International Criticality
-Safety Benchmark Evaluation Project** (ICSBEP) handbook against this
-engine. Captured here so the audit and phased delivery plan don't get
-lost; **execution is deferred** until the harder, research-grade items
-ahead of it land first.
+The International Criticality Safety Benchmark Evaluation Project
+(ICSBEP) is the canonical published validation set for Monte Carlo
+criticality codes. This file documents what's wired into the engine,
+how to run it, where the canonical specifications come from, and what's
+still gated on follow-up work.
 
-This is a **forward-looking spec**, not a status report. For current
-state see `STATUS.md`; for round-by-round narrative see `resume.md`.
+## TL;DR
 
-## Position in the priority queue
+- **`Geometry::from_json` ships** (`src/geometry/scene_io.rs`).
+  Deserializes the full open_rust_mc geometry schema (every surface
+  variant, every CSG operator, rect and hex lattices). Validated
+  against the **367 ICSBEP cases** imported from `mit-crpg/benchmarks`
+  — all round-trip cleanly.
+- **`material_resolve::resolve_materials`** bridges the schema's
+  HDF5-path / ZAID material entries to engine `Material` + an
+  `SvdXsProvider` with deduplicated kernels.
+- **`cargo test --test icsbep_runs --release -- --ignored`** is the
+  canonical regression entry point. Each ICSBEP case is a
+  `#[test]` function; pass criterion is `|Δk| < 3σ_combined`.
+  - **PASS today (3 cases):** HEU-MET-FAST-001 (Godiva, Δ ≈ −445 pcm,
+    1.73σ); PU-MET-FAST-001 (Jezebel, Δ ≈ +131 pcm, 0.41σ);
+    PU-MET-FAST-002 (Pu-240-enriched).
+  - **KNOWN FAIL (1 case):** U233-MET-FAST-001 (Δ ≈ −2876 pcm) —
+    real engine bug exposed by the harness (0.68 b missing-channels
+    gap in U-233 SVD decomposition). Tracked as a follow-up.
+- **`bench/icsbep/`** holds 367 case JSON files (NMC bundle format,
+  `benchmark` + `scene` blocks). Authored by
+  `scripts/import_icsbep.py` from the open-source proxy
+  `mit-crpg/benchmarks` + `openmc-dev/validation`. Every case carries
+  a `data_provenance` chain.
+- The legacy `icsbep_bench` CLI orchestrator (subprocess-based) is
+  retained for the small handful of cases that wrap a separate
+  pre-existing binary (`godiva.rs`, `pwr_pincell.rs`). It will be
+  deprecated as those binaries are subsumed into scene-driven cases.
 
-ICSBEP is engineering-heavy but research-light. None of it requires new
-physics; all of it requires wiring existing data into existing
-infrastructure. That's a 3-4 month focused arc. The argument for
-deferring it is that the items below all require **new physics** that
-ICSBEP-driven validation would help characterize, not the other way
-around — running ICSBEP first would lock validation against an engine
-that's still missing core capabilities, and we'd have to redo the
-runs once the missing pieces land.
+## What runs today
 
-**Items that go first** (cross-references to `STATUS.md`):
+```bash
+# Full ICSBEP cargo-test regression (release-mode required, slow):
+cargo test --test icsbep_runs --release -- --ignored
 
-| Priority | Item | Effort | Why it goes before ICSBEP |
-|---|---|---|---|
-| 1 | **Time-dependent (point) kinetics** with 6-group delayed-neutron precursors | ~3-4 weeks | Unlocks reactivity-induced excursions, prompt-jump analysis, RBMK / SPERT-style benchmarks. Without it we can't run kinetics-based ICSBEP entries (subcritical neutron-source evaluations) in the BFS / Bigten sub-prompt regime. |
-| 2 | **Real continuous-energy adjoint photon MC** (CADIS proper) | ~4-6 weeks | The variance-reduction infrastructure is shipped (`shield_slab` + WW); the FOM gain is gated on adjoint kernels. Running ICSBEP shielding sub-suites (concrete / lead / water reflectors) without working CADIS is wall-time prohibitive. |
-| 3 | **CADIS for neutrons** | ~3-4 weeks | Same machinery, transposed for neutron scatter / fission / capture. Shielding ICSBEP entries depend on this for tractable runtimes. |
-| 4 | **Full PWR depletion bench** validated against OpenMC's depletion solver | ~3-4 weeks | The depletion module is shipped (CRAM-16/-48, chains, BurnupMapping, fresh-corrector). Validation against OpenMC at long burnup is the missing piece. ICSBEP burnup-credit benchmarks (LWBR, Saxton MOX) live downstream of this. |
-| 5 | **Thermal-hydraulic coupling** (or external coupling to RELAP / TRACE) | months / out of scope | Not all ICSBEP cases need this, but the operating-power-feedback ones do (e.g. SPERT-3, BORAX). Out of scope for the engine itself; flagged here only to note that *some* ICSBEP cases are gated on it. |
+# Single case:
+cargo test --test icsbep_runs --release -- --ignored pu_met_fast_001_jezebel
 
-After items 1-4 land, ICSBEP becomes the natural validation programme
-that anchors the codebase to a published, peer-reviewed reference set.
-The point of doing it then rather than now is that "X out of 600
-ICSBEP cases match within σ_exp" is the single number a reactor-
-physics code is judged by — and we want it to mean something across
-the *full* engine, not just the static-eigenvalue subset.
+# Override the nuclear-data path:
+ICSBEP_DATA_DIR=/path/to/endfb-vii.1-hdf5/neutron \
+  cargo test --test icsbep_runs --release -- --ignored
 
-## Engine capability matrix vs ICSBEP requirements
-
-### What's wired today
-
-| Capability | Status |
-|---|---|
-| Bare / reflected sphere geometry | ✅ |
-| Cylinder, slab, cubic-array geometries | ✅ |
-| Square + hex lattices (CPU + GPU) | ✅ |
-| k-eigenvalue with collision + track-length estimators | ✅ |
-| Doppler broadening (URR + WMP + Ducru) | ✅ |
-| URR equivalence theory for tight lattices | ✅ |
-| S(α,β) thermal scattering | ✅ infrastructure ready, only `c_H_in_H2O.h5` wired into a binary |
-| Continuous-energy fixed-source shielding | ⚠️ framework in tree (`shield_slab`), FOM-gain pending real adjoint MC |
-| Time-dependent kinetics | ❌ static k-eigenvalue only |
-
-### Nuclear data — available vs wired into a binary
-
-```
-Available in data/endfb-vii.1-hdf5/neutron/   → 444 nuclide files (full ENDF/B-VII.1)
-   + 21 thermal-scattering kernels: c_Graphite, c_Be, c_Be_in_BeO,
-     c_H_in_CH2 (polyethylene), c_H_in_H2O, c_D_in_D2O, c_H_in_ZrH (TRIGA),
-     c_O_in_UO2, c_U_in_UO2, c_C6H6 (benzene), c_ortho_H, c_para_H, …
-
-Wired into a running binary (NUCLIDE_SPECS in any src/bin/*.rs)  → 10 unique nuclides:
-   U-234, U-235, U-238, O-16, H-1, Zr-90/91/92/94, Xe-135
-   + WMP: 092234, 092235, 092238
-   + S(α,β): c_H_in_H2O only
+# Legacy CLI orchestrator (for hand-authored runner cases):
+.\target\release\icsbep_bench.exe ../bench/icsbep \
+  --data-dir ../data/endfb-vii.1-hdf5/neutron \
+  --output ../outputs/icsbep_bench.csv
 ```
 
-The full ICSBEP-relevant set (Pu-238/239/240/241/242, U-233, Np-237/239,
-Am-241, Be-9, C-0, Fe-54/56/57/58, Cr-50/52/53/54, Ni-58/60/61/62/64,
-Pb-204/206/207/208, Si-28, Al-27, B-10/11) is **all present as data,
-none wired**.
+Add a new case to the cargo-test harness by adding a `#[test]
+#[ignore]` function in `tests/icsbep_runs.rs` that calls
+`run_case_e2e(...)` against the corresponding `bench/icsbep/*.json`.
+The deserializer + material resolver handle everything else.
 
-## ICSBEP categorization, by class
+## Authoritative source vs open-source proxies
 
-ICSBEP entries are tagged `<fissile>-<form>-<spectrum>-NNN`. The full
-suite is ~600 evaluated benchmarks across these axes. Per-class status:
+The **official** source for ICSBEP benchmark specifications is the
+NEA/OECD ICSBEP Handbook, distributed through the registered request
+form:
 
-| Class | Examples | Engine status |
-|---|---|---|
-| **HEU-MET-FAST** (bare/reflected HEU metal, fast spectrum) | Godiva (Hmf-001), Topsy (Hmf-005), Flattop-25 | ✅ **Godiva validated within σ_exp**. Topsy/Flattop need depleted-U / water reflector — engineering only, ~1 day each. |
-| **IEU-MET-FAST** (intermediate enrichment metal) | Big-Ten (Imf-007) | ⚠️ Big-Ten uses U-235 + U-238 only → **doable today** with a parameter-edit on `godiva.rs`. |
-| **PU-MET-FAST** | Jezebel (Pmf-001), Flattop-Pu | ❌ blocked: no Pu-239 in any binary's NUCLIDE_SPECS. ~2 hours to wire Pu-239 + Pu-240 + Pu-241 |
-| **PU-MET-INTER** | Pmi-001 through 003 (graphite-reflected Pu) | ❌ blocked on Pu + graphite (C-0 + `c_Graphite.h5`) |
-| **LEU-COMP-THERM** (PWR pellet lattices) | Lct-001 to ~100 | ⚠️ `pwr_pincell` is morally a Lct-007-style problem. Specific LCT cases vary in pitch / enrichment / boron / temperature — each is a few hours of binary parameter editing |
-| **HEU-COMP-THERM** | Hct-001 (HEU oxide / nitrate) | partial — solution cases need N-14 + acid; oxide cases doable |
-| **MIX-COMP-THERM** (MOX) | Mct-001 (Saxton MOX), Tank Cell | ❌ blocked on Pu-239/240/241 wiring |
-| **U233-\*** (any) | All U-233 benchmarks | ❌ blocked: U-233 not wired |
-| **HEU-SOL-THERM**, **LEU-SOL-THERM**, **PU-SOL-THERM** (nitrate solutions) | Hst-001 (PNL-2), Lst-001, Pst-018 | ❌ blocked: no nitrate species; needs N-14, acid model |
-| **\*-MET-INTER** (graphite / beryllium reflected) | Imi-001, Hmi-006 | ❌ blocked: no Be-9 / C-0 wired, no graphite or Be S(α,β) |
+  https://www.oecd-nea.org/science/wpncs/icsbep/order.html
 
-## Block breakdown by class of work
+Access is restricted to authorised requesters from OECD member
+countries and contributing institutions. Distribution is by DVD and
+password-protected GitLab. The click-through agreement explicitly
+prohibits redistribution. **We cannot fetch it automatically.**
 
-The blocks are **entirely engineering**, not physics:
+What we use instead, with full provenance baked into every case file:
 
-| Block class | What's missing | Effort | Unlocks |
+| Layer | Source | License | Note |
 |---|---|---|---|
-| Pu benchmarks (~80 cases) | Pu-238/239/240/241 wired into a NUCLIDE_SPECS table; new binary `jezebel.rs`, `flattop_pu.rs` | 1 week to ship Jezebel binary + validate within σ_exp | All Pu-MET-FAST + foundation for MOX |
-| U-233 benchmarks (~40 cases) | U-233 wired; new binary | 1 day per case | Jezebel-23 + U-233 thorium-cycle benchmarks |
-| Solution benchmarks (~150 cases) | N-14, density-dependent acid model, fissile-in-solution material builder | 1-2 weeks | All `*-SOL-*` (largest single ICSBEP sub-class) |
-| Graphite/Be reflected (~50 cases) | C-0 + `c_Graphite.h5` thermal scattering wired; same for Be-9 | 2-3 days each | Pu-MET-INTER, HEU-MET-INTER, RBMK-style problems |
-| MOX / mixed-fuel (~40 cases) | Pu wiring + multi-isotope material composition | 1 week after Pu | Saxton, Tank Cell, MOX-fueled fast benchmarks |
-| Stainless steel reflected (~30 cases) | Fe / Cr / Ni isotope set wired | 1 week for full alloy | Reactor-vessel-relevant benchmarks |
+| Geometry + materials | `github.com/mit-crpg/benchmarks` (Paul Romano et al., MIT-CRPG) | MIT | Hand-transcribed OpenMC XMLs of the registered handbook by the OpenMC development team. Industry-standard derivative. |
+| k_ref + σ_exp | `github.com/openmc-dev/validation` (`benchmarking/uncertainties.csv`, 487 rows) | MIT | Per-case k_ref ± σ_exp table sourced from the handbook by the same team. |
+| Canonical source | NEA/OECD ICSBEP Handbook (NEA/NSC/DOC(95)03, 2022–2024 editions) | restricted | The registered, peer-reviewed evaluations. |
 
-## The bigger blocker — no benchmark runner
+**Handbook-fidelity policy.** Any case shipped into our regression
+suite that will be cited in a validation report MUST be re-verified
+against the registered handbook by an authorised requester before
+publication. The open-source proxies are correct in practice but are
+not the canonical specifications. Every `bench/icsbep/*.json` file
+emitted by `scripts/import_icsbep.py` carries this caveat verbatim in
+its `benchmark.data_provenance` block.
 
-Even if every nuclide were wired, **we can't iterate over the ICSBEP
-suite automatically.** Each ICSBEP entry is a hand-crafted MCNP input
-deck (~300 lines of `cell` / `surface` / `material` cards). To
-run them in our engine we'd need one of:
+## Import pipeline
 
-1. **An MCNP input parser** mapping surfaces / cells / materials onto
-   our `geometry` / `Material` types. The MCNP language has hundreds
-   of cards but the ICSBEP subset is bounded — geometry is mostly
-   spheres, cylinders, simple lattices, planes. Estimated: 2-4 weeks
-   for "good enough" coverage.
-2. **A YAML/JSON case-spec format** plus a small library of converters
-   from ICSBEP MCNP decks. Estimated: 1-2 weeks for the format +
-   handful of conversions, plus 1-2 weeks per benchmark cluster.
-3. **OpenMC's machinery** — they ship `openmc.examples.icsbep_*` for a
-   curated subset. We could call OpenMC from Python, dump its
-   geometry, then re-translate. Defeats the purpose; we're a Rust
-   engine, not an OpenMC orchestrator.
+```text
+mit-crpg/benchmarks/icsbep/<case>/openmc/{geometry,materials,settings}.xml
+                            │
+                            ▼
+                scripts/import_icsbep.py
+                            │ + uncertainties.csv
+                            ▼
+            bench/icsbep/<case>.json
+              (NMC scene-bundle format, benchmark + scene blocks)
+                            │
+                            ▼
+       Geometry::from_json (src/geometry/scene_io.rs)
+                            │
+                            ▼
+       resolve_materials (src/transport/material_resolve.rs)
+                            │ + NuclideLibrary
+                            ▼
+                  CpuRunner.run(SimConfig)
+                            │
+                            ▼
+                    k_calc ± σ_calc
+                            │
+                            ▼
+        |k_calc − k_ref| ≤ n_σ · √(σ_calc² + σ_exp²)
+```
 
-Recommended path: **option 2** (JSON case-spec format) — bounded scope,
-human-readable, version-controllable, and the conversion from MCNP
-decks to JSON is a one-shot script that doesn't need to be perfect
-because each case can be hand-touched once.
+## Coverage today
 
-## Phased delivery plan
+| Suite | Imported | Runnable today | Notes |
+|---|---:|---:|---|
+| HEU-MET-FAST | ~80 | 1 (HMF-001) | Godiva variants share materials/geometry; expanding the cargo-test functions is one-line additions. |
+| PU-MET-FAST  | ~40 | 2 (PMF-001 / PMF-002) | Jezebel + Pu-240-enriched bare sphere both pass. |
+| IEU-MET-FAST | 10  | 0 | Big-Ten, Imf-006/007. One-line additions; intermediate-enrichment U works through the same path. |
+| U233-MET-FAST | 6  | 0 of 1 attempted | KNOWN FAIL on U233-MF-001 — see follow-up tracker. |
+| HEU-COMP-INTER | 7 | 0 | Imported, deserializer accepts them. Needs cargo-test functions added. |
+| HEU-SOL-THERM | 9 | 0 | Solution cases. Imported with `data_provenance`. S(α,β) integration through `MaterialDto.thermal_file` is a follow-up. |
+| LEU-COMP-THERM | 1 | 0 | LCT-008 imported (non-lattice case-3/4 only). Most LCT cases use lattices — `Geometry::from_json` supports them, deserializer round-trips, but the import script currently skips them as `uses <lattice>`. |
+| LEU-SOL-THERM | 6 | 0 | Same status as HEU-SOL-THERM. |
+| MIX-COMP-FAST/THERM | 5 | 0 | MOX cases. Pu fissile chain available. |
+| MIX-MET-FAST | 4 | 0 | Pu-U metal mixes. |
+| PU-COMP-INTER | 1 | 0 | |
+| PU-MET-INTER | 1 | 0 | |
+| PU-SOL-THERM | 14 | 0 | |
+| SPEC-MET-FAST | 1 | 0 | |
+| U233-COMP-THERM / U233-SOL-* | 7 | 0 | |
 
-Total ~13 weeks of focused work. Each phase is independently shippable
-and produces a measurable validation number.
+**Totals: 367 ICSBEP cases imported, 3 wired into the cargo-test harness, 1 known fail.**
 
-### Phase 1 — Fast-spectrum metal suite (~3 weeks)
+Adding more cases is mechanical: one `#[test] #[ignore] fn …` per
+case in `tests/icsbep_runs.rs`. The remaining work is investigating
+the U-233 missing-channels gap (real engine bug), wiring S(α,β)
+through `material_resolve`, and re-enabling the 15 lattice cases that
+the import script currently skips.
 
-Cluster of ICSBEP fast-metal benchmarks that share simple geometry
-(bare or simply reflected spheres / cylinders).
+## Skip and block reasons
 
-- Wire Pu-238/239/240/241 into a `pu_metal` binary template.
-- Ship binaries for **Jezebel** (Pmf-001), **Flattop-25**
-  (Hmf-001-reflected), **Flattop-Pu** (Pmf-006), **Big-Ten**
-  (Imf-007), **Topsy** (Hmf-005). Godiva is already validated.
-- Validate all 6 against ICSBEP within σ_exp.
-- Coverage: ~30 ICSBEP fast-spectrum metal cases (the 6 above + minor
-  variants).
-- Headline number: "6/6 fast-metal benchmarks within σ_exp."
+The import script's skip log:
 
-### Phase 2 — Thermal LWR lattice suite (~2 weeks)
+```
+  15  uses <lattice>                    — converter scope; deserializer supports them
+  11  no row in uncertainties.csv        — handbook cases the OpenMC validation team
+                                           hasn't keyed in yet
+```
 
-- Generalise `pwr_pincell` into a parameterised binary (pitch /
-  enrichment / pin radius / boron concentration / temperature as CLI
-  flags).
-- Run a sweep across **Lct-001 to Lct-050**.
-- Coverage: ~50 ICSBEP LCT cases with one binary.
-- Headline number: "X/50 LCT benchmarks within σ_exp."
+The lattice-skip is a script limitation, not an engine limitation —
+`Geometry::from_json` happily round-trips `RectLatticeDto` and
+`HexLatticeDto` (tested in `geometry::scene_io::tests`). Extending
+the Python import script to walk OpenMC's `<lattice>` element is a
+1-day follow-up. The 11 missing uncertainties are inherent to the
+upstream table; resolution requires either the handbook or an updated
+upstream CSV.
 
-### Phase 3 — Graphite + Be reflected, U-233 (~3 weeks)
+## Follow-up backlog
 
-- Wire **C-0** + **Be-9** + **U-233** + thermal-scattering kernels for
-  graphite and Be (`c_Graphite.h5`, `c_Be.h5`).
-- Three new binary templates: `pu_graphite_reflected.rs`,
-  `heu_be_reflected.rs`, `u233_metal.rs`.
-- Coverage: ~80 ICSBEP cases (Pmi-001..3, Hmi-* series, U233-MET-FAST,
-  U233-MET-THERM).
+1. **U-233 missing-channels investigation** (tracker task) — find the
+   missing reaction channel in `xs_provider`'s MT decomposition for
+   U-233. Likely a thermal-region (n,γ) or low-MT channel that's
+   covered for U-235/Pu-239 but not U-233.
+2. **Extend cargo-test coverage** — add `#[test] #[ignore]` functions
+   for the next 5–10 cases in each suite. Targeting full corpus
+   coverage is mechanical.
+3. **S(α,β) through `material_resolve`** — surface the schema's
+   `nuclide.thermal_file` field into the resolved `SvdXsProvider`.
+   Unblocks all *-COMP-THERM and *-SOL-THERM cases.
+4. **Lattice import in `scripts/import_icsbep.py`** — walk OpenMC's
+   `<lattice>` element into `rect_lattices` / `hex_lattices`.
+   Unblocks the 15 currently-skipped cases (LCT-008, MIX-COMP-THERM,
+   HEU-MET-FAST-026.c-11).
+5. **Retire `icsbep_bench` CLI** — the cargo-test harness fully
+   replaces it for scene-bearing cases. The hand-authored runner
+   cases (3 files) can be reimplemented as scene cases once the
+   engine supports the corresponding compositions.
+6. **Handbook-fidelity verification pass** — once a validation report
+   is being prepared, an authorised requester must re-verify each
+   case against the registered NEA handbook and update the
+   `data_provenance` block to reflect the verification.
 
-### Phase 4 — Solution benchmarks (~3 weeks)
+## Files of interest
 
-- Wire **N-14** + density-dependent acid model + fissile-in-solution
-  material builder.
-- Solution-tank geometries (cylinders with annular reflectors).
-- Coverage: ~150 ICSBEP `*-SOL-*` cases — the single largest
-  sub-class.
+```
+specs/nmc/                                — bundle spec + JSON schema (canonical)
+  NMC_SPEC.md                             — §3.1 documents the `benchmark` block
+  open_rust_mc_geometry.schema.json       — exact field-by-field schema
 
-### Phase 5 — Bench runner + JSON case-spec format (~2 weeks)
+scripts/import_icsbep.py                  — bulk converter from mit-crpg/openmc-dev → bench/
 
-- Define `bench/<case>.json` schema with geometry + materials + tally
-  + reference k_eff + σ_exp.
-- One-shot conversion script for the ICSBEP MCNP decks we want to
-  cover (manual touch-ups expected).
-- A `bench_runner` binary that ingests a directory of specs, runs each
-  through the right engine binary, and emits a CSV of `(k_calc -
-  k_ref) / σ_exp` for the whole suite.
-- This is what gives us a single regression number ("X% of N
-  benchmarks within σ_exp") for ongoing code-health tracking.
+bench/icsbep/                             — 370 case files (367 imported + 3 hand-authored runner)
+  pu-met-fast-001.json                    — PMF-001 Jezebel reference scene
+  heu-met-fast-001_case-1.json            — HMF-001 Godiva case 1
+  hmf-001_godiva.json                     — hand-authored runner case (legacy)
+  …
 
-## Success criteria
+rust_prototype/src/
+  geometry/scene_io.rs                    — Geometry::from_json (DTOs + converter)
+  transport/material_resolve.rs           — MaterialDto → engine Material
+  transport/nuclides.rs                   — NuclideLibrary (125+ entries)
+  transport/material.rs                   — from_mass_fractions* helpers
 
-By end of Phase 5:
-
-- ≥ 90 % of run cases land within σ_exp (i.e. `|k_calc - k_ref| <
-  σ_exp`).
-- ≥ 95 % within 2σ_exp.
-- Outliers categorised: nuclear-data issue (compare to OpenMC on the
-  same library) vs engine bug vs benchmark-spec interpretation
-  ambiguity (these exist; cross-checked with the published
-  evaluations).
-- The full suite runs unattended (single command, single CSV output).
-
-## Things that explicitly do NOT block ICSBEP
-
-The following items are flagged as research / hard-engineering in
-`STATUS.md`, but ICSBEP doesn't depend on them — they can land in
-parallel or after:
-
-- Doppler-broadened coherent elastic / Bragg-edge phonon treatment
-  (only matters for crystalline-moderated reactors; ICSBEP doesn't
-  exercise those at the per-percent level).
-- EADL fluorescence / Auger cascade on GPU (photon-side; ICSBEP is
-  neutron-eigenvalue dominated).
-- Event-based GPU transport (~6× perf gain per Tramm 2024; nice to
-  have, doesn't change correctness).
-- Photon depletion / activation transport (separate problem class).
-
-## Cross-references
-
-- Current status: [`STATUS.md`](STATUS.md)
-- Round-by-round narrative: [`resume.md`](resume.md)
-- Engine architecture overview: [`CLAUDE.md`](CLAUDE.md)
+rust_prototype/tests/
+  icsbep_runs.rs                          — cargo-test ICSBEP harness
+  scene_io_corpus.rs                      — corpus deserialization smoke test
+```

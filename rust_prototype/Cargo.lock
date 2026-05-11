@@ -1830,6 +1830,7 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 [[package]]
 name = "rust-mc-sim"
 version = "0.1.0"
+source = "git+https://github.com/sorcerer86pt/Rust-MC-SimulationLib#e67ed3db47a36b813b15945c63aad37a8ca8ee44"
 dependencies = [
  "faer",
  "font8x8",

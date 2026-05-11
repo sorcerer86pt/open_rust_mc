@@ -49,6 +49,18 @@ pub struct NuclideKernels {
     pub n2n: Option<ReactionKernel>,
     /// SVD kernel for (n,3n) reaction (MT=17).
     pub n3n: Option<ReactionKernel>,
+    /// SVD kernel for (n,4n) reaction (MT=37). Threshold ~14–20 MeV
+    /// for actinides; produces FOUR outgoing neutrons. Q-value very
+    /// negative (~−18 to −24 MeV). Critical for U-233 Jezebel-23 where
+    /// MT=37 is the dominant contributor to the high-energy missing
+    /// residual — U-233's evaluation ships MT=37 explicitly but not
+    /// MT=22/24/28, so the (n,nα) channels we added in task #16 didn't
+    /// help U-233 at all.
+    pub n4n: Option<ReactionKernel>,
+    /// MT=37 outgoing-energy distribution (per-neutron — applies to
+    /// all four secondaries with independent samples, same convention
+    /// as n2n / n3n).
+    pub n4n_edist: Option<EnergyDistribution>,
     /// SVD kernel for fission (MT=18). None for non-fissile nuclides.
     pub fission: Option<ReactionKernel>,
     /// SVD kernel for capture (MT=102).
@@ -92,6 +104,34 @@ pub struct NuclideKernels {
     pub n2n_edist: Option<EnergyDistribution>,
     /// ENDF MT=17 (n,3n) outgoing-energy distribution.
     pub n3n_edist: Option<EnergyDistribution>,
+    // ── Charged-particle emission channels with secondary neutrons ──
+    //
+    // These reactions consume the incident neutron and emit a charged
+    // particle plus one or more outgoing neutrons. We track them as
+    // first-class kernels (not folded into capture or inelastic) so
+    // collision sampling routes through their proper Q-values and
+    // outgoing-energy spectra. Critical for U-233 — MT=22 alone is
+    // ~0.7 b at 6–15 MeV and was the bulk of the −2876 pcm bias in
+    // the residual-routing heuristic this code replaces.
+    /// SVD kernel for (n,nα) (MT=22). Threshold ~5–8 MeV for actinides;
+    /// one outgoing neutron plus an absorbed α particle.
+    pub n_nalpha: Option<ReactionKernel>,
+    /// MT=22 outgoing-energy distribution. Same `ContinuousTabular`
+    /// shape as MT=91 / MT=16; `None` if the HDF5 evaluation omits it.
+    pub n_nalpha_edist: Option<EnergyDistribution>,
+    /// MT=22 ENDF Q-value (eV, negative). Used for the inelastic-style
+    /// outcome tagging. `0.0` when MT=22 isn't loaded.
+    pub q_n_nalpha: f64,
+    /// SVD kernel for (n,2nα) (MT=24). Two outgoing neutrons plus an
+    /// absorbed α. Threshold ~10–15 MeV for actinides.
+    pub n_2nalpha: Option<ReactionKernel>,
+    pub n_2nalpha_edist: Option<EnergyDistribution>,
+    pub q_n_2nalpha: f64,
+    /// SVD kernel for (n,np) (MT=28). One outgoing neutron plus an
+    /// absorbed proton. Threshold typically ~6–10 MeV.
+    pub n_np: Option<ReactionKernel>,
+    pub n_np_edist: Option<EnergyDistribution>,
+    pub q_n_np: f64,
     /// URR probability tables.
     pub urr_tables: Option<UrrProbabilityTables>,
     /// Photon products keyed by ENDF MT. Populated from HDF5
@@ -121,20 +161,98 @@ pub struct DiscreteLevel {
     pub kernel: Option<ReactionKernel>,
 }
 
-/// SVD kernel + energy grid for a single reaction.
-pub struct ReactionKernel {
-    pub kernel: SvdKernel,
-    /// Pre-computed temperature coefficients (one set per temperature).
-    pub coeffs: Vec<f64>,
+/// XS source for a single reaction channel. The transport hot path
+/// queries this with a (grid-index, log-fraction) pair from a shared
+/// binary search over the nuclide's union energy grid; both variants
+/// resolve to the same `(energy → barns)` map.
+///
+/// **Svd** keeps the rank-`k` log-XS decomposition + per-temperature
+/// coefficients. Reconstruction is `k` multiply-adds + `exp2` per
+/// lookup. Good when the channel has wide energy range with smooth
+/// resonance structure (most heavy-actinide MTs).
+///
+/// **Table** is a plain pointwise XS array indexed by the same grid.
+/// Lookup is one array index + log-log interp. The point of this
+/// variant: for nuclides with S(α,β) attached, MT=2 is REPLACED at
+/// runtime by the thermal scattering XS below `energy_max`, so the
+/// SVD basis × coefficients × reconstruction work is thrown away on
+/// ~99 % of moderator collisions (HEU-SOL-THERM-001 telemetry). The
+/// per-nuclide policy at load time switches those channels to
+/// Table to skip the wasted SVD reconstruction and the ~5 MB
+/// dead-weight basis.
+pub enum ReactionKernel {
+    Svd {
+        kernel: SvdKernel,
+        /// Pre-computed temperature coefficients (one set per temperature).
+        coeffs: Vec<f64>,
+    },
+    Table {
+        /// Shared energy grid (must match the other kernels of the same
+        /// nuclide so the hot path's single binary search is valid).
+        energies: Vec<f64>,
+        /// Pointwise XS values at each energy (barns).
+        xs: Vec<f64>,
+    },
 }
 
 impl ReactionKernel {
+    /// Build a Table-variant kernel from a pointwise XS sampled on the
+    /// shared union energy grid.
+    pub fn from_table(energies: Vec<f64>, xs: Vec<f64>) -> Self {
+        debug_assert_eq!(energies.len(), xs.len(), "ReactionKernel::from_table — grid / xs length mismatch");
+        ReactionKernel::Table { energies, xs }
+    }
+
+    /// Number of energy points in the underlying grid.
+    #[inline]
+    pub fn n_energy(&self) -> usize {
+        match self {
+            ReactionKernel::Svd { kernel, .. } => kernel.n_energy(),
+            ReactionKernel::Table { energies, .. } => energies.len(),
+        }
+    }
+
+    /// Energy grid (immutable view).
+    #[inline]
+    pub fn energies(&self) -> &[f64] {
+        match self {
+            ReactionKernel::Svd { kernel, .. } => kernel.energies(),
+            ReactionKernel::Table { energies, .. } => energies,
+        }
+    }
+
+    /// Index of the lower-bound grid point for `energy` (same convention
+    /// as `SvdKernel::energy_index`). Used by the shared binary search
+    /// at the top of `XsProvider::lookup`.
+    #[inline]
+    pub fn energy_index(&self, energy: f64) -> usize {
+        match self {
+            ReactionKernel::Svd { kernel, .. } => kernel.energy_index(energy),
+            ReactionKernel::Table { energies, .. } => {
+                // Match SvdKernel::energy_index semantics: returns the
+                // lower-bound bracket index, clamped to [0, n-2]. Use
+                // binary search over the (sorted) energies slice.
+                if energies.is_empty() {
+                    return 0;
+                }
+                let n = energies.len();
+                let i = match energies.binary_search_by(|e| {
+                    e.partial_cmp(&energy).unwrap_or(std::cmp::Ordering::Less)
+                }) {
+                    Ok(i) => i,
+                    Err(i) => i.saturating_sub(1),
+                };
+                i.min(n.saturating_sub(2))
+            }
+        }
+    }
+
     /// Reconstruct cross-section at a given energy (linear scale, barns).
     /// Performs its own binary search — use `reconstruct_at_index` when
     /// the index is already known from a shared grid search.
     #[inline]
     pub fn lookup(&self, energy: f64) -> f64 {
-        let idx = self.kernel.energy_index(energy);
+        let idx = self.energy_index(energy);
         self.reconstruct_at_index(idx)
     }
 
@@ -143,8 +261,13 @@ impl ReactionKernel {
     /// the same shared energy grid.
     #[inline]
     pub fn reconstruct_at_index(&self, idx: usize) -> f64 {
-        let log_val = self.kernel.reconstruct_single_log(idx, &self.coeffs);
-        f64::exp2(log_val * std::f64::consts::LOG2_10)
+        match self {
+            ReactionKernel::Svd { kernel, coeffs } => {
+                let log_val = kernel.reconstruct_single_log(idx, coeffs);
+                f64::exp2(log_val * std::f64::consts::LOG2_10)
+            }
+            ReactionKernel::Table { xs, .. } => xs.get(idx).copied().unwrap_or(0.0),
+        }
     }
 
     /// Reconstruct with log-log interpolation between grid points (OpenMC scheme).
@@ -153,17 +276,96 @@ impl ReactionKernel {
     /// in log-energy space: `(ln(E) - ln(E_lo)) / (ln(E_hi) - ln(E_lo))`.
     #[inline]
     pub fn reconstruct_interp(&self, idx: usize, log_frac: f64) -> f64 {
-        let log_lo = self.kernel.reconstruct_single_log(idx, &self.coeffs);
-        if idx + 1 >= self.kernel.n_energy() || log_frac <= 0.0 {
-            return f64::exp2(log_lo * std::f64::consts::LOG2_10);
+        match self {
+            ReactionKernel::Svd { kernel, coeffs } => {
+                let log_lo = kernel.reconstruct_single_log(idx, coeffs);
+                if idx + 1 >= kernel.n_energy() || log_frac <= 0.0 {
+                    return f64::exp2(log_lo * std::f64::consts::LOG2_10);
+                }
+                let log_hi = kernel.reconstruct_single_log(idx + 1, coeffs);
+                let log_interp = log_lo + log_frac * (log_hi - log_lo);
+                f64::exp2(log_interp * std::f64::consts::LOG2_10)
+            }
+            ReactionKernel::Table { xs, .. } => {
+                let lo = xs.get(idx).copied().unwrap_or(0.0);
+                if idx + 1 >= xs.len() || log_frac <= 0.0 || lo <= 0.0 {
+                    return lo;
+                }
+                let hi = xs[idx + 1];
+                if hi <= 0.0 {
+                    return lo;
+                }
+                // Log-log interp consistent with OpenMC pointwise XS.
+                let log_lo = lo.ln();
+                let log_hi = hi.ln();
+                (log_lo + log_frac * (log_hi - log_lo)).exp()
+            }
         }
-        let log_hi = self.kernel.reconstruct_single_log(idx + 1, &self.coeffs);
-        let log_interp = log_lo + log_frac * (log_hi - log_lo);
-        f64::exp2(log_interp * std::f64::consts::LOG2_10)
+    }
+
+    /// Memory footprint in bytes for this kernel — used by
+    /// `NuclideKernels::svd_memory_bytes` to track the SVD-compression
+    /// payoff.
+    #[inline]
+    pub fn memory_bytes(&self) -> usize {
+        match self {
+            ReactionKernel::Svd { kernel, coeffs } => {
+                kernel.memory_bytes() + coeffs.len() * std::mem::size_of::<f64>()
+            }
+            ReactionKernel::Table { energies, xs } => {
+                (energies.len() + xs.len()) * std::mem::size_of::<f64>()
+            }
+        }
     }
 }
 
 impl NuclideKernels {
+    /// Empty placeholder — all kernels absent, just AWR and the
+    /// constant ν̄ fallback. Used by binaries when the requested HDF5
+    /// file isn't on disk and the run continues with degraded fidelity
+    /// (warning issued elsewhere).
+    pub fn empty(awr: f64, nu_bar_const: f64) -> Self {
+        Self {
+            elastic: None,
+            total_table: None,
+            total_xs_raw: None,
+            missing_xs: None,
+            pointwise_xs: None,
+            inelastic: None,
+            n2n: None,
+            n3n: None,
+            n4n: None,
+            n4n_edist: None,
+            fission: None,
+            capture: None,
+            awr,
+            nu_bar_const,
+            nu_bar_table: None,
+            delayed_nu_bar_table: None,
+            discrete_levels: vec![],
+            inelastic_cdf: None,
+            discrete_level_angles: vec![],
+            has_continuum_inelastic: false,
+            elastic_angle: None,
+            fission_energy_dist: None,
+            inelastic_continuum_edist: None,
+            n2n_edist: None,
+            n3n_edist: None,
+            urr_tables: None,
+            photon_products: Vec::new(),
+            partial_kernels: Vec::new(),
+            n_nalpha: None,
+            n_nalpha_edist: None,
+            q_n_nalpha: 0.0,
+            n_2nalpha: None,
+            n_2nalpha_edist: None,
+            q_n_2nalpha: 0.0,
+            n_np: None,
+            n_np_edist: None,
+            q_n_np: 0.0,
+        }
+    }
+
     /// Get energy-dependent nu-bar at the given energy.
     pub fn nu_bar_at(&self, energy: f64) -> f64 {
         self.nu_bar_table
@@ -205,29 +407,29 @@ impl NuclideKernels {
     pub fn svd_memory_bytes(&self) -> usize {
         let mut total = 0;
         if let Some(k) = &self.elastic {
-            total += k.kernel.memory_bytes();
+            total += k.memory_bytes();
         }
         if let Some(t) = &self.total_table {
             total += t.memory_bytes();
         }
         if let Some(k) = &self.inelastic {
-            total += k.kernel.memory_bytes();
+            total += k.memory_bytes();
         }
         if let Some(k) = &self.n2n {
-            total += k.kernel.memory_bytes();
+            total += k.memory_bytes();
         }
         if let Some(k) = &self.n3n {
-            total += k.kernel.memory_bytes();
+            total += k.memory_bytes();
         }
         if let Some(k) = &self.fission {
-            total += k.kernel.memory_bytes();
+            total += k.memory_bytes();
         }
         if let Some(k) = &self.capture {
-            total += k.kernel.memory_bytes();
+            total += k.memory_bytes();
         }
         for lvl in &self.discrete_levels {
             if let Some(k) = &lvl.kernel {
-                total += k.kernel.memory_bytes();
+                total += k.memory_bytes();
             }
         }
         total
@@ -299,8 +501,8 @@ impl XsProvider for SvdXsProvider {
 
         let (idx, log_frac) = match any_kernel {
             Some(k) => {
-                let idx = k.kernel.energy_index(energy);
-                let grid = k.kernel.energies();
+                let idx = k.energy_index(energy);
+                let grid = k.energies();
                 let frac = if idx + 1 < grid.len() && grid[idx] > 0.0 && grid[idx + 1] > grid[idx] {
                     let log_e = energy.ln();
                     let log_lo = grid[idx].ln();
@@ -338,6 +540,10 @@ impl XsProvider for SvdXsProvider {
             .n3n
             .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
+        let n4n = nuc
+            .n4n
+            .as_ref()
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
         let fission = nuc
             .fission
             .as_ref()
@@ -347,40 +553,71 @@ impl XsProvider for SvdXsProvider {
             .as_ref()
             .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
 
+        // Charged-particle channels with secondary neutrons (MT=22/24/28).
+        // Reconstructed alongside the legacy six MTs so we no longer
+        // route them through capture by residual heuristic — `process_collision`
+        // dispatches each via its own outgoing-energy distribution + Q-value.
+        let n_nalpha = nuc
+            .n_nalpha
+            .as_ref()
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
+        let n_2nalpha = nuc
+            .n_2nalpha
+            .as_ref()
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
+        let n_np = nuc
+            .n_np
+            .as_ref()
+            .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac));
+
         let total = match &nuc.total_table {
             // The total_table lives on the same shared energy grid that we
             // already searched for the SVD reactions — reuse `idx` instead
-            // of doing a second binary/hash search here. `lookup_at_idx`
-            // produces bit-identical output to `lookup(energy)`.
+            // of doing a second binary/hash search here.
             //
-            // Earlier we overrode `capture = total - elastic - …` here to
-            // absorb the "missing channels" (n,α, n,p, etc.) into the
-            // capture cross-section. That forced any SVD reconstruction
-            // error in `elastic` to flow 1:1 into `capture`, where the
-            // absolute error became a *huge* relative error wherever
-            // capture is small but elastic is large — between U-238
-            // resonances at ~1 keV the elastic SVD error of 0.04 b
-            // (0.2 % of elastic) blew up into a 21 % error on a 0.20-b
-            // capture, dragging on-library PWR k_inf by ~19 000 pcm vs
-            // the pointwise-table provider.
+            // Now that MT=22/24/28 are reconstructed as first-class
+            // partials, the residual between MT=2+MT=3 (HDF5 recorded
+            // total) and the sum of `elastic + inelastic + n2n + n3n +
+            // fission + capture + n_nalpha + n_2nalpha + n_np` should
+            // be small — only the truly absorbing channels we still
+            // don't model explicitly: MT=103 (n,p) and MT=107 (n,α).
+            // Both consume the incident neutron without emitting one,
+            // so routing this small residual into `capture` is
+            // physically correct.
             //
-            // We now keep the SVD-reconstructed capture, and only top
-            // it up by the "missing channels" residual when that
-            // residual is large enough that the SVD-elastic noise is
-            // dominated by genuine missing-channel content. The
-            // threshold (0.5 % of total) is loose enough to keep the
-            // (n,α)/(n,p) thresholded contributions but tight enough to
-            // not propagate per-nuclide elastic noise into capture.
+            // Threshold 0.5 % of total: keeps the (n,α)/(n,p)
+            // thresholded contributions but stays tight enough not to
+            // propagate per-nuclide elastic-SVD noise into capture.
             Some(t) => {
                 let tot = t.lookup_at_idx(energy, idx);
-                let partials = elastic + inelastic + n2n + n3n + fission + capture;
+                let partials = elastic
+                    + inelastic
+                    + n2n
+                    + n3n
+                    + n4n
+                    + fission
+                    + capture
+                    + n_nalpha
+                    + n_2nalpha
+                    + n_np;
                 let residual = tot - partials;
                 if residual > 0.005 * tot {
                     capture += residual;
                 }
                 tot
             }
-            None => elastic + inelastic + n2n + n3n + fission + capture,
+            None => {
+                elastic
+                    + inelastic
+                    + n2n
+                    + n3n
+                    + n4n
+                    + fission
+                    + capture
+                    + n_nalpha
+                    + n_2nalpha
+                    + n_np
+            }
         };
         let nu_bar = nuc.nu_bar_at(energy);
         let delayed_nu_bar = nuc.delayed_nu_bar_at(energy);
@@ -391,8 +628,12 @@ impl XsProvider for SvdXsProvider {
             inelastic,
             n2n,
             n3n,
+            n4n,
             fission,
             capture,
+            n_nalpha,
+            n_2nalpha,
+            n_np,
             nu_bar,
             delayed_nu_bar,
             awr: nuc.awr,
@@ -517,7 +758,7 @@ pub fn build_reaction_kernel(
     let t_idx = temp_idx.min(n_t - 1);
     let coeffs = kernel.temp_coeffs(t_idx);
 
-    Some(ReactionKernel { kernel, coeffs })
+    Some(ReactionKernel::Svd { kernel, coeffs })
 }
 
 /// Build an SVD kernel from a `NuclideFileReader` using a shared energy grid.
@@ -535,6 +776,45 @@ fn build_kernel_from_reader(
 ) -> Option<ReactionKernel> {
     let data = reader.read_reaction(mt).ok()?;
     build_kernel_from_data(&data, svd_rank, temp_idx, shared_grid, &reader.temperatures)
+}
+
+/// Build a pointwise `ReactionKernel::Table` for `mt` at `temp_idx` on
+/// the nuclide's shared union energy grid. Used by the per-nuclide
+/// policy to skip SVD reconstruction for channels whose value is
+/// discarded at runtime (e.g. MT=2 for moderator nuclides where
+/// S(α,β) replaces the free-atom elastic XS below `energy_max`).
+fn build_table_kernel_from_reader(
+    reader: &NuclideFileReader,
+    mt: u32,
+    temp_idx: usize,
+    shared_grid: &Arc<[f64]>,
+) -> Option<ReactionKernel> {
+    let data = reader.read_reaction(mt).ok()?;
+    if data.n_energy() == 0 || data.n_temp() == 0 {
+        return None;
+    }
+    let t = temp_idx.min(data.n_temp() - 1);
+    Some(ReactionKernel::from_table(
+        shared_grid.to_vec(),
+        data.xs_per_temp[t].clone(),
+    ))
+}
+
+/// Build either an SVD or a Table kernel for `mt` based on the active
+/// `RankPolicy`. Centralises the dispatch so every call site stays
+/// uniform regardless of which channels the policy directs to Table.
+fn build_kernel_with_policy(
+    reader: &NuclideFileReader,
+    policy: &RankPolicy,
+    mt: u32,
+    temp_idx: usize,
+    shared_grid: &Arc<[f64]>,
+) -> Option<ReactionKernel> {
+    if policy.use_table_for(mt) {
+        build_table_kernel_from_reader(reader, mt, temp_idx, shared_grid)
+    } else {
+        build_kernel_from_reader(reader, mt, policy.rank_for(mt), temp_idx, shared_grid)
+    }
 }
 
 /// MTs whose XS is loaded as a partial-kernel side table for the
@@ -631,7 +911,7 @@ fn build_kernel_from_data(
         let t_idx = temp_idx.min(n_t - 1);
         kernel.temp_coeffs(t_idx)
     };
-    Some(ReactionKernel { kernel, coeffs })
+    Some(ReactionKernel::Svd { kernel, coeffs })
 }
 
 /// Number of log-spaced energy points used to tabulate the per-level
@@ -998,6 +1278,17 @@ pub fn load_nuclide(
 pub struct RankPolicy {
     pub default: usize,
     pub per_mt: std::collections::HashMap<u32, usize>,
+    /// MTs forced to a pointwise Table (`ReactionKernel::Table`) rather
+    /// than SVD. The most useful case: for a moderator nuclide with
+    /// S(α,β) attached, MT=2 is replaced by the thermal-scattering XS
+    /// below `energy_max` (the transport loop zeroes the elastic
+    /// contribution from the lookup before sampling). Keeping the
+    /// channel as SVD wastes a basis × coeffs reconstruction per
+    /// collision that gets thrown away — Table makes the lookup
+    /// `xs[idx]` and saves the SVD basis memory entirely. Used by
+    /// `material_resolve` to set MT=2 → Table when a nuclide has a
+    /// thermal-file binding.
+    pub table_mts: std::collections::HashSet<u32>,
 }
 
 impl RankPolicy {
@@ -1005,6 +1296,7 @@ impl RankPolicy {
         Self {
             default: default.max(1),
             per_mt: std::collections::HashMap::new(),
+            table_mts: std::collections::HashSet::new(),
         }
     }
     pub fn with_mt(mut self, mt: u32, rank: usize) -> Self {
@@ -1013,8 +1305,17 @@ impl RankPolicy {
         }
         self
     }
+    /// Force `mt` to use a pointwise `ReactionKernel::Table` instead
+    /// of SVD reconstruction.
+    pub fn with_table(mut self, mt: u32) -> Self {
+        self.table_mts.insert(mt);
+        self
+    }
     pub fn rank_for(&self, mt: u32) -> usize {
         *self.per_mt.get(&mt).unwrap_or(&self.default)
+    }
+    pub fn use_table_for(&self, mt: u32) -> bool {
+        self.table_mts.contains(&mt)
     }
 }
 
@@ -1060,6 +1361,8 @@ pub fn load_nuclide_with_policy(
                 inelastic: None,
                 n2n: None,
                 n3n: None,
+                n4n: None,
+                n4n_edist: None,
                 fission: None,
                 capture: None,
                 awr: awr_fallback,
@@ -1078,6 +1381,15 @@ pub fn load_nuclide_with_policy(
                 urr_tables: None,
                 photon_products: Vec::new(),
                 partial_kernels: Vec::new(),
+                n_nalpha: None,
+                n_nalpha_edist: None,
+                q_n_nalpha: 0.0,
+                n_2nalpha: None,
+                n_2nalpha_edist: None,
+                q_n_2nalpha: 0.0,
+                n_np: None,
+                n_np_edist: None,
+                q_n_np: 0.0,
             };
         }
     };
@@ -1168,9 +1480,20 @@ pub fn load_nuclide_with_policy(
     let total_table = total_xs_vec
         .as_ref()
         .map(|xs| PointwiseTable::from_shared_grid(shared_grid.clone(), xs.clone()));
-    let elastic = build_kernel_from_reader(&reader, 2, policy.rank_for(2), temp_idx, &shared_grid);
-    if elastic.is_some() {
-        println!("    MT=2  (elastic)  rank={}", policy.rank_for(2));
+    let elastic = build_kernel_with_policy(&reader, policy, 2, temp_idx, &shared_grid);
+    if let Some(ref k) = elastic {
+        match k {
+            ReactionKernel::Svd { .. } => {
+                println!("    MT=2  (elastic)  rank={}", policy.rank_for(2));
+            }
+            ReactionKernel::Table { xs, .. } => {
+                println!(
+                    "    MT=2  (elastic)  Table ({} pts, {:.1} KB)",
+                    xs.len(),
+                    (xs.len() * std::mem::size_of::<f64>()) as f64 / 1024.0
+                );
+            }
+        }
     }
     let native_inelastic =
         build_kernel_from_reader(&reader, 4, policy.rank_for(4), temp_idx, &shared_grid);
@@ -1261,10 +1584,81 @@ pub fn load_nuclide_with_policy(
         println!("    MT=102 (capture) rank={}", policy.rank_for(102));
     }
 
+    // Charged-particle channels with secondary neutrons. Critical for
+    // actinides — U-233 (n,nα) MT=22 alone is ~0.7 b at 6–15 MeV.
+    // ENDF/B-VII.1 carries explicit MT=22/24/28 evaluations on most
+    // actinides; absent on light nuclides (None ⇒ kernel reconstructs
+    // to 0 throughout). Reuses the same rank as MT=4 for now —
+    // refining per-MT rank is a follow-up.
+    let n_nalpha =
+        build_kernel_from_reader(&reader, 22, policy.rank_for(22), temp_idx, &shared_grid);
+    if n_nalpha.is_some() {
+        println!("    MT=22 (n,nα)    rank={}", policy.rank_for(22));
+    }
+    let n_nalpha_edist = if n_nalpha.is_some() {
+        reader.reaction_energy_dist(22)
+    } else {
+        None
+    };
+    let q_n_nalpha = if n_nalpha.is_some() {
+        reader.reaction_q_value(22).unwrap_or(-6.0e6)
+    } else {
+        0.0
+    };
+
+    let n_2nalpha =
+        build_kernel_from_reader(&reader, 24, policy.rank_for(24), temp_idx, &shared_grid);
+    if n_2nalpha.is_some() {
+        println!("    MT=24 (n,2nα)   rank={}", policy.rank_for(24));
+    }
+    let n_2nalpha_edist = if n_2nalpha.is_some() {
+        reader.reaction_energy_dist(24)
+    } else {
+        None
+    };
+    let q_n_2nalpha = if n_2nalpha.is_some() {
+        reader.reaction_q_value(24).unwrap_or(-12.0e6)
+    } else {
+        0.0
+    };
+
+    let n_np = build_kernel_from_reader(&reader, 28, policy.rank_for(28), temp_idx, &shared_grid);
+    if n_np.is_some() {
+        println!("    MT=28 (n,np)    rank={}", policy.rank_for(28));
+    }
+    let n_np_edist = if n_np.is_some() {
+        reader.reaction_energy_dist(28)
+    } else {
+        None
+    };
+    let q_n_np = if n_np.is_some() {
+        reader.reaction_q_value(28).unwrap_or(-6.0e6)
+    } else {
+        0.0
+    };
+
+    // (n,4n) MT=37 — four-neutron emission. Dominant residual
+    // contributor for U-233 (~0.2 b at 14–20 MeV) and other
+    // actinides whose evaluations ship MT=37 explicitly. Same n×n
+    // pattern as MT=16/17.
+    let n4n = build_kernel_from_reader(&reader, 37, policy.rank_for(37), temp_idx, &shared_grid);
+    if n4n.is_some() {
+        println!("    MT=37 (n,4n)     rank={}", policy.rank_for(37));
+    }
+    let n4n_edist = if n4n.is_some() {
+        reader.reaction_energy_dist(37)
+    } else {
+        None
+    };
+
     let missing_xs = total_xs_vec.as_ref().map(|total| {
         let n = shared_grid.len();
         let mut partial_sum = vec![0.0_f64; n];
-        for mt in [2_u32, 16, 17, 18, 102] {
+        // Now includes the four new explicit-kernel MTs (22/24/28/37)
+        // so the residual reported truly is "missing physics we don't
+        // know how to load yet" rather than reactions we just hadn't
+        // wired through.
+        for mt in [2_u32, 16, 17, 18, 22, 24, 28, 37, 102] {
             if let Ok(data) = reader.read_reaction(mt)
                 && let Some(xs) = data.xs_per_temp.get(temp_idx)
             {
@@ -1339,6 +1733,17 @@ pub fn load_nuclide_with_policy(
         urr_tables,
         photon_products: load_photon_products(&reader),
         partial_kernels,
+        n_nalpha,
+        n_nalpha_edist,
+        q_n_nalpha,
+        n_2nalpha,
+        n_2nalpha_edist,
+        q_n_2nalpha,
+        n_np,
+        n_np_edist,
+        q_n_np,
+        n4n,
+        n4n_edist,
     }
 }
 
@@ -1570,8 +1975,17 @@ impl XsProvider for TableXsProvider {
             inelastic,
             n2n,
             n3n,
+            n4n: 0.0,
             fission,
             capture,
+            // TableXsProvider doesn't currently load MT=22/24/28/37 from
+            // its pointwise tables — those channels fall through to
+            // the residual/capture path here as before. The SVD
+            // provider (the production path for ICSBEP regression
+            // runs) does load them as first-class kernels.
+            n_nalpha: 0.0,
+            n_2nalpha: 0.0,
+            n_np: 0.0,
             nu_bar,
             delayed_nu_bar,
             awr: nuc.awr,
@@ -2172,6 +2586,8 @@ pub fn load_nuclide_at_temp(
                 inelastic: None,
                 n2n: None,
                 n3n: None,
+                n4n: None,
+                n4n_edist: None,
                 fission: None,
                 capture: None,
                 awr: awr_fallback,
@@ -2190,6 +2606,15 @@ pub fn load_nuclide_at_temp(
                 urr_tables: None,
                 photon_products: Vec::new(),
                 partial_kernels: Vec::new(),
+                n_nalpha: None,
+                n_nalpha_edist: None,
+                q_n_nalpha: 0.0,
+                n_2nalpha: None,
+                n_2nalpha_edist: None,
+                q_n_2nalpha: 0.0,
+                n_np: None,
+                n_np_edist: None,
+                q_n_np: 0.0,
             };
         }
     };
@@ -2306,12 +2731,55 @@ pub fn load_nuclide_at_temp(
     let fission = build_kernel_at_temp(&reader, 18, svd_rank, target_temp, &shared_grid);
     let capture = build_kernel_at_temp(&reader, 102, svd_rank, target_temp, &shared_grid);
 
+    // Charged-particle channels with secondary-neutron emission — see
+    // load_nuclide_with_policy for the rationale.
+    let n_nalpha = build_kernel_at_temp(&reader, 22, svd_rank, target_temp, &shared_grid);
+    let n_nalpha_edist = if n_nalpha.is_some() {
+        reader.reaction_energy_dist(22)
+    } else {
+        None
+    };
+    let q_n_nalpha = if n_nalpha.is_some() {
+        reader.reaction_q_value(22).unwrap_or(-6.0e6)
+    } else {
+        0.0
+    };
+    let n_2nalpha = build_kernel_at_temp(&reader, 24, svd_rank, target_temp, &shared_grid);
+    let n_2nalpha_edist = if n_2nalpha.is_some() {
+        reader.reaction_energy_dist(24)
+    } else {
+        None
+    };
+    let q_n_2nalpha = if n_2nalpha.is_some() {
+        reader.reaction_q_value(24).unwrap_or(-12.0e6)
+    } else {
+        0.0
+    };
+    let n_np = build_kernel_at_temp(&reader, 28, svd_rank, target_temp, &shared_grid);
+    let n_np_edist = if n_np.is_some() {
+        reader.reaction_energy_dist(28)
+    } else {
+        None
+    };
+    let q_n_np = if n_np.is_some() {
+        reader.reaction_q_value(28).unwrap_or(-6.0e6)
+    } else {
+        0.0
+    };
+
+    let n4n = build_kernel_at_temp(&reader, 37, svd_rank, target_temp, &shared_grid);
+    let n4n_edist = if n4n.is_some() {
+        reader.reaction_energy_dist(37)
+    } else {
+        None
+    };
+
     // Auxiliary pointwise at nearest library temp (for GPU upload).
     let pointwise_xs = reader.compute_pointwise_xs(aux_temp_idx);
     let missing_xs = total_xs_vec.as_ref().map(|total| {
         let n = shared_grid.len();
         let mut partial_sum = vec![0.0_f64; n];
-        for mt in [2_u32, 16, 17, 18, 102] {
+        for mt in [2_u32, 16, 17, 18, 22, 24, 28, 37, 102] {
             if let Ok(data) = reader.read_reaction(mt)
                 && let Some(xs) = data.xs_per_temp.get(aux_temp_idx)
             {
@@ -2374,6 +2842,17 @@ pub fn load_nuclide_at_temp(
         urr_tables,
         photon_products: load_photon_products(&reader),
         partial_kernels,
+        n_nalpha,
+        n_nalpha_edist,
+        q_n_nalpha,
+        n_2nalpha,
+        n_2nalpha_edist,
+        q_n_2nalpha,
+        n_np,
+        n_np_edist,
+        q_n_np,
+        n4n,
+        n4n_edist,
     }
 }
 
@@ -2592,7 +3071,7 @@ fn build_kernel_at_temp(
     } else {
         kernel.temp_coeffs(0)
     };
-    Some(ReactionKernel { kernel, coeffs })
+    Some(ReactionKernel::Svd { kernel, coeffs })
 }
 
 /// Load every prompt-photon product from every photon-emitting
@@ -2679,15 +3158,15 @@ mod tests {
         // simulation hits.
         kernel.build_hash(8192);
         let coeffs = vec![1.0];
-        ReactionKernel { kernel, coeffs }
+        ReactionKernel::Svd { kernel, coeffs }
     }
 
     /// Compute the lookup index + log_frac the way `SvdXsProvider::lookup`
     /// does. Mirrors the production path so the test reflects what the
     /// transport loop actually sees.
     fn lookup_idx_and_frac(rxn: &ReactionKernel, energy: f64) -> (usize, f64) {
-        let idx = rxn.kernel.energy_index(energy);
-        let grid = rxn.kernel.energies();
+        let idx = rxn.energy_index(energy);
+        let grid = rxn.energies();
         let frac = if idx + 1 < grid.len() && grid[idx] > 0.0 && grid[idx + 1] > grid[idx] {
             let log_e = energy.ln();
             let log_lo = grid[idx].ln();
@@ -2787,7 +3266,7 @@ mod tests {
         for win in grid.windows(2).enumerate() {
             let (i, w) = win;
             let e_mid = (w[0] * w[1]).sqrt();
-            let idx = rxn.kernel.energy_index(e_mid);
+            let idx = rxn.energy_index(e_mid);
             assert_eq!(
                 idx,
                 i,
@@ -2805,34 +3284,9 @@ mod tests {
     /// their natural empty / None defaults — the partial-XS lookup
     /// path doesn't touch them.
     fn make_nuclide_with_partials(partials: Vec<(u32, ReactionKernel)>) -> NuclideKernels {
-        NuclideKernels {
-            elastic: None,
-            total_table: None,
-            total_xs_raw: None,
-            missing_xs: None,
-            pointwise_xs: None,
-            inelastic: None,
-            n2n: None,
-            n3n: None,
-            fission: None,
-            capture: None,
-            awr: 1.0,
-            nu_bar_const: 0.0,
-            nu_bar_table: None,
-            delayed_nu_bar_table: None,
-            discrete_levels: vec![],
-            inelastic_cdf: None,
-            discrete_level_angles: vec![],
-            has_continuum_inelastic: false,
-            elastic_angle: None,
-            fission_energy_dist: None,
-            inelastic_continuum_edist: None,
-            n2n_edist: None,
-            n3n_edist: None,
-            urr_tables: None,
-            photon_products: vec![],
-            partial_kernels: partials,
-        }
+        let mut nk = NuclideKernels::empty(1.0, 0.0);
+        nk.partial_kernels = partials;
+        nk
     }
 
     /// `partial_xs` reports the synthetic 1/√E law for MT=103, returns

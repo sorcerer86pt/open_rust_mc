@@ -15,6 +15,7 @@ pub mod ray;
 #[cfg(test)]
 mod recursive_smoke;
 pub mod scene;
+pub mod scene_io;
 pub mod shapes;
 pub mod surface;
 pub mod universe;

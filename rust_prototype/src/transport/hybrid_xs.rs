@@ -67,9 +67,14 @@ impl HybridSvdWmpXsProvider {
             let (e_lo, e_hi) = (wmp.e_min, wmp.e_max);
             for slot in [&mut nuc.elastic, &mut nuc.fission, &mut nuc.capture] {
                 if let Some(rxn) = slot.as_mut() {
-                    before += rxn.kernel.memory_bytes();
-                    rxn.kernel = rxn.kernel.trim_to_outside(e_lo, e_hi);
-                    after += rxn.kernel.memory_bytes();
+                    before += rxn.memory_bytes();
+                    // Only the SVD variant has a basis to trim — Table
+                    // kernels are already a single pointwise array and
+                    // don't benefit from `trim_to_outside` shaping.
+                    if let crate::transport::xs_provider::ReactionKernel::Svd { kernel, .. } = rxn {
+                        *kernel = kernel.trim_to_outside(e_lo, e_hi);
+                    }
+                    after += rxn.memory_bytes();
                 }
             }
         }
@@ -97,20 +102,20 @@ impl HybridSvdWmpXsProvider {
 
         for (i, nuc) in self.inner.nuclides.iter().enumerate() {
             // Full-grid bytes for every reaction
-            let k_el = nuc.elastic.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_fis = nuc.fission.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_cap = nuc.capture.as_ref().map_or(0, |r| r.kernel.memory_bytes());
+            let k_el = nuc.elastic.as_ref().map_or(0, |r| r.memory_bytes());
+            let k_fis = nuc.fission.as_ref().map_or(0, |r| r.memory_bytes());
+            let k_cap = nuc.capture.as_ref().map_or(0, |r| r.memory_bytes());
             let k_in = nuc
                 .inelastic
                 .as_ref()
-                .map_or(0, |r| r.kernel.memory_bytes());
-            let k_2n = nuc.n2n.as_ref().map_or(0, |r| r.kernel.memory_bytes());
-            let k_3n = nuc.n3n.as_ref().map_or(0, |r| r.kernel.memory_bytes());
+                .map_or(0, |r| r.memory_bytes());
+            let k_2n = nuc.n2n.as_ref().map_or(0, |r| r.memory_bytes());
+            let k_3n = nuc.n3n.as_ref().map_or(0, |r| r.memory_bytes());
             let k_tt = nuc.total_table.as_ref().map_or(0, |t| t.memory_bytes());
             let k_dl: usize = nuc
                 .discrete_levels
                 .iter()
-                .map(|l| l.kernel.as_ref().map_or(0, |r| r.kernel.memory_bytes()))
+                .map(|l| l.kernel.as_ref().map_or(0, |r| r.memory_bytes()))
                 .sum();
 
             let full_nuc = k_el + k_fis + k_cap + k_in + k_2n + k_3n + k_tt + k_dl;
@@ -176,7 +181,7 @@ fn kernel_smooth_fraction(
         .as_ref()
         .or(nuc.fission.as_ref())
         .or(nuc.capture.as_ref())
-        .map(|r| r.kernel.energies());
+        .map(|r| r.energies());
     match grid {
         None => 1.0,
         Some(g) => {

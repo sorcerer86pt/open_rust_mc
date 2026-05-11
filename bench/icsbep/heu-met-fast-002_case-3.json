@@ -1,0 +1,524 @@
+{
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-MET-FAST-002.case-3",
+    "case_name": "",
+    "category": "HEU-MET-FAST",
+    "k_eff_reference": 1.0,
+    "k_eff_sigma": 0.003,
+    "source": "ICSBEP Handbook, HEU-MET-FAST-002.case-3 \u2014 NEA/NSC/DOC(95)03",
+    "data_provenance": {
+      "geometry_materials": {
+        "repo": "github.com/mit-crpg/benchmarks",
+        "path": "icsbep/heu-met-fast-002/openmc/case-3",
+        "license": "MIT",
+        "note": "Open-source proxy. Hand-transcribed from the registered NEA/OECD ICSBEP Handbook by the OpenMC developers (MIT-CRPG). Re-verify against the registered handbook before publishing any validation report."
+      },
+      "k_eff_reference": {
+        "repo": "github.com/openmc-dev/validation",
+        "path": "benchmarking/uncertainties.csv",
+        "row": "case-3",
+        "license": "MIT"
+      },
+      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "PlaneX",
+        "x0": -25.4,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneX",
+        "x0": -5.08,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneX",
+        "x0": 5.08,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneX",
+        "x0": 25.4,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneY",
+        "y0": -25.4,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneY",
+        "y0": -5.08,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneY",
+        "y0": 5.08,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneY",
+        "y0": 25.4,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": -24.97,
+        "bc": "Vacuum"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": -4.65,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 4.65,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 24.97,
+        "bc": "Vacuum"
+      }
+    ],
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 0,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 1,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 4,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 7,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 1,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 2,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 4,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 5,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 1,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 2,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 5,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 9,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 1,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 2,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 5,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 9,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 10,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 5,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 1,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 2,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 5,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 10,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 6,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 1,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 2,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 6,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 7,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      },
+      {
+        "id": 7,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "Intersection",
+                  "left": {
+                    "op": "HalfSpace",
+                    "surface_idx": 2,
+                    "positive": true
+                  },
+                  "right": {
+                    "op": "HalfSpace",
+                    "surface_idx": 3,
+                    "positive": false
+                  }
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 4,
+                  "positive": true
+                }
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 7,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 8,
+              "positive": true
+            }
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 11,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6
+        ]
+      }
+    ],
+    "materials": [
+      {
+        "name": "mat_1",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.0004921
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.044917
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0025993
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "mat_2",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 2.6299e-06
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.00034428
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.04747
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

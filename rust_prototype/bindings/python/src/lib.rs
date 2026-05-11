@@ -52,6 +52,7 @@ use open_rust_mc::photon::transport::transport_history_csg;
 use open_rust_mc::photon::PhotonElement;
 use std::sync::Arc;
 
+use open_rust_mc::hdf5_reader::NuclideFileReader;
 use open_rust_mc::transport::hybrid_xs::{HybridSvdWmpXsProvider, HybridTableWmpXsProvider};
 use open_rust_mc::transport::material::Material as RustMaterial;
 use open_rust_mc::transport::rng::Rng;
@@ -2226,6 +2227,136 @@ fn cram(matrix: Vec<f64>, n0: Vec<f64>, order: PyCramOrder) -> PyResult<Vec<f64>
     Ok(open_rust_mc::depletion::cram::cram(order, &matrix, &n0))
 }
 
+// ── Nuclear-data introspection ────────────────────────────────────────────
+//
+// Lightweight read-only handle on an ENDF HDF5 nuclide file, for
+// diagnostic work (e.g. the U-233 −2876 pcm Jezebel-23 bias deep-dive).
+// Exposes ν̄(E) and fission χ(E_in, E_out) tables verbatim from the
+// file so they can be diffed against OpenMC's Python API
+// (`openmc.data.IncidentNeutron.from_hdf5(...)`).
+
+/// Open a nuclide HDF5 file for read-only introspection.
+///
+/// >>> nuc = NuclideFile.open("data/endfb-vii.1-hdf5/neutron/U233.h5")
+/// >>> nuc.nuclide_name
+/// 'U233'
+/// >>> e, v = nuc.nu_bar()
+/// >>> len(e)
+/// 13
+#[pyclass(name = "NuclideFile", module = "open_rust_mc._core")]
+pub struct PyNuclideFile {
+    reader: NuclideFileReader,
+}
+
+#[pymethods]
+impl PyNuclideFile {
+    /// Open a nuclide HDF5 file. Raises FileNotFoundError on missing
+    /// file, ValueError on any HDF5 / layout issue.
+    #[staticmethod]
+    fn open(path: &str) -> PyResult<Self> {
+        let p = PathBuf::from(path);
+        if !p.exists() {
+            return Err(PyFileNotFoundError::new_err(format!("no such file: {path}")));
+        }
+        NuclideFileReader::open(&p)
+            .map(|reader| Self { reader })
+            .map_err(|e| PyValueError::new_err(format!("{e}")))
+    }
+
+    /// Nuclide name as stored in the HDF5 root group (e.g. "U233").
+    #[getter]
+    fn nuclide_name(&self) -> String {
+        self.reader.nuclide_name.clone()
+    }
+
+    /// Temperatures (K) present in the file, sorted ascending.
+    #[getter]
+    fn temperatures(&self) -> Vec<f64> {
+        self.reader.temperatures.clone()
+    }
+
+    /// Atomic weight ratio (AWR). Returns 0.0 if the attribute is
+    /// missing.
+    fn awr(&self) -> f64 {
+        self.reader.awr().unwrap_or(0.0)
+    }
+
+    /// Prompt + delayed ν̄(E) table.
+    ///
+    /// Returns ``(energies_eV, nu_bar)`` as two equal-length lists.
+    /// Empty lists if the nuclide is non-fissile.
+    fn nu_bar(&self) -> PyResult<(Vec<f64>, Vec<f64>)> {
+        let nb = self
+            .reader
+            .nu_bar()
+            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        Ok((nb.energies, nb.values))
+    }
+
+    /// Linear-interpolated ν̄ at a single energy. Same code path as
+    /// the transport engine, so values match the engine bit-for-bit.
+    fn nu_bar_at(&self, energy_eV: f64) -> PyResult<f64> {
+        let nb = self
+            .reader
+            .nu_bar()
+            .map_err(|e| PyValueError::new_err(format!("{e}")))?;
+        Ok(nb.lookup(energy_eV))
+    }
+
+    /// Delayed-only ν̄(E) table. ``None`` if the file ships no
+    /// delayed-product entries (always the case for non-fissile
+    /// nuclides; some fissile files also omit it).
+    fn delayed_nu_bar(&self) -> Option<(Vec<f64>, Vec<f64>)> {
+        self.reader
+            .delayed_nu_bar()
+            .map(|nb| (nb.energies, nb.values))
+    }
+
+    /// Fission χ(E_in, E_out) incident-energy grid (eV). Returns
+    /// ``None`` if the file does not ship MT=18 outgoing-energy data
+    /// in a form the engine recognises (uncorrelated tabular law).
+    fn fission_incident_energies(&self) -> Option<Vec<f64>> {
+        self.reader.fission_energy_dist().map(|ed| ed.energies)
+    }
+
+    /// Per-incident-energy outgoing distribution at index ``i``.
+    /// Returns ``(e_out_eV, pdf, cdf)`` — three equal-length lists.
+    /// ``pdf`` may be empty when the file only stores ``(e_out, cdf)``
+    /// pairs without an explicit PDF channel (the engine then falls
+    /// back to histogram-CDF inversion at sample time).
+    ///
+    /// Raises ValueError if the file has no fission spectrum, or if
+    /// ``i`` is out of range.
+    fn fission_outgoing_at(&self, i: usize) -> PyResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+        let ed = self
+            .reader
+            .fission_energy_dist()
+            .ok_or_else(|| PyValueError::new_err("no fission energy distribution in this file"))?;
+        let d = ed
+            .distributions
+            .get(i)
+            .ok_or_else(|| PyValueError::new_err(format!(
+                "index {i} out of range (have {} incident-energy nodes)",
+                ed.energies.len()
+            )))?;
+        Ok((d.e_out.clone(), d.pdf.clone(), d.cdf.clone()))
+    }
+
+    /// Sample ``n`` outgoing fission-neutron energies (eV) at the
+    /// given incident energy, using the engine's exact sampling
+    /// kernel. Returns an empty list if the file has no fission
+    /// energy distribution.
+    #[pyo3(signature = (energy_eV, n, seed = 0xD1A6_F133))]
+    fn sample_fission_outgoing(&self, energy_eV: f64, n: usize, seed: u64) -> Vec<f64> {
+        let ed = match self.reader.fission_energy_dist() {
+            Some(ed) => ed,
+            None => return Vec::new(),
+        };
+        let mut rng = Rng::new(seed, 0);
+        (0..n).map(|_| ed.sample(energy_eV, &mut rng)).collect()
+    }
+}
+
 // ── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -2247,6 +2378,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGammaHeatingResult>()?;
     m.add_class::<PyChain>()?;
     m.add_class::<PyCramOrder>()?;
+    m.add_class::<PyNuclideFile>()?;
 
     m.add_function(wrap_pyfunction!(Sphere, m)?)?;
     m.add_function(wrap_pyfunction!(ZCylinder, m)?)?;

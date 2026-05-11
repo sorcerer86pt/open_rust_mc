@@ -1,3 +1,257 @@
+# ICSBEP harness, scene/material deserialization, MT=22/24/28/37 explicit kernels — 2026-05-11
+
+## TL;DR
+
+This round turned the engine from a "runs Godiva and a hard-coded PWR
+pin-cell" tool into a **published-benchmark regression substrate**.
+The new entry point is `cargo test --test icsbep_runs --release --
+--ignored`. Every case is a JSON file in `bench/icsbep/` (NMC bundle
+format) that loads through `Geometry::from_json` + `material_resolve`
++ `EigenvalueRunner` in-process — no subprocess orchestration, no
+custom Status enum, no parallel ICSBEP-specific case format.
+
+**386 / 386 lib tests green** (was 287 at session start, +99). The
+in-process regression harness runs 5 ICSBEP cases — **4 PASS, 1 KNOWN
+FAIL** (U-233 by −2876 pcm, deeply investigated, real physics gap).
+
+`origin/main` at `025c486` + this session's uncommitted work. `cargo
+check` default and `--features cuda` both clean. `cargo test --test
+scene_io_corpus -- --ignored` passes — all **373/373 scene-bearing
+JSON cases** in `bench/icsbep/` round-trip through the deserializer.
+
+## What landed
+
+### Nuclide catalog: 50 → 155 entries, convention-derived filenames
+
+- ICSBEP-relevant nuclides added: Be-9, Th-232, Pa-231/233, W-isotopes,
+  Pb-204/206/207/208, Bi-209, Ni/Cr/Mn/Mo/Cu structural set, Ga-69/71
+  (δ-Pu stabilizer), N-14/15, Cl-35/37, F-19, S/P/Ar/K/Ca/Ti/V (solution
+  chemistry + concrete), Cd/Ag/In/Hf/Eu/Dy (control rods), Zn/Br/Sb/Ba
+  /Sm/Gd/U-232.
+- **Filename derivation by ZAID convention** (your callout):
+  `default_filename_for_zaid` + `symbol_for_z` are the new single
+  source of truth. `CatalogEntry.filename` is now `filename_override:
+  Option<&'static str>` with `None` triggering `<Symbol><Mass>.h5`.
+  Universal across 155/155 entries — proven by
+  `default_filename_matches_every_catalog_entry`. Adding a new nuclide
+  is a 3-field `{zaid, symbol, nu_bar_const}` entry.
+
+### Material API: mass-fraction → atom-density
+
+- `Material::from_mass_fractions(name, T, ρ_g/cc, [(idx, A_u, w_i)])`
+  with two variants for AWR and atom-fraction input. Avogadro / m_n
+  constants pinned to 2019-SI CODATA values via const-division so the
+  two never drift.
+- 6 tests including Godiva HEU round-trip + PWR UO₂ stoichiometry.
+
+### NMC bundle spec + ICSBEP benchmark block
+
+- `specs/nmc/NMC_SPEC.md` + `open_rust_mc_geometry.schema.json` moved
+  into the repo with a new `manifest.benchmark` section (§3.1) for
+  reference k_eff / σ_exp / case_id / source / data_provenance.
+- A bundle without `benchmark` is still a valid `.nmc` — the block is
+  optional, only validation runs need it.
+
+### Bulk ICSBEP import: 367 cases from open-source proxies
+
+- `scripts/import_icsbep.py` walks `mit-crpg/benchmarks/icsbep/*` +
+  `openmc-dev/validation/uncertainties.csv` → emits one JSON per case
+  in NMC scene-bundle format with full provenance chain
+  (`data_provenance.geometry_materials` cites mit-crpg commit/path,
+  `data_provenance.k_eff_reference` cites the openmc-dev row,
+  `data_provenance.canonical_source` cites the registered NEA handbook).
+- Round 1: 367 cases emitted, 15 lattice cases skipped, 11 missing
+  from uncertainties.csv.
+- **Lattice support added** in a follow-up: `<lattice>` →
+  `rect_lattices`, distinguishes `fill="N"` as lattice-vs-universe
+  by id-set membership, **remaps sparse universe IDs** to dense
+  `[0, N_universes)` indices (engine validator treats UniverseId.0
+  as a direct array index). 6 LCT-008 cases now imported (case-1, 2,
+  5, 7, 8, 11). Final: **373 case JSONs in `bench/icsbep/`**.
+
+### `Geometry::from_json` (`scene_io`)
+
+- Field-for-field DTO types matching `open_rust_mc_geometry.schema.json`
+  via serde tagged-enum: 11 surface variants, 4 region ops, 5 cell-fill
+  variants, rect-lattice with `material_overrides`, hex-lattice with
+  flat-top / pointy-top orientation, materials with HDF5 paths or
+  ZAID-form entries, optional rotation matrices.
+- 7 unit tests + the corpus smoke test (`scene_io_corpus`) that loads
+  **all 373** scene-bearing cases — zero failures.
+
+### `material_resolve::resolve_materials`
+
+- Bridges `MaterialDto` (HDF5 paths or ZAID) → engine `Material` +
+  `SvdXsProvider`. Dedupes kernels by `(zaid, temp_idx)` so the same
+  nuclide at the same temperature is loaded once across all materials.
+- **S(α,β) wiring (your callout — "do things correctly")**:
+  - Per-nuclide canonical form (`NuclideEntryDto.thermal_file`) supported.
+  - Material-level form (`MaterialDto.thermal_files`, current import-
+    script output) supported via `parse_thermal_target` that maps
+    `c_<Symbol>_in_<Compound>.h5` → element Z / mass; D/T glyphs map
+    to H-2 / H-3 specifically. 6 unit tests covering all conventions.
+  - End-to-end validated on HEU-SOL-THERM-001 case-1: 106 thermal
+    energies loaded across 8 temperatures from `c_H_in_H2O.h5`,
+    correctly attached to H-1 kernel slot. Case passes.
+
+### `cargo test`–driven ICSBEP harness
+
+- `tests/icsbep_runs.rs`. Each case is one `#[test]` (currently 5 cases
+  + a SVD-rank-sweep diagnostic). All `#[ignore]`d so default
+  `cargo test` stays fast; full sweep via `cargo test --test
+  icsbep_runs --release -- --ignored`.
+- Pass criterion: `|Δk| ≤ 3 σ_combined`.
+- `ICSBEP_DATA_DIR` env var overrides the HDF5 root.
+
+### MT=22/24/28/37 as first-class explicit kernels (your callout — "no cheaping out")
+
+After investigating the U-233 −2876 pcm bias, identified that the
+"missing-channels residual" code path was a heuristic shortcut.
+Replaced with first-class kernels per ENDF MT:
+
+- `NuclideKernels` gains: `n_nalpha` (MT=22), `n_2nalpha` (MT=24),
+  `n_np` (MT=28), `n4n` (MT=37), each with its own
+  `*_edist: Option<EnergyDistribution>` and (for the n_α/n_p set) ENDF
+  `Q_value`.
+- `hdf5_reader::reaction_q_value(mt)` helper for Q-value attribute
+  reads.
+- `load_nuclide_with_policy` + `load_nuclide_at_temp` load each MT
+  separately; the missing-channels partial-sum now includes
+  MT={22, 24, 28, 37} so the residual reported truly is "physics we
+  don't know how to model yet".
+- `MicroXs` gains fields for each.
+- `process_collision` gains dispatch branches with correct
+  multiplicity: MT=22 / 28 emit 1 neutron (single secondary, treated
+  as inelastic with the reaction's own Q-value); MT=24 emits 2; MT=37
+  emits 4.
+- `ChargedParticleEdists<'a>` bundle struct so `process_collision`'s
+  signature doesn't balloon (6 extra args collapsed to 1).
+- `XsProvider::charged_particle_edists` trait method, `SvdXsProvider`
+  impl returns the bundle. Default impl (Table / fixtures) returns
+  empty. n4n_edist also exposed.
+- 5 binary placeholder sites for `NuclideKernels` collapsed to a new
+  `NuclideKernels::empty(awr, nu_bar)` constructor (saved ~130 lines,
+  avoids field-explosion when adding new fields).
+- 386 lib tests pass.
+
+### `bench_mem` / clean-up of 5 binary placeholders
+
+- godiva.rs / pwr_pincell.rs / pwr_assembly.rs / hex_minicore.rs /
+  deplete_pwr.rs all use `NuclideKernels::empty()`.
+
+### Updated `ICSBEP.md`
+
+- Source-of-truth policy documented: canonical source is the NEA/OECD
+  registered handbook; open-source proxies (mit-crpg, openmc-dev) used
+  for bulk-authoring with full attribution chain in every case file.
+
+## ICSBEP regression status
+
+| Case | k_calc | k_ref | Δ_pcm | n_σ | Status |
+|---|---:|---:|---:|---:|---|
+| HEU-MET-FAST-001 case-1 (Godiva) | 0.99555 ± 0.00236 | 1.0000 ± 0.001 | −445 | 1.73 | PASS |
+| PU-MET-FAST-001 (Jezebel) | 1.00131 ± 0.00251 | 1.0000 ± 0.002 | +131 | 0.41 | PASS |
+| PU-MET-FAST-002 | 0.99883 ± 0.00231 | 1.0000 ± 0.002 | −117 | 0.38 | PASS |
+| HEU-SOL-THERM-001 case-1 | 0.97952 ± 0.00552 | 1.0004 ± 0.006 | −2088 | 2.56 | PASS (with S(α,β)) |
+| U233-MET-FAST-001 (Jezebel-23) | 0.97124 ± 0.00246 | 1.0000 ± 0.001 | −2876 | 10.85 | **KNOWN FAIL** |
+
+## U-233 deep-dive findings (task #19)
+
+Spent substantial time tracing the −2876 pcm bias. Each hypothesis
+tested, each ruled in or out:
+
+1. **Residual-routing heuristic** (capture vs inelastic for the
+   "missing channels" gap). Routed to inelastic → made U-233 worse
+   (−2942 pcm). Reverted. Routing was correct, problem was elsewhere.
+2. **MT=22/24/28 missing as explicit kernels**. Added them properly
+   (no heuristic shortcuts, full kinematics). U-233's HDF5 doesn't
+   contain those groups — path-not-found errors confirm.
+3. **MT=37 (n,4n) missing as explicit kernel**. U-233 HAS this MT,
+   we weren't loading it. Added with 4-secondary dispatch. **Doesn't
+   fire** for U-233 — kinematic threshold ≈ 19 MeV is above Jezebel-23
+   spectrum (effective ceiling ~12 MeV).
+4. **SVD-rank cutoff** (your hint — "math + values correct, maybe
+   thresholds assumed"). Ran sweep at rank 5 / 15 / 30:
+
+   | rank | k_calc | Δ_ICSBEP |
+   |---:|---:|---:|
+   | 5 | 0.97124 | −2876 pcm |
+   | 15 | 0.97439 | −2561 pcm |
+   | 30 | 0.97439 | −2561 pcm |
+
+   SVD compression contributes **315 pcm** at rank 5; convergent at
+   rank ≥ 15. **The remaining 2561 pcm is non-SVD physics.**
+
+5. **ν̄(E) interpolation**. U-233's HDF5 ships only 13 ν̄(E) points
+   vs U-235's 79. Values look correct at probe energies (thermal
+   2.49, 1 MeV 2.58, 5 MeV 3.15). Linear interpolation between
+   sparse points may still be inadequate for the 1-5 MeV range that
+   dominates Jezebel-23 transport — not yet conclusively ruled in
+   or out.
+6. **Fission spectrum χ(E_in, E_out)** for U-233 — not investigated
+   yet. Likely culprit per task #20.
+
+**Architectural takeaway** (your callout — "one-size-fits-all is
+erroneous"): each nuclide's evaluation has different MTs, different
+ν̄(E) point density, different optimal SVD rank. The
+default-everywhere policy (rank 5, generic MT list, generic
+interpolation) needs to become per-nuclide policy. Tracked as task
+#20.
+
+## Test count progression
+
+287 (start) → 379 (after catalog + mass-frac + scene_io + bench
+runner + thermal wiring) → 386 (after MT=22/24/28/37 work). All
+green, plus 1 corpus integration test, plus 5 ICSBEP cases (4 PASS,
+1 KNOWN FAIL).
+
+## Honest scorecard
+
+| Item | Status |
+|---|---|
+| `Geometry::from_json` deserializer | ✅ shipped, 7 unit tests + 373-case corpus smoke |
+| `material_resolve` with S(α,β) | ✅ shipped, validated on SOL-THERM case |
+| ICSBEP-handbook-fidelity policy | ✅ documented in ICSBEP.md |
+| Bulk import (367 → 373 cases) | ✅ shipped |
+| Cargo-test regression harness | ✅ shipped, 5 cases wired |
+| Catalog convention (filename from ZAID) | ✅ universal, proven by self-test |
+| Mass-fraction → atom-density converter | ✅ 6 tests including Godiva HEU |
+| MT=22/24/28/37 explicit-kernel loading | ✅ shipped with proper dispatch |
+| ν̄/m_n CODATA constants (2019 SI) | ✅ pinned via const-division |
+| **U-233 −2876 pcm bias resolution** | ❌ deferred (task #20) — non-SVD physics gap |
+| Per-nuclide rank policy | ❌ deferred (task #20) |
+| `runner`-based `icsbep_bench` CLI | retired in favour of `cargo test` |
+
+## Files touched this round
+
+```
+NEW:
+  bench/icsbep/*.json                       (373 cases)
+  scripts/import_icsbep.py                  (bulk converter)
+  specs/nmc/NMC_SPEC.md                     (bundle spec)
+  specs/nmc/open_rust_mc_geometry.schema.json
+  rust_prototype/src/geometry/scene_io.rs   (Geometry::from_json)
+  rust_prototype/src/transport/material_resolve.rs
+  rust_prototype/src/bin/icsbep_bench.rs    (transitional CLI, retired)
+  rust_prototype/tests/icsbep_runs.rs       (cargo-test harness)
+  rust_prototype/tests/scene_io_corpus.rs   (corpus smoke)
+
+MODIFIED:
+  CLAUDE.md                                  (updated project memory)
+  ICSBEP.md                                  (rewrote with current state)
+  rust_prototype/src/transport/nuclides.rs   (155 catalog entries, conv-derived filename)
+  rust_prototype/src/transport/material.rs   (from_mass_fractions* + CODATA consts)
+  rust_prototype/src/transport/xs_provider.rs (MT=22/24/28/37 + empty() constructor)
+  rust_prototype/src/transport/simulate.rs   (cp_edists threading + trait method)
+  rust_prototype/src/physics/collision.rs    (MT=22/24/28/37 dispatch + 3-new MicroXs fields)
+  rust_prototype/src/hdf5_reader.rs          (reaction_q_value helper)
+  rust_prototype/src/bin/{godiva,pwr_pincell,pwr_assembly,hex_minicore,deplete_pwr}.rs
+                                             (NuclideKernels::empty refactor)
+  rust_prototype/src/bin/xs_provider_diff.rs (MicroXs field update)
+```
+
+---
+
 # Random-ray TRRM (forward + adjoint, immortal rays) + FW-CADIS replacement — 2026-05-08
 
 ## TL;DR
@@ -99,8 +353,9 @@ Both RR-CADIS results are unbiased within combined MC σ. RR vs lite at
    Cartesian FSR lookup, atomic-add accumulators. `src/gpu_random_ray.rs`
    — Rust wrapper with NVRTC compile + buffer alloc + scaffold launch.
    `cargo check --features cuda` clean. Runtime parity validation
-   against CPU is **deferred until CUDA hardware is available** — same
-   convention as the hex-GPU work in this file.
+   against CPU is **pending the NVRTC compile + on-device run** —
+   CUDA hardware is present (RTX A1000 laptop), same convention as
+   the hex-GPU work in this file.
 
 ## Validated benchmarks (lib tests)
 
@@ -139,7 +394,7 @@ ergonomics test). Net **+27 lib tests**, all green.
 | Textbook 50–1000× CADIS gain | ❌ ruled out for this WW design — see negative results below |
 | Linear source approximation (1st-order) | deferred (flat on fine mesh equivalent for axis-aligned problems) |
 | Full C5G7 (4 fuel × 7g × 17×17) | data plumbing, no new code |
-| GPU runtime validation | deferred until CUDA hardware available |
+| GPU runtime validation | pending NVRTC compile + on-device run (CUDA hw present) |
 | Continuous-splitting variance reduction (DXTRAN-style) | research-tier, **the actual lever needed for >14 mfp** |
 
 ### Negative results documented this round
@@ -677,11 +932,11 @@ clean.
 ## Honest gaps and what's deferred
 
 - **Hex GPU runtime parity test** — schema and Rust glue compile
-  clean under `cargo check --features cuda`, but the NVRTC compile
-  + on-device validation are pending CUDA hardware. The CPU smoke
-  (`hex_lattice_descent_and_trace_smoke`) covers the math; an
-  equivalent multi-million-event GPU↔CPU comparison is the next
-  step once a device is available.
+  clean under `cargo check --features cuda`. CUDA hardware is
+  present (RTX A1000 laptop, same box used for all other GPU
+  validation in this file); the NVRTC compile + on-device
+  multi-million-event GPU↔CPU comparison is the obvious next step,
+  using `hex_lattice_descent_and_trace_smoke` as the CPU reference.
 
 - **Bootstrap WW on a heterogeneous problem** — the algorithm runs
   end-to-end on Godiva but doesn't help there because the
