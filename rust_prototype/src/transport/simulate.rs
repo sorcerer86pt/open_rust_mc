@@ -2181,7 +2181,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
 /// only those that land inside a cell containing material. For Godiva, this
 /// is the single fuel sphere. For PWR pin cell, this is the cylindrical
 /// fuel region (rejects corners of the bounding box that fall in gap/clad/water).
-fn initial_source(
+pub fn initial_source(
     n: usize,
     geometry: &crate::geometry::Geometry,
     cells: &[Cell],

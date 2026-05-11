@@ -170,7 +170,17 @@
 #define P_INEL_CDF_N_LEV    101
 #define P_INEL_CDF_LOG_EMIN 102
 #define P_INEL_CDF_LOG_EMAX 103
-#define N_PARAMS            104
+// Closed-form Watt (Law 11) χ — see GpuNuclideData::watt_*.
+// `P_WATT_NUC_N[i] > 0` flags nuclide `i` as Watt-parameterised; the
+// device looks up a(E_in), b(E_in) by lin-lin interpolation on the
+// shared incident-energy grid `P_WATT_INC_E[off..off+n]`.
+#define P_WATT_INC_E        104
+#define P_WATT_A            105
+#define P_WATT_B            106
+#define P_WATT_U            107
+#define P_WATT_NUC_OFF      108
+#define P_WATT_NUC_N        109
+#define N_PARAMS            110
 
 // Access helpers — read from the flat u64 params buffer
 // PTR_F removed — all basis data is now f64 (PTR_D)
@@ -398,17 +408,79 @@ __device__ __forceinline__ double sample_eout_bin(
     return eo[lo] + f * (eo[hi] - eo[lo]);
 }
 
+/// Mathematically correct Watt sampler matching the analytic moments
+/// 3a/2 + a²b/4. Derivation in the CPU `WattLaw::sample` (see
+/// `hdf5_reader.rs`): W ~ Maxwell(a) via Coveyou–Macpherson
+///   W = -a · (ln ξ₁ + cos²(π ξ₂ / 2) · ln ξ₃)
+/// then the Watt step
+///   E_out = W + a²b/4 + (2ξ₄ − 1) · √(a²b·W)
+/// with a in eV and b in /eV. The prior GPU fallback dropped the
+/// `a²b/4` shift and the jitter term entirely, giving a pure Maxwell
+/// with mean 3a/2 — 27% LOW on the outgoing fission spectrum for
+/// Cranberg U-235 parameters.
+__device__ __forceinline__ double sample_watt_ab(
+    double a_eV, double b_inv_eV, PcgState* rng)
+{
+    double xi1 = fmax(pcg_uniform(rng), 1e-30);
+    double xi2 = pcg_uniform(rng);
+    double xi3 = fmax(pcg_uniform(rng), 1e-30);
+    double xi4 = pcg_uniform(rng);
+    double c   = cos(PI * 0.5 * xi2);
+    double W   = -a_eV * (log(xi1) + c * c * log(xi3));
+    double term = 0.25 * a_eV * a_eV * b_inv_eV;
+    double e_out = W + term + (2.0 * xi4 - 1.0) * sqrt(a_eV * a_eV * b_inv_eV * W);
+    return fmax(e_out, 1e-5);
+}
+
 __device__ double sample_fission_energy(
     double E_inc, PcgState* rng, Params p, int hit_nuc)
 {
     int fi_off = __ldg(&PTR_I(p, P_FIS_NUC_OFF)[hit_nuc]);
     int fi_n   = __ldg(&PTR_I(p, P_FIS_NUC_NINC)[hit_nuc]);
     if (fi_n <= 0) {
-        // Watt fallback when no tabulated spectrum available.
-        double a=0.988, x1=-log(fmax(pcg_uniform(rng),1e-30));
-        double x2=-log(fmax(pcg_uniform(rng),1e-30));
-        double c=cos(PI/2.0*pcg_uniform(rng));
-        return a*(x1+x2*c*c)*1e6;
+        // Tabular χ not stored for this nuclide — check for a Watt
+        // closed-form (ENDF Law 11) upload before falling back to the
+        // U-235 Cranberg parameters. Watt is the dominant
+        // closed-form path for actinides whose MT=18 ships a(E),
+        // b(E) (e.g. U-233 / U-234 multi-chance contributions).
+        int w_n   = __ldg(&PTR_I(p, P_WATT_NUC_N)[hit_nuc]);
+        if (w_n > 0) {
+            int w_off = __ldg(&PTR_I(p, P_WATT_NUC_OFF)[hit_nuc]);
+            const double* w_e = &PTR_D(p, P_WATT_INC_E)[w_off];
+            const double* w_a = &PTR_D(p, P_WATT_A)[w_off];
+            const double* w_b = &PTR_D(p, P_WATT_B)[w_off];
+            double a_eV, b_inv_eV;
+            if (E_inc <= w_e[0]) {
+                a_eV = w_a[0]; b_inv_eV = w_b[0];
+            } else if (E_inc >= w_e[w_n - 1]) {
+                a_eV = w_a[w_n - 1]; b_inv_eV = w_b[w_n - 1];
+            } else {
+                int lo = 0, hi = w_n - 1;
+                while (hi - lo > 1) {
+                    int mid = (lo + hi) >> 1;
+                    if (w_e[mid] <= E_inc) lo = mid; else hi = mid;
+                }
+                double t = (E_inc - w_e[lo]) /
+                           fmax(w_e[lo + 1] - w_e[lo], 1e-30);
+                a_eV     = w_a[lo] + t * (w_a[lo + 1] - w_a[lo]);
+                b_inv_eV = w_b[lo] + t * (w_b[lo + 1] - w_b[lo]);
+            }
+            double u_cut = __ldg(&PTR_D(p, P_WATT_U)[hit_nuc]);
+            double max_e = fmax(E_inc - u_cut, 1e-5);
+            // Resample until E_out ≤ E_in − u; bound at 100 tries
+            // for the same safety reason as the CPU sampler.
+            for (int t = 0; t < 100; ++t) {
+                double e_out = sample_watt_ab(a_eV, b_inv_eV, rng);
+                if (e_out <= max_e) return e_out;
+            }
+            return fmin(sample_watt_ab(a_eV, b_inv_eV, rng), max_e);
+        }
+        // No Watt parameters either — fall back to U-235 Cranberg.
+        // This path fires only for nuclides whose evaluation carries
+        // a fission-spectrum law the engine doesn't yet handle on
+        // GPU (Maxwell / Evaporation / Madland-Nix). The host upload
+        // logs a one-time warning when it skips one of those laws.
+        return sample_watt_ab(0.988e6, 2.249e-6, rng);
     }
     const double* inc_e = &PTR_D(p, P_FIS_INC_E)[fi_off];
 

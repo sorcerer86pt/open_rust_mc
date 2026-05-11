@@ -1233,6 +1233,14 @@ pub struct WattLaw {
 }
 
 impl WattLaw {
+    /// Public re-export of the internal lin-lin lookup so callers
+    /// uploading the Watt parameters to GPU can sample a/b on a
+    /// chosen incident-energy grid without duplicating the
+    /// interpolation logic.
+    pub fn lookup_lin_lin_pub(grid: &[f64], values: &[f64], e: f64) -> f64 {
+        Self::lookup_lin_lin(grid, values, e)
+    }
+
     fn lookup_lin_lin(grid: &[f64], values: &[f64], e: f64) -> f64 {
         if grid.is_empty() {
             return 0.0;

@@ -56,6 +56,16 @@ use open_rust_mc::transport::material_resolve;
 use open_rust_mc::transport::nuclides::NuclideLibrary;
 use open_rust_mc::transport::simulate::SimConfig;
 
+// CUDA-feature-gated parallel of the CPU regression. The metal cases
+// fit the device's `max_nuc = 4` per-material constraint and exercise
+// every piece of the GPU path that the ICSBEP harness needs:
+// `transport_recursive` device kernel with SVD-and-Table reactions,
+// recursive geometry walk, S(α,β) thermal swap-in (when present), and
+// the fission-bank → next-batch source renormalisation handled by
+// `dispatch::CudaRunner`.
+#[cfg(feature = "cuda")]
+mod cuda_runs;
+
 /// SVD reconstruction rank for the ICSBEP regression. Bumped from 5
 /// to 15 after the HEU-SOL-THERM-001 deep-dive showed that thermal
 /// benchmarks resolve a 500+ pcm residual SVD-compression bias only

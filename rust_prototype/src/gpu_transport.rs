@@ -91,7 +91,7 @@ pub struct GpuNuclideData {
     pub ang_nuc_offsets: CudaSlice<i32>, // per-nuclide → offset into ang_energies
     pub ang_nuc_n_energies: CudaSlice<i32>, // per-nuclide → number of angular energies
     pub ang_is_cm: CudaSlice<i32>,    // per-nuclide → 1 if CM frame
-    // Fission energy distributions (tabulated CDF)
+    // Fission energy distributions (tabulated CDF — ENDF Law 4/61).
     pub fis_inc_energies: CudaSlice<f64>,
     pub fis_dist_offsets: CudaSlice<i32>,
     pub fis_dist_sizes: CudaSlice<i32>,
@@ -99,6 +99,22 @@ pub struct GpuNuclideData {
     pub fis_cdf: CudaSlice<f64>,
     pub fis_nuc_offsets: CudaSlice<i32>,
     pub fis_nuc_n_inc: CudaSlice<i32>,
+    // Closed-form fission χ parameters per nuclide (ENDF Law 11 Watt).
+    // When `fis_nuc_n_inc[i] == 0` and `watt_nuc_n[i] > 0`, the
+    // device-side `sample_fission_energy` interpolates
+    // a(E_in) and b(E_in) from `watt_inc_e[off..off+n]` →
+    // `watt_a[off..off+n]` / `watt_b[off..off+n]` and samples via
+    // the math-correct Watt sampler in transport.cu. Replaces the
+    // hardcoded U-235 Cranberg fallback for every nuclide whose
+    // evaluation actually carries Watt parameters (U-233, U-234
+    // multi-chance fission products, etc.). `watt_u` is the eV
+    // cutoff applied as `E_out ≤ E_in − u`.
+    pub watt_inc_energies: CudaSlice<f64>,
+    pub watt_a: CudaSlice<f64>,
+    pub watt_b: CudaSlice<f64>,
+    pub watt_u: CudaSlice<f64>,
+    pub watt_nuc_offsets: CudaSlice<i32>,
+    pub watt_nuc_n: CudaSlice<i32>,
     // URR probability tables
     pub urr_energies: CudaSlice<f64>,
     pub urr_cum_prob: CudaSlice<f64>,
@@ -655,6 +671,14 @@ impl GpuTransportContext {
             dptr!(&nuc_data.inel_cdf_n_lev),
             dptr!(&nuc_data.inel_cdf_log_e_min),
             dptr!(&nuc_data.inel_cdf_log_e_max),
+            // Watt closed-form χ (Law 11), slots 104-109. See
+            // transport.cu sample_fission_energy for the dispatch.
+            dptr!(&nuc_data.watt_inc_energies),
+            dptr!(&nuc_data.watt_a),
+            dptr!(&nuc_data.watt_b),
+            dptr!(&nuc_data.watt_u),
+            dptr!(&nuc_data.watt_nuc_offsets),
+            dptr!(&nuc_data.watt_nuc_n),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -864,16 +888,53 @@ impl GpuTransportContext {
                 lev_q_vec.push(lev.info.q_value);
                 lev_thr_vec.push(lev.info.threshold);
                 lev_mt_vec.push(lev.info.mt as i32);
-                if let Some(ref rk) = lev.kernel {
-                    lev_has_kernel_vec.push(1);
-                    lev_basis_off_vec.push(lev_basis_vec.len() as i32);
-                    lev_basis_vec.extend_from_slice(rk.kernel.basis_f64());
-                    lev_coeffs_off_vec.push(lev_coeffs_vec.len() as i32);
-                    lev_coeffs_vec.extend_from_slice(&rk.coeffs);
-                } else {
-                    lev_has_kernel_vec.push(0);
-                    lev_basis_off_vec.push(0);
-                    lev_coeffs_off_vec.push(0);
+                match lev.kernel.as_ref() {
+                    Some(crate::transport::xs_provider::ReactionKernel::Svd { kernel, coeffs }) => {
+                        lev_has_kernel_vec.push(1);
+                        lev_basis_off_vec.push(lev_basis_vec.len() as i32);
+                        lev_basis_vec.extend_from_slice(kernel.basis_f64());
+                        lev_coeffs_off_vec.push(lev_coeffs_vec.len() as i32);
+                        lev_coeffs_vec.extend_from_slice(coeffs);
+                    }
+                    Some(crate::transport::xs_provider::ReactionKernel::Table { xs, .. }) => {
+                        // Discrete-level Table variant — adapt to the
+                        // same uniform rank-N SVD layout the device
+                        // kernel expects, matching the path used for
+                        // the main per-MT channels (basis = log10(xs)
+                        // at slot 0, zero elsewhere; coeffs = [1, 0,
+                        // ...]).
+                        let rank = nuclides
+                            .iter()
+                            .flat_map(|n| {
+                                n.elastic.as_ref().into_iter().chain(n.fission.as_ref())
+                            })
+                            .find_map(|k| match k {
+                                crate::transport::xs_provider::ReactionKernel::Svd { kernel, .. } => {
+                                    Some(kernel.rank())
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(1);
+                        lev_has_kernel_vec.push(1);
+                        lev_basis_off_vec.push(lev_basis_vec.len() as i32);
+                        for &v in xs {
+                            let log10_v = if v > 0.0 { v.log10() } else { -300.0 };
+                            lev_basis_vec.push(log10_v);
+                            for _ in 1..rank {
+                                lev_basis_vec.push(0.0);
+                            }
+                        }
+                        lev_coeffs_off_vec.push(lev_coeffs_vec.len() as i32);
+                        lev_coeffs_vec.push(1.0);
+                        for _ in 1..rank {
+                            lev_coeffs_vec.push(0.0);
+                        }
+                    }
+                    None => {
+                        lev_has_kernel_vec.push(0);
+                        lev_basis_off_vec.push(0);
+                        lev_coeffs_off_vec.push(0);
+                    }
                 }
                 // Per-level angular dist: optional slice aligned with
                 // discrete_levels. Missing → mark as 0 energies so the
@@ -1001,17 +1062,79 @@ impl GpuTransportContext {
         let mut fis_nuc_off_vec = vec![0_i32; n_nuc];
         let mut fis_nuc_ninc_vec = vec![0_i32; n_nuc];
 
+        // Per-nuclide Watt closed-form χ parameters. Populated only
+        // for nuclides whose ENDF evaluation carries Watt (Law 11) —
+        // the rest leave `watt_nuc_n_vec[i] = 0` and the device kernel
+        // skips the Watt branch.
+        let mut watt_inc_e_vec: Vec<f64> = Vec::new();
+        let mut watt_a_vec: Vec<f64> = Vec::new();
+        let mut watt_b_vec: Vec<f64> = Vec::new();
+        let mut watt_u_vec = vec![0.0_f64; n_nuc];
+        let mut watt_nuc_off_vec = vec![0_i32; n_nuc];
+        let mut watt_nuc_n_vec = vec![0_i32; n_nuc];
+
         for (nuc_idx, nuc) in nuclides.iter().enumerate() {
             if let Some(ref edist) = nuc.fission_energy_dist {
-                fis_nuc_off_vec[nuc_idx] = fis_inc_e_vec.len() as i32;
-                fis_nuc_ninc_vec[nuc_idx] = edist.energies.len() as i32;
-                for (i, e_inc) in edist.energies.iter().enumerate() {
-                    fis_inc_e_vec.push(*e_inc);
-                    let dist = &edist.distributions[i];
-                    fis_dist_off_vec.push(fis_eout_vec.len() as i32);
-                    fis_dist_sz_vec.push(dist.e_out.len() as i32);
-                    fis_eout_vec.extend_from_slice(&dist.e_out);
-                    fis_cdf_vec.extend_from_slice(&dist.cdf);
+                use crate::hdf5_reader::FissionEnergyLaw;
+                match &edist.closed_form {
+                    None => {
+                        // Tabular path — ENDF Law 4 / Law 61. Distributions vec
+                        // is aligned 1:1 with the incident-energy grid.
+                        fis_nuc_off_vec[nuc_idx] = fis_inc_e_vec.len() as i32;
+                        fis_nuc_ninc_vec[nuc_idx] = edist.energies.len() as i32;
+                        for (i, e_inc) in edist.energies.iter().enumerate() {
+                            fis_inc_e_vec.push(*e_inc);
+                            let dist = &edist.distributions[i];
+                            fis_dist_off_vec.push(fis_eout_vec.len() as i32);
+                            fis_dist_sz_vec.push(dist.e_out.len() as i32);
+                            fis_eout_vec.extend_from_slice(&dist.e_out);
+                            fis_cdf_vec.extend_from_slice(&dist.cdf);
+                        }
+                    }
+                    Some(FissionEnergyLaw::Watt(w)) => {
+                        // Closed-form Watt — distributions vec is empty.
+                        // Resample a(E) and b(E) onto a SHARED incident-
+                        // energy grid (union of both) so the device only
+                        // does one binary search per fission event.
+                        let mut shared: Vec<f64> = w
+                            .a_energies
+                            .iter()
+                            .chain(w.b_energies.iter())
+                            .copied()
+                            .collect();
+                        shared.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                        shared.dedup_by(|a, b| (*a - *b).abs() < 1e-30 * a.abs().max(1.0));
+                        let off = watt_inc_e_vec.len() as i32;
+                        watt_nuc_off_vec[nuc_idx] = off;
+                        watt_nuc_n_vec[nuc_idx] = shared.len() as i32;
+                        watt_u_vec[nuc_idx] = w.u;
+                        for e in &shared {
+                            watt_inc_e_vec.push(*e);
+                            watt_a_vec.push(crate::hdf5_reader::WattLaw::lookup_lin_lin_pub(
+                                &w.a_energies,
+                                &w.a_values,
+                                *e,
+                            ));
+                            watt_b_vec.push(crate::hdf5_reader::WattLaw::lookup_lin_lin_pub(
+                                &w.b_energies,
+                                &w.b_values,
+                                *e,
+                            ));
+                        }
+                    }
+                    Some(FissionEnergyLaw::Maxwell(_))
+                    | Some(FissionEnergyLaw::Evaporation(_)) => {
+                        // Not yet handled on GPU — the per-collision
+                        // sampler in transport.cu will fall through to
+                        // the math-correct Watt fallback with Cranberg
+                        // parameters. Logged once at load time so the
+                        // bias is visible.
+                        eprintln!(
+                            "warning: nuclide idx {nuc_idx}: Maxwell / Evaporation \
+                             fission χ not yet uploaded to GPU — falling back to \
+                             U-235 Cranberg Watt parameters at runtime."
+                        );
+                    }
                 }
             }
         }
@@ -1025,6 +1148,15 @@ impl GpuTransportContext {
         if fis_dist_off_vec.is_empty() {
             fis_dist_off_vec.push(0);
             fis_dist_sz_vec.push(0);
+        }
+        // Watt buffers must have at least one entry so the CUDA
+        // device buffers are non-empty (`clone_htod` accepts empty
+        // slices on most drivers but emitting a sentinel keeps the
+        // hot path branch-free at the bounds check).
+        if watt_inc_e_vec.is_empty() {
+            watt_inc_e_vec.push(0.0);
+            watt_a_vec.push(0.0);
+            watt_b_vec.push(0.0);
         }
 
         // ── Pack URR probability tables ──
@@ -1143,6 +1275,12 @@ impl GpuTransportContext {
             fis_cdf: self.stream.clone_htod(&fis_cdf_vec)?,
             fis_nuc_offsets: self.stream.clone_htod(&fis_nuc_off_vec)?,
             fis_nuc_n_inc: self.stream.clone_htod(&fis_nuc_ninc_vec)?,
+            watt_inc_energies: self.stream.clone_htod(&watt_inc_e_vec)?,
+            watt_a: self.stream.clone_htod(&watt_a_vec)?,
+            watt_b: self.stream.clone_htod(&watt_b_vec)?,
+            watt_u: self.stream.clone_htod(&watt_u_vec)?,
+            watt_nuc_offsets: self.stream.clone_htod(&watt_nuc_off_vec)?,
+            watt_nuc_n: self.stream.clone_htod(&watt_nuc_n_vec)?,
             urr_energies: self.stream.clone_htod(&urr_e_vec)?,
             urr_cum_prob: self.stream.clone_htod(&urr_cp_vec)?,
             urr_total_f: self.stream.clone_htod(&urr_tf_vec)?,
@@ -1636,6 +1774,12 @@ impl GpuTransportContext {
             dptr!(&nuc_data.inel_cdf_n_lev),       //101 P_INEL_CDF_N_LEV
             dptr!(&nuc_data.inel_cdf_log_e_min),   //102 P_INEL_CDF_LOG_EMIN
             dptr!(&nuc_data.inel_cdf_log_e_max),   //103 P_INEL_CDF_LOG_EMAX
+            dptr!(&nuc_data.watt_inc_energies),    //104 P_WATT_INC_E
+            dptr!(&nuc_data.watt_a),               //105 P_WATT_A
+            dptr!(&nuc_data.watt_b),               //106 P_WATT_B
+            dptr!(&nuc_data.watt_u),               //107 P_WATT_U
+            dptr!(&nuc_data.watt_nuc_offsets),     //108 P_WATT_NUC_OFF
+            dptr!(&nuc_data.watt_nuc_n),           //109 P_WATT_NUC_N
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
