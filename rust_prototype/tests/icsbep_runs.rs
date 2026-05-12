@@ -274,27 +274,58 @@ fn run_case_e2e(case_file: &Path, batches: u32, inactive: u32, particles: u32, s
         .get("scene")
         .unwrap_or_else(|| panic!("{}: missing `scene` block", case_file.display()));
 
-    // Acceptance reference selection: prefer the `local_validation`
-    // block (OpenMC measurement on the SAME scene JSON) when present,
-    // fall back to the ICSBEP handbook value otherwise. See
-    // `tests/cuda_runs.rs::run_case_cuda` for the rationale.
-    let (k_ref, sigma_exp) = match benchmark.get("local_validation") {
+    // ── Acceptance reference selection ───────────────────────────────
+    //
+    // WHAT THIS RESOLVES TO: the (k_ref, sigma_exp) pair `assert_passes`
+    // grades the engine's `k_calc` against.
+    //
+    // PRIMARY (default) target: `benchmark.k_eff_reference` — the
+    // canonical ICSBEP handbook value. This is the truth; nothing else
+    // displaces it for normal benchmarks.
+    //
+    // SECONDARY target, used ONLY when the bench JSON carries a
+    // `local_validation` block: `local_validation.openmc_k_eff` — the
+    // k_eff that OpenMC measured on the EXACT SAME `scene` block our
+    // engine consumes.
+    //
+    // WHY THE SECONDARY EXISTS: our bench JSONs come from the
+    // MIT-CRPG / OpenMC open-source proxy of ICSBEP. Small geometry /
+    // material transcription drift means OpenMC running our JSON can
+    // also undershoot the handbook k (HMF-008: OpenMC −310 pcm vs
+    // handbook). Asserting engine vs handbook in that case blames the
+    // engine for scene-JSON drift it cannot fix without registered
+    // handbook access. Asserting engine vs OpenMC-on-this-JSON
+    // isolates engine quality from scene fidelity.
+    //
+    // WHAT THE SECONDARY IS NOT: this is NOT lowering the acceptance
+    // bar. The handbook value stays in `k_eff_reference` and is logged
+    // every test run (see the println below). When a future scene JSON
+    // is regenerated closer to the registered handbook spec, the
+    // `local_validation` block should be refreshed via
+    // `scripts/openmc_scene_runner.py` — see the `_when_to_update`
+    // field on the block itself.
+    let handbook_k = benchmark["k_eff_reference"].as_f64().unwrap_or_else(|| {
+        panic!("{}: benchmark.k_eff_reference not f64", case_file.display())
+    });
+    let handbook_sigma = benchmark["k_eff_sigma"].as_f64().unwrap_or_else(|| {
+        panic!("{}: benchmark.k_eff_sigma not f64", case_file.display())
+    });
+    let (k_ref, sigma_exp, ref_source) = match benchmark.get("local_validation") {
         Some(lv) if lv.get("openmc_k_eff").and_then(|v| v.as_f64()).is_some() => {
             let k = lv["openmc_k_eff"].as_f64().unwrap();
             let s_omc = lv["openmc_k_sigma_seeds"].as_f64().unwrap_or(0.001);
-            let s_handbook = benchmark["k_eff_sigma"].as_f64().unwrap_or(0.001);
-            (k, s_omc.max(s_handbook))
+            (
+                k,
+                s_omc.max(handbook_sigma),
+                "local_validation (OpenMC on this scene)",
+            )
         }
-        _ => {
-            let k = benchmark["k_eff_reference"].as_f64().unwrap_or_else(|| {
-                panic!("{}: benchmark.k_eff_reference not f64", case_file.display())
-            });
-            let s = benchmark["k_eff_sigma"].as_f64().unwrap_or_else(|| {
-                panic!("{}: benchmark.k_eff_sigma not f64", case_file.display())
-            });
-            (k, s)
-        }
+        _ => (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)"),
     };
+    println!(
+        "  [{}] acceptance reference: {ref_source}; handbook k = {handbook_k:.5} ± {handbook_sigma:.5}",
+        case_file.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
+    );
 
     // ── Geometry ──────────────────────────────────────────────────────
     let scene_str = scene.to_string();

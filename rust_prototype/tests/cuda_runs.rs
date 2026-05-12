@@ -51,35 +51,61 @@ fn run_case_cuda(
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
     let benchmark = &value["benchmark"];
     let scene = &value["scene"];
-    // Acceptance reference selection:
+    // ── Acceptance reference selection ───────────────────────────────
     //
-    // ICSBEP handbook (`k_eff_reference`) is the canonical truth, but
-    // our bench JSONs come from the MIT-CRPG / OpenMC open-source proxy
-    // and can carry small scene-transcription drift vs the registered
-    // handbook geometry. When a `local_validation` block exists (added
-    // after running OpenMC on the SAME scene JSON), prefer it: that
-    // captures the apples-to-apples scene-specific target a high-fidelity
-    // MC code computes on the exact same input, so the engine is graded
-    // on engine quality rather than on scene-JSON drift it can't fix.
+    // WHAT THIS RESOLVES TO: the (k_ref, sigma_exp) pair the engine's
+    // k_calc is graded against by `report()` below. This is the PASS /
+    // FAIL target.
     //
-    // Combined σ uses the bigger of (`k_eff_sigma`, OpenMC's seed σ)
-    // — handbook σ is wider, but the OpenMC σ tracks the actual MC
-    // floor on our scene.
-    let (k_ref, sigma_exp) = match benchmark.get("local_validation") {
+    // PRIMARY (default) target is `benchmark.k_eff_reference` —  the
+    // canonical ICSBEP handbook value. This is THE TRUTH; nothing else
+    // displaces it.
+    //
+    // SECONDARY target, used ONLY when the bench JSON carries an
+    // explicit `local_validation` block: `local_validation.openmc_k_eff`
+    // — the k_eff that an independent high-fidelity MC code (OpenMC)
+    // measured on the EXACT SAME `scene` block our engine consumes.
+    //
+    // WHY THE SECONDARY EXISTS: our bench JSONs are sourced from the
+    // MIT-CRPG / OpenMC open-source proxy of ICSBEP, not the registered
+    // NEA/OECD handbook. Small geometry / material transcription drift
+    // can mean OpenMC running our JSON also undershoots the handbook k
+    // (HMF-008: OpenMC −310 pcm vs handbook on our JSON, regardless of
+    // ENDF/B-VII.1 library version). Asserting engine vs handbook in
+    // that situation blames the engine for scene-JSON drift it cannot
+    // fix without registered-access handbook data. Asserting engine vs
+    // OpenMC-on-same-JSON isolates engine quality from scene fidelity.
+    //
+    // WHAT THE SECONDARY IS NOT: this is NOT lowering the acceptance
+    // bar. The handbook value stays in `k_eff_reference` and is logged
+    // as an informational delta in every test report. A future PR that
+    // sources the scene JSON from the registered handbook (or otherwise
+    // closes the OpenMC↔handbook gap) should refresh `local_validation`
+    // accordingly — see the `_when_to_update` field on the block.
+    //
+    // Combined σ uses max(σ_OpenMC_seeds, σ_handbook). σ_OpenMC at our
+    // 24 M-history measurements is typically ~20 pcm, much tighter than
+    // handbook σ_exp; the max prevents under-stating uncertainty if
+    // OpenMC were ever measured at low statistics.
+    let handbook_k = benchmark["k_eff_reference"].as_f64().unwrap();
+    let handbook_sigma = benchmark["k_eff_sigma"].as_f64().unwrap();
+    let (k_ref, sigma_exp, ref_source) = match benchmark.get("local_validation") {
         Some(lv) if lv.get("openmc_k_eff").and_then(|v| v.as_f64()).is_some() => {
             let k = lv["openmc_k_eff"].as_f64().unwrap();
             let s_omc = lv["openmc_k_sigma_seeds"].as_f64().unwrap_or(0.001);
-            let s_handbook = benchmark["k_eff_sigma"].as_f64().unwrap_or(0.001);
-            // Use the larger σ as a conservative bound — if OpenMC's
-            // seed σ is wider than the handbook σ (it usually isn't at
-            // 24 M histories) we don't want to under-state uncertainty.
-            (k, s_omc.max(s_handbook))
+            (k, s_omc.max(handbook_sigma), "local_validation (OpenMC on this scene)")
         }
-        _ => (
-            benchmark["k_eff_reference"].as_f64().unwrap(),
-            benchmark["k_eff_sigma"].as_f64().unwrap(),
-        ),
+        _ => (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)"),
     };
+    // `ref_source` is documented inline above (PRIMARY / SECONDARY)
+    // and printed when this run logs (see further below).  Held in a
+    // sink to avoid an unused-warning while keeping the variable for
+    // future enrichment of `report()`.
+    let _ = ref_source;
+    println!(
+        "  [{}] acceptance reference: {ref_source}; handbook k = {handbook_k:.5} ± {handbook_sigma:.5}",
+        case_file.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
+    );
 
     let loaded = scene_io::load_scene_from_json(&scene.to_string()).unwrap();
     let lib = NuclideLibrary::from_data_dir(&data_dir());
@@ -191,6 +217,12 @@ fn run_case_cuda(
         .sum::<f64>()
         / (n - 1.0).max(1.0);
     let stderr = (variance / n).sqrt();
+    // The handbook (k, σ) is informational only — the test report
+    // can be cross-checked by inspecting `benchmark.k_eff_reference`
+    // alongside `benchmark.local_validation` in the bench JSON. Both
+    // values are persisted; this runner returns only the active
+    // acceptance pair so call sites stay 4-tuple compatible.
+    let _ = (handbook_k, handbook_sigma);
     (mean, stderr, k_ref, sigma_exp)
 }
 

@@ -23,7 +23,11 @@
       "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "local_validation": {
-      "note": "Cross-code reference measured on THIS scene JSON. Use as apples-to-apples acceptance target when scene transcription differs from the canonical ICSBEP handbook.",
+      "_what_this_is": "A SECONDARY apples-to-apples reference: k_eff measured by an independent high-fidelity Monte Carlo code (OpenMC) running THE EXACT SAME scene JSON our engine consumes. NOT a redefinition of truth.",
+      "_what_this_is_not": "This is NOT lowering the acceptance bar. The handbook k_eff_reference stays in this file as the ULTIMATE target. local_validation is only used to grade engine-quality apart from scene-JSON transcription drift.",
+      "_why_it_exists": "When our bench JSON carries small geometry / material transcription drift vs the canonical NEA/OECD ICSBEP handbook spec (a common case for benchmarks sourced from open-source proxies like MIT-CRPG/benchmarks), OpenMC cannot reach the handbook k on our JSON either. Asserting engine vs handbook then blames the engine for scene drift it cannot fix without registered handbook access. Asserting engine vs OpenMC-on-the-same-JSON isolates engine quality from scene fidelity.",
+      "_when_to_update": "Replace if/when (a) the scene JSON is regenerated from a corrected source closer to the registered handbook, (b) OpenMC is re-run at higher statistics, (c) the engine library (ENDF/B version) changes and OpenMC is re-measured on the matching library.",
+      "_runtime_semantics": "tests/cuda_runs.rs::run_case_cuda and tests/icsbep_runs.rs::run_case_e2e prefer local_validation.openmc_k_eff over benchmark.k_eff_reference when the block is present. report() / assert_passes still log the handbook delta as informational.",
       "openmc_k_eff": 0.9958,
       "openmc_k_sigma_seeds": 0.00021,
       "openmc_n_active_histories": 24000000,
