@@ -24,7 +24,11 @@ use open_rust_mc::transport::xs_provider::{load_nuclide, NuclideKernels, Reactio
 // Energies span the bulk of the Godiva fission spectrum.
 const TEST_E_EV: &[f64] = &[5.0e5, 1.0e6, 1.5e6, 2.0e6, 3.0e6, 5.0e6];
 
+// Defaults to U-235 unless overridden via argv[2] (file) + argv[3] (AWR).
+// Used during the rank-padding fix verification and re-used for the
+// HMF-008 Fe / Cu reflector gap investigation.
 const NUCLIDE: &str = "U235.h5";
+const DEFAULT_AWR: f64 = 233.025;
 
 fn data_dir() -> PathBuf {
     if let Some(v) = std::env::args().nth(1) {
@@ -254,9 +258,19 @@ fn gpu_round_trip_check(_kern: &NuclideKernels) -> Result<(), Box<dyn std::error
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = data_dir();
-    let path = dir.join(NUCLIDE);
-    println!("Loading {}", path.display());
-    let kern = load_nuclide(&path, 15, 0, 233.025, 2.43);
+    // Optional argv[1] = nuclide filename (e.g. "Fe56.h5"),
+    // argv[2] = AWR fallback. Used to re-run the rank-padding diagnostic
+    // against any nuclide while debugging an engine-level XS gap.
+    let nuclide_file = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| NUCLIDE.to_string());
+    let awr_fallback = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_AWR);
+    let path = dir.join(&nuclide_file);
+    println!("Loading {} (AWR fallback = {})", path.display(), awr_fallback);
+    let kern = load_nuclide(&path, 15, 0, awr_fallback, 2.43);
 
     println!("\nLevel inventory ({} discrete levels):", kern.discrete_levels.len());
     for (li, lvl) in kern.discrete_levels.iter().enumerate().take(12) {
