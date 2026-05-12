@@ -106,12 +106,19 @@ impl RectLattice {
         elem_overrides.get(&cell_idx).copied()
     }
 
-    /// Get the local coordinate within a lattice element.
+    /// Get the local coordinate within a lattice element, relative to
+    /// the element's CENTER. Matches the OpenMC / MCNP convention
+    /// where the universe filling each lattice element is placed with
+    /// its origin at the element centre, so surfaces defined at the
+    /// pin universe's local origin (e.g. `CylinderZ { center: 0, 0 }`)
+    /// sit at the centre of every element. Was previously corner-
+    /// relative — that broke LCT/PWR-style benchmarks whose JSON
+    /// scene_io export defines pin cylinders at universe-local origin.
     pub fn local_position(&self, pos: Vec3, ix: usize, iy: usize, iz: usize) -> Vec3 {
         Vec3::new(
-            pos.x - self.origin.x - (ix as f64) * self.pitch.x,
-            pos.y - self.origin.y - (iy as f64) * self.pitch.y,
-            pos.z - self.origin.z - (iz as f64) * self.pitch.z,
+            pos.x - self.origin.x - ((ix as f64) + 0.5) * self.pitch.x,
+            pos.y - self.origin.y - ((iy as f64) + 0.5) * self.pitch.y,
+            pos.z - self.origin.z - ((iz as f64) + 0.5) * self.pitch.z,
         )
     }
 

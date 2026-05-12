@@ -8,6 +8,17 @@
 use crate::hdf5_reader::{AngularDistribution, DiscreteLevelInfo, EnergyDistribution};
 use crate::transport::particle::{FissionSite, Particle};
 use crate::transport::rng::Rng;
+use smallvec::{SmallVec, smallvec};
+
+/// Inline capacity for `CollisionOutcome::Fission` site lists.
+/// U-235 ν̄ ≈ 2.4 → vast majority of fissions emit ≤ 4 neutrons; 8 is
+/// a comfortable bound that covers the high-tail (ν up to 8 at very
+/// high E_inc) so the inline branch is taken essentially always.
+/// Inline size: 8 × sizeof(FissionSite) = 8 × 40 = 320 B, plus header.
+pub type FissionSites = SmallVec<[FissionSite; 8]>;
+/// Inline capacity for `CollisionOutcome::Multiplicity` secondaries.
+/// (n,2n) = 2, (n,3n) = 3, (n,4n) = 4. 4 is the natural fit.
+pub type SecondaryList = SmallVec<[SecondaryNeutron; 4]>;
 
 /// Cross-section data for a nuclide at a specific energy.
 #[derive(Debug, Clone, Copy, Default)]
@@ -111,14 +122,14 @@ pub enum CollisionOutcome {
     Absorption,
     /// Particle caused fission — absorbed, fission sites banked for
     /// the NEXT generation's source.
-    Fission { sites: Vec<FissionSite> },
+    Fission { sites: FissionSites },
     /// Non-fission multiplicative reaction: (n,2n) or (n,3n). The
     /// primary continues (energy/direction already updated in-place);
     /// `secondaries` are additional neutrons at the collision site that
     /// must transport in the CURRENT generation. They do NOT seed the
     /// next generation's fission bank. This mirrors OpenMC / MCNP
     /// convention: only true fission neutrons count toward k_eff.
-    Multiplicity { secondaries: Vec<SecondaryNeutron> },
+    Multiplicity { secondaries: SecondaryList },
 }
 
 /// Process a collision for a particle.
@@ -228,7 +239,7 @@ pub fn process_collision(
             energy: e_secondary,
         };
         return CollisionOutcome::Multiplicity {
-            secondaries: vec![secondary],
+            secondaries: smallvec![secondary],
         };
     }
 
@@ -251,7 +262,7 @@ pub fn process_collision(
         particle.dir = crate::geometry::Vec3::new(u, v, w);
         let (u1, v1, w1) = rng.isotropic_direction();
         let (u2, v2, w2) = rng.isotropic_direction();
-        let secondaries = vec![
+        let secondaries: SecondaryList = smallvec![
             SecondaryNeutron {
                 pos: particle.pos,
                 dir: crate::geometry::Vec3::new(u1, v1, w1),
@@ -292,7 +303,7 @@ pub fn process_collision(
         let (u1, v1, w1) = rng.isotropic_direction();
         let (u2, v2, w2) = rng.isotropic_direction();
         let (u3, v3, w3) = rng.isotropic_direction();
-        let secondaries = vec![
+        let secondaries: SecondaryList = smallvec![
             SecondaryNeutron {
                 pos: particle.pos,
                 dir: crate::geometry::Vec3::new(u1, v1, w1),
@@ -349,7 +360,7 @@ pub fn process_collision(
         particle.dir = crate::geometry::Vec3::new(u, v, w);
         let (us, vs, ws) = rng.isotropic_direction();
         return CollisionOutcome::Multiplicity {
-            secondaries: vec![SecondaryNeutron {
+            secondaries: smallvec![SecondaryNeutron {
                 pos: particle.pos,
                 dir: crate::geometry::Vec3::new(us, vs, ws),
                 energy: e_secondary,
@@ -377,7 +388,7 @@ pub fn process_collision(
     cum += xs.fission;
     if xi < cum {
         let n_neutrons = fission_yield(xs.nu_bar, particle.weight, rng);
-        let mut sites = Vec::with_capacity(n_neutrons);
+        let mut sites: FissionSites = SmallVec::with_capacity(n_neutrons);
 
         // β(E) = ν_delayed / ν_total — fraction of fission neutrons
         // that are emitted by precursor β-decay (soft Watt spectrum)
@@ -517,7 +528,7 @@ pub fn process_scatter_only(
             energy: e_secondary,
         };
         return CollisionOutcome::Multiplicity {
-            secondaries: vec![secondary],
+            secondaries: smallvec![secondary],
         };
     }
 
@@ -536,7 +547,7 @@ pub fn process_scatter_only(
     particle.dir = crate::geometry::Vec3::new(u, v, w);
     let (u1, v1, w1) = rng.isotropic_direction();
     let (u2, v2, w2) = rng.isotropic_direction();
-    let secondaries = vec![
+    let secondaries: SecondaryList = smallvec![
         SecondaryNeutron {
             pos: particle.pos,
             dir: crate::geometry::Vec3::new(u1, v1, w1),

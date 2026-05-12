@@ -74,6 +74,22 @@ t_e.filters = [cell_filter, ebins]
 t_e.scores = ["total", "fission", "absorption", "scatter"]
 tallies.append(t_e)
 
+# 3b. fine energy-resolved fission rate. The coarse 7-bin tally above
+# gives ⟨E⟩ to ~1%, but its σ(E) computed from midpoints is wildly
+# biased upward (the 0–1e-1 and 1e-1–1e3 bins contribute zero rate
+# but huge bin-midpoint² values would, if rates weren't zero there;
+# more importantly, real fission events that fall in the wide 1e6–2e6
+# or 2e6–5e6 bin all get binned at the midpoint, smearing σ). The
+# fine tally lets the Rust diagnostic compute σ(E_in fission) at
+# 100-bin log resolution for a faithful CPU↔GPU↔OpenMC comparison.
+fine_egroups = np.logspace(np.log10(1e3), np.log10(2e7), 101).tolist()
+fine_egroups = [0.0] + fine_egroups
+fine_ebins = openmc.EnergyFilter(fine_egroups)
+t_fine_fis = openmc.Tally(name="fission_by_energy_fine")
+t_fine_fis.filters = [cell_filter, fine_ebins]
+t_fine_fis.scores = ["fission"]
+tallies.append(t_fine_fis)
+
 tallies.export_to_xml()
 
 results_per_seed = []
@@ -137,6 +153,7 @@ for tname, tdata in first.items():
     }
 agg["tallies_seed_mean"] = tally_agg
 agg["energy_groups_MeV"] = [e/1e6 for e in egroups]
+agg["fine_fission_groups_eV"] = fine_egroups
 with open(OUT, "w") as fh:
     json.dump(agg, fh, indent=2)
 print(f"\nmean k = {agg['k_mean']:.5f}  sigma_seeds = {agg['sigma_seeds']:.5f}")

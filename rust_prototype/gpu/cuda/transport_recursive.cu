@@ -109,7 +109,34 @@ transport_recursive_persistent(
     int* __restrict__ fis_count, int max_fis,
     // ── Counters (single-slot atomics) ──────────────────────────────
     int* __restrict__ cnt_coll, int* __restrict__ cnt_fis,
-    int* __restrict__ cnt_leak, int* __restrict__ cnt_surf)
+    int* __restrict__ cnt_leak, int* __restrict__ cnt_surf,
+    // ── Per-reaction tallies (added for spectrum-hardening diagnosis,
+    //    bin/metal_stats_diag). Per-reaction event counts plus
+    //    E-in / E-out accumulators so the host can compute
+    //    ⟨E_in at fission⟩, ⟨E_in elastic⟩, and the inelastic
+    //    energy-loss moment. Mean is taken on the host as
+    //    `e_*_sum / cnt_*`. Atomics are double-add (compute capability
+    //    ≥ 6.0 = Ampere/RTX A1000 OK).
+    int* __restrict__ cnt_elastic,
+    int* __restrict__ cnt_inelastic,
+    int* __restrict__ cnt_capture,
+    double* __restrict__ e_fis_in_sum,
+    double* __restrict__ e_el_in_sum,
+    double* __restrict__ e_inel_in_sum,
+    double* __restrict__ e_inel_out_sum,
+    // Squared-energy accumulators (added to localise the metal hot
+    // bias to higher moments of the E-at-reaction distribution after
+    // ν-table parity was confirmed by `bin/nu_lookup_compare`).
+    // Host computes σ(E_at_reaction) = sqrt(⟨E²⟩ − ⟨E⟩²).
+    double* __restrict__ e_fis_in_sq_sum,
+    double* __restrict__ e_el_in_sq_sum,
+    double* __restrict__ e_inel_in_sq_sum,
+    // Σ |Q| over inelastic events — `bin/metal_stats_diag` reports
+    // ⟨|Q|⟩_inel as the CM-frame energy lost per inelastic event.
+    // Used to localise the +400 keV ⟨E_out⟩ gap to per-level XS-weighted
+    // sampling (CPU and GPU should converge here if level selection is
+    // unbiased).
+    double* __restrict__ q_inel_sum)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_particles) return;
@@ -155,6 +182,15 @@ transport_recursive_persistent(
     }
 
     int lcnt_coll = 0, lcnt_fis = 0, lcnt_leak = 0, lcnt_surf = 0;
+    int lcnt_el = 0, lcnt_inel = 0, lcnt_cap = 0;
+    double l_e_fis_in_sum = 0.0;
+    double l_e_el_in_sum = 0.0;
+    double l_e_inel_in_sum = 0.0;
+    double l_e_inel_out_sum = 0.0;
+    double l_e_fis_in_sq_sum = 0.0;
+    double l_e_el_in_sq_sum = 0.0;
+    double l_e_inel_in_sq_sum = 0.0;
+    double l_q_inel_sum = 0.0;
     int events = 0;
     int is_alive = 1;
 
@@ -198,149 +234,16 @@ transport_recursive_persistent(
         // ── XS evaluation (geometry-agnostic; mirrors transport.cu) ──
         int n_nuc = __ldg(&PTR_I(p, P_MAT_N_NUC)[mat]);
         double sum_t = 0.0;
-        double nuc_t[4] = {}, nuc_el[4] = {}, nuc_inel[4] = {}, nuc_n2n[4] = {};
-        double nuc_n3n[4] = {}, nuc_fis[4] = {}, nuc_cap[4] = {};
+        double nuc_t[MAX_NUC_PER_MAT] = {};
         double urr_xi = pcg_uniform(&rng);
 
         for (int i = 0; i < n_nuc; i++) {
-            int ni = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * 4 + i]);
-            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * 4 + i]);
-            int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
-            int n_e = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
-            const double* grid = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
-            int e_idx = energy_index(grid, n_e, E);
-            double log_frac = 0.0;
-            if (e_idx + 1 < n_e && grid[e_idx] > 0.0) {
-                double log_e = log(E);
-                double log_lo = log(grid[e_idx]);
-                double log_hi = log(grid[e_idx + 1]);
-                if (log_hi > log_lo) log_frac = (log_e - log_lo) / (log_hi - log_lo);
-                if (log_frac < 0.0) log_frac = 0.0;
-                if (log_frac > 1.0) log_frac = 1.0;
-            }
-
-            double s_el = 0, s_inel = 0, s_n2n = 0, s_n3n = 0, s_fis = 0, s_cap = 0, micro_t = 0;
-
-            if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
-                int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
-                const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
-                const double* pw1 = (e_idx + 1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx + 1) * 7] : pw0;
-                double xs7[7];
-                for (int ch = 0; ch < 7; ch++) {
-                    double lo = pw0[ch], hi = pw1[ch];
-                    xs7[ch] = (lo > 1e-30 && hi > 1e-30 && log_frac > 0.0)
-                        ? exp(log(lo) + log_frac * (log(hi) - log(lo)))
-                        : lo;
-                }
-                s_el = xs7[0]; s_inel = xs7[1]; s_n2n = xs7[2]; s_n3n = xs7[3];
-                s_fis = xs7[4]; s_cap = xs7[5]; micro_t = xs7[6];
-                double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
-                s_cap = fmax(micro_t - partials, 0.0);
-            } else {
-                bool has_inel_k = false;
-                for (int r = 0; r < 6; r++) {
-                    int key = ni * N_REACTIONS + r;
-                    if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
-                        double s = svd_reconstruct_interp(
-                            &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                            &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
-                            e_idx, n_e, rank, log_frac);
-                        if (r == 0) s_el = s;
-                        else if (r == 1) { s_inel = s; has_inel_k = true; }
-                        else if (r == 2) s_n2n = s;
-                        else if (r == 3) s_n3n = s;
-                        else if (r == 4) s_fis = s;
-                        else if (r == 5) s_cap = s;
-                    }
-                }
-                if (!has_inel_k) {
-                    int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[ni]);
-                    int n_lev = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[ni]);
-                    double lsum = 0.0;
-                    for (int l = 0; l < n_lev; l++) {
-                        int gl = lv_off + l;
-                        if (!__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) continue;
-                        if (E < __ldg(&PTR_D(p, P_LEVEL_THR)[gl])) continue;
-                        double lxs = svd_reconstruct_interp(
-                            &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                            &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
-                            e_idx, n_e, rank, log_frac);
-                        if (lxs > 0.0) lsum += lxs;
-                    }
-                    s_inel = lsum;
-                }
-                if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-                    int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
-                    const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
-                    double tot_lo = tot_grid[e_idx];
-                    double tot_hi = (e_idx + 1 < n_e) ? tot_grid[e_idx + 1] : tot_lo;
-                    double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
-                        ? exp(log(tot_lo) + log_frac * (log(tot_hi) - log(tot_lo)))
-                        : tot_lo;
-                    double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
-                    s_cap = fmax(tot - partials, 0.0);
-                    micro_t = tot;
-                } else {
-                    micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
-                }
-            }
-
-            // Hybrid SVD+WMP — replaces el / fis / cap when E is in window
-            bool in_wmp = false;
-            if (__ldg(&PTR_I(p, P_WMP_HAS)[ni])) {
-                double e_lo = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
-                double e_hi = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
-                if (E >= e_lo && E <= e_hi) in_wmp = true;
-            }
-            if (!in_wmp) {
-                double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
-                apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
-                micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
-            } else {
-                int pole_off = __ldg(&PTR_I(p, P_WMP_POLE_OFF)[ni]);
-                int win_off  = __ldg(&PTR_I(p, P_WMP_WIN_OFF)[ni]);
-                int bro_off  = __ldg(&PTR_I(p, P_WMP_BROADEN_OFF)[ni]);
-                int cf_off   = __ldg(&PTR_I(p, P_WMP_CF_OFF)[ni]);
-                double w_emin = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
-                double w_emax = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
-                double w_spc  = __ldg(&PTR_D(p, P_WMP_SPACING)[ni]);
-                double w_sqra = __ldg(&PTR_D(p, P_WMP_SQRT_AWR)[ni]);
-                double w_tk   = __ldg(&PTR_D(p, P_WMP_T_KELVIN)[ni]);
-                int w_nw   = __ldg(&PTR_I(p, P_WMP_N_WINDOWS)[ni]);
-                int w_fo   = __ldg(&PTR_I(p, P_WMP_FIT_ORDER)[ni]);
-                int w_fiss = __ldg(&PTR_I(p, P_WMP_FISSIONABLE)[ni]);
-                const double2* w_poles    = PTR_D2(p, P_WMP_POLES) + pole_off;
-                const int* w_windows      = PTR_I(p, P_WMP_WINDOWS) + win_off;
-                const signed char* w_bro  = PTR_B(p, P_WMP_BROADEN) + bro_off;
-                const double* w_curvefit  = PTR_D(p, P_WMP_CURVEFIT) + cf_off;
-                double w_s = 0.0, w_a = 0.0, w_f = 0.0;
-                wmp_eval(E, w_tk, w_emin, w_emax, w_spc, w_sqra,
-                         w_nw, w_fo, w_fiss,
-                         w_poles, w_windows, w_bro, w_curvefit,
-                         &w_s, &w_a, &w_f);
-                double new_el  = fmax(w_s, 0.0);
-                double new_fis = fmax(w_f, 0.0);
-                double new_cap = fmax(w_a - w_f, 0.0);
-                micro_t = new_el + s_inel + s_n2n + s_n3n + new_fis + new_cap;
-                s_el = new_el; s_fis = new_fis; s_cap = new_cap;
-            }
-
-            // S(α,β) on the configured nuclide
-            if (sab_nuc_idx >= 0 && ni == sab_nuc_idx
-                && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0
-                && SCALAR_I(p, P_SAB_N_INC) > 0) {
-                double sab_xs_val = sab_total_xs(E, p);
-                if (sab_xs_val > 0.0) {
-                    double delta = sab_xs_val - s_el;
-                    micro_t += delta;
-                    s_el = sab_xs_val;
-                }
-            }
-
-            nuc_t[i]    = Ni * micro_t; nuc_el[i]   = Ni * s_el;   nuc_inel[i] = Ni * s_inel;
-            nuc_n2n[i]  = Ni * s_n2n;   nuc_n3n[i]  = Ni * s_n3n;
-            nuc_fis[i]  = Ni * s_fis;   nuc_cap[i]  = Ni * s_cap;
-            sum_t += Ni * micro_t;
+            int ni    = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + i]);
+            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + i]);
+            NuclideMacroXs xs = eval_nuclide_macro_xs(ni, Ni, E, urr_xi,
+                                                     sab_nuc_idx, rank, p);
+            nuc_t[i] = xs.s_t;
+            sum_t   += xs.s_t;
         }
 
         if (sum_t <= 0.0) { is_alive = 0; break; }
@@ -389,15 +292,25 @@ transport_recursive_persistent(
         for (int i = 0; i < n_nuc; i++) {
             cum += nuc_t[i]; if (xi_nuc < cum) { hit_l = i; break; } hit_l = i;
         }
-        int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * 4 + hit_l]);
+        int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + hit_l]);
+        double Ni_hit = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + hit_l]);
         double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
+
+        // Per-reaction breakdown for the chosen nuclide. Re-uses the
+        // urr_xi drawn above so the resampled Σ_x sum back to nuc_t[hit_l]
+        // and reaction selection stays unbiased.
+        NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
+            hit_nuc, Ni_hit, E, urr_xi, sab_nuc_idx, rank, p);
 
         // Sample reaction — el, inel, n2n, n3n, fis, cap (matches CPU)
         double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
         double cum_rxn = 0.0;
-        cum_rxn += nuc_el[hit_l];
+        cum_rxn += hit_xs.s_el;
         if (xi_rxn < cum_rxn) {
             // ═══ Elastic ═══
+            lcnt_el++;
+            l_e_el_in_sum += E;
+            l_e_el_in_sq_sum += E * E;
             if (sab_nuc_idx >= 0 && hit_nuc == sab_nuc_idx
                 && E < SCALAR_D(p, P_SAB_EMAX) && SCALAR_I(p, P_SAB_N_INC) > 0) {
                 double E_sab, mu_sab;
@@ -465,11 +378,11 @@ transport_recursive_persistent(
                 double phi = 2.0 * PI * pcg_uniform(&rng);
                 rotate_direction(&dx, &dy, &dz, mu_lab, phi);
             }
-        } else if ((cum_rxn += nuc_inel[hit_l]), xi_rxn < cum_rxn) {
+        } else if ((cum_rxn += hit_xs.s_inel), xi_rxn < cum_rxn) {
             // ═══ Inelastic ═══ — handled below at do_inelastic
             goto do_inelastic;
 
-        } else if ((cum_rxn += nuc_n2n[hit_l]), xi_rxn < cum_rxn) {
+        } else if ((cum_rxn += hit_xs.s_n2n), xi_rxn < cum_rxn) {
             // ═══ (n,2n) — bank 1 extra neutron, primary continues ═══
             { double temp = E / 10.0;
               double x1 = fmax(pcg_uniform(&rng), 1e-30);
@@ -499,7 +412,7 @@ transport_recursive_persistent(
               double phi = 2.0 * PI * pcg_uniform(&rng);
               rotate_direction(&dx, &dy, &dz, ml, phi);
             }
-        } else if ((cum_rxn += nuc_n3n[hit_l]), xi_rxn < cum_rxn) {
+        } else if ((cum_rxn += hit_xs.s_n3n), xi_rxn < cum_rxn) {
             // ═══ (n,3n) — bank 2 extra neutrons ═══
             for (int ns3 = 0; ns3 < 2; ns3++) {
                 double temp = E / 10.0;
@@ -530,9 +443,11 @@ transport_recursive_persistent(
               double phi = 2.0 * PI * pcg_uniform(&rng);
               rotate_direction(&dx, &dy, &dz, ml, phi);
             }
-        } else if ((cum_rxn += nuc_fis[hit_l]), xi_rxn < cum_rxn) {
+        } else if ((cum_rxn += hit_xs.s_fis), xi_rxn < cum_rxn) {
             // ═══ Fission ═══
             lcnt_fis++;
+            l_e_fis_in_sum += E;
+            l_e_fis_in_sq_sum += E * E;
             int nb_off = __ldg(&PTR_I(p, P_NB_OFFSETS)[hit_nuc]);
             int nb_sz  = __ldg(&PTR_I(p, P_NB_SIZES)[hit_nuc]);
             double nu = (nb_sz > 0)
@@ -544,19 +459,24 @@ transport_recursive_persistent(
                 int idx = atomicAdd(fis_count, 1);
                 if (idx < max_fis) {
                     fis_x[idx] = px; fis_y[idx] = py; fis_z[idx] = pz;
-                    fis_e[idx] = sample_fission_energy(E, &rng, p, hit_nuc);
+                    fis_e[idx] = sample_fission_emit_energy(E, nu, &rng, p, hit_nuc);
                     fis_w[idx] = 1.0;
                 }
             }
             is_alive = 0;
         } else {
             // ═══ Capture (remainder) ═══
+            lcnt_cap++;
             is_alive = 0;
             goto end_coll;
         }
 
         if (0) { do_inelastic:
             // Discrete-level inelastic — same algorithm as transport.cu.
+            lcnt_inel++;
+            l_e_inel_in_sum += E;
+            l_e_inel_in_sq_sum += E * E;
+            const double e_inel_pre = E;
             int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[hit_nuc]);
             int n_lev  = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[hit_nuc]);
             double Q = -0.5e6;
@@ -629,16 +549,35 @@ transport_recursive_persistent(
             }
             int sel_mt = (n_lev > 0) ? __ldg(&PTR_I(p, P_LEVEL_MT)[lv_off + selected]) : 0;
             if (sel_mt == 91) {
-                double a_p = A / 8.0;
+                // Prefer the ENDF MT=91 tabulated outgoing distribution
+                // when uploaded. This matches the CPU's
+                // `sample_inelastic_level` continuum path. NOTE:
+                // experimentally MT=91 only fires for ~5% of inelastic
+                // events on Godiva, so this alone does not close the
+                // +400 keV ⟨E_out inel⟩ CPU↔GPU gap — but it's the
+                // correct algorithm and harmless when the table is
+                // present. The remaining gap lives in the discrete-
+                // level path; investigation ongoing.
                 double ecm_mev = E * A / ((A + 1.0) * 1e6);
-                double eex = fmax(ecm_mev, 0.1);
-                double T = sqrt(eex / a_p);
-                double x1 = fmax(pcg_uniform(&rng), 1e-30);
-                double x2 = fmax(pcg_uniform(&rng), 1e-30);
-                double eo = -T * log(x1 * x2);
-                eo = fmin(eo, ecm_mev * 0.9);
-                Q = -(ecm_mev - eo) * 1e6;
+                int n_inc91 = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
+                double eo_mev;
+                if (n_inc91 > 0) {
+                    double eo_ev = sample_inel91_energy(E, &rng, p, hit_nuc);
+                    eo_mev = eo_ev / 1.0e6;
+                } else {
+                    double a_p = A / 8.0;
+                    double eex = fmax(ecm_mev, 0.1);
+                    double T = sqrt(eex / a_p);
+                    double x1 = fmax(pcg_uniform(&rng), 1e-30);
+                    double x2 = fmax(pcg_uniform(&rng), 1e-30);
+                    eo_mev = -T * log(x1 * x2);
+                }
+                eo_mev = fmin(eo_mev, ecm_mev * 0.9);
+                Q = -(ecm_mev - eo_mev) * 1e6;
             }
+            // Accumulate |Q| (CM-frame excitation energy per inelastic
+            // event). ⟨|Q|⟩_inel ≈ ⟨ΔE⟩_inel for heavy nuclei (CM ≈ lab).
+            l_q_inel_sum += fabs(Q);
             double e_cm = E * A / (A + 1.0);
             double e_cm_out = e_cm + Q;
             if (e_cm_out <= 0.0) {
@@ -675,6 +614,11 @@ transport_recursive_persistent(
                 double phi = 2.0 * PI * pcg_uniform(&rng);
                 rotate_direction(&dx, &dy, &dz, mu_lab, phi);
             }
+            // Tally outgoing E for the inelastic energy-loss moment.
+            // `e_inel_pre` snapshots E before the kinematics block; the
+            // host computes ⟨ΔE⟩ = (e_inel_in_sum − e_inel_out_sum) / n_inel.
+            l_e_inel_out_sum += E;
+            (void)e_inel_pre;
         }
         end_coll: ;
     } // while
@@ -684,20 +628,28 @@ transport_recursive_persistent(
     energy[tid] = E; alive[tid] = is_alive;
     rng_state_arr[tid] = rng.state; rng_inc_arr[tid] = rng.inc;
 
-    // Warp-level reduction → atomic
-    unsigned mask = __activemask();
-    for (int off = 16; off > 0; off /= 2) {
-        lcnt_coll += __shfl_down_sync(mask, lcnt_coll, off);
-        lcnt_fis  += __shfl_down_sync(mask, lcnt_fis,  off);
-        lcnt_leak += __shfl_down_sync(mask, lcnt_leak, off);
-        lcnt_surf += __shfl_down_sync(mask, lcnt_surf, off);
-    }
-    if ((threadIdx.x & 31) == 0) {
-        if (lcnt_coll > 0) atomicAdd(cnt_coll, lcnt_coll);
-        if (lcnt_fis  > 0) atomicAdd(cnt_fis,  lcnt_fis);
-        if (lcnt_leak > 0) atomicAdd(cnt_leak, lcnt_leak);
-        if (lcnt_surf > 0) atomicAdd(cnt_surf, lcnt_surf);
-    }
+    // Per-thread atomicAdd. Mirrors the pattern in transport.cu's
+    // `transport_persistent`. The earlier warp-reduction-then-lane-0
+    // path was correct for full warps but corrupted by partial warps
+    // exiting on `alive[tid] = 0` early returns — see the explanatory
+    // comment in `gpu_transport.rs:1545`. Per-thread atomicAdd is
+    // slightly more contended but exactly correct under any
+    // execution mask.
+    if (lcnt_coll > 0) atomicAdd(cnt_coll, lcnt_coll);
+    if (lcnt_fis  > 0) atomicAdd(cnt_fis,  lcnt_fis);
+    if (lcnt_leak > 0) atomicAdd(cnt_leak, lcnt_leak);
+    if (lcnt_surf > 0) atomicAdd(cnt_surf, lcnt_surf);
+    if (lcnt_el   > 0) atomicAdd(cnt_elastic,   lcnt_el);
+    if (lcnt_inel > 0) atomicAdd(cnt_inelastic, lcnt_inel);
+    if (lcnt_cap  > 0) atomicAdd(cnt_capture,   lcnt_cap);
+    if (l_e_fis_in_sum   != 0.0) atomicAdd(e_fis_in_sum,   l_e_fis_in_sum);
+    if (l_e_el_in_sum    != 0.0) atomicAdd(e_el_in_sum,    l_e_el_in_sum);
+    if (l_e_inel_in_sum  != 0.0) atomicAdd(e_inel_in_sum,  l_e_inel_in_sum);
+    if (l_e_inel_out_sum != 0.0) atomicAdd(e_inel_out_sum, l_e_inel_out_sum);
+    if (l_e_fis_in_sq_sum  != 0.0) atomicAdd(e_fis_in_sq_sum,  l_e_fis_in_sq_sum);
+    if (l_e_el_in_sq_sum   != 0.0) atomicAdd(e_el_in_sq_sum,   l_e_el_in_sq_sum);
+    if (l_e_inel_in_sq_sum != 0.0) atomicAdd(e_inel_in_sq_sum, l_e_inel_in_sq_sum);
+    if (l_q_inel_sum       != 0.0) atomicAdd(q_inel_sum,       l_q_inel_sum);
 }
 
 #endif // TRANSPORT_RECURSIVE_CU

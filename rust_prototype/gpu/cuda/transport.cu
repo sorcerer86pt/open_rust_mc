@@ -180,7 +180,63 @@
 #define P_WATT_U            107
 #define P_WATT_NUC_OFF      108
 #define P_WATT_NUC_N        109
-#define N_PARAMS            110
+// Delayed-only ν̄(E) per nuclide — mirrors P_NB_* (which carries
+// ν_total = ν_prompt + Σ ν_delayed). β(E) = ν_delayed / ν_total is
+// computed at the fission emission site; with probability β each
+// banked neutron is drawn from the soft-Watt delayed spectrum
+// (sample_delayed_energy) instead of the prompt χ. Nuclides without
+// delayed-product data leave `P_DNB_SIZES[i] = 0`, in which case the
+// kernel falls through to the prompt-only path.
+#define P_DNB_ENERGIES      110
+#define P_DNB_VALUES        111
+#define P_DNB_OFFSETS       112
+#define P_DNB_SIZES         113
+// PDF samples aligned 1:1 with P_FIS_E_OUT / P_FIS_CDF. Enables the
+// quadratic lin-lin CDF inversion in `sample_eout_bin`, matching the
+// OpenMC `Tabular::sample` algorithm used on CPU. Pre-fix the GPU's
+// linear-CDF fallback was biasing χ outgoing spectra hard → less
+// leakage → +500-700 pcm hot on Godiva / PMF metal benchmarks.
+#define P_FIS_PDF           114
+
+// ── MT=91 continuum inelastic outgoing-energy distribution ───────
+//
+// Mirror of P_FIS_* but for the ENDF MT=91 (continuum inelastic)
+// secondary-energy law. Added to close a +400 keV ⟨E_out⟩ gap vs the
+// CPU: the kernel previously used a Weisskopf evaporation
+// approximation (`E_out = -T·log(ξ1·ξ2)` with `T = √(E_exc / (A/8))`)
+// for every nuclide, but the CPU samples directly from the tabulated
+// MT=91 distribution when one is present (see
+// `physics/collision.rs::sample_inelastic_level`). For Godiva the
+// evaporation approximation gave ⟨E_out inelastic⟩ ≈ 1.25 MeV on GPU
+// vs 0.85 MeV on CPU — a 48 % hardening that flowed straight through
+// to a +500–700 pcm `k_eff` bias on fast-metal benchmarks.
+//
+// When `P_INEL91_NUC_NINC[nuc] == 0` the kernel falls back to the
+// evaporation formula (light isotopes / older evaluations that ship
+// no MT=91 distribution).
+#define P_INEL91_INC_E      115
+#define P_INEL91_DIST_OFF   116
+#define P_INEL91_DIST_SZ    117
+#define P_INEL91_E_OUT      118
+#define P_INEL91_CDF        119
+#define P_INEL91_PDF        120
+#define P_INEL91_NUC_OFF    121
+#define P_INEL91_NUC_NINC   122
+#define N_PARAMS            115
+
+// ───────────────────────────────────────────────────────────────────────
+// Per-material nuclide stride. Bumped from 4 to 32 to match the CPU's
+// `MAX_NUCLIDES` (see `transport/simulate.rs`). Solution and LEU-COMP-
+// THERM benchmarks pack 28-30 nuclides per material; 4 was a Godiva /
+// PWR-pin-cell-era constant that blocked every other ICSBEP family.
+//
+// The kernel does NOT carry seven 32-wide per-thread arrays — that
+// would spill ~1.8 KB/thread to local memory. The reaction-channel
+// breakdown is recomputed only for the chosen nuclide at sampling
+// time (see `eval_nuclide_macro_xs` below), so per-thread register
+// footprint stays at one nuc_t[MAX_NUC_PER_MAT] array (256 bytes,
+// same envelope as the pre-refactor 7 × 4 = 28 doubles).
+#define MAX_NUC_PER_MAT     32
 
 // Access helpers — read from the flat u64 params buffer
 // PTR_F removed — all basis data is now f64 (PTR_D)
@@ -397,15 +453,61 @@ __device__ double nu_bar_lookup(
     return v[lo] + f*(v[hi]-v[lo]);
 }
 
-// CDF-invert E_out within one bin using a pre-drawn xi.
+// Quadratic lin-lin CDF inversion (OpenMC `Tabular::sample`).
+// Mirrors `TabularEnergyDist::sample_with_xi` in `hdf5_reader.rs`.
+//
+// ─── Empirical note (this session) ────────────────────────────────
+// The original GPU `sample_eout_bin` used a linear-CDF / histogram-
+// PDF fallback. The hypothesis was that this biased fission χ hard
+// on Godiva and was responsible for the +500-700 pcm GPU↔CPU gap on
+// fast-metal benchmarks. We ported the proper quadratic formula
+// (matching the CPU bit-for-bit, verified by `bin/chi_compare`:
+// max per-sample Δ < 6 ppm of E_out for U-235 χ across all 20
+// incident-energy bins, ⟨E⟩ agrees to 5 significant figures).
+//
+// Result: **NO statistically significant shift** in Godiva k_eff
+// across 5-seed batches once 5-seed σ_mean ≈ 110 pcm is accounted
+// for. The historical "+330 pcm" worsening looked real on one batch
+// of 5 seeds but evaporated to <1.5σ over the next batch — pure
+// noise from GPU atomicAdd ordering + small-N seed sampling.
+//
+// Therefore: the quadratic formula is now correct and parity-locked
+// with the CPU, but the +500-700 pcm fast-metal CPU↔GPU gap lives
+// elsewhere — angular kinematics CM→lab, URR equivalence, or
+// initial-source seeding are the remaining candidates. χ sampling
+// is ruled out by direct numerical comparison.
+// ──────────────────────────────────────────────────────────────────
 __device__ __forceinline__ double sample_eout_bin(
-    double xi, const double* eo, const double* cd, int sz)
+    double xi, const double* eo, const double* cd, const double* pd, int sz)
 {
     if (sz <= 1) return eo[0];
-    int lo=0, hi=sz-1;
-    while (hi-lo > 1) { int mid=(lo+hi) >> 1; if (cd[mid] <= xi) lo=mid; else hi=mid; }
-    double f = (xi - cd[lo]) / fmax(cd[hi]-cd[lo], 1e-30);
-    return eo[lo] + f * (eo[hi] - eo[lo]);
+    int lo = 0, hi = sz - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (cd[mid] <= xi) lo = mid; else hi = mid;
+    }
+    const double e_lo = eo[lo];
+    const double e_hi = eo[hi];
+    const double cdf_lo = cd[lo];
+    const double cdf_hi = cd[hi];
+    const double de = e_hi - e_lo;
+    if (fabs(cdf_hi - cdf_lo) < 1e-15) return e_lo;
+    if (pd != nullptr && de > 0.0) {
+        const double p_lo = pd[lo];
+        const double p_hi = pd[hi];
+        const double dc = xi - cdf_lo;
+        if (p_lo > 0.0 || p_hi > 0.0) {
+            const double m = (p_hi - p_lo) / de;
+            if (fabs(m) < 1e-30) {
+                if (p_lo > 0.0) return e_lo + dc / p_lo;
+            } else {
+                const double disc = p_lo * p_lo + 2.0 * m * dc;
+                if (disc >= 0.0) return e_lo + (sqrt(disc) - p_lo) / m;
+            }
+        }
+    }
+    const double f = (xi - cdf_lo) / fmax(cdf_hi - cdf_lo, 1e-30);
+    return e_lo + f * de;
 }
 
 /// Mathematically correct Watt sampler matching the analytic moments
@@ -489,14 +591,16 @@ __device__ double sample_fission_energy(
         int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off];
         return fmax(sample_eout_bin(pcg_uniform(rng),
                                     &PTR_D(p, P_FIS_E_OUT)[off],
-                                    &PTR_D(p, P_FIS_CDF)[off], sz), 1e-5);
+                                    &PTR_D(p, P_FIS_CDF)[off],
+                                    &PTR_D(p, P_FIS_PDF)[off], sz), 1e-5);
     }
     // Edge: above grid — sample from last bin.
     if (E_inc >= inc_e[fi_n-1]) {
         int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+fi_n-1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+fi_n-1];
         return fmax(sample_eout_bin(pcg_uniform(rng),
                                     &PTR_D(p, P_FIS_E_OUT)[off],
-                                    &PTR_D(p, P_FIS_CDF)[off], sz), 1e-5);
+                                    &PTR_D(p, P_FIS_CDF)[off],
+                                    &PTR_D(p, P_FIS_PDF)[off], sz), 1e-5);
     }
 
     // Binary search for bracket
@@ -514,7 +618,8 @@ __device__ double sample_fission_energy(
     int sz_l  = PTR_I(p, P_FIS_DIST_SZ)[chosen];
     const double* eo_l = &PTR_D(p, P_FIS_E_OUT)[off_l];
     const double* cd_l = &PTR_D(p, P_FIS_CDF)[off_l];
-    double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, sz_l);
+    const double* pd_l = &PTR_D(p, P_FIS_PDF)[off_l];
+    double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
 
     // Scaled kinematic adjustment: remap e_out from chosen bin's
     // [el1_lo, el1_hi] to the interpolated [e1, eK] between both bins.
@@ -536,6 +641,139 @@ __device__ double sample_fission_energy(
     double adjusted = (fabs(span_l) < 1e-30) ? e_out
                     : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
     return fmax(adjusted, 1e-5);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// MT=91 continuum-inelastic outgoing energy sampler — mirrors
+// `sample_fission_energy` above but reads from the P_INEL91_* slots
+// and has no Watt / Cranberg fallback (MT=91 evaluations only ship a
+// tabular law). Callers must check `P_INEL91_NUC_NINC[hit_nuc] > 0`
+// before calling; the evaporation fallback in the kernel handles the
+// `n_inc == 0` case (light isotopes / older ENDF evaluations).
+//
+// Same OpenMC `ContinuousTabular::sample` algorithm as the fission
+// sampler: stochastic bin pick proportional to incident-E interpolation
+// fraction, then `sample_eout_bin` on the chosen bin, then scaled
+// kinematic remap onto the interpolated outgoing-energy support.
+// ───────────────────────────────────────────────────────────────────────
+__device__ double sample_inel91_energy(
+    double E_inc, PcgState* rng, Params p, int hit_nuc)
+{
+    int fi_off = __ldg(&PTR_I(p, P_INEL91_NUC_OFF)[hit_nuc]);
+    int fi_n   = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
+    if (fi_n <= 0) return -1.0;  // caller must guard with NUC_NINC > 0
+    const double* inc_e = &PTR_D(p, P_INEL91_INC_E)[fi_off];
+
+    if (E_inc <= inc_e[0]) {
+        int off = PTR_I(p, P_INEL91_DIST_OFF)[fi_off];
+        int sz  = PTR_I(p, P_INEL91_DIST_SZ)[fi_off];
+        return fmax(sample_eout_bin(pcg_uniform(rng),
+                                    &PTR_D(p, P_INEL91_E_OUT)[off],
+                                    &PTR_D(p, P_INEL91_CDF)[off],
+                                    &PTR_D(p, P_INEL91_PDF)[off], sz), 1e-5);
+    }
+    if (E_inc >= inc_e[fi_n - 1]) {
+        int off = PTR_I(p, P_INEL91_DIST_OFF)[fi_off + fi_n - 1];
+        int sz  = PTR_I(p, P_INEL91_DIST_SZ)[fi_off + fi_n - 1];
+        return fmax(sample_eout_bin(pcg_uniform(rng),
+                                    &PTR_D(p, P_INEL91_E_OUT)[off],
+                                    &PTR_D(p, P_INEL91_CDF)[off],
+                                    &PTR_D(p, P_INEL91_PDF)[off], sz), 1e-5);
+    }
+
+    int ie;
+    {
+        int lo = 0, hi = fi_n - 1;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >> 1;
+            if (inc_e[mid] <= E_inc) lo = mid; else hi = mid;
+        }
+        ie = lo;
+    }
+
+    double r = (E_inc - inc_e[ie]) / fmax(inc_e[ie + 1] - inc_e[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen_lo = fi_off + ie;
+    int chosen_hi = fi_off + ie + 1;
+    int chosen = pick_hi ? chosen_hi : chosen_lo;
+    int off_l = PTR_I(p, P_INEL91_DIST_OFF)[chosen];
+    int sz_l  = PTR_I(p, P_INEL91_DIST_SZ)[chosen];
+    const double* eo_l = &PTR_D(p, P_INEL91_E_OUT)[off_l];
+    const double* cd_l = &PTR_D(p, P_INEL91_CDF)[off_l];
+    const double* pd_l = &PTR_D(p, P_INEL91_PDF)[off_l];
+    double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
+
+    int off_a = PTR_I(p, P_INEL91_DIST_OFF)[chosen_lo];
+    int sz_a  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_lo];
+    int off_b = PTR_I(p, P_INEL91_DIST_OFF)[chosen_hi];
+    int sz_b  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_hi];
+    const double* eo_a = &PTR_D(p, P_INEL91_E_OUT)[off_a];
+    const double* eo_b = &PTR_D(p, P_INEL91_E_OUT)[off_b];
+    double el1_lo = eo_l[0];
+    double el1_hi = (sz_l > 0) ? eo_l[sz_l - 1] : el1_lo;
+    double ea_lo  = eo_a[0];
+    double ea_hi  = (sz_a > 0) ? eo_a[sz_a - 1] : ea_lo;
+    double eb_lo  = eo_b[0];
+    double eb_hi  = (sz_b > 0) ? eo_b[sz_b - 1] : eb_lo;
+    double e1 = (1.0 - r) * ea_lo + r * eb_lo;
+    double eK = (1.0 - r) * ea_hi + r * eb_hi;
+    double span_l = el1_hi - el1_lo;
+    double adjusted = (fabs(span_l) < 1e-30) ? e_out
+                    : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
+    return fmax(adjusted, 1e-5);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Delayed-neutron outgoing energy — soft Watt spectrum mirroring the
+// CPU `physics/collision.rs::sample_delayed_energy`. Delayed neutrons
+// from precursor β-decay have a mean ~0.4 MeV (much softer than the
+// prompt ~2 MeV); the single combined spectrum is sufficient for
+// static k-eigenvalue, per-precursor breakdown is only needed for
+// time-dependent kinetics. ENDF-style parameters: a = 0.4 MeV,
+// b = 2.249 /MeV.
+// ───────────────────────────────────────────────────────────────────────
+__device__ __forceinline__ double sample_delayed_energy(PcgState* rng) {
+    const double a = 4.0e5;     // 0.4 MeV in eV
+    const double b = 2.249e-6;  // 2.249 /MeV in /eV
+    const double term = 0.25 * a * a * b;
+    // Bounded retry — matches the unbounded CPU loop with a 100-try cap
+    // for the same safety reason as the Watt sampler above.
+    for (int t = 0; t < 100; ++t) {
+        double xi1 = fmax(pcg_uniform(rng), 1e-30);
+        double e_prime = -a * log(xi1);
+        double xi2 = pcg_uniform(rng);
+        double e = e_prime + term
+                 + (2.0 * xi2 - 1.0) * sqrt(a * a * b * e_prime) * 0.5;
+        if (e > 0.0) return e;
+    }
+    return 1e-5;
+}
+
+// Fission emission with prompt/delayed split. β(E) = ν_delayed / ν_total
+// is sampled per banked neutron; with probability β the outgoing energy
+// is drawn from `sample_delayed_energy`, otherwise from the prompt χ
+// (`sample_fission_energy`). Mirrors the CPU dispatch in
+// `transport/simulate.rs:1294` and `physics/collision.rs:387`.
+//
+// `nu_total` is the value already looked up by the caller for the
+// integer-neutron count; passing it in avoids a redundant lin-lin
+// interpolation per emitted neutron.
+__device__ __forceinline__ double sample_fission_emit_energy(
+    double E_inc, double nu_total, PcgState* rng, Params p, int hit_nuc)
+{
+    int dnb_sz = __ldg(&PTR_I(p, P_DNB_SIZES)[hit_nuc]);
+    if (dnb_sz > 0 && nu_total > 0.0) {
+        int dnb_off = __ldg(&PTR_I(p, P_DNB_OFFSETS)[hit_nuc]);
+        double nu_d = nu_bar_lookup(
+            E_inc, PTR_D(p, P_DNB_ENERGIES), PTR_D(p, P_DNB_VALUES),
+            dnb_off, dnb_sz);
+        double beta = nu_d / nu_total;
+        if (beta > 1.0) beta = 1.0;
+        if (beta > 0.0 && pcg_uniform(rng) < beta) {
+            return sample_delayed_energy(rng);
+        }
+    }
+    return sample_fission_energy(E_inc, rng, p, hit_nuc);
 }
 
 // CDF-invert mu within one bin using a pre-drawn xi.
@@ -981,6 +1219,172 @@ __device__ void wmp_eval(
     const double* curvefit,
     double* out_s, double* out_a, double* out_f);
 
+// ═══════════════════════════════════════════════════════════════════════
+// Per-nuclide macroscopic XS evaluation.
+//
+// Returns Σ_x = N · σ_x(E) for the six tracked reactions plus the
+// macroscopic total. Encapsulates the SVD / Pointwise / WMP / URR /
+// S(α,β) lattice so the calling kernels can store a single
+// `nuc_t[MAX_NUC_PER_MAT]` array for nuclide selection and recompute
+// only the hit nuclide's reaction breakdown at sampling time. This is
+// what lets `MAX_NUC_PER_MAT = 32` fit in registers: the streaming
+// pattern replaces 7 × 32-wide per-thread arrays (1.8 KB → spill) with
+// one 32-wide array (256 B, stays in registers / L1).
+//
+// Deterministic given `urr_xi`. Callers pre-draw `urr_xi` once at the
+// top of the collision step and pass the same value to both the
+// nuclide-selection pass and the reaction-selection pass, so the two
+// calls produce identical XS.
+// ═══════════════════════════════════════════════════════════════════════
+struct NuclideMacroXs {
+    double s_t;
+    double s_el, s_inel, s_n2n, s_n3n, s_fis, s_cap;
+};
+
+__device__ NuclideMacroXs eval_nuclide_macro_xs(
+    int ni, double Ni, double E, double urr_xi,
+    int sab_nuc_idx, int rank, Params p)
+{
+    int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
+    int n_e   = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
+    const double* grid = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
+    int e_idx = energy_index(grid, n_e, E);
+    double log_frac = 0.0;
+    if (e_idx + 1 < n_e && grid[e_idx] > 0.0) {
+        double log_e = log(E);
+        double log_lo = log(grid[e_idx]);
+        double log_hi = log(grid[e_idx + 1]);
+        if (log_hi > log_lo) log_frac = (log_e - log_lo) / (log_hi - log_lo);
+        if (log_frac < 0.0) log_frac = 0.0;
+        if (log_frac > 1.0) log_frac = 1.0;
+    }
+
+    double s_el = 0, s_inel = 0, s_n2n = 0, s_n3n = 0, s_fis = 0, s_cap = 0, micro_t = 0;
+
+    if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
+        int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
+        const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
+        const double* pw1 = (e_idx + 1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx + 1) * 7] : pw0;
+        double xs7[7];
+        for (int ch = 0; ch < 7; ch++) {
+            double lo = pw0[ch], hi = pw1[ch];
+            xs7[ch] = (lo > 1e-30 && hi > 1e-30 && log_frac > 0.0)
+                ? exp(log(lo) + log_frac * (log(hi) - log(lo))) : lo;
+        }
+        s_el = xs7[0]; s_inel = xs7[1]; s_n2n = xs7[2]; s_n3n = xs7[3];
+        s_fis = xs7[4]; s_cap = xs7[5]; micro_t = xs7[6];
+        double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
+        s_cap = fmax(micro_t - partials, 0.0);
+    } else {
+        bool has_inel_k = false;
+        for (int r = 0; r < 6; r++) {
+            int key = ni * N_REACTIONS + r;
+            if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
+                double s = svd_reconstruct_interp(
+                    &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
+                    &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
+                    e_idx, n_e, rank, log_frac);
+                if (r == 0)      s_el = s;
+                else if (r == 1) { s_inel = s; has_inel_k = true; }
+                else if (r == 2) s_n2n = s;
+                else if (r == 3) s_n3n = s;
+                else if (r == 4) s_fis = s;
+                else if (r == 5) s_cap = s;
+            }
+        }
+        if (!has_inel_k) {
+            int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[ni]);
+            int n_lev  = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[ni]);
+            double lsum = 0.0;
+            for (int l = 0; l < n_lev; l++) {
+                int gl = lv_off + l;
+                if (!__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) continue;
+                if (E < __ldg(&PTR_D(p, P_LEVEL_THR)[gl])) continue;
+                double lxs = svd_reconstruct_interp(
+                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
+                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                    e_idx, n_e, rank, log_frac);
+                if (lxs > 0.0) lsum += lxs;
+            }
+            s_inel = lsum;
+        }
+        if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
+            int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
+            const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
+            double tot_lo = tot_grid[e_idx];
+            double tot_hi = (e_idx + 1 < n_e) ? tot_grid[e_idx + 1] : tot_lo;
+            double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
+                ? exp(log(tot_lo) + log_frac * (log(tot_hi) - log(tot_lo)))
+                : tot_lo;
+            double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
+            s_cap = fmax(tot - partials, 0.0);
+            micro_t = tot;
+        } else {
+            micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
+        }
+    }
+
+    bool in_wmp = false;
+    if (__ldg(&PTR_I(p, P_WMP_HAS)[ni])) {
+        double e_lo = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
+        double e_hi = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
+        if (E >= e_lo && E <= e_hi) in_wmp = true;
+    }
+    if (!in_wmp) {
+        double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
+        apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
+        micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
+    } else {
+        int pole_off = __ldg(&PTR_I(p, P_WMP_POLE_OFF)[ni]);
+        int win_off  = __ldg(&PTR_I(p, P_WMP_WIN_OFF)[ni]);
+        int bro_off  = __ldg(&PTR_I(p, P_WMP_BROADEN_OFF)[ni]);
+        int cf_off   = __ldg(&PTR_I(p, P_WMP_CF_OFF)[ni]);
+        double w_emin = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
+        double w_emax = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
+        double w_spc  = __ldg(&PTR_D(p, P_WMP_SPACING)[ni]);
+        double w_sqra = __ldg(&PTR_D(p, P_WMP_SQRT_AWR)[ni]);
+        double w_tk   = __ldg(&PTR_D(p, P_WMP_T_KELVIN)[ni]);
+        int w_nw   = __ldg(&PTR_I(p, P_WMP_N_WINDOWS)[ni]);
+        int w_fo   = __ldg(&PTR_I(p, P_WMP_FIT_ORDER)[ni]);
+        int w_fiss = __ldg(&PTR_I(p, P_WMP_FISSIONABLE)[ni]);
+        const double2* w_poles    = PTR_D2(p, P_WMP_POLES) + pole_off;
+        const int* w_windows      = PTR_I(p, P_WMP_WINDOWS) + win_off;
+        const signed char* w_bro  = PTR_B(p, P_WMP_BROADEN) + bro_off;
+        const double* w_curvefit  = PTR_D(p, P_WMP_CURVEFIT) + cf_off;
+        double w_s = 0.0, w_a = 0.0, w_f = 0.0;
+        wmp_eval(E, w_tk, w_emin, w_emax, w_spc, w_sqra,
+                 w_nw, w_fo, w_fiss,
+                 w_poles, w_windows, w_bro, w_curvefit,
+                 &w_s, &w_a, &w_f);
+        double new_el  = fmax(w_s, 0.0);
+        double new_fis = fmax(w_f, 0.0);
+        double new_cap = fmax(w_a - w_f, 0.0);
+        micro_t = new_el + s_inel + s_n2n + s_n3n + new_fis + new_cap;
+        s_el = new_el; s_fis = new_fis; s_cap = new_cap;
+    }
+
+    if (sab_nuc_idx >= 0 && ni == sab_nuc_idx
+        && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0
+        && SCALAR_I(p, P_SAB_N_INC) > 0) {
+        double sab_xs_val = sab_total_xs(E, p);
+        if (sab_xs_val > 0.0) {
+            double delta = sab_xs_val - s_el;
+            micro_t += delta;
+            s_el = sab_xs_val;
+        }
+    }
+
+    NuclideMacroXs out;
+    out.s_t    = Ni * micro_t;
+    out.s_el   = Ni * s_el;
+    out.s_inel = Ni * s_inel;
+    out.s_n2n  = Ni * s_n2n;
+    out.s_n3n  = Ni * s_n3n;
+    out.s_fis  = Ni * s_fis;
+    out.s_cap  = Ni * s_cap;
+    return out;
+}
+
 // Cap on discrete inelastic levels we walk on the legacy fallback
 // path (used when no CDF is built — i.e. nuclides whose ENDF/B-VII.1
 // evaluation provides MT=4 natively, like U-235). Keep at 64 to match
@@ -1045,171 +1449,25 @@ transport_persistent(
             continue;
         }
 
-        // XS lookup — track all 6 reactions separately
+        // XS lookup — Pass 1 stores only Σ_t per nuclide; per-reaction
+        // breakdown is recomputed for the chosen nuclide at sampling
+        // time. This keeps per-thread footprint flat as
+        // MAX_NUC_PER_MAT grows (see eval_nuclide_macro_xs comment).
         int n_nuc = __ldg(&PTR_I(p, P_MAT_N_NUC)[mat]);
-        double sum_t=0;
-        double nuc_t[4]={}, nuc_el[4]={}, nuc_inel[4]={}, nuc_n2n[4]={};
-        double nuc_n3n[4]={}, nuc_fis[4]={}, nuc_cap[4]={};
+        double sum_t = 0;
+        double nuc_t[MAX_NUC_PER_MAT] = {};
         double urr_xi = pcg_uniform(&rng);
 
-        for (int i=0; i<n_nuc; i++) {
-            int ni = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+i]);
-            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+i]);
-            int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
-            int n_e = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
-            const double* grid = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
-            int e_idx = energy_index(grid, n_e, E);
-            // Log-log interpolation fraction (OpenMC scheme)
-            double log_frac = 0.0;
-            if (e_idx + 1 < n_e && grid[e_idx] > 0.0) {
-                double log_e = log(E);
-                double log_lo = log(grid[e_idx]);
-                double log_hi = log(grid[e_idx+1]);
-                if (log_hi > log_lo) log_frac = (log_e - log_lo) / (log_hi - log_lo);
-                if (log_frac < 0.0) log_frac = 0.0;
-                if (log_frac > 1.0) log_frac = 1.0;
-            }
-
-            double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0, micro_t=0;
-
-            if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
-                // Pointwise table lookup — exact HDF5 values, log-log interpolation
-                int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
-                const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
-                const double* pw1 = (e_idx+1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx+1) * 7] : pw0;
-                double xs7[7];
-                for (int ch=0; ch<7; ch++) {
-                    double lo = pw0[ch], hi = pw1[ch];
-                    xs7[ch] = (lo > 1e-30 && hi > 1e-30 && log_frac > 0.0)
-                        ? exp(log(lo) + log_frac * (log(hi) - log(lo))) : lo;
-                }
-                s_el=xs7[0]; s_inel=xs7[1]; s_n2n=xs7[2]; s_n3n=xs7[3];
-                s_fis=xs7[4]; s_cap=xs7[5]; micro_t=xs7[6];
-                // Ensure capture absorbs any remainder
-                double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
-                s_cap = fmax(micro_t - partials, 0.0);
-            } else {
-                // SVD fallback
-                bool has_inel_k = false;
-                for (int r=0; r<6; r++) {
-                    int key = ni*N_REACTIONS+r;
-                    if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
-                        double s = svd_reconstruct_interp(
-                            &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                            &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
-                            e_idx, n_e, rank, log_frac);
-                        if(r==0) s_el=s; else if(r==1) { s_inel=s; has_inel_k=true; }
-                        else if(r==2) s_n2n=s; else if(r==3) s_n3n=s;
-                        else if(r==4) s_fis=s; else if(r==5) s_cap=s;
-                    }
-                }
-                // Match CPU: when MT=4 kernel is absent, synthesize inelastic by
-                // summing discrete-level SVD reconstructions at this energy.
-                if (!has_inel_k) {
-                    int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[ni]);
-                    int n_lev  = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[ni]);
-                    double lsum = 0.0;
-                    for (int l=0; l<n_lev; l++) {
-                        int gl = lv_off + l;
-                        if (!__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) continue;
-                        if (E < __ldg(&PTR_D(p, P_LEVEL_THR)[gl])) continue;
-                        double lxs = svd_reconstruct_interp(
-                            &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                            &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
-                            e_idx, n_e, rank, log_frac);
-                        if (lxs > 0.0) lsum += lxs;
-                    }
-                    s_inel = lsum;
-                }
-                // Match CPU: if HDF5 total is available, set micro_t to the HDF5
-                // total and reabsorb the delta into capture. This captures the
-                // "missing" absorption channels (n,a / n,p / MT=19-21 etc.) that
-                // the 6-channel SVD basis does not represent. Without this step,
-                // U-238 resonance-region absorption is underestimated and k_inf
-                // comes in ~+2500 pcm high.
-                if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-                    int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
-                    const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
-                    double tot_lo = tot_grid[e_idx];
-                    double tot_hi = (e_idx+1 < n_e) ? tot_grid[e_idx+1] : tot_lo;
-                    double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
-                        ? exp(log(tot_lo) + log_frac*(log(tot_hi)-log(tot_lo)))
-                        : tot_lo;
-                    double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
-                    s_cap = fmax(tot - partials, 0.0);
-                    micro_t = tot;
-                } else {
-                    micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
-                }
-            }
-
-            // Hybrid SVD+WMP: if this nuclide has WMP coverage and E is inside
-            // the resolved-resonance window, replace elastic/fission/capture with
-            // the windowed-multipole evaluation and suppress URR (resonances are
-            // already explicit via poles). Outside the window the SVD/PW path
-            // stands and URR applies as usual.
-            bool in_wmp = false;
-            if (__ldg(&PTR_I(p, P_WMP_HAS)[ni])) {
-                double e_lo = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
-                double e_hi = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
-                if (E >= e_lo && E <= e_hi) in_wmp = true;
-            }
-
-            if (!in_wmp) {
-                // URR — modifies s_el, s_fis, s_cap. Recompute micro_t to match CPU behavior.
-                double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
-                apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
-                micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
-            } else {
-                int pole_off = __ldg(&PTR_I(p, P_WMP_POLE_OFF)[ni]);
-                int win_off  = __ldg(&PTR_I(p, P_WMP_WIN_OFF)[ni]);
-                int bro_off  = __ldg(&PTR_I(p, P_WMP_BROADEN_OFF)[ni]);
-                int cf_off   = __ldg(&PTR_I(p, P_WMP_CF_OFF)[ni]);
-                double w_emin = __ldg(&PTR_D(p, P_WMP_E_MIN)[ni]);
-                double w_emax = __ldg(&PTR_D(p, P_WMP_E_MAX)[ni]);
-                double w_spc  = __ldg(&PTR_D(p, P_WMP_SPACING)[ni]);
-                double w_sqra = __ldg(&PTR_D(p, P_WMP_SQRT_AWR)[ni]);
-                double w_tk   = __ldg(&PTR_D(p, P_WMP_T_KELVIN)[ni]);
-                int w_nw      = __ldg(&PTR_I(p, P_WMP_N_WINDOWS)[ni]);
-                int w_fo      = __ldg(&PTR_I(p, P_WMP_FIT_ORDER)[ni]);
-                int w_fiss    = __ldg(&PTR_I(p, P_WMP_FISSIONABLE)[ni]);
-
-                const double2* w_poles    = PTR_D2(p, P_WMP_POLES) + pole_off;
-                const int* w_windows      = PTR_I(p, P_WMP_WINDOWS) + win_off;
-                const signed char* w_bro  = PTR_B(p, P_WMP_BROADEN) + bro_off;
-                const double* w_curvefit  = PTR_D(p, P_WMP_CURVEFIT) + cf_off;
-
-                double w_s = 0.0, w_a = 0.0, w_f = 0.0;
-                wmp_eval(E, w_tk, w_emin, w_emax, w_spc, w_sqra,
-                         w_nw, w_fo, w_fiss,
-                         w_poles, w_windows, w_bro, w_curvefit,
-                         &w_s, &w_a, &w_f);
-
-                double new_el  = fmax(w_s, 0.0);
-                double new_fis = fmax(w_f, 0.0);
-                double new_cap = fmax(w_a - w_f, 0.0);
-                micro_t = new_el + s_inel + s_n2n + s_n3n + new_fis + new_cap;
-                s_el = new_el; s_fis = new_fis; s_cap = new_cap;
-            }
-
-            // S(alpha,beta) for H1 (nuclide idx 3 in PWR)
-            if (ni==3 && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0 && SCALAR_I(p, P_SAB_N_INC) > 0) {
-                double sab_xs_val = sab_total_xs(E, p);
-                if (sab_xs_val > 0.0) {
-                    double delta = sab_xs_val - s_el;
-                    micro_t += delta;
-                    s_el = sab_xs_val;
-                }
-            }
-            // debug: uncomment to trace per-nuclide XS on first step
-            // if (lane==0 && step==0) {
-            //     printf("  nuc=%d Ni=%.6f el=%.4f inel=%.4f fis=%.4f cap=%.4f tot=%.4f E=%.2f pw=%d\n",
-            //         ni, Ni, s_el, s_inel, s_fis, s_cap, micro_t, E, __ldg(&PTR_I(p, P_HAS_PW)[ni]));
-            // }
-            nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
-            nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
-            nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
-            sum_t+=Ni*micro_t;
+        for (int i = 0; i < n_nuc; i++) {
+            int ni    = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + i]);
+            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + i]);
+            // Legacy `transport_persistent` is PWR-pin-cell-only; nuclide
+            // index 3 is H-1 in that hardcoded geometry. Pass sab_nuc_idx
+            // = 3 so the helper reproduces the prior `ni == 3` gate.
+            NuclideMacroXs xs = eval_nuclide_macro_xs(ni, Ni, E, urr_xi,
+                                                     /*sab_nuc_idx*/ 3, rank, p);
+            nuc_t[i] = xs.s_t;
+            sum_t   += xs.s_t;
         }
 
         if (sum_t <= 0.0) { is_alive=0; break; }
@@ -1242,14 +1500,21 @@ transport_persistent(
             double xi_nuc = pcg_uniform(&rng) * sum_t;
             double cum=0.0; int hit_l=0;
             for (int i=0; i<n_nuc; i++) { cum+=nuc_t[i]; if(xi_nuc<cum){hit_l=i;break;} hit_l=i; }
-            int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+hit_l]);
+            int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + hit_l]);
+            double Ni_hit = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + hit_l]);
             double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
+
+            // Reaction-channel breakdown for the chosen nuclide. Same
+            // urr_xi as Pass 1 — deterministic, so Σ_x sum back to Σ_t
+            // and reaction weights stay normalised.
+            NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
+                hit_nuc, Ni_hit, E, urr_xi, /*sab_nuc_idx*/ 3, rank, p);
 
             // Sample reaction — order matches CPU: el, inel, n2n, n3n, fis, cap
             double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
             double cum_rxn = 0.0;
 
-            cum_rxn += nuc_el[hit_l];
+            cum_rxn += hit_xs.s_el;
             if (xi_rxn < cum_rxn) {
                 // ═══ Elastic scattering ═══
 
@@ -1320,11 +1585,11 @@ transport_persistent(
                     rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                 }
 
-            } else if ((cum_rxn+=nuc_inel[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_inel), xi_rxn < cum_rxn) {
                 // ═══ Inelastic — proper discrete level sampling ═══
                 goto do_inelastic;
 
-            } else if ((cum_rxn+=nuc_n2n[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_n2n), xi_rxn < cum_rxn) {
                 // ═══ (n,2n) — bank 1 extra neutron, primary continues ═══
                 { double temp=E/10.0;
                   double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
@@ -1344,7 +1609,7 @@ transport_persistent(
                   rotate_direction(&dx,&dy,&dz,ml,phi);
                 }
 
-            } else if ((cum_rxn+=nuc_n3n[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_n3n), xi_rxn < cum_rxn) {
                 // ═══ (n,3n) — bank 2 extra neutrons, primary continues ═══
                 for(int ns3=0;ns3<2;ns3++){
                   double temp=E/10.0;
@@ -1365,7 +1630,7 @@ transport_persistent(
                   rotate_direction(&dx,&dy,&dz,ml,phi);
                 }
 
-            } else if ((cum_rxn+=nuc_fis[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_fis), xi_rxn < cum_rxn) {
                 // ═══ Fission ═══
                 lcnt_fis++;
                 int nb_off=__ldg(&PTR_I(p, P_NB_OFFSETS)[hit_nuc]);
@@ -1378,7 +1643,7 @@ transport_persistent(
                     int idx=atomicAdd(fis_count,1);
                     if(idx<max_fis){
                         fis_x[idx]=px; fis_y[idx]=py; fis_z[idx]=pz;
-                        fis_e[idx]=sample_fission_energy(E,&rng,p,hit_nuc);
+                        fis_e[idx]=sample_fission_emit_energy(E,nu,&rng,p,hit_nuc);
                         fis_w[idx]=1.0;
                     }
                 }
@@ -1479,16 +1744,28 @@ transport_persistent(
                     }
                 }
                 int sel_mt=(n_lev>0)?__ldg(&PTR_I(p, P_LEVEL_MT)[lv_off+selected]):0;
-                // Continuum (MT=91): compute effective Q from evaporation model
+                // Prefer the ENDF MT=91 tabulated outgoing distribution;
+                // fall back to Weisskopf evaporation when no table.
+                // Matches `sample_inelastic_level` in
+                // `physics/collision.rs`. Closes a small portion (~5 %)
+                // of inelastic-MT=91 events on Godiva — see
+                // transport_recursive.cu for the full investigation note.
                 if(sel_mt==91){
-                    double a_p=A/8.0;
                     double ecm_mev=E*A/((A+1.0)*1e6);
-                    double eex=fmax(ecm_mev,0.1);
-                    double T=sqrt(eex/a_p);
-                    double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
-                    double eo=-T*log(x1*x2);
-                    eo=fmin(eo,ecm_mev*0.9);
-                    Q = -(ecm_mev - eo)*1e6;
+                    int n_inc91 = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
+                    double eo_mev;
+                    if (n_inc91 > 0) {
+                        double eo_ev = sample_inel91_energy(E, &rng, p, hit_nuc);
+                        eo_mev = eo_ev / 1.0e6;
+                    } else {
+                        double a_p=A/8.0;
+                        double eex=fmax(ecm_mev,0.1);
+                        double T=sqrt(eex/a_p);
+                        double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
+                        eo_mev=-T*log(x1*x2);
+                    }
+                    eo_mev=fmin(eo_mev, ecm_mev*0.9);
+                    Q = -(ecm_mev - eo_mev)*1e6;
                 }
                 // Two-body inelastic kinematics (matches CPU inelastic_scatter)
                 double e_cm = E * A / (A + 1.0);
@@ -1636,90 +1913,22 @@ extern "C" __global__ void debug_transport_trace(
             continue;
         }
 
-        // XS lookup — same as transport_persistent
+        // XS lookup — same algebra as transport_persistent, via the
+        // streaming helper. Diagnostics that previously read per-nuclide
+        // reaction breakdown (trace rows 11-14) re-call the helper for
+        // the chosen nuclide below.
         int n_nuc = __ldg(&PTR_I(p, P_MAT_N_NUC)[mat]);
-        double sum_t=0;
-        double nuc_t[4]={}, nuc_el[4]={}, nuc_inel[4]={}, nuc_n2n[4]={};
-        double nuc_n3n[4]={}, nuc_fis[4]={}, nuc_cap[4]={};
+        double sum_t = 0;
+        double nuc_t[MAX_NUC_PER_MAT] = {};
         double urr_xi = pcg_uniform(&rng);
 
-        for (int i=0; i<n_nuc; i++) {
-            int ni = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+i]);
-            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+i]);
-            int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
-            int n_e = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
-            const double* grid = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
-            int e_idx = energy_index(grid, n_e, E);
-            double log_frac = 0.0;
-            if (e_idx + 1 < n_e && grid[e_idx] > 0.0) {
-                double log_e = log(E), log_lo = log(grid[e_idx]), log_hi = log(grid[e_idx+1]);
-                if (log_hi > log_lo) log_frac = (log_e - log_lo) / (log_hi - log_lo);
-                if (log_frac < 0.0) log_frac = 0.0;
-                if (log_frac > 1.0) log_frac = 1.0;
-            }
-            double s_el=0, s_inel=0, s_n2n=0, s_n3n=0, s_fis=0, s_cap=0, micro_t=0;
-            if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
-                int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
-                const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
-                const double* pw1 = (e_idx+1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx+1) * 7] : pw0;
-                double xs7[7];
-                for (int ch=0; ch<7; ch++) {
-                    double lo = pw0[ch], hi = pw1[ch];
-                    xs7[ch] = (lo > 1e-30 && hi > 1e-30 && log_frac > 0.0)
-                        ? exp(log(lo) + log_frac * (log(hi) - log(lo))) : lo;
-                }
-                s_el=xs7[0]; s_inel=xs7[1]; s_n2n=xs7[2]; s_n3n=xs7[3];
-                s_fis=xs7[4]; s_cap=xs7[5]; micro_t=xs7[6];
-                double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
-                s_cap = fmax(micro_t - partials, 0.0);
-            } else {
-                for (int r=0; r<6; r++) {
-                    int key = ni*N_REACTIONS+r;
-                    if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
-                        double s = svd_reconstruct_interp(
-                            &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                            &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
-                            e_idx, n_e, rank, log_frac);
-                        if(r==0) s_el=s; else if(r==1) s_inel=s;
-                        else if(r==2) s_n2n=s; else if(r==3) s_n3n=s;
-                        else if(r==4) s_fis=s; else if(r==5) s_cap=s;
-                    }
-                }
-                // Same CPU-parity fix as main transport: set micro_t to HDF5 total
-                // and reabsorb delta into capture.
-                if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-                    int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
-                    const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
-                    double tot_lo = tot_grid[e_idx];
-                    double tot_hi = (e_idx+1 < n_e) ? tot_grid[e_idx+1] : tot_lo;
-                    double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
-                        ? exp(log(tot_lo) + log_frac*(log(tot_hi)-log(tot_lo)))
-                        : tot_lo;
-                    double partials = s_el + s_inel + s_n2n + s_n3n + s_fis;
-                    s_cap = fmax(tot - partials, 0.0);
-                    micro_t = tot;
-                } else {
-                    micro_t = s_el + s_inel + s_n2n + s_n3n + s_fis + s_cap;
-                }
-            }
-            // URR — recompute micro_t via delta
-            {
-                double prev_el = s_el, prev_fis = s_fis, prev_cap = s_cap;
-                apply_urr(p, ni, &s_el, &s_fis, &s_cap, E, urr_xi);
-                micro_t += (s_el - prev_el) + (s_fis - prev_fis) + (s_cap - prev_cap);
-            }
-            if (ni==3 && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0 && SCALAR_I(p, P_SAB_N_INC) > 0) {
-                double sab_xs_val = sab_total_xs(E, p);
-                if (sab_xs_val > 0.0) {
-                    double delta = sab_xs_val - s_el;
-                    micro_t += delta;
-                    s_el = sab_xs_val;
-                }
-            }
-            nuc_t[i]=Ni*micro_t; nuc_el[i]=Ni*s_el; nuc_inel[i]=Ni*s_inel;
-            nuc_n2n[i]=Ni*s_n2n; nuc_n3n[i]=Ni*s_n3n;
-            nuc_fis[i]=Ni*s_fis; nuc_cap[i]=Ni*s_cap;
-            sum_t+=Ni*micro_t;
+        for (int i = 0; i < n_nuc; i++) {
+            int ni    = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + i]);
+            double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + i]);
+            NuclideMacroXs xs = eval_nuclide_macro_xs(ni, Ni, E, urr_xi,
+                                                     /*sab_nuc_idx*/ 3, rank, p);
+            nuc_t[i] = xs.s_t;
+            sum_t   += xs.s_t;
         }
         if (sum_t <= 0.0) { trace[row+9]=8.0; is_alive=0; actual_steps++; break; }
 
@@ -1758,19 +1967,26 @@ extern "C" __global__ void debug_transport_trace(
             double xi_nuc = pcg_uniform(&rng) * sum_t;
             double cum=0.0; int hit_l=0;
             for (int i=0; i<n_nuc; i++) { cum+=nuc_t[i]; if(xi_nuc<cum){hit_l=i;break;} hit_l=i; }
-            int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat*4+hit_l]);
+            int hit_nuc = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + hit_l]);
+            double Ni_hit = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + hit_l]);
             double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
 
+            // Reaction breakdown for the chosen nuclide. Same urr_xi as
+            // Pass 1 → Σ_x sum back to nuc_t[hit_l]; reaction weights
+            // stay normalised.
+            NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
+                hit_nuc, Ni_hit, E, urr_xi, /*sab_nuc_idx*/ 3, rank, p);
+
             trace[row+10] = (double)hit_nuc;
-            trace[row+11] = nuc_el[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
-            trace[row+12] = nuc_inel[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
-            trace[row+13] = nuc_fis[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
-            trace[row+14] = nuc_cap[hit_l] / __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat*4+hit_l]);
+            trace[row+11] = hit_xs.s_el  / Ni_hit;
+            trace[row+12] = hit_xs.s_inel / Ni_hit;
+            trace[row+13] = hit_xs.s_fis / Ni_hit;
+            trace[row+14] = hit_xs.s_cap / Ni_hit;
 
             double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
             double cum_rxn = 0.0;
 
-            cum_rxn += nuc_el[hit_l];
+            cum_rxn += hit_xs.s_el;
             if (xi_rxn < cum_rxn) {
                 trace[row+9] = 0.0; // elastic
                 if (hit_nuc==3 && E < SCALAR_D(p, P_SAB_EMAX) && SCALAR_I(p, P_SAB_N_INC) > 0) {
@@ -1833,22 +2049,22 @@ extern "C" __global__ void debug_transport_trace(
                         rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                     }
                 }
-            } else if ((cum_rxn+=nuc_inel[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_inel), xi_rxn < cum_rxn) {
                 trace[row+9] = 1.0; // inelastic
                 E = fmax(E * 0.5, 1e-5); // simplified for trace
                 double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
                 rotate_direction(&dx,&dy,&dz,mu,phi);
-            } else if ((cum_rxn+=nuc_n2n[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_n2n), xi_rxn < cum_rxn) {
                 trace[row+9] = 2.0;
                 E = fmax(E * 0.3, 1e-5);
                 double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
                 rotate_direction(&dx,&dy,&dz,mu,phi);
-            } else if ((cum_rxn+=nuc_n3n[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_n3n), xi_rxn < cum_rxn) {
                 trace[row+9] = 3.0;
                 E = fmax(E * 0.2, 1e-5);
                 double mu=2.0*pcg_uniform(&rng)-1.0, phi=2.0*PI*pcg_uniform(&rng);
                 rotate_direction(&dx,&dy,&dz,mu,phi);
-            } else if ((cum_rxn+=nuc_fis[hit_l]), xi_rxn < cum_rxn) {
+            } else if ((cum_rxn+=hit_xs.s_fis), xi_rxn < cum_rxn) {
                 trace[row+9] = 4.0; // fission
                 is_alive = 0;
             } else {

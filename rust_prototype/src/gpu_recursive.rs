@@ -421,10 +421,15 @@ impl GpuRecursiveContext {
 
         // Compile recursive kernels.
         let source = assemble_kernel_source();
+        // Pin sm_86 (Ampere / RTX A1000) so the kernel can use
+        // `atomicAdd(double*, double)` — required for the spectrum-
+        // hardening diagnostic tallies (e_fis_in_sum etc.). The default
+        // NVRTC arch is sm_52, which lacks double-add atomics.
         let ptx = nvrtc::compile_ptx_with_opts(
             &source,
             nvrtc::CompileOptions {
                 use_fast_math: Some(false),
+                arch: Some("sm_86"),
                 ..Default::default()
             },
         )
@@ -1369,6 +1374,29 @@ pub struct RecursiveTransportBatch {
     pub n_leakage: u64,
     pub n_surf_xings: u64,
     pub k_eff: f64,
+    // Per-reaction tallies (added for spectrum-hardening diagnosis;
+    // see `bin/metal_stats_diag`). Mean E at each reaction is
+    // `e_*_sum / n_*`. Inelastic energy loss is
+    // `(e_inel_in_sum − e_inel_out_sum) / n_inelastic`.
+    pub n_elastic: u64,
+    pub n_inelastic: u64,
+    pub n_capture: u64,
+    pub e_fis_in_sum: f64,
+    pub e_el_in_sum: f64,
+    pub e_inel_in_sum: f64,
+    pub e_inel_out_sum: f64,
+    /// Squared-energy accumulators for σ(E_at_reaction). σ at fission
+    /// is the diagnostic that distinguishes a tail-driven ⟨ν⟩ bias
+    /// from a mean-driven one once ν(E) parity is confirmed.
+    pub e_fis_in_sq_sum: f64,
+    pub e_el_in_sq_sum: f64,
+    pub e_inel_in_sq_sum: f64,
+    /// Σ |Q| over inelastic events. ⟨|Q|⟩ = q_inel_sum / n_inelastic
+    /// is the CM-frame energy lost per event. CPU and GPU should
+    /// converge here if level-XS-proportional sampling is unbiased;
+    /// a gap localises the metal hot bias to the level selection
+    /// path.
+    pub q_inel_sum: f64,
 }
 
 impl GpuRecursiveContext {
@@ -1416,6 +1444,17 @@ impl GpuRecursiveContext {
                 n_leakage: 0,
                 n_surf_xings: 0,
                 k_eff: 0.0,
+                n_elastic: 0,
+                n_inelastic: 0,
+                n_capture: 0,
+                e_fis_in_sum: 0.0,
+                e_el_in_sum: 0.0,
+                e_inel_in_sum: 0.0,
+                e_inel_out_sum: 0.0,
+                e_fis_in_sq_sum: 0.0,
+                e_el_in_sq_sum: 0.0,
+                e_inel_in_sq_sum: 0.0,
+                q_inel_sum: 0.0,
             });
         }
         if rng_seeds.len() != n {
@@ -1498,6 +1537,18 @@ impl GpuRecursiveContext {
         let mut d_cnt_fis = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
         let mut d_cnt_leak = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
         let mut d_cnt_surf = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        // Spectrum-hardening diagnostic tallies — see `RecursiveTransportBatch`.
+        let mut d_cnt_el = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let mut d_cnt_inel = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let mut d_cnt_cap = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        let mut d_e_fis_in = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_e_el_in = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_e_inel_in = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_e_inel_out = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_e_fis_in_sq = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_e_el_in_sq = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_e_inel_in_sq = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
+        let mut d_q_inel = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
 
         // Build the packed TransportParams buffer using GpuTransportContext's
         // helper. P_GEOM_TYPE is irrelevant here (the recursive kernel
@@ -1591,7 +1642,19 @@ impl GpuRecursiveContext {
             .arg(&mut d_cnt_coll)
             .arg(&mut d_cnt_fis)
             .arg(&mut d_cnt_leak)
-            .arg(&mut d_cnt_surf);
+            .arg(&mut d_cnt_surf)
+            // spectrum-hardening diagnostic tallies
+            .arg(&mut d_cnt_el)
+            .arg(&mut d_cnt_inel)
+            .arg(&mut d_cnt_cap)
+            .arg(&mut d_e_fis_in)
+            .arg(&mut d_e_el_in)
+            .arg(&mut d_e_inel_in)
+            .arg(&mut d_e_inel_out)
+            .arg(&mut d_e_fis_in_sq)
+            .arg(&mut d_e_el_in_sq)
+            .arg(&mut d_e_inel_in_sq)
+            .arg(&mut d_q_inel);
         // SAFETY: kernel signature matches the argument list above
         // (transport_recursive_persistent in transport_recursive.cu).
         unsafe {
@@ -1613,6 +1676,17 @@ impl GpuRecursiveContext {
         let cnt_fis = stream.clone_dtoh(&d_cnt_fis).map_err(|e| e.to_string())?[0] as u64;
         let cnt_leak = stream.clone_dtoh(&d_cnt_leak).map_err(|e| e.to_string())?[0] as u64;
         let cnt_surf = stream.clone_dtoh(&d_cnt_surf).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_el = stream.clone_dtoh(&d_cnt_el).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_inel = stream.clone_dtoh(&d_cnt_inel).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_cap = stream.clone_dtoh(&d_cnt_cap).map_err(|e| e.to_string())?[0] as u64;
+        let e_fis_in = stream.clone_dtoh(&d_e_fis_in).map_err(|e| e.to_string())?[0];
+        let e_el_in = stream.clone_dtoh(&d_e_el_in).map_err(|e| e.to_string())?[0];
+        let e_inel_in = stream.clone_dtoh(&d_e_inel_in).map_err(|e| e.to_string())?[0];
+        let e_inel_out = stream.clone_dtoh(&d_e_inel_out).map_err(|e| e.to_string())?[0];
+        let e_fis_in_sq = stream.clone_dtoh(&d_e_fis_in_sq).map_err(|e| e.to_string())?[0];
+        let e_el_in_sq = stream.clone_dtoh(&d_e_el_in_sq).map_err(|e| e.to_string())?[0];
+        let e_inel_in_sq = stream.clone_dtoh(&d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
+        let q_inel = stream.clone_dtoh(&d_q_inel).map_err(|e| e.to_string())?[0];
 
         // Suppress unused-warning on retained guards.
         let _ = (
@@ -1644,6 +1718,17 @@ impl GpuRecursiveContext {
             n_leakage: cnt_leak,
             n_surf_xings: cnt_surf,
             k_eff,
+            n_elastic: cnt_el,
+            n_inelastic: cnt_inel,
+            n_capture: cnt_cap,
+            e_fis_in_sum: e_fis_in,
+            e_el_in_sum: e_el_in,
+            e_inel_in_sum: e_inel_in,
+            e_inel_out_sum: e_inel_out,
+            e_fis_in_sq_sum: e_fis_in_sq,
+            e_el_in_sq_sum: e_el_in_sq,
+            e_inel_in_sq_sum: e_inel_in_sq,
+            q_inel_sum: q_inel,
         })
     }
 }

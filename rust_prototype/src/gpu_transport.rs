@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 104;
+const N_PARAMS: usize = 123;
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -57,11 +57,21 @@ pub struct GpuNuclideData {
     pub pointwise_xs: CudaSlice<f64>,
     pub pw_offsets: CudaSlice<i32>,
     pub has_pw: CudaSlice<i32>,
-    // Energy-dependent nu-bar tables
+    // Energy-dependent nu-bar tables (ν_total = ν_prompt + Σ ν_delayed).
     pub nu_bar_energies: CudaSlice<f64>,
     pub nu_bar_values: CudaSlice<f64>,
     pub nu_bar_offsets: CudaSlice<i32>,
     pub nu_bar_sizes: CudaSlice<i32>,
+    // Delayed-only ν̄(E) per nuclide. Empty entries (`delayed_nu_bar_sizes[i]==0`)
+    // mean the nuclide carries no delayed-neutron data and the device-side
+    // fission emitter falls through to the prompt χ path. When non-empty,
+    // β(E) = ν_d(E) / ν_t(E) and the emitter draws each banked neutron from
+    // the soft Watt delayed spectrum (sample_delayed_energy) with probability
+    // β, matching `physics/collision.rs::sample_delayed_energy`.
+    pub delayed_nu_bar_energies: CudaSlice<f64>,
+    pub delayed_nu_bar_values: CudaSlice<f64>,
+    pub delayed_nu_bar_offsets: CudaSlice<i32>,
+    pub delayed_nu_bar_sizes: CudaSlice<i32>,
     // Discrete inelastic levels (Q-values + SVD basis for XS-proportional sampling)
     pub level_q_values: CudaSlice<f64>, // flat: all Q-values concatenated
     pub level_thresholds: CudaSlice<f64>, // flat: all thresholds concatenated
@@ -97,8 +107,34 @@ pub struct GpuNuclideData {
     pub fis_dist_sizes: CudaSlice<i32>,
     pub fis_e_out: CudaSlice<f64>,
     pub fis_cdf: CudaSlice<f64>,
+    /// PDF samples aligned 1:1 with `fis_e_out` / `fis_cdf`. Enables
+    /// the quadratic lin-lin CDF inversion in `sample_eout_bin`
+    /// (OpenMC `Tabular::sample`) on the GPU. Pre-fix the GPU used a
+    /// linear-CDF / histogram-PDF fallback, which biased the χ
+    /// outgoing spectrum hard → less leakage → +500-700 pcm hot on
+    /// fast-metal benchmarks (Godiva, PMF). When non-empty, falls
+    /// back to linear interpolation only when the PDF slope is
+    /// degenerate.
+    pub fis_pdf: CudaSlice<f64>,
     pub fis_nuc_offsets: CudaSlice<i32>,
     pub fis_nuc_n_inc: CudaSlice<i32>,
+    // MT=91 continuum-inelastic outgoing energy distributions
+    // (ENDF Law 4 tabular). Layout mirrors the fission distribution
+    // buffers above. Wired to close a +400 keV ⟨E_out⟩ gap vs CPU
+    // (the GPU used to fall back unconditionally to a Weisskopf
+    // evaporation approximation, the source of the +500-700 pcm
+    // fast-metal hot bias on Godiva / Jezebel). When
+    // `inel91_nuc_n_inc[i] == 0` the GPU kernel falls back to the
+    // evaporation formula — matches the CPU behaviour on nuclides
+    // whose evaluation does not ship a tabulated MT=91 distribution.
+    pub inel91_inc_energies: CudaSlice<f64>,
+    pub inel91_dist_offsets: CudaSlice<i32>,
+    pub inel91_dist_sizes: CudaSlice<i32>,
+    pub inel91_e_out: CudaSlice<f64>,
+    pub inel91_cdf: CudaSlice<f64>,
+    pub inel91_pdf: CudaSlice<f64>,
+    pub inel91_nuc_offsets: CudaSlice<i32>,
+    pub inel91_nuc_n_inc: CudaSlice<i32>,
     // Closed-form fission χ parameters per nuclide (ENDF Law 11 Watt).
     // When `fis_nuc_n_inc[i] == 0` and `watt_nuc_n[i] > 0`, the
     // device-side `sample_fission_energy` interpolates
@@ -679,6 +715,31 @@ impl GpuTransportContext {
             dptr!(&nuc_data.watt_u),
             dptr!(&nuc_data.watt_nuc_offsets),
             dptr!(&nuc_data.watt_nuc_n),
+            // Delayed-only ν̄(E) (slots 110-113). Drives β(E) =
+            // ν_d / ν_t at the fission emission site so each banked
+            // neutron picks between prompt χ and the soft-Watt delayed
+            // spectrum — see transport.cu sample_fission_emit_energy.
+            dptr!(&nuc_data.delayed_nu_bar_energies),
+            dptr!(&nuc_data.delayed_nu_bar_values),
+            dptr!(&nuc_data.delayed_nu_bar_offsets),
+            dptr!(&nuc_data.delayed_nu_bar_sizes),
+            // Fission χ PDF (slot 114). Drives the OpenMC quadratic
+            // lin-lin CDF inversion in `sample_eout_bin`. See
+            // P_FIS_PDF comment in transport.cu.
+            dptr!(&nuc_data.fis_pdf),
+            // MT=91 continuum inelastic distributions (slots 115-122).
+            // Replaces the Weisskopf evaporation fallback in the GPU's
+            // inelastic branch; restores the ENDF tabular path the CPU
+            // already used. Fixes the +400 keV ⟨E_out inelastic⟩ gap
+            // that drove the +500-700 pcm fast-metal `k_eff` bias.
+            dptr!(&nuc_data.inel91_inc_energies),
+            dptr!(&nuc_data.inel91_dist_offsets),
+            dptr!(&nuc_data.inel91_dist_sizes),
+            dptr!(&nuc_data.inel91_e_out),
+            dptr!(&nuc_data.inel91_cdf),
+            dptr!(&nuc_data.inel91_pdf),
+            dptr!(&nuc_data.inel91_nuc_offsets),
+            dptr!(&nuc_data.inel91_nuc_n_inc),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -890,11 +951,54 @@ impl GpuTransportContext {
                 lev_mt_vec.push(lev.info.mt as i32);
                 match lev.kernel.as_ref() {
                     Some(crate::transport::xs_provider::ReactionKernel::Svd { kernel, coeffs }) => {
+                        // Per-level SvdKernel may have actual rank
+                        // `level_rank < rank` (the global rank uploaded
+                        // as `P_RANK`) when the HDF5 grid for the MT is
+                        // sparse (high-threshold levels typically have
+                        // <15 unique energy points and SVD truncates).
+                        //
+                        // The device kernel reads basis[e_idx * P_RANK
+                        // + j] for j in 0..P_RANK and dots with
+                        // coeffs[0..P_RANK]; if we just `extend_from_
+                        // slice` the level's raw `n_e * level_rank`
+                        // basis we end up storing a NARROWER stride than
+                        // the kernel reads — every column j ≥ level_rank
+                        // reads past the level's basis into the next
+                        // level's data (or into level_coeffs garbage).
+                        // The pre-fix consequence on Godiva: levels with
+                        // small svd.rank silently returned ~10^0 ≈ 1 b
+                        // for their XS (basis row is junk that dot-
+                        // products to ~0 in log space), so the GPU's
+                        // level-selection sampling was biased toward the
+                        // first ~16 low-|Q| levels — ⟨|Q|⟩_GPU = 659 keV
+                        // vs CPU 926 keV, the +500-700 pcm fast-metal
+                        // hot bias.
+                        //
+                        // Fix: pad each row to the global stride with
+                        // zeros, and pad coeffs to length `rank` with
+                        // zeros. The dot product reproduces the level's
+                        // true XS (extra coeffs * 0 + extra basis * 0 = 0).
+                        let level_rank = kernel.rank();
+                        let n_e = kernel.n_energy();
+                        let raw_basis = kernel.basis_f64();
                         lev_has_kernel_vec.push(1);
                         lev_basis_off_vec.push(lev_basis_vec.len() as i32);
-                        lev_basis_vec.extend_from_slice(kernel.basis_f64());
+                        if level_rank == rank {
+                            lev_basis_vec.extend_from_slice(raw_basis);
+                        } else {
+                            for i in 0..n_e {
+                                let src = &raw_basis[i * level_rank..(i + 1) * level_rank];
+                                lev_basis_vec.extend_from_slice(src);
+                                for _ in level_rank..rank {
+                                    lev_basis_vec.push(0.0);
+                                }
+                            }
+                        }
                         lev_coeffs_off_vec.push(lev_coeffs_vec.len() as i32);
                         lev_coeffs_vec.extend_from_slice(coeffs);
+                        for _ in coeffs.len()..rank {
+                            lev_coeffs_vec.push(0.0);
+                        }
                     }
                     Some(crate::transport::xs_provider::ReactionKernel::Table { xs, .. }) => {
                         // Discrete-level Table variant — adapt to the
@@ -1053,12 +1157,38 @@ impl GpuTransportContext {
             nb_values_vec.push(0.0);
         }
 
+        // ── Pack delayed-only ν̄(E) tables — mirrors the prompt+delayed
+        // packing above. The device emitter divides ν_delayed(E)/ν_total(E)
+        // per banked neutron to sample β(E) on the fly; nuclides without a
+        // delayed table leave `dnb_sizes_vec[i] = 0` and the GPU falls
+        // through to the prompt χ path (existing sample_fission_energy).
+        let mut dnb_energies_vec: Vec<f64> = Vec::new();
+        let mut dnb_values_vec: Vec<f64> = Vec::new();
+        let mut dnb_offsets_vec = vec![0_i32; n_nuc];
+        let mut dnb_sizes_vec = vec![0_i32; n_nuc];
+
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref t) = nuc.delayed_nu_bar_table {
+                if !t.energies.is_empty() {
+                    dnb_offsets_vec[nuc_idx] = dnb_energies_vec.len() as i32;
+                    dnb_sizes_vec[nuc_idx] = t.energies.len() as i32;
+                    dnb_energies_vec.extend_from_slice(&t.energies);
+                    dnb_values_vec.extend_from_slice(&t.values);
+                }
+            }
+        }
+        if dnb_energies_vec.is_empty() {
+            dnb_energies_vec.push(0.0);
+            dnb_values_vec.push(0.0);
+        }
+
         // ── Pack fission energy distributions (flat CDFs with offsets) ──
         let mut fis_inc_e_vec: Vec<f64> = Vec::new();
         let mut fis_dist_off_vec: Vec<i32> = Vec::new();
         let mut fis_dist_sz_vec: Vec<i32> = Vec::new();
         let mut fis_eout_vec: Vec<f64> = Vec::new();
         let mut fis_cdf_vec: Vec<f64> = Vec::new();
+        let mut fis_pdf_vec: Vec<f64> = Vec::new();
         let mut fis_nuc_off_vec = vec![0_i32; n_nuc];
         let mut fis_nuc_ninc_vec = vec![0_i32; n_nuc];
 
@@ -1089,6 +1219,17 @@ impl GpuTransportContext {
                             fis_dist_sz_vec.push(dist.e_out.len() as i32);
                             fis_eout_vec.extend_from_slice(&dist.e_out);
                             fis_cdf_vec.extend_from_slice(&dist.cdf);
+                            // PDF aligned 1:1 with e_out/cdf when ENDF
+                            // ships it; some Law 4 variants ship only
+                            // a histogram CDF (no PDF). The device
+                            // helper falls back to linear-CDF when
+                            // PDF entries are zero, so an unconditional
+                            // extend preserves alignment.
+                            if dist.pdf.len() == dist.e_out.len() {
+                                fis_pdf_vec.extend_from_slice(&dist.pdf);
+                            } else {
+                                fis_pdf_vec.extend(std::iter::repeat_n(0.0_f64, dist.e_out.len()));
+                            }
                         }
                     }
                     Some(FissionEnergyLaw::Watt(w)) => {
@@ -1144,11 +1285,70 @@ impl GpuTransportContext {
         if fis_eout_vec.is_empty() {
             fis_eout_vec.push(0.0);
             fis_cdf_vec.push(0.0);
+            fis_pdf_vec.push(0.0);
         }
         if fis_dist_off_vec.is_empty() {
             fis_dist_off_vec.push(0);
             fis_dist_sz_vec.push(0);
         }
+
+        // ── Pack MT=91 continuum-inelastic outgoing-energy
+        // distributions. Layout 1:1 with the fission spectrum
+        // packing above. Closes the +400 keV ⟨E_out⟩ gap that the
+        // evaporation fallback was producing on Godiva / Jezebel.
+        let mut inel91_inc_e_vec: Vec<f64> = Vec::new();
+        let mut inel91_dist_off_vec: Vec<i32> = Vec::new();
+        let mut inel91_dist_sz_vec: Vec<i32> = Vec::new();
+        let mut inel91_eout_vec: Vec<f64> = Vec::new();
+        let mut inel91_cdf_vec: Vec<f64> = Vec::new();
+        let mut inel91_pdf_vec: Vec<f64> = Vec::new();
+        let mut inel91_nuc_off_vec = vec![0_i32; n_nuc];
+        let mut inel91_nuc_ninc_vec = vec![0_i32; n_nuc];
+
+        for (nuc_idx, nuc) in nuclides.iter().enumerate() {
+            if let Some(ref edist) = nuc.inelastic_continuum_edist {
+                // MT=91 is always tabular (ENDF Law 4); no closed-form
+                // variant to dispatch on.
+                if edist.energies.is_empty() || edist.distributions.is_empty() {
+                    continue;
+                }
+                inel91_nuc_off_vec[nuc_idx] = inel91_inc_e_vec.len() as i32;
+                inel91_nuc_ninc_vec[nuc_idx] = edist.energies.len() as i32;
+                for (i, e_inc) in edist.energies.iter().enumerate() {
+                    inel91_inc_e_vec.push(*e_inc);
+                    let dist = &edist.distributions[i];
+                    inel91_dist_off_vec.push(inel91_eout_vec.len() as i32);
+                    inel91_dist_sz_vec.push(dist.e_out.len() as i32);
+                    inel91_eout_vec.extend_from_slice(&dist.e_out);
+                    inel91_cdf_vec.extend_from_slice(&dist.cdf);
+                    if dist.pdf.len() == dist.e_out.len() {
+                        inel91_pdf_vec.extend_from_slice(&dist.pdf);
+                    } else {
+                        inel91_pdf_vec
+                            .extend(std::iter::repeat_n(0.0_f64, dist.e_out.len()));
+                    }
+                }
+            }
+        }
+        if inel91_inc_e_vec.is_empty() {
+            inel91_inc_e_vec.push(0.0);
+        }
+        if inel91_eout_vec.is_empty() {
+            inel91_eout_vec.push(0.0);
+            inel91_cdf_vec.push(0.0);
+            inel91_pdf_vec.push(0.0);
+        }
+        if inel91_dist_off_vec.is_empty() {
+            inel91_dist_off_vec.push(0);
+            inel91_dist_sz_vec.push(0);
+        }
+        let n_with_inel91 = inel91_nuc_ninc_vec.iter().filter(|&&n| n > 0).count();
+        println!(
+            "  GPU: MT=91 continuum table = {} pts ({} / {} nuclides covered)",
+            inel91_eout_vec.len(),
+            n_with_inel91,
+            n_nuc,
+        );
         // Watt buffers must have at least one entry so the CUDA
         // device buffers are non-empty (`clone_htod` accepts empty
         // slices on most drivers but emitting a sentinel keeps the
@@ -1215,12 +1415,15 @@ impl GpuTransportContext {
             urr_cf_vec.push(0.0);
         }
 
+        let n_with_dnb = dnb_sizes_vec.iter().filter(|&&s| s > 0).count();
         println!(
-            "  GPU: basis={:.1} MB, grids={:.1} MB, nu-bar={} pts, fis_spec={} pts",
+            "  GPU: basis={:.1} MB, grids={:.1} MB, nu-bar={} pts, fis_spec={} pts, delayed_nu_bar={} pts ({} nuclides)",
             all_basis_vec.len() as f64 * 8.0 / 1e6,
             all_grids_vec.len() as f64 * 8.0 / 1e6,
             nb_energies_vec.len(),
-            fis_eout_vec.len()
+            fis_eout_vec.len(),
+            dnb_energies_vec.len(),
+            n_with_dnb,
         );
 
         Ok(GpuNuclideData {
@@ -1268,13 +1471,26 @@ impl GpuTransportContext {
             nu_bar_values: self.stream.clone_htod(&nb_values_vec)?,
             nu_bar_offsets: self.stream.clone_htod(&nb_offsets_vec)?,
             nu_bar_sizes: self.stream.clone_htod(&nb_sizes_vec)?,
+            delayed_nu_bar_energies: self.stream.clone_htod(&dnb_energies_vec)?,
+            delayed_nu_bar_values: self.stream.clone_htod(&dnb_values_vec)?,
+            delayed_nu_bar_offsets: self.stream.clone_htod(&dnb_offsets_vec)?,
+            delayed_nu_bar_sizes: self.stream.clone_htod(&dnb_sizes_vec)?,
             fis_inc_energies: self.stream.clone_htod(&fis_inc_e_vec)?,
             fis_dist_offsets: self.stream.clone_htod(&fis_dist_off_vec)?,
             fis_dist_sizes: self.stream.clone_htod(&fis_dist_sz_vec)?,
             fis_e_out: self.stream.clone_htod(&fis_eout_vec)?,
             fis_cdf: self.stream.clone_htod(&fis_cdf_vec)?,
+            fis_pdf: self.stream.clone_htod(&fis_pdf_vec)?,
             fis_nuc_offsets: self.stream.clone_htod(&fis_nuc_off_vec)?,
             fis_nuc_n_inc: self.stream.clone_htod(&fis_nuc_ninc_vec)?,
+            inel91_inc_energies: self.stream.clone_htod(&inel91_inc_e_vec)?,
+            inel91_dist_offsets: self.stream.clone_htod(&inel91_dist_off_vec)?,
+            inel91_dist_sizes: self.stream.clone_htod(&inel91_dist_sz_vec)?,
+            inel91_e_out: self.stream.clone_htod(&inel91_eout_vec)?,
+            inel91_cdf: self.stream.clone_htod(&inel91_cdf_vec)?,
+            inel91_pdf: self.stream.clone_htod(&inel91_pdf_vec)?,
+            inel91_nuc_offsets: self.stream.clone_htod(&inel91_nuc_off_vec)?,
+            inel91_nuc_n_inc: self.stream.clone_htod(&inel91_nuc_ninc_vec)?,
             watt_inc_energies: self.stream.clone_htod(&watt_inc_e_vec)?,
             watt_a: self.stream.clone_htod(&watt_a_vec)?,
             watt_b: self.stream.clone_htod(&watt_b_vec)?,
@@ -1308,18 +1524,31 @@ impl GpuTransportContext {
         nuclide_awrs: &[f64],
         nuclide_nu_bars: &[f64],
     ) -> Result<GpuMaterialData, Box<dyn std::error::Error>> {
-        let max_nuc = 4; // max nuclides per material
+        // Must match `MAX_NUC_PER_MAT` in transport.cu. Bumped from 4 to
+        // 32 to match the CPU's `MAX_NUCLIDES` so LCT / solution
+        // benchmarks (28-30 nuclides/material) fit without truncation.
+        // Per-thread register footprint is held flat by the streaming
+        // reaction-XS recompute — see `eval_nuclide_macro_xs` and the
+        // refactored Pass 1 in `transport.cu` / `transport_recursive.cu`.
+        const MAX_NUC: usize = 32;
         let n_mat = materials.len();
 
         let mut n_nuclides = vec![0_i32; n_mat];
-        let mut nuc_idx = vec![0_i32; n_mat * max_nuc];
-        let mut atom_dens = vec![0.0_f64; n_mat * max_nuc];
+        let mut nuc_idx = vec![0_i32; n_mat * MAX_NUC];
+        let mut atom_dens = vec![0.0_f64; n_mat * MAX_NUC];
 
         for (m, mat) in materials.iter().enumerate() {
+            if mat.nuclides.len() > MAX_NUC {
+                return Err(format!(
+                    "upload_material_data: material {} has {} nuclides, GPU stride MAX_NUC = {}",
+                    m, mat.nuclides.len(), MAX_NUC
+                )
+                .into());
+            }
             n_nuclides[m] = mat.nuclides.len() as i32;
             for (i, nuc) in mat.nuclides.iter().enumerate() {
-                nuc_idx[m * max_nuc + i] = nuc.xs_kernel_idx as i32;
-                atom_dens[m * max_nuc + i] = nuc.atom_density;
+                nuc_idx[m * MAX_NUC + i] = nuc.xs_kernel_idx as i32;
+                atom_dens[m * MAX_NUC + i] = nuc.atom_density;
             }
         }
 
@@ -1780,6 +2009,19 @@ impl GpuTransportContext {
             dptr!(&nuc_data.watt_u),               //107 P_WATT_U
             dptr!(&nuc_data.watt_nuc_offsets),     //108 P_WATT_NUC_OFF
             dptr!(&nuc_data.watt_nuc_n),           //109 P_WATT_NUC_N
+            dptr!(&nuc_data.delayed_nu_bar_energies), //110 P_DNB_ENERGIES
+            dptr!(&nuc_data.delayed_nu_bar_values),   //111 P_DNB_VALUES
+            dptr!(&nuc_data.delayed_nu_bar_offsets),  //112 P_DNB_OFFSETS
+            dptr!(&nuc_data.delayed_nu_bar_sizes),    //113 P_DNB_SIZES
+            dptr!(&nuc_data.fis_pdf),                 //114 P_FIS_PDF
+            dptr!(&nuc_data.inel91_inc_energies),     //115 P_INEL91_INC_E
+            dptr!(&nuc_data.inel91_dist_offsets),     //116 P_INEL91_DIST_OFF
+            dptr!(&nuc_data.inel91_dist_sizes),       //117 P_INEL91_DIST_SZ
+            dptr!(&nuc_data.inel91_e_out),            //118 P_INEL91_E_OUT
+            dptr!(&nuc_data.inel91_cdf),              //119 P_INEL91_CDF
+            dptr!(&nuc_data.inel91_pdf),              //120 P_INEL91_PDF
+            dptr!(&nuc_data.inel91_nuc_offsets),      //121 P_INEL91_NUC_OFF
+            dptr!(&nuc_data.inel91_nuc_n_inc),        //122 P_INEL91_NUC_NINC
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -2125,6 +2367,13 @@ impl GpuTransportContext {
             dptr!(&nuc_data.lev_ang_lev_off),
             dptr!(&nuc_data.lev_ang_lev_ne),
         ];
+        // Debug-trace kernel doesn't reference the inel_cdf / Watt /
+        // delayed-ν̄ / fis_pdf / MT=91-inelastic slots. Pad to
+        // N_PARAMS so the assert + TransportParams layout match.
+        let mut params_vec = params_vec;
+        while params_vec.len() < N_PARAMS {
+            params_vec.push(0_u64);
+        }
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
 

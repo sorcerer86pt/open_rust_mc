@@ -531,6 +531,31 @@ pub struct BatchResult {
     /// reaction-rate numerators). Each `Vec` inside is empty when the
     /// matching tally is disabled in `SimConfig.tallies`.
     pub tallies: BatchTallies,
+    /// Spectrum-hardening diagnostic tallies — see `bin/metal_stats_diag`.
+    /// Per-reaction event counts plus E-in / E-out accumulators so the
+    /// caller can compute ⟨E_in at fission⟩, ⟨E_in elastic⟩, and the
+    /// inelastic energy-loss moment ⟨ΔE⟩ = (e_inel_in − e_inel_out) / n_inel.
+    /// Default 0 when the backend doesn't populate them.
+    pub n_elastic: u64,
+    pub n_inelastic: u64,
+    pub n_capture: u64,
+    pub e_fis_in_sum: f64,
+    pub e_el_in_sum: f64,
+    pub e_inel_in_sum: f64,
+    pub e_inel_out_sum: f64,
+    /// Squared-energy accumulators (GPU-only for now). σ(E_at_reaction)
+    /// = sqrt(⟨E²⟩ − ⟨E⟩²). Used by `bin/metal_stats_diag` to test
+    /// whether the metal hot bias is a higher-moment effect on the
+    /// fission-incident energy distribution after ν(E) parity was
+    /// confirmed via `bin/nu_lookup_compare`.
+    pub e_fis_in_sq_sum: f64,
+    pub e_el_in_sq_sum: f64,
+    pub e_inel_in_sq_sum: f64,
+    /// Σ |Q| over inelastic events — used to localise the metal hot
+    /// bias to per-level-XS-weighted sampling. CPU and GPU should
+    /// agree on ⟨|Q|⟩ = q_inel_sum / n_inelastic if level selection
+    /// is unbiased.
+    pub q_inel_sum: f64,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -594,33 +619,58 @@ pub struct PhotonSourceEvent {
     pub mt: u32,
 }
 
-/// Per-particle transport result for parallel reduction.
+/// Per-particle transport result — scalar counters only. Variable-
+/// length outputs (fission sites, capture cells, photon events) and
+/// per-particle tally accumulators have been moved into
+/// [`TransportCtx`] so the transport functions can push directly into
+/// the worker-thread-local buffers instead of allocating a per-particle
+/// Vec on every fission / capture / γ-producing collision. For ICSBEP
+/// k-eigenvalue runs (no tallies, no γ coupling, ~2-3 fissions per
+/// history) this eliminates the dominant remaining per-particle heap
+/// allocation.
 struct ParticleResult {
-    fission_sites: Vec<FissionSite>,
     leakage: u32,
     absorptions: u32,
     thermal_scatters: u32,
     surface_crossings: u32,
     fissions: u32,
     collisions: u32,
-    /// Cell indices where this particle was captured (n,γ-style
-    /// non-fission absorption). Typical history captures at most
-    /// once, so this vec is usually empty or a single element —
-    /// allocation cost is amortised by the parallel reduction and the
-    /// fact that capture events are rare relative to scatter events.
-    capture_cells: Vec<usize>,
-    /// Photon emission events sampled at each reaction site (capture,
-    /// fission, inelastic). Reduced into `BatchResult::photon_events`.
-    photon_events: Vec<PhotonSourceEvent>,
     /// Track-length tally accumulator: Σ_segments w · d · Σ_νf(E),
     /// summed over every advance the particle made through fuel-
     /// bearing material. Reduced into `BatchResult::k_track` as
     /// `total / N_source` after the batch completes.
     track_length_nu_sigf: f64,
-    /// Per-particle tally accumulators (surface currents, mesh flux).
-    /// Sized once at particle birth from the active `Tallies` config;
-    /// empty Vec when the corresponding tally is disabled.
-    tallies: ParticleTallies,
+    // Spectrum-hardening diagnostics — once per fission/elastic/
+    // inelastic event. Counted on the CPU side to give `metal_stats_diag`
+    // a CPU σ value to compare against GPU σ at fission, after the
+    // ν(E)-table parity check (`bin/nu_lookup_compare`) ruled out the
+    // upload path.
+    n_elastic: u32,
+    n_inelastic: u32,
+    n_capture: u32,
+    e_fis_in_sum: f64,
+    e_fis_in_sq: f64,
+    e_el_in_sum: f64,
+    e_el_in_sq: f64,
+    e_inel_in_sum: f64,
+    e_inel_in_sq: f64,
+    e_inel_out_sum: f64,
+    q_inel_sum: f64,
+}
+
+/// Worker-thread-local sinks that the transport functions write into
+/// directly. Each rayon fold step rebuilds one of these around the
+/// current `WorkerAccum`'s buffers; the per-particle path never
+/// allocates a Vec of its own.
+///
+/// `captures_by_cell` is a pre-sized `&mut [f64]` (one entry per
+/// geometry cell). Capture events `+= 1.0` into the slot inline,
+/// replacing the prior `Vec<usize>` push-then-iter-then-bump pattern.
+struct TransportCtx<'a> {
+    fission_sites: &'a mut Vec<FissionSite>,
+    captures_by_cell: &'a mut [f64],
+    photon_events: &'a mut Vec<PhotonSourceEvent>,
+    tallies: &'a mut ParticleTallies,
 }
 
 /// Sample photon products for a given reaction (MT) at the current
@@ -754,6 +804,13 @@ fn apply_urr_equivalence_correction<XS: XsProvider>(
 }
 
 /// Transport a single particle to completion.
+///
+/// `tally_cfg` carries the static "what to track" config; `ctx` is the
+/// worker-thread-local sink — its `tallies` field is reset by the
+/// caller before each particle, and its Vec fields are append-only
+/// pointers into the worker-local batch buffers. Returns only scalar
+/// counters; all variable-length output (fission sites, capture cells,
+/// photon events, per-particle tallies) is written through `ctx`.
 #[allow(clippy::too_many_arguments)]
 fn transport_particle<XS: XsProvider>(
     site: &FissionSite,
@@ -764,7 +821,8 @@ fn transport_particle<XS: XsProvider>(
     cells: &[Cell],
     materials: &[Material],
     xs_provider: &XS,
-    tallies: &Tallies,
+    tally_cfg: &Tallies,
+    ctx: &mut TransportCtx<'_>,
     survival_biasing: Option<&SurvivalBiasing>,
     weight_window: Option<&crate::transport::weight_window::WeightWindow>,
     disable_delayed_neutrons: bool,
@@ -772,17 +830,24 @@ fn transport_particle<XS: XsProvider>(
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
-        fission_sites: Vec::new(),
         leakage: 0,
         absorptions: 0,
         fissions: 0,
         collisions: 0,
         thermal_scatters: 0,
         surface_crossings: 0,
-        capture_cells: Vec::new(),
-        photon_events: Vec::new(),
         track_length_nu_sigf: 0.0,
-        tallies: ParticleTallies::new(tallies),
+        n_elastic: 0,
+        n_inelastic: 0,
+        n_capture: 0,
+        e_fis_in_sum: 0.0,
+        e_fis_in_sq: 0.0,
+        e_el_in_sum: 0.0,
+        e_el_in_sq: 0.0,
+        e_inel_in_sum: 0.0,
+        e_inel_in_sq: 0.0,
+        e_inel_out_sum: 0.0,
+        q_inel_sum: 0.0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -998,13 +1063,13 @@ fn transport_particle<XS: XsProvider>(
             }
             // Mesh flux tally: deposit w · d into every voxel the
             // segment intersects. Skipped when the tally is disabled.
-            if let Some(mesh) = tallies.mesh_flux.as_ref() {
+            if let Some(mesh) = tally_cfg.mesh_flux.as_ref() {
                 mesh.deposit(
                     particle.pos,
                     particle.dir,
                     advance_dist,
                     particle.weight,
-                    &mut result.tallies.mesh_flux,
+                    &mut ctx.tallies.mesh_flux,
                 );
             }
             // Reaction-rate tally for chain-XS spectrum collapse:
@@ -1013,11 +1078,11 @@ fn transport_particle<XS: XsProvider>(
             // Track-length form is exact for the one-group XS
             // collapse; collision-estimator form would have higher
             // variance for non-rare reactions like (n,γ).
-            if let Some(rr) = tallies.reaction_rate.as_ref() {
+            if let Some(rr) = tally_cfg.reaction_rate.as_ref() {
                 let cell_idx = particle.cell_idx;
                 if cell_idx < rr.n_cells {
                     let w_d = particle.weight * advance_dist;
-                    result.tallies.rr_flux[cell_idx] += w_d;
+                    ctx.tallies.rr_flux[cell_idx] += w_d;
                     let n_mts = rr.n_mts;
                     for (i, nuc) in material.nuclides.iter().take(n_nuclides).enumerate() {
                         let xs_idx = nuc.xs_kernel_idx;
@@ -1046,7 +1111,7 @@ fn transport_particle<XS: XsProvider>(
                                     .partial_xs(xs_idx, particle.energy, other)
                                     .unwrap_or(0.0),
                             };
-                            result.tallies.rr_rate[base + m] += w_d * sigma;
+                            ctx.tallies.rr_rate[base + m] += w_d * sigma;
                         }
                     }
                 }
@@ -1058,15 +1123,15 @@ fn transport_particle<XS: XsProvider>(
                     // Surface current tally: split forward / backward
                     // crossings by sign(particle.dir · surface_normal).
                     if let (Some(sct), Some(surf_idx)) =
-                        (tallies.surface_current.as_ref(), hit.surface_idx)
+                        (tally_cfg.surface_current.as_ref(), hit.surface_idx)
                         && let Some(bin) = sct.bin_for(surf_idx)
                     {
                         let crossing_pos = particle.pos + particle.dir * hit.distance;
                         let n = surfaces[surf_idx].normal_at(crossing_pos);
                         if particle.dir.dot(n) >= 0.0 {
-                            result.tallies.surface_current_pos[bin] += particle.weight;
+                            ctx.tallies.surface_current_pos[bin] += particle.weight;
                         } else {
-                            result.tallies.surface_current_neg[bin] += particle.weight;
+                            ctx.tallies.surface_current_neg[bin] += particle.weight;
                         }
                     }
                     match hit.bc {
@@ -1217,6 +1282,7 @@ fn transport_particle<XS: XsProvider>(
                             &mut rng,
                             survival_biasing,
                             &mut result,
+                            ctx,
                             &mut pending,
                         );
                     }
@@ -1252,10 +1318,12 @@ fn transport_particle<XS: XsProvider>(
 /// Dispatch a real collision, branching between analog and survival-
 /// biasing paths.
 ///
-/// Updates `particle` (energy / direction / weight / status) and
-/// appends to `result` (fission_sites, photon_events, capture_cells,
-/// counters) and `pending` (secondaries from (n,xn) multiplicity).
-/// Used by both `transport_particle` (surface tracking) and
+/// Updates `particle` (energy / direction / weight / status), writes
+/// scalar counters into `result`, and appends variable-length output
+/// (fission sites, photon events, capture-cell bumps) directly into
+/// the worker sinks on `ctx`. `pending` carries (n,xn) secondaries
+/// back to the per-history outer loop. Used by both
+/// `transport_particle` (surface tracking) and
 /// `transport_particle_delta` so the implicit-capture path is shared.
 #[allow(clippy::too_many_arguments)]
 fn dispatch_real_collision<XS: XsProvider>(
@@ -1274,6 +1342,7 @@ fn dispatch_real_collision<XS: XsProvider>(
     rng: &mut Rng,
     survival_biasing: Option<&SurvivalBiasing>,
     result: &mut ParticleResult,
+    ctx: &mut TransportCtx<'_>,
     pending: &mut Vec<Particle>,
 ) {
     if let Some(sb) = survival_biasing {
@@ -1291,6 +1360,11 @@ fn dispatch_real_collision<XS: XsProvider>(
                 0
             };
         if n_fiss > 0 {
+            // Accumulate σ-at-fission inputs once per fission event
+            // (matches the GPU semantics in transport_recursive.cu:430).
+            let e_pre = particle.energy;
+            result.e_fis_in_sum += e_pre;
+            result.e_fis_in_sq += e_pre * e_pre;
             // β(E) = ν_delayed / ν_total — see process_collision for details.
             let beta = if micro.nu_bar > 0.0 {
                 (micro.delayed_nu_bar / micro.nu_bar).clamp(0.0, 1.0)
@@ -1306,7 +1380,7 @@ fn dispatch_real_collision<XS: XsProvider>(
                         None => collision::sample_fission_energy(particle.energy, rng),
                     }
                 };
-                result.fission_sites.push(FissionSite {
+                ctx.fission_sites.push(FissionSite {
                     pos: particle.pos,
                     energy: e_f,
                     weight: 1.0,
@@ -1319,7 +1393,7 @@ fn dispatch_real_collision<XS: XsProvider>(
                 FISSION_PHOTON_MTS,
                 particle,
                 rng,
-                &mut result.photon_events,
+                ctx.photon_events,
             );
         }
 
@@ -1327,20 +1401,21 @@ fn dispatch_real_collision<XS: XsProvider>(
         let sigma_s = (micro.total - sigma_a).max(0.0);
         if sigma_s <= 0.0 {
             result.absorptions += 1;
-            result.capture_cells.push(particle.cell_idx);
+            bump_capture(ctx.captures_by_cell, particle.cell_idx);
             sample_photon_products(
                 xs_provider,
                 xs_kernel_idx,
                 ABSORPTION_PHOTON_MTS,
                 particle,
                 rng,
-                &mut result.photon_events,
+                ctx.photon_events,
             );
             particle.kill();
             return;
         }
         particle.weight *= sigma_s / micro.total;
 
+        let e_pre = particle.energy;
         let outcome = collision::process_scatter_only(
             particle,
             micro,
@@ -1353,9 +1428,18 @@ fn dispatch_real_collision<XS: XsProvider>(
             rng,
         );
         match outcome {
-            CollisionOutcome::Scatter => {}
+            CollisionOutcome::Scatter => {
+                result.n_elastic += 1;
+                result.e_el_in_sum += e_pre;
+                result.e_el_in_sq += e_pre * e_pre;
+            }
             CollisionOutcome::InelasticScatter { q_value_ev } => {
-                result.photon_events.push(PhotonSourceEvent {
+                result.n_inelastic += 1;
+                result.e_inel_in_sum += e_pre;
+                result.e_inel_in_sq += e_pre * e_pre;
+                result.e_inel_out_sum += particle.energy;
+                result.q_inel_sum += q_value_ev.abs();
+                ctx.photon_events.push(PhotonSourceEvent {
                     cell_idx: particle.cell_idx as u32,
                     pos: [particle.pos.x, particle.pos.y, particle.pos.z],
                     energy: q_value_ev.abs(),
@@ -1369,6 +1453,7 @@ fn dispatch_real_collision<XS: XsProvider>(
             }
             CollisionOutcome::Absorption => {
                 result.absorptions += 1;
+                result.n_capture += 1;
             }
             CollisionOutcome::Fission { .. } => {}
         }
@@ -1385,6 +1470,7 @@ fn dispatch_real_collision<XS: XsProvider>(
     }
 
     // ── Analog (legacy bit-exact) ───────────────────────────────────
+    let e_pre = particle.energy;
     let outcome = collision::process_collision(
         particle,
         micro,
@@ -1399,9 +1485,18 @@ fn dispatch_real_collision<XS: XsProvider>(
         rng,
     );
     match outcome {
-        CollisionOutcome::Scatter => {}
+        CollisionOutcome::Scatter => {
+            result.n_elastic += 1;
+            result.e_el_in_sum += e_pre;
+            result.e_el_in_sq += e_pre * e_pre;
+        }
         CollisionOutcome::InelasticScatter { q_value_ev } => {
-            result.photon_events.push(PhotonSourceEvent {
+            result.n_inelastic += 1;
+            result.e_inel_in_sum += e_pre;
+            result.e_inel_in_sq += e_pre * e_pre;
+            result.e_inel_out_sum += particle.energy;
+            result.q_inel_sum += q_value_ev.abs();
+            ctx.photon_events.push(PhotonSourceEvent {
                 cell_idx: particle.cell_idx as u32,
                 pos: [particle.pos.x, particle.pos.y, particle.pos.z],
                 energy: q_value_ev.abs(),
@@ -1410,26 +1505,29 @@ fn dispatch_real_collision<XS: XsProvider>(
         }
         CollisionOutcome::Absorption => {
             result.absorptions += 1;
-            result.capture_cells.push(particle.cell_idx);
+            result.n_capture += 1;
+            bump_capture(ctx.captures_by_cell, particle.cell_idx);
             sample_photon_products(
                 xs_provider,
                 xs_kernel_idx,
                 ABSORPTION_PHOTON_MTS,
                 particle,
                 rng,
-                &mut result.photon_events,
+                ctx.photon_events,
             );
         }
         CollisionOutcome::Fission { sites } => {
             result.fissions += 1;
-            result.fission_sites.extend(sites);
+            result.e_fis_in_sum += e_pre;
+            result.e_fis_in_sq += e_pre * e_pre;
+            ctx.fission_sites.extend(sites);
             sample_photon_products(
                 xs_provider,
                 xs_kernel_idx,
                 FISSION_PHOTON_MTS,
                 particle,
                 rng,
-                &mut result.photon_events,
+                ctx.photon_events,
             );
         }
         CollisionOutcome::Multiplicity { secondaries } => {
@@ -1437,6 +1535,15 @@ fn dispatch_real_collision<XS: XsProvider>(
                 pending.push(Particle::new(s.pos, s.dir, s.energy, particle.cell_idx));
             }
         }
+    }
+}
+
+/// Bump the captures_by_cell slot for a capture at `cell_idx`,
+/// replacing the prior `Vec<usize>` push-then-iter-then-bump pattern.
+#[inline]
+fn bump_capture(captures_by_cell: &mut [f64], cell_idx: usize) {
+    if cell_idx < captures_by_cell.len() {
+        captures_by_cell[cell_idx] += 1.0;
     }
 }
 
@@ -1459,23 +1566,31 @@ fn transport_particle_delta<XS: XsProvider>(
     disable_delayed_neutrons: bool,
     urr_equivalence: Option<&crate::transport::urr_equivalence::UrrEquivalence>,
     majorant: &MajorantTable,
-    tallies: &Tallies,
+    tally_cfg: &Tallies,
+    ctx: &mut TransportCtx<'_>,
     survival_biasing: Option<&SurvivalBiasing>,
     weight_window: Option<&crate::transport::weight_window::WeightWindow>,
 ) -> ParticleResult {
     let mut rng = Rng::for_particle(batch, particle_idx);
     let mut result = ParticleResult {
-        fission_sites: Vec::new(),
         leakage: 0,
         absorptions: 0,
         fissions: 0,
         collisions: 0,
         thermal_scatters: 0,
         surface_crossings: 0,
-        capture_cells: Vec::new(),
-        photon_events: Vec::new(),
         track_length_nu_sigf: 0.0,
-        tallies: ParticleTallies::new(tallies),
+        n_elastic: 0,
+        n_inelastic: 0,
+        n_capture: 0,
+        e_fis_in_sum: 0.0,
+        e_fis_in_sq: 0.0,
+        e_el_in_sum: 0.0,
+        e_el_in_sq: 0.0,
+        e_inel_in_sum: 0.0,
+        e_inel_in_sq: 0.0,
+        e_inel_out_sum: 0.0,
+        q_inel_sum: 0.0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -1530,13 +1645,13 @@ fn transport_particle_delta<XS: XsProvider>(
             // Amanatides-Woo deposit handles axis-aligned voxel walks;
             // the integrand is the same as in surface tracking even if
             // the segment crosses materials silently.
-            if let Some(mesh) = tallies.mesh_flux.as_ref() {
+            if let Some(mesh) = tally_cfg.mesh_flux.as_ref() {
                 mesh.deposit(
                     particle.pos,
                     particle.dir,
                     advance_dist,
                     particle.weight,
-                    &mut result.tallies.mesh_flux,
+                    &mut ctx.tallies.mesh_flux,
                 );
             }
 
@@ -1549,7 +1664,7 @@ fn transport_particle_delta<XS: XsProvider>(
             // standard pragmatic limitation of surface-current under
             // delta tracking; reflective/vacuum boundaries are exact
             // because the segment stops there.
-            if let (Some(hit), Some(sct)) = (trace.as_ref(), tallies.surface_current.as_ref())
+            if let (Some(hit), Some(sct)) = (trace.as_ref(), tally_cfg.surface_current.as_ref())
                 && hit.distance < d_collision
                 && let Some(surf_idx) = hit.surface_idx
                 && let Some(bin) = sct.bin_for(surf_idx)
@@ -1557,9 +1672,9 @@ fn transport_particle_delta<XS: XsProvider>(
                 let crossing_pos = particle.pos + particle.dir * hit.distance;
                 let n = surfaces[surf_idx].normal_at(crossing_pos);
                 if particle.dir.dot(n) >= 0.0 {
-                    result.tallies.surface_current_pos[bin] += particle.weight;
+                    ctx.tallies.surface_current_pos[bin] += particle.weight;
                 } else {
-                    result.tallies.surface_current_neg[bin] += particle.weight;
+                    ctx.tallies.surface_current_neg[bin] += particle.weight;
                 }
             }
 
@@ -1888,6 +2003,7 @@ fn transport_particle_delta<XS: XsProvider>(
                 &mut rng,
                 survival_biasing,
                 &mut result,
+                ctx,
                 &mut pending,
             );
 
@@ -2000,81 +2116,199 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
         // Parallel transport: dispatch based on tracking mode.
         // Seed offsets batch number to make each seed produce independent streams.
         let batch_seed = batch as u64 + seed * 100_000;
-        let transport_one = |(i, site): (usize, &FissionSite)| match &tracking {
-            TrackingMode::Surface => transport_particle(
-                site,
-                batch_seed,
-                i as u64,
-                geometry,
-                surfaces,
-                cells,
-                materials,
-                xs_provider,
-                &config.tallies,
-                config.survival_biasing.as_ref(),
-                config.weight_window.as_ref(),
-                config.disable_delayed_neutrons,
-                config.urr_equivalence.as_ref(),
-            ),
-            TrackingMode::Delta(majorant) => transport_particle_delta(
-                site,
-                batch_seed,
-                i as u64,
-                geometry,
-                surfaces,
-                cells,
-                materials,
-                xs_provider,
-                config.disable_delayed_neutrons,
-                config.urr_equivalence.as_ref(),
-                majorant,
-                &config.tallies,
-                config.survival_biasing.as_ref(),
-                config.weight_window.as_ref(),
-            ),
+        // Per-worker accumulator. Each rayon worker initialises one of
+        // these and folds every particle it handles into it; the
+        // `ParticleTallies` scratch is recycled (reset in place) across
+        // every particle so per-particle `vec![0.0; rr_rate_size]`
+        // allocations stop showing up under depletion / RR-CADIS runs.
+        // At the end of the batch the per-worker accumulators are merged
+        // in `reduce_op` below.
+        struct WorkerAccum {
+            leakage: u32,
+            absorptions: u32,
+            fissions: u32,
+            collisions: u32,
+            thermal_scatters: u32,
+            surface_crossings: u32,
+            track_length_sum: f64,
+            fission_sites: Vec<FissionSite>,
+            captures_by_cell: Vec<f64>,
+            photon_events: Vec<PhotonSourceEvent>,
+            tallies: BatchTallies,
+            // Worker-local scratch — reset before each particle, written
+            // by the inner-loop tally code, then folded into `tallies`.
+            scratch: ParticleTallies,
+            // Spectrum-hardening diagnostic accumulators (CPU side now
+            // mirrors GPU side; see `bin/metal_stats_diag`).
+            n_elastic: u64,
+            n_inelastic: u64,
+            n_capture: u64,
+            e_fis_in_sum: f64,
+            e_fis_in_sq: f64,
+            e_el_in_sum: f64,
+            e_el_in_sq: f64,
+            e_inel_in_sum: f64,
+            e_inel_in_sq: f64,
+            e_inel_out_sum: f64,
+            q_inel_sum: f64,
+        }
+
+        let worker_init = || WorkerAccum {
+            leakage: 0,
+            absorptions: 0,
+            fissions: 0,
+            collisions: 0,
+            thermal_scatters: 0,
+            surface_crossings: 0,
+            track_length_sum: 0.0,
+            fission_sites: Vec::new(),
+            captures_by_cell: vec![0.0_f64; cells.len()],
+            photon_events: Vec::new(),
+            tallies: BatchTallies::new(&config.tallies),
+            scratch: ParticleTallies::new(&config.tallies),
+            n_elastic: 0,
+            n_inelastic: 0,
+            n_capture: 0,
+            e_fis_in_sum: 0.0,
+            e_fis_in_sq: 0.0,
+            e_el_in_sum: 0.0,
+            e_el_in_sq: 0.0,
+            e_inel_in_sum: 0.0,
+            e_inel_in_sq: 0.0,
+            e_inel_out_sum: 0.0,
+            q_inel_sum: 0.0,
         };
-        let particle_results: Vec<ParticleResult> = if config.parallel {
+
+        let fold_one = |mut acc: WorkerAccum, (i, site): (usize, &FissionSite)| {
+            acc.scratch.reset();
+            // Build the per-particle sink around acc's worker-local
+            // buffers; the transport function pushes fission sites,
+            // capture-cell bumps, photon events, and tally writes
+            // directly into them. No per-particle Vec allocation.
+            let WorkerAccum {
+                ref mut fission_sites,
+                ref mut captures_by_cell,
+                ref mut photon_events,
+                ref mut scratch,
+                ..
+            } = acc;
+            let mut ctx = TransportCtx {
+                fission_sites,
+                captures_by_cell: captures_by_cell.as_mut_slice(),
+                photon_events,
+                tallies: scratch,
+            };
+            let pr = match &tracking {
+                TrackingMode::Surface => transport_particle(
+                    site,
+                    batch_seed,
+                    i as u64,
+                    geometry,
+                    surfaces,
+                    cells,
+                    materials,
+                    xs_provider,
+                    &config.tallies,
+                    &mut ctx,
+                    config.survival_biasing.as_ref(),
+                    config.weight_window.as_ref(),
+                    config.disable_delayed_neutrons,
+                    config.urr_equivalence.as_ref(),
+                ),
+                TrackingMode::Delta(majorant) => transport_particle_delta(
+                    site,
+                    batch_seed,
+                    i as u64,
+                    geometry,
+                    surfaces,
+                    cells,
+                    materials,
+                    xs_provider,
+                    config.disable_delayed_neutrons,
+                    config.urr_equivalence.as_ref(),
+                    majorant,
+                    &config.tallies,
+                    &mut ctx,
+                    config.survival_biasing.as_ref(),
+                    config.weight_window.as_ref(),
+                ),
+            };
+            // ctx goes out of scope here, releasing the borrow on `acc`.
+            acc.tallies.accumulate(&acc.scratch);
+            acc.leakage += pr.leakage;
+            acc.absorptions += pr.absorptions;
+            acc.fissions += pr.fissions;
+            acc.collisions += pr.collisions;
+            acc.thermal_scatters += pr.thermal_scatters;
+            acc.surface_crossings += pr.surface_crossings;
+            acc.track_length_sum += pr.track_length_nu_sigf;
+            acc.n_elastic += pr.n_elastic as u64;
+            acc.n_inelastic += pr.n_inelastic as u64;
+            acc.n_capture += pr.n_capture as u64;
+            acc.e_fis_in_sum += pr.e_fis_in_sum;
+            acc.e_fis_in_sq += pr.e_fis_in_sq;
+            acc.e_el_in_sum += pr.e_el_in_sum;
+            acc.e_el_in_sq += pr.e_el_in_sq;
+            acc.e_inel_in_sum += pr.e_inel_in_sum;
+            acc.e_inel_in_sq += pr.e_inel_in_sq;
+            acc.e_inel_out_sum += pr.e_inel_out_sum;
+            acc.q_inel_sum += pr.q_inel_sum;
+            acc
+        };
+
+        let reduce_op = |mut a: WorkerAccum, b: WorkerAccum| {
+            a.leakage += b.leakage;
+            a.absorptions += b.absorptions;
+            a.fissions += b.fissions;
+            a.collisions += b.collisions;
+            a.thermal_scatters += b.thermal_scatters;
+            a.surface_crossings += b.surface_crossings;
+            a.track_length_sum += b.track_length_sum;
+            a.fission_sites.extend(b.fission_sites);
+            for (slot, v) in a.captures_by_cell.iter_mut().zip(&b.captures_by_cell) {
+                *slot += v;
+            }
+            a.photon_events.extend(b.photon_events);
+            a.tallies.merge(&b.tallies);
+            a.n_elastic += b.n_elastic;
+            a.n_inelastic += b.n_inelastic;
+            a.n_capture += b.n_capture;
+            a.e_fis_in_sum += b.e_fis_in_sum;
+            a.e_fis_in_sq += b.e_fis_in_sq;
+            a.e_el_in_sum += b.e_el_in_sum;
+            a.e_el_in_sq += b.e_el_in_sq;
+            a.e_inel_in_sum += b.e_inel_in_sum;
+            a.e_inel_in_sq += b.e_inel_in_sq;
+            a.e_inel_out_sum += b.e_inel_out_sum;
+            a.q_inel_sum += b.q_inel_sum;
+            a
+        };
+
+        let final_acc = if config.parallel {
             source_bank
                 .par_iter()
                 .enumerate()
-                .map(transport_one)
-                .collect()
+                .fold(worker_init, fold_one)
+                .reduce(worker_init, reduce_op)
         } else {
-            source_bank.iter().enumerate().map(transport_one).collect()
+            source_bank
+                .iter()
+                .enumerate()
+                .fold(worker_init(), fold_one)
         };
 
-        // Reduce: merge per-particle results.
         let mut fission_bank = FissionBank::new();
-        let mut leakage = 0_u32;
-        let mut absorptions = 0_u32;
-        let mut fissions = 0_u32;
-        let mut collisions = 0_u32;
-        let mut thermal_scatters = 0_u32;
-        let mut surface_crossings = 0_u32;
-        let mut captures_by_cell = vec![0.0_f64; cells.len()];
-        let mut photon_events: Vec<PhotonSourceEvent> = Vec::new();
-        let mut track_length_sum = 0.0_f64;
-        // All five tally Vecs in one struct; `accumulate` is a no-op
-        // for any disabled channel since both sides are empty.
-        let mut batch_tallies = BatchTallies::new(&config.tallies);
-
-        for pr in particle_results {
-            fission_bank.sites.extend(pr.fission_sites);
-            leakage += pr.leakage;
-            absorptions += pr.absorptions;
-            fissions += pr.fissions;
-            collisions += pr.collisions;
-            thermal_scatters += pr.thermal_scatters;
-            surface_crossings += pr.surface_crossings;
-            track_length_sum += pr.track_length_nu_sigf;
-            for c in pr.capture_cells {
-                if c < captures_by_cell.len() {
-                    captures_by_cell[c] += 1.0;
-                }
-            }
-            photon_events.extend(pr.photon_events);
-            batch_tallies.accumulate(&pr.tallies);
-        }
+        fission_bank.sites = final_acc.fission_sites;
+        let leakage = final_acc.leakage;
+        let absorptions = final_acc.absorptions;
+        let fissions = final_acc.fissions;
+        let collisions = final_acc.collisions;
+        let thermal_scatters = final_acc.thermal_scatters;
+        let surface_crossings = final_acc.surface_crossings;
+        let captures_by_cell = final_acc.captures_by_cell;
+        let photon_events = final_acc.photon_events;
+        let track_length_sum = final_acc.track_length_sum;
+        let batch_tallies = final_acc.tallies;
 
         let k_batch = fission_bank.len() as f64 / n as f64;
         let k_track = track_length_sum / n as f64;
@@ -2095,6 +2329,22 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             photon_events,
             k_track,
             tallies: batch_tallies,
+            // Spectrum-hardening diagnostic tallies — populated on
+            // both CPU and GPU now. CPU side adds per-collision
+            // accumulators in `dispatch_real_collision` so
+            // `bin/metal_stats_diag` can do a three-way CPU↔GPU↔OpenMC
+            // σ(E_at_reaction) comparison.
+            n_elastic: final_acc.n_elastic,
+            n_inelastic: final_acc.n_inelastic,
+            n_capture: final_acc.n_capture,
+            e_fis_in_sum: final_acc.e_fis_in_sum,
+            e_el_in_sum: final_acc.e_el_in_sum,
+            e_inel_in_sum: final_acc.e_inel_in_sum,
+            e_inel_out_sum: final_acc.e_inel_out_sum,
+            e_fis_in_sq_sum: final_acc.e_fis_in_sq,
+            e_el_in_sq_sum: final_acc.e_el_in_sq,
+            e_inel_in_sq_sum: final_acc.e_inel_in_sq,
+            q_inel_sum: final_acc.q_inel_sum,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.
@@ -2200,16 +2450,29 @@ pub fn initial_source(
     // For nested geometries the Material cell lives in element-local
     // coords — its AABB is meaningless in world coords. In that case
     // fall back to the union of every cell that has a finite world
-    // AABB; that's the smallest world-coord box guaranteed to contain
-    // the geometry.
+    // AABB AND every lattice's world-coord extent (lattice cells'
+    // AABBs are element-local; their world bounds come from
+    // `origin + pitch · shape`). LCT-style benchmarks have all
+    // fissile material inside a lattice and zero finite cell AABBs
+    // covering the world extent — without the lattice union the
+    // sampler would default to ±10 cm and miss the geometry entirely.
     let target_aabb = target_idx.map(|i| cells[i].aabb);
     let aabb = match target_aabb {
         Some(a) if a.surface_area().is_finite() && a.surface_area() > 0.0 => a,
-        _ => union_finite_world_aabbs(cells).unwrap_or(crate::geometry::Aabb::new(
-            Vec3::new(-10.0, -10.0, -10.0),
-            Vec3::new(10.0, 10.0, 10.0),
-        )),
+        _ => union_finite_world_aabbs(cells)
+            .map(|cells_aabb| union_with_lattices(cells_aabb, geometry))
+            .or_else(|| lattices_world_aabb(geometry))
+            .unwrap_or(crate::geometry::Aabb::new(
+                Vec3::new(-10.0, -10.0, -10.0),
+                Vec3::new(10.0, 10.0, 10.0),
+            )),
     };
+    // 2D-extruded benchmarks (LCT-008, many sol-therm cases) carry
+    // a degenerate z pitch like ±10 000 cm — rejection sampling
+    // would waste 99 %+ of attempts above/below the fuel. Clamp any
+    // axis whose half-extent exceeds 10× the smallest finite half-
+    // extent to that 10× cap, centred at the AABB's midpoint.
+    let aabb = clamp_degenerate_axes(aabb);
 
     let mut attempts: u64 = 0;
     let max_attempts: u64 = (n as u64).saturating_mul(10_000).max(1_000_000);
@@ -2264,6 +2527,81 @@ fn union_finite_world_aabbs(cells: &[Cell]) -> Option<crate::geometry::Aabb> {
         .map(|c| c.aabb)
         .filter(|a| a.surface_area().is_finite() && a.surface_area() > 0.0)
         .reduce(crate::geometry::Aabb::union)
+}
+
+/// World-coordinate AABB enclosing every rectangular lattice in the
+/// geometry. For each lattice the extent is `[origin, origin + pitch ·
+/// shape]`. Used by `initial_source` when the cells alone don't pin
+/// the bounding box (LCT / sol-therm cases where every fissile cell
+/// lives inside a lattice and therefore carries an element-local
+/// AABB). Returns `None` only for lattice-free geometries.
+fn lattices_world_aabb(geometry: &crate::geometry::Geometry) -> Option<crate::geometry::Aabb> {
+    geometry
+        .lattices
+        .iter()
+        .map(|lat| {
+            let extent = Vec3::new(
+                lat.pitch.x * lat.shape[0] as f64,
+                lat.pitch.y * lat.shape[1] as f64,
+                lat.pitch.z * lat.shape[2] as f64,
+            );
+            crate::geometry::Aabb::new(lat.origin, lat.origin + extent)
+        })
+        .reduce(crate::geometry::Aabb::union)
+}
+
+fn union_with_lattices(
+    cells_aabb: crate::geometry::Aabb,
+    geometry: &crate::geometry::Geometry,
+) -> crate::geometry::Aabb {
+    match lattices_world_aabb(geometry) {
+        Some(lat_aabb) => cells_aabb.union(lat_aabb),
+        None => cells_aabb,
+    }
+}
+
+/// Tighten any axis whose half-extent exceeds 10× the smallest finite
+/// half-extent. 2D-extruded lattice problems (LCT-008, sol-therm cases
+/// with z-pitch like ±10 000 cm) trip rejection sampling because most
+/// uniform draws land outside the fuel; clamping that axis to ±10× the
+/// in-plane radius around the AABB midpoint preserves the fissile
+/// content while keeping the sampling-acceptance probability high.
+fn clamp_degenerate_axes(aabb: crate::geometry::Aabb) -> crate::geometry::Aabb {
+    let center = Vec3::new(
+        0.5 * (aabb.min.x + aabb.max.x),
+        0.5 * (aabb.min.y + aabb.max.y),
+        0.5 * (aabb.min.z + aabb.max.z),
+    );
+    let half = [
+        0.5 * (aabb.max.x - aabb.min.x),
+        0.5 * (aabb.max.y - aabb.min.y),
+        0.5 * (aabb.max.z - aabb.min.z),
+    ];
+    // Smallest positive half-extent; ignore degenerate (0 or negative)
+    // axes so a perfectly planar geometry doesn't collapse the cap to 0.
+    let min_pos = half
+        .iter()
+        .copied()
+        .filter(|h| h.is_finite() && *h > 0.0)
+        .fold(f64::INFINITY, f64::min);
+    if !min_pos.is_finite() {
+        return aabb;
+    }
+    // Cap each axis at the smallest finite half-extent — for an
+    // extruded-2D geometry this collapses the artificial z dimension
+    // to roughly the in-plane radius around the AABB midpoint. Tighter
+    // than 10× because the root cell's z range is often a single pin
+    // height (a few cm), not the lattice's "infinite" pitch.
+    let cap = min_pos;
+    let clamped = [
+        half[0].min(cap),
+        half[1].min(cap),
+        half[2].min(cap),
+    ];
+    crate::geometry::Aabb::new(
+        Vec3::new(center.x - clamped[0], center.y - clamped[1], center.z - clamped[2]),
+        Vec3::new(center.x + clamped[0], center.y + clamped[1], center.z + clamped[2]),
+    )
 }
 
 /// Normalize fission bank to N particles for the next generation.

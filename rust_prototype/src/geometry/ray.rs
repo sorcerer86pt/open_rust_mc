@@ -647,13 +647,15 @@ mod tests {
         // Lattice origin at (-1, -1, -big), pitch 1.0 — so the four
         // elements occupy [-1,0)×[-1,0), [0,1)×[-1,0), [-1,0)×[0,1),
         // [0,1)×[0,1) in the xy plane. Cylinders are centered at
-        // pin-universe origin (0.5, 0.5) so the pin sits at each
-        // element's center.
+        // pin-universe origin (0, 0) — `RectLattice::local_position`
+        // is element-CENTRE-relative (OpenMC convention), so a pin
+        // surface defined at the pin universe's local origin sits at
+        // the centre of every lattice element automatically.
         let surfaces = vec![
-            // 0: cylinder R=0.3 at element-local (0.5, 0.5)
+            // 0: cylinder R=0.3 at element-local (0, 0)
             Surface::CylinderZ {
-                center_x: 0.5,
-                center_y: 0.5,
+                center_x: 0.0,
+                center_y: 0.0,
                 radius: 0.3,
                 bc: BoundaryCondition::Transmission,
             },
@@ -777,8 +779,8 @@ mod tests {
         //   2. Land in element (1,0).
         let surfaces = vec![
             Surface::CylinderZ {
-                center_x: 0.5,
-                center_y: 0.5,
+                center_x: 0.0,
+                center_y: 0.0,
                 radius: 0.3,
                 bc: BoundaryCondition::Transmission,
             },
@@ -1008,8 +1010,8 @@ mod tests {
         // crossing should be the cylinder surface.
         let surfaces = vec![
             Surface::CylinderZ {
-                center_x: 0.5,
-                center_y: 0.5,
+                center_x: 0.0,
+                center_y: 0.0,
                 radius: 0.3,
                 bc: BoundaryCondition::Transmission,
             },

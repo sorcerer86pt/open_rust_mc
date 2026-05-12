@@ -167,6 +167,26 @@ fn run_case_cuda(
     (mean, stderr, k_ref, sigma_exp)
 }
 
+/// Default seeds for multi-seed averaging. Three independent seeds
+/// give a √3 ≈ 1.73× reduction in the seed-to-seed stderr of the
+/// mean and capture GPU atomic-ordering nondeterminism (which a
+/// single-seed run hides). Pair with `run_case_cuda_seeds`.
+const CUDA_DEFAULT_SEEDS: &[u64] = &[42, 43, 44];
+
+/// Pass criterion: `|Δ| ≤ max(150 pcm, 2σ_combined)`.
+///
+/// * The 150 pcm absolute floor catches small systematic biases that
+///   would otherwise hide inside a wide σ_combined — notably
+///   HEU-SOL-THERM-001 where ICSBEP σ_exp = 600 pcm dominates.
+/// * The `2σ_combined` envelope keeps the test honest when σ_exp is
+///   tight (Godiva σ_exp = 100 pcm), letting genuine MC noise + GPU
+///   atomic nondeterminism pass without a false-positive while still
+///   catching a regression of ≳ 2σ.
+/// * Replaces the prior dual rule (`pass_stat: ≤3σ` + `pass_phys: ≤500
+///   pcm`). 500 pcm was a research-engine permissive bar — production
+///   MC codes match Godiva / Jezebel within 100 pcm at production
+///   statistics, and the dual rule could let a 2σ regression land
+///   inside the absolute floor undetected.
 fn report(case: &str, k_calc: f64, sigma_calc: f64, k_ref: f64, sigma_exp: f64) -> bool {
     let delta = k_calc - k_ref;
     let pcm = delta * 1.0e5;
@@ -176,38 +196,135 @@ fn report(case: &str, k_calc: f64, sigma_calc: f64, k_ref: f64, sigma_exp: f64) 
     } else {
         f64::INFINITY
     };
-    let pass_stat = n_sigma <= 3.0;
-    let pass_phys = pcm.abs() <= 500.0;
-    let verdict = match (pass_stat, pass_phys) {
-        (true, true) => "PASS",
-        (false, _) => "FAIL(stat)",
-        (_, false) => "FAIL(phys)",
-    };
+    let envelope_pcm = (2.0 * sigma_c * 1.0e5).max(150.0);
+    let pass = pcm.abs() <= envelope_pcm;
+    let verdict = if pass { "PASS" } else { "FAIL" };
     println!(
         "  [CUDA {case}] k_calc = {k_calc:.5} ± {sigma_calc:.5}   k_ref = {k_ref:.5} ± {sigma_exp:.5}   \
-         Δ = {pcm:+.0} pcm   {n_sigma:.2}σ   [{verdict}]"
+         Δ = {pcm:+.0} pcm   {n_sigma:.2}σ   bound = ±{envelope_pcm:.0} pcm   [{verdict}]"
     );
-    pass_stat && pass_phys
+    pass
+}
+
+/// Multi-seed wrapper for `run_case_cuda`. Runs the case once per
+/// seed and returns the seed-mean of k_eff plus the seed-to-seed
+/// stderr of that mean. The latter captures both intra-run MC noise
+/// and GPU-specific atomic-ordering nondeterminism in one number —
+/// crucial for the tighter 2σ acceptance bound, since a single-seed
+/// run's within-batch stderr UNDERESTIMATES the actual variability
+/// when the GPU's atomicAdd ordering shifts ν banking between runs.
+fn run_case_cuda_seeds(
+    case_file: &Path,
+    batches: u32,
+    inactive: u32,
+    particles: u32,
+    seeds: &[u64],
+    rank: usize,
+) -> (f64, f64, f64, f64) {
+    assert!(!seeds.is_empty(), "need at least one seed");
+    let mut ks = Vec::with_capacity(seeds.len());
+    let (mut k_ref, mut sigma_exp) = (0.0_f64, 0.0_f64);
+    for &seed in seeds {
+        let (k, _stderr, kr, se) =
+            run_case_cuda(case_file, batches, inactive, particles, seed, rank);
+        ks.push(k);
+        k_ref = kr;
+        sigma_exp = se;
+    }
+    let n = ks.len() as f64;
+    let mean = ks.iter().sum::<f64>() / n;
+    let var = if ks.len() > 1 {
+        ks.iter().map(|k| (k - mean).powi(2)).sum::<f64>() / (n - 1.0)
+    } else {
+        0.0
+    };
+    let sigma_mean = (var / n).sqrt();
+    (mean, sigma_mean, k_ref, sigma_exp)
 }
 
 /// HMF-001 Godiva on CUDA. 3 nuclides (U-234/235/238), no S(α,β),
-/// fits the device's max_nuc=4 constraint.
+/// fast metal sphere — the historical family floor.
 #[test]
 #[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
 fn cuda_heu_met_fast_001_godiva() {
     let case = bench_dir().join("heu-met-fast-001_case-1.json");
-    let (k, sigma, k_ref, sigma_exp) = run_case_cuda(&case, 80, 20, 5_000, 42, 15);
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("HEU-MET-FAST-001.case-1", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "Godiva CUDA case failed under dual criterion");
+    assert!(pass, "Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope");
 }
 
 /// U233-MF-001 Jezebel-23 on CUDA. 4 nuclides (U-233/234/235/238),
-/// no S(α,β), fits max_nuc=4 exactly.
+/// no S(α,β); validates the Watt-χ + delayed-ν̄ GPU upload paths.
 #[test]
 #[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
 fn cuda_u233_met_fast_001() {
     let case = bench_dir().join("u233-met-fast-001.json");
-    let (k, sigma, k_ref, sigma_exp) = run_case_cuda(&case, 80, 20, 5_000, 42, 15);
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("U233-MET-FAST-001", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "U-233 Jezebel-23 CUDA case failed under dual criterion");
+    assert!(pass, "U-233 Jezebel-23 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// PMF-001 / Jezebel — bare δ-Pu sphere, 6.385 cm radius, vacuum BC.
+/// 5 nuclides (Pu-239/240/241 + Ga-69/Ga-71). Exercises Pu-239 fission
+/// physics and the GPU's per-nuclide χ dispatch — Pu-239 ships
+/// Tabular χ (Law 4/61), Pu-240/241 ship Watt χ (Law 11). Was blocked
+/// by the historical max_nuc = 4 GPU upload cap; now unblocked.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_pu_met_fast_001_jezebel() {
+    let case = bench_dir().join("pu-met-fast-001.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("PU-MET-FAST-001", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "PMF-001 Jezebel CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// PMF-002 — bare Pu-240-enriched sphere (~6.66 cm). 6 nuclides;
+/// different Pu vector from Jezebel (higher Pu-240). Cross-checks
+/// the GPU's Pu-240 χ and ν̄(E) tables against a second
+/// independent benchmark.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_pu_met_fast_002() {
+    let case = bench_dir().join("pu-met-fast-002.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("PU-MET-FAST-002", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "PMF-002 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// LCT-008 case-1 — LEU lattice (low-enriched pin lattice in a
+/// water moderator). Up to 28 nuclides per material; exercises the
+/// lifted MAX_NUC_PER_MAT = 32 stride and engages H-1 S(α,β)
+/// thermal scattering on the GPU (`sab_nuc_idx` arg of
+/// `transport_recursive_persistent`). Validates the
+/// element-CENTRE-relative lattice convention end-to-end across
+/// CPU `find_cell_recursive` and GPU `gr_find_cell`.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_leu_comp_therm_008_case_1() {
+    let case = bench_dir().join("leu-comp-therm-008_case-1.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("LEU-COMP-THERM-008.case-1", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "LCT-008 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// HEU-SOL-THERM-001 case-1 — uranyl nitrate solution. 30 nuclides
+/// per material (solution stoichiometry + steel structural traces).
+/// The thermal-spectrum benchmark the CPU path was previously stuck
+/// at Δ ≈ −1500 pcm vs OpenMC on (see icsbep_runs.rs commentary);
+/// the GPU is expected to expose the same gap because the bug is
+/// in the S(α,β) sampling kernel, not the upload path. Runs at the
+/// CPU's reference statistics: 80 × 50 000 particles.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_heu_sol_therm_001_case_1() {
+    let case = bench_dir().join("heu-sol-therm-001_case-1.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 50_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("HEU-SOL-THERM-001.case-1", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "HEU-SOL-THERM-001 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
 }

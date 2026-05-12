@@ -1,0 +1,113 @@
+Data dir: C:\Users\fog\madman_svd_experiment\data/endfb-vii.1-hdf5/neutron
+  Loading C:\Users\fog\madman_svd_experiment\data/endfb-vii.1-hdf5/neutron\U234.h5 (rank=5)...
+    AWR = 232.030 (6 temps, 37420 energy pts)
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 22 energies
+    Elastic angular dist: 53 energies, CM=true
+    URR: 26 energies, 20 bands, 1500–100000 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 37420 energy pts × 7 channels = 2046.4 KB
+        U234: NO nu_bar table — falls back to nu_bar_const = 2.4000
+  Loading C:\Users\fog\madman_svd_experiment\data/endfb-vii.1-hdf5/neutron\U235.h5 (rank=5)...
+    AWR = 233.025 (6 temps, 83114 energy pts)
+    nu-bar(E): 79 pts, 2.437 @ thermal, 2.533 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 20 energies
+    Elastic angular dist: 49 energies, CM=true
+    URR: 19 energies, 20 bands, 2250–25000 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 83114 energy pts × 7 channels = 4545.3 KB
+        U235:   79 pts, E ∈ [1.000e-5, 2.000e7] eV, ν ∈ [2.4367, 5.2098], nu_bar_const = 2.4300
+  Loading C:\Users\fog\madman_svd_experiment\data/endfb-vii.1-hdf5/neutron\U238.h5 (rank=5)...
+    AWR = 236.006 (6 temps, 185903 energy pts)
+    nu-bar(E): 10 pts, 2.492 @ thermal, 2.563 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 25 energies
+    Elastic angular dist: 38 energies, CM=true
+    URR: 18 energies, 20 bands, 20000–149029 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 185903 energy pts × 7 channels = 10166.6 KB
+        U238:   10 pts, E ∈ [1.000e-5, 3.000e7] eV, ν ∈ [2.4921, 6.4141], nu_bar_const = 2.5000
+
+=== CPU-only ν̄(E) sweep ===
+      E (eV)          U234          U235          U238
+    2.530e-2      2.430000      2.436700      2.492088
+     1.000e3      2.430000      2.433800      2.492159
+     1.000e4      2.430000      2.433800      2.492801
+     1.000e5      2.430000      2.437763      2.499215
+     5.000e5      2.430000      2.483665      2.527723
+     1.000e6      2.430000      2.532706      2.563357
+     1.611e6      2.430000      2.608231      2.606903
+     1.826e6      2.430000      2.633632      2.622226
+     2.000e6      2.430000      2.653354      2.634627
+     3.000e6      2.430000      2.768200      2.717845
+     5.000e6      2.430000      3.045345      3.095763
+     1.000e7      2.430000      3.830917      3.840157
+     1.500e7      2.430000      4.537460      4.598827
+     2.000e7      2.430000      5.209845      5.222372
+
+=== GPU round-trip ν̄(E) A/B ===
+  GPU transport kernels compiled (8 kernels)
+  GPU: pointwise XS = 17.2 MB
+  GPU: 123 discrete levels, 251.3 MB level basis
+  GPU: basis=73.5 MB, grids=2.5 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  packed buffer: 89 energies, 89 values, 3 offsets, 3 sizes
+  [0]       U234: size=0 (no table — GPU uses nu_bar_const = 2.4000)
+  [1]       U235: off=0 sz=79   gpu=(1.000e-5,2.4367)→(2.000e7,5.2098)  cpu=(1.000e-5,2.4367)→(2.000e7,5.2098)  OK
+  [2]       U238: off=79 sz=10   gpu=(1.000e-5,2.4921)→(3.000e7,6.4141)  cpu=(1.000e-5,2.4921)→(3.000e7,6.4141)  OK
+
+      E (eV)            U234 (cpu / gpu / Δ)            U235 (cpu / gpu / Δ)            U238 (cpu / gpu / Δ)
+    2.530e-2    2.430000 /   2.400000 / -3.00e-2    2.436700 /   2.436700 / +0.00e0    2.492088 /   2.492088 / +0.00e0
+     1.000e3    2.430000 /   2.400000 / -3.00e-2    2.433800 /   2.433800 / +0.00e0    2.492159 /   2.492159 / +0.00e0
+     1.000e4    2.430000 /   2.400000 / -3.00e-2    2.433800 /   2.433800 / +0.00e0    2.492801 /   2.492801 / +0.00e0
+     1.000e5    2.430000 /   2.400000 / -3.00e-2    2.437763 /   2.437763 / +0.00e0    2.499215 /   2.499215 / +0.00e0
+     5.000e5    2.430000 /   2.400000 / -3.00e-2    2.483665 /   2.483665 / +0.00e0    2.527723 /   2.527723 / +0.00e0
+     1.000e6    2.430000 /   2.400000 / -3.00e-2    2.532706 /   2.532706 / +0.00e0    2.563357 /   2.563357 / +0.00e0
+     1.611e6    2.430000 /   2.400000 / -3.00e-2    2.608231 /   2.608231 / +0.00e0    2.606903 /   2.606903 / +0.00e0
+     1.826e6    2.430000 /   2.400000 / -3.00e-2    2.633632 /   2.633632 / +0.00e0    2.622226 /   2.622226 / +0.00e0
+     2.000e6    2.430000 /   2.400000 / -3.00e-2    2.653354 /   2.653354 / +0.00e0    2.634627 /   2.634627 / +0.00e0
+     3.000e6    2.430000 /   2.400000 / -3.00e-2    2.768200 /   2.768200 / +0.00e0    2.717845 /   2.717845 / +0.00e0
+     5.000e6    2.430000 /   2.400000 / -3.00e-2    3.045345 /   3.045345 / +0.00e0    3.095763 /   3.095763 / +0.00e0
+     1.000e7    2.430000 /   2.400000 / -3.00e-2    3.830917 /   3.830917 / +0.00e0    3.840157 /   3.840157 / +0.00e0
+     1.500e7    2.430000 /   2.400000 / -3.00e-2    4.537460 /   4.537460 / +0.00e0    4.598827 /   4.598827 / +0.00e0
+     2.000e7    2.430000 /   2.400000 / -3.00e-2    5.209845 /   5.209845 / +0.00e0    5.222372 /   5.222372 / +0.00e0
+
+Worst |Δ| over actively-tabulated nuclides (sz > 0): 0.000e0
+    → ν table data is BIT-IDENTICAL CPU↔GPU for every
+       nuclide that carries a real ν(E) table. The
+       +500-700 pcm fast-metal hot bias is NOT a ν-table
+       upload bug. Next suspect: the E_in distribution at
+       fission (shape, not mean).
+
+Worst |Δ| over fallback-only nuclides (sz = 0): 3.000e-2
+    at: U234 at E = 2.530e-2 eV  cpu = 2.430000  gpu = 2.400000
+    → CPU `NuBarTable::lookup` falls back to a hardcoded 2.43
+       when the table is `Some(empty)`, while the GPU uses
+       the per-nuclide `nu_bar_const`. Real but small impact
+       on Godiva — bounded by (fission share of affected
+       nuclide) × Δν. Not the source of the +500-700 pcm bias
+       on its own.

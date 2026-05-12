@@ -585,12 +585,17 @@ __device__ int gr_find_cell(
             current_universe = gr_lattice_universe_at(g, lat_id, ix, iy, iz);
             const double* org = g->lat_origin + lat_id * 3;
             const double* pit = g->lat_pitch  + lat_id * 3;
-            // local_in_element = local_pos − origin − idx*pitch
-            // element_offset   = local_pos − local_in_element
-            //                  = origin + idx*pitch
-            next_off_x = org[0] + ix * pit[0];
-            next_off_y = org[1] + iy * pit[1];
-            next_off_z = org[2] + iz * pit[2];
+            // Element-CENTRE-relative convention (matches CPU
+            // `RectLattice::local_position` after the OpenMC-convention
+            // fix in `geometry/lattice.rs`). The element offset shifts
+            // the parent-frame coords down into the element's local
+            // frame whose origin sits at the element's centre:
+            //   local_in_element = local_pos − origin − (idx + 0.5)·pitch
+            //   element_offset   = local_pos − local_in_element
+            //                    = origin + (idx + 0.5)·pitch
+            next_off_x = org[0] + (ix + 0.5) * pit[0];
+            next_off_y = org[1] + (iy + 0.5) * pit[1];
+            next_off_z = org[2] + (iz + 0.5) * pit[2];
             next_has_lat = 1; next_lat_id = lat_id;
             next_lat_ix = ix; next_lat_iy = iy; next_lat_iz = iz;
             continue;

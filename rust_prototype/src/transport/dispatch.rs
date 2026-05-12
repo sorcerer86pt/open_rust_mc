@@ -191,17 +191,44 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 batch,
                 k_eff: result.k_eff,
                 leakage: result.n_leakage as u32,
-                absorptions: 0, // GPU recursive doesn't tally absorptions per cell
+                // Codebase convention: BatchResult.absorptions = capture
+                // events only (matches CPU semantics in
+                // simulate.rs::dispatch_real_collision; the flux estimator
+                // in depletion/flux.rs:62 also assumes captures and
+                // fissions are counted separately). The GPU emits a
+                // capture counter as `n_capture`; wire that through.
+                // The "OpenMC-style absorption" = captures + fissions
+                // is reconstructed in bin/metal_stats_diag from this plus
+                // BatchResult.fissions.
+                absorptions: result.n_capture as u32,
                 fissions: result.n_fissions as u32,
                 collisions: result.n_collisions as u32,
                 thermal_scatters: 0,
-                surface_crossings: 0,
+                // GPU's transport_recursive_persistent does tally `cnt_surf` —
+                // wire it through so diagnostics (e.g. `bin/metal_stats_diag`)
+                // can compare against the CPU surface_crossings count.
+                surface_crossings: result.n_surf_xings as u32,
                 shannon_entropy: 0.0,
                 active,
                 captures_by_cell: vec![],
                 photon_events: vec![],
                 k_track: 0.0,
                 tallies: crate::transport::tally::BatchTallies::default(),
+                // Spectrum-hardening diagnostic — GPU populates these
+                // so `bin/metal_stats_diag` can compute ⟨E_in at
+                // fission⟩, ⟨E_in elastic⟩, and the inelastic energy-
+                // loss moment for the CPU↔GPU↔OpenMC 3-way.
+                n_elastic: result.n_elastic,
+                n_inelastic: result.n_inelastic,
+                n_capture: result.n_capture,
+                e_fis_in_sum: result.e_fis_in_sum,
+                e_el_in_sum: result.e_el_in_sum,
+                e_inel_in_sum: result.e_inel_in_sum,
+                e_inel_out_sum: result.e_inel_out_sum,
+                e_fis_in_sq_sum: result.e_fis_in_sq_sum,
+                e_el_in_sq_sum: result.e_el_in_sq_sum,
+                e_inel_in_sq_sum: result.e_inel_in_sq_sum,
+                q_inel_sum: result.q_inel_sum,
             });
 
             // Normalize fission bank → next-batch source.

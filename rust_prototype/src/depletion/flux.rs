@@ -214,6 +214,17 @@ mod tests {
                 rr_flux: vec![],
                 rr_rate: vec![],
             },
+            n_elastic: 0,
+            n_inelastic: 0,
+            n_capture: 0,
+            e_fis_in_sum: 0.0,
+            e_el_in_sum: 0.0,
+            e_inel_in_sum: 0.0,
+            e_inel_out_sum: 0.0,
+            e_fis_in_sq_sum: 0.0,
+            e_el_in_sq_sum: 0.0,
+            e_inel_in_sq_sum: 0.0,
+            q_inel_sum: 0.0,
         }
     }
 

@@ -336,6 +336,22 @@ impl ParticleTallies {
             rr_rate: vec![0.0; rr_rate_size],
         }
     }
+
+    /// Zero every accumulator in place without dropping or
+    /// reallocating. Lets a worker thread reuse one `ParticleTallies`
+    /// instance for every particle it handles in a batch — the per-
+    /// particle `vec![0.0; N]` allocations that were dominating
+    /// depletion / RR-CADIS runs collapse to a single allocation per
+    /// worker per batch. Free (no work) when every field is empty
+    /// (the tally-disabled common case).
+    #[inline]
+    pub fn reset(&mut self) {
+        self.surface_current_pos.fill(0.0);
+        self.surface_current_neg.fill(0.0);
+        self.mesh_flux.fill(0.0);
+        self.rr_flux.fill(0.0);
+        self.rr_rate.fill(0.0);
+    }
 }
 
 /// Batch-reduced tally output. Same shape as [`ParticleTallies`],
@@ -395,6 +411,28 @@ impl BatchTallies {
             *b += v;
         }
         for (b, v) in self.rr_rate.iter_mut().zip(&p.rr_rate) {
+            *b += v;
+        }
+    }
+
+    /// Merge another BatchTallies (e.g. a partial result from a
+    /// different rayon worker) into self. Used by the par_iter
+    /// `fold().reduce()` final-merge step — each worker accumulates
+    /// into its own BatchTallies, then the reducer combines them.
+    pub fn merge(&mut self, other: &BatchTallies) {
+        for (b, v) in self.surface_current_pos.iter_mut().zip(&other.surface_current_pos) {
+            *b += v;
+        }
+        for (b, v) in self.surface_current_neg.iter_mut().zip(&other.surface_current_neg) {
+            *b += v;
+        }
+        for (b, v) in self.mesh_flux.iter_mut().zip(&other.mesh_flux) {
+            *b += v;
+        }
+        for (b, v) in self.rr_flux.iter_mut().zip(&other.rr_flux) {
+            *b += v;
+        }
+        for (b, v) in self.rr_rate.iter_mut().zip(&other.rr_rate) {
             *b += v;
         }
     }
