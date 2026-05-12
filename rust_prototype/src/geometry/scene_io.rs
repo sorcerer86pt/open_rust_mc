@@ -62,6 +62,41 @@ impl From<BoundaryConditionDto> for BoundaryCondition {
     }
 }
 
+/// Optional human-readable metadata that may appear on any scene
+/// primitive (surface, cell, material, universe, lattice). Survives
+/// the load into `SceneNames` so engine diagnostics, panic messages,
+/// and IDE tooling can resolve numeric indices to user-supplied names
+/// without forcing every engine struct to carry a String.
+///
+/// JSON convention:
+/// * `name` — short identifier (1-3 words), e.g. `"Outer reflector"`.
+/// * `comment` — longer free-form description.
+/// * Both accept the underscored aliases `_name` / `_comment` so users
+///   who prefer the JSON "non-semantic metadata" convention can pick
+///   either spelling.
+///
+/// Both fields are `Option<String>` and default to `None`, so every
+/// existing scene.json (which omits them) still parses unchanged.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct PrimitiveMetadata {
+    #[serde(default, alias = "_name")]
+    pub name: Option<String>,
+    #[serde(default, alias = "_comment")]
+    pub comment: Option<String>,
+}
+
+/// Surface entry with optional metadata. `meta` and `surface` are both
+/// `#[serde(flatten)]` so the JSON looks identical to a bare
+/// `SurfaceDto` plus optional `name` / `comment` fields at the same
+/// level — no nesting, no schema break for existing scene.json files.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NamedSurface {
+    #[serde(flatten)]
+    pub meta: PrimitiveMetadata,
+    #[serde(flatten)]
+    pub surface: SurfaceDto,
+}
+
 /// Tagged-enum surface variant. Field names mirror
 /// `open_rust_mc_geometry.schema.json` §$defs/Surface.
 #[derive(Debug, Clone, Deserialize)]
@@ -298,6 +333,15 @@ pub struct CellDto {
     pub rotation: Option<[[f64; 3]; 3]>,
 }
 
+/// Cell with optional metadata. See [`PrimitiveMetadata`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct NamedCell {
+    #[serde(flatten)]
+    pub meta: PrimitiveMetadata,
+    #[serde(flatten)]
+    pub cell: CellDto,
+}
+
 fn default_temperature() -> f64 {
     293.6
 }
@@ -327,6 +371,15 @@ pub struct UniverseDto {
     pub cell_indices: Vec<usize>,
 }
 
+/// Universe with optional metadata. See [`PrimitiveMetadata`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct NamedUniverse {
+    #[serde(flatten)]
+    pub meta: PrimitiveMetadata,
+    #[serde(flatten)]
+    pub universe: UniverseDto,
+}
+
 impl From<UniverseDto> for Universe {
     fn from(u: UniverseDto) -> Universe {
         Universe::new(UniverseId(u.id), u.cell_indices)
@@ -341,6 +394,15 @@ pub struct RectLatticeDto {
     pub universes: Vec<u32>,
     #[serde(default)]
     pub material_overrides: Option<Vec<HashMap<String, u32>>>,
+}
+
+/// Rect lattice with optional metadata. See [`PrimitiveMetadata`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct NamedRectLattice {
+    #[serde(flatten)]
+    pub meta: PrimitiveMetadata,
+    #[serde(flatten)]
+    pub lattice: RectLatticeDto,
 }
 
 impl From<RectLatticeDto> for RectLattice {
@@ -377,6 +439,15 @@ pub struct HexLatticeDto {
     pub universes: Vec<u32>,
     #[serde(default)]
     pub material_overrides: Option<Vec<HashMap<String, u32>>>,
+}
+
+/// Hex lattice with optional metadata. See [`PrimitiveMetadata`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct NamedHexLattice {
+    #[serde(flatten)]
+    pub meta: PrimitiveMetadata,
+    #[serde(flatten)]
+    pub lattice: HexLatticeDto,
 }
 
 impl HexLatticeDto {
@@ -439,6 +510,11 @@ pub struct NuclideEntryDto {
 #[derive(Debug, Clone, Deserialize)]
 pub struct MaterialDto {
     pub name: String,
+    /// Optional free-form description, surfaced through `SceneNames`
+    /// for diagnostics / IDE tooling. Accepts `_comment` as an alias
+    /// matching the user-side metadata convention.
+    #[serde(default, alias = "_comment")]
+    pub comment: Option<String>,
     #[serde(default = "default_temperature")]
     pub temperature: f64,
     pub nuclides: Vec<NuclideEntryDto>,
@@ -450,15 +526,21 @@ pub struct MaterialDto {
 }
 
 /// Top-level scene.json structure.
+///
+/// Every primitive list (`surfaces`, `cells`, `universes`,
+/// `rect_lattices`, `hex_lattices`) accepts optional `name` and
+/// `comment` fields on each entry via the `Named*` wrappers. Existing
+/// scene.json files without those fields still parse — the wrapper is
+/// transparent under `#[serde(flatten)]`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SceneDto {
-    pub surfaces: Vec<SurfaceDto>,
-    pub cells: Vec<CellDto>,
-    pub universes: Vec<UniverseDto>,
+    pub surfaces: Vec<NamedSurface>,
+    pub cells: Vec<NamedCell>,
+    pub universes: Vec<NamedUniverse>,
     #[serde(default)]
-    pub rect_lattices: Vec<RectLatticeDto>,
+    pub rect_lattices: Vec<NamedRectLattice>,
     #[serde(default)]
-    pub hex_lattices: Vec<HexLatticeDto>,
+    pub hex_lattices: Vec<NamedHexLattice>,
     #[serde(default)]
     pub materials: Vec<MaterialDto>,
     pub root_universe_id: u32,
@@ -478,13 +560,63 @@ pub enum SceneLoadError {
 
 // ── Public API ────────────────────────────────────────────────────────
 
+/// Parallel-array lookup of human-readable names for every primitive
+/// in the scene. Index space matches `Geometry.surfaces /
+/// cells / universes / rect_lattices / hex_lattices` and
+/// `LoadedScene.materials`. `None` for any entry that omitted the
+/// field. Engine diagnostics, panic messages, and IDE tooling can
+/// consult this without forcing every engine struct to carry a String.
+#[derive(Debug, Default, Clone)]
+pub struct SceneNames {
+    pub surfaces: Vec<PrimitiveMetadata>,
+    pub cells: Vec<PrimitiveMetadata>,
+    pub universes: Vec<PrimitiveMetadata>,
+    pub rect_lattices: Vec<PrimitiveMetadata>,
+    pub hex_lattices: Vec<PrimitiveMetadata>,
+    pub materials: Vec<PrimitiveMetadata>,
+}
+
+impl SceneNames {
+    /// Look up a surface's name by index, falling back to `surface[i]`
+    /// when no name was supplied. Convenient for error / log messages.
+    pub fn surface_label(&self, idx: usize) -> String {
+        Self::label("surface", &self.surfaces, idx)
+    }
+    pub fn cell_label(&self, idx: usize) -> String {
+        Self::label("cell", &self.cells, idx)
+    }
+    pub fn universe_label(&self, idx: usize) -> String {
+        Self::label("universe", &self.universes, idx)
+    }
+    pub fn rect_lattice_label(&self, idx: usize) -> String {
+        Self::label("rect_lattice", &self.rect_lattices, idx)
+    }
+    pub fn hex_lattice_label(&self, idx: usize) -> String {
+        Self::label("hex_lattice", &self.hex_lattices, idx)
+    }
+    pub fn material_label(&self, idx: usize) -> String {
+        Self::label("material", &self.materials, idx)
+    }
+
+    fn label(kind: &str, table: &[PrimitiveMetadata], idx: usize) -> String {
+        table
+            .get(idx)
+            .and_then(|m| m.name.as_deref())
+            .map(|n| format!("{kind}[{idx}] \"{n}\""))
+            .unwrap_or_else(|| format!("{kind}[{idx}]"))
+    }
+}
+
 /// Result of loading a scene.json file. `geometry` is fully built and
 /// validated; `materials` carries the raw schema entries so a caller
-/// can resolve their HDF5 files into engine `Material`s when needed.
+/// can resolve their HDF5 files into engine `Material`s when needed;
+/// `names` carries the optional `name` / `comment` metadata for every
+/// primitive in index-aligned form (see [`SceneNames`]).
 #[derive(Debug)]
 pub struct LoadedScene {
     pub geometry: Geometry,
     pub materials: Vec<MaterialDto>,
+    pub names: SceneNames,
 }
 
 /// Parse `scene.json` (or the `scene` block of an NMC bundle) into a
@@ -499,15 +631,45 @@ pub fn load_scene_from_json(json: &str) -> Result<LoadedScene, SceneLoadError> {
 /// [`SceneDto`]. Useful when the JSON is embedded in a larger
 /// document (e.g. an `.nmc` bundle's `scene` field).
 pub fn load_scene_from_dto(dto: SceneDto) -> Result<LoadedScene, SceneLoadError> {
-    let surfaces: Vec<Surface> = dto.surfaces.into_iter().map(Into::into).collect();
-    let cells: Vec<Cell> = dto.cells.into_iter().map(|c| c.into_cell()).collect();
-    let universes: Vec<Universe> = dto.universes.into_iter().map(Into::into).collect();
-    let rect_lattices: Vec<RectLattice> = dto.rect_lattices.into_iter().map(Into::into).collect();
-    let hex_lattices: Vec<HexLattice> = dto
-        .hex_lattices
+    // Split each Named<Primitive> into its metadata and the inner DTO.
+    // The order in each Vec must stay in lock-step with the engine
+    // index space (Geometry uses positional indices to reference
+    // surfaces, cells, etc.) so that `SceneNames::*_label(idx)`
+    // resolves correctly.
+    let (surface_names, surfaces): (Vec<_>, Vec<Surface>) = dto
+        .surfaces
         .into_iter()
-        .map(HexLatticeDto::into_hex_lattice)
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|ns| (ns.meta, Surface::from(ns.surface)))
+        .unzip();
+    let (cell_names, cells): (Vec<_>, Vec<Cell>) = dto
+        .cells
+        .into_iter()
+        .map(|nc| (nc.meta, nc.cell.into_cell()))
+        .unzip();
+    let (universe_names, universes): (Vec<_>, Vec<Universe>) = dto
+        .universes
+        .into_iter()
+        .map(|nu| (nu.meta, Universe::from(nu.universe)))
+        .unzip();
+    let (rect_lat_names, rect_lattices): (Vec<_>, Vec<RectLattice>) = dto
+        .rect_lattices
+        .into_iter()
+        .map(|nl| (nl.meta, RectLattice::from(nl.lattice)))
+        .unzip();
+    let mut hex_lat_names: Vec<PrimitiveMetadata> = Vec::with_capacity(dto.hex_lattices.len());
+    let mut hex_lattices: Vec<HexLattice> = Vec::with_capacity(dto.hex_lattices.len());
+    for nl in dto.hex_lattices {
+        hex_lat_names.push(nl.meta);
+        hex_lattices.push(nl.lattice.into_hex_lattice()?);
+    }
+    let material_names: Vec<PrimitiveMetadata> = dto
+        .materials
+        .iter()
+        .map(|m| PrimitiveMetadata {
+            name: Some(m.name.clone()),
+            comment: m.comment.clone(),
+        })
+        .collect();
 
     let geometry = Geometry::new(
         surfaces,
@@ -520,6 +682,14 @@ pub fn load_scene_from_dto(dto: SceneDto) -> Result<LoadedScene, SceneLoadError>
     Ok(LoadedScene {
         geometry,
         materials: dto.materials,
+        names: SceneNames {
+            surfaces: surface_names,
+            cells: cell_names,
+            universes: universe_names,
+            rect_lattices: rect_lat_names,
+            hex_lattices: hex_lat_names,
+            materials: material_names,
+        },
     })
 }
 
@@ -560,6 +730,95 @@ impl SurfaceDto {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    /// Optional `name` / `comment` metadata on surfaces, cells, and
+    /// materials round-trips through the loader into `SceneNames` with
+    /// the expected index alignment. Also verifies that the underscore
+    /// alias (`_name` / `_comment`) works alongside the plain spelling.
+    /// Scenes that omit the metadata fields (every existing scene.json)
+    /// still parse — covered implicitly by the unchanged
+    /// `load_godiva_bare_sphere` test below.
+    #[test]
+    fn primitive_metadata_round_trips() {
+        let json = r#"{
+            "surfaces": [
+                {
+                    "type": "Sphere",
+                    "center": [0, 0, 0],
+                    "radius": 8.7407,
+                    "bc": "Vacuum",
+                    "name": "Outer reflector boundary",
+                    "_comment": "ICSBEP HMF-001 case-1 outer radius"
+                }
+            ],
+            "cells": [
+                {
+                    "id": 0,
+                    "region": { "op": "HalfSpace", "surface_idx": 0, "positive": false },
+                    "fill":   { "type": "Material", "material_idx": 0 },
+                    "_name": "HEU core"
+                },
+                {
+                    "id": 1,
+                    "region": { "op": "HalfSpace", "surface_idx": 0, "positive": true },
+                    "fill":   { "type": "Void" }
+                }
+            ],
+            "universes": [
+                { "id": 0, "cell_indices": [0, 1], "name": "root" }
+            ],
+            "materials": [
+                {
+                    "name": "HEU",
+                    "comment": "93.7 % U-235 / 5.3 % U-238 / 1.0 % U-234",
+                    "temperature": 293.6,
+                    "nuclides": [
+                        { "hdf5_file": "U235.h5", "atom_density": 0.045 }
+                    ]
+                }
+            ],
+            "root_universe_id": 0
+        }"#;
+        let loaded = load_scene_from_json(json).unwrap();
+        // Indices line up with Geometry's positional ordering.
+        assert_eq!(loaded.names.surfaces.len(), 1);
+        assert_eq!(loaded.names.cells.len(), 2);
+        assert_eq!(loaded.names.universes.len(), 1);
+        assert_eq!(loaded.names.materials.len(), 1);
+        // `name` parses both ways: plain (surfaces[0]) and underscored
+        // alias (cells[0] uses `_name`).
+        assert_eq!(
+            loaded.names.surfaces[0].name.as_deref(),
+            Some("Outer reflector boundary")
+        );
+        assert_eq!(loaded.names.cells[0].name.as_deref(), Some("HEU core"));
+        // Cell[1] omits metadata — `None` survives the round-trip.
+        assert_eq!(loaded.names.cells[1].name, None);
+        assert_eq!(loaded.names.cells[1].comment, None);
+        // `_comment` alias works on the surface.
+        assert_eq!(
+            loaded.names.surfaces[0].comment.as_deref(),
+            Some("ICSBEP HMF-001 case-1 outer radius")
+        );
+        // Universe name parses.
+        assert_eq!(loaded.names.universes[0].name.as_deref(), Some("root"));
+        // Material name + comment surface through SceneNames.
+        assert_eq!(loaded.names.materials[0].name.as_deref(), Some("HEU"));
+        assert!(
+            loaded.names.materials[0]
+                .comment
+                .as_deref()
+                .unwrap()
+                .starts_with("93.7")
+        );
+        // Helpers render the labelled form when a name exists, fall
+        // back to the bare index otherwise.
+        assert_eq!(
+            loaded.names.surface_label(0),
+            "surface[0] \"Outer reflector boundary\""
+        );
+        assert_eq!(loaded.names.cell_label(1), "cell[1]");
+    }
 
     /// Bare Godiva sphere — single sphere, single cell, single
     /// universe. Smallest possible scene. Verifies every surface

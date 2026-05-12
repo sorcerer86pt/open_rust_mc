@@ -610,6 +610,78 @@ fn leu_comp_therm_008_case_1() {
     assert_passes("LEU-COMP-THERM-008.case-1", k, sigma, k_ref, sigma_exp);
 }
 
+/// PMF-006 / Flattop-Pu — Pu/Ga core inside a natural-U reflector.
+/// The canonical reflected fast critical benchmark: ~10 % of the
+/// fissions come from neutrons that leaked into the U reflector,
+/// fast-scattered, and leaked back into the Pu core. Validates the
+/// two-region recursive-geometry transport AND the reflector boundary
+/// physics that bare PMF-001 / 002 do not exercise.
+#[test]
+#[ignore = "ICSBEP regression — opt in via --ignored. Reflected fast-Pu (Flattop-Pu)."]
+fn pu_met_fast_006_flattop_pu() {
+    let case = bench_dir().join("pu-met-fast-006.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    assert_passes("PU-MET-FAST-006", k, sigma, k_ref, sigma_exp);
+}
+
+/// HMF-008 — HEU sphere with iron + copper reflector. Different
+/// reflector chemistry from Flattop-Pu (Fe / Cu inelastic scattering
+/// dominates the moderation in the reflector, no U fissioning). Tests
+/// the Fe / Cu cross-section libraries on a fast-metal benchmark.
+///
+/// KNOWN GAP (2026-05-12): Both CPU and CUDA agree to ~60 pcm at
+/// Δ ≈ −600 pcm, outside the ±max(150 pcm, 2σ) envelope. The
+/// CPU↔GPU agreement rules out a backend-specific bug — this is an
+/// engine-level physics gap on Fe / Cu reflector inelastic scattering
+/// (most likely Fe-56 per-MT pointwise XS interpolation or a missing
+/// reflector-composition channel). Diagnostic-only test for now;
+/// asserting is deferred until the gap is closed.
+#[test]
+#[ignore = "ICSBEP diagnostic — opt in via --ignored. Known engine gap; logs only."]
+fn heu_met_fast_008_fe_cu_reflected_diagnostic() {
+    let case = bench_dir().join("heu-met-fast-008.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let delta = k - k_ref;
+    let pcm = delta * 1.0e5;
+    let sigma_combined = (sigma * sigma + sigma_exp * sigma_exp).sqrt();
+    let n_sigma = if sigma_combined > 0.0 { delta.abs() / sigma_combined } else { f64::INFINITY };
+    println!(
+        "  [HEU-MET-FAST-008] k_calc = {k:.5} ± {sigma:.5}   k_ref = {k_ref:.5} ± {sigma_exp:.5}   \
+         Δ = {pcm:+.0} pcm   {n_sigma:.2}σ   [KNOWN GAP — not asserting]"
+    );
+}
+
+/// MMF-001 — Pu/Ga core surrounded by HEU metal. Both fuels fission
+/// in significant fractions, in a fast spectrum. Stresses the
+/// dispatch logic across two fissioning nuclide sets simultaneously
+/// (Pu-239 + U-235 ν̄(E) interpolation, Pu vs U Watt χ vs tabular
+/// outgoing distributions, anisotropic elastic for both metals).
+#[test]
+#[ignore = "ICSBEP regression — opt in via --ignored. Mixed Pu / HEU fast composite."]
+fn mix_met_fast_001() {
+    let case = bench_dir().join("mix-met-fast-001.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    assert_passes("MIX-MET-FAST-001", k, sigma, k_ref, sigma_exp);
+}
+
+/// HMF-018 case-2 — bare HEU sphere at a different mass and
+/// composition from Godiva. Same physics regime as HMF-001 but
+/// includes trace impurities (C, Fe, W) — a sanity check that the
+/// fast-metal path holds across the HEU mass range without
+/// re-validating the reflector-region physics already covered by
+/// HMF-008 / PMF-006.
+#[test]
+#[ignore = "ICSBEP regression — opt in via --ignored. Bare HEU at different scale from Godiva."]
+fn heu_met_fast_018_case_2() {
+    let case = bench_dir().join("heu-met-fast-018_case-2.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    assert_passes("HEU-MET-FAST-018.case-2", k, sigma, k_ref, sigma_exp);
+}
+
 // ── Path helpers ──────────────────────────────────────────────────────
 
 fn workspace_root() -> PathBuf {

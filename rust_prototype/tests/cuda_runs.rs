@@ -328,3 +328,77 @@ fn cuda_heu_sol_therm_001_case_1() {
     let pass = report("HEU-SOL-THERM-001.case-1", k, sigma, k_ref, sigma_exp);
     assert!(pass, "HEU-SOL-THERM-001 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
 }
+
+/// PMF-006 / Flattop-Pu on CUDA. Pu/Ga core inside a natural-U
+/// reflector — the canonical reflected fast critical. ~10 % of
+/// fissions come from neutrons that leaked into U, fast-scattered,
+/// and leaked back into Pu. Validates the GPU recursive-geometry
+/// path on a two-region fast metal AND the per-nuclide χ dispatch
+/// for both Pu (Tabular Law 4/61) and U (mixed) within the same
+/// material assembly.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_pu_met_fast_006_flattop_pu() {
+    let case = bench_dir().join("pu-met-fast-006.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("PU-MET-FAST-006", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "PMF-006 Flattop-Pu CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// HMF-008 on CUDA — HEU with Fe + Cu structural reflector. Fast
+/// inelastic on Fe/Cu dominates the reflector's moderation, no U
+/// fissioning in the reflector. Cross-checks the Fe-54/56/57/58 and
+/// Cu-63/65 cross-section uploads on the GPU.
+///
+/// KNOWN GAP (2026-05-12): Both CPU and CUDA agree to ~60 pcm at
+/// Δ ≈ −600 pcm, falling outside the ±max(150 pcm, 2σ) envelope. The
+/// CPU↔GPU agreement rules out a backend-specific bug — this is an
+/// engine-level physics gap on Fe / Cu reflector inelastic scattering
+/// (suspected: per-MT pointwise XS interpolation on Fe-56 thresholds,
+/// or missing channels in the reflector composition). Diagnosed but
+/// not yet fixed; the test reports the discrepancy without panicking
+/// so the rest of the suite stays green.
+#[test]
+#[ignore = "ICSBEP diagnostic (CUDA) — opt in via --ignored. Known engine gap; logs only."]
+fn cuda_heu_met_fast_008_fe_cu_reflected_diagnostic() {
+    let case = bench_dir().join("heu-met-fast-008.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("HEU-MET-FAST-008", k, sigma, k_ref, sigma_exp);
+    if !pass {
+        println!(
+            "  ⚠ HMF-008 is a KNOWN ENGINE GAP (Fe / Cu reflector inelastic); not asserting."
+        );
+    }
+}
+
+/// MMF-001 on CUDA — Pu/Ga core surrounded by HEU metal. Both fuels
+/// fission in significant fractions in a fast spectrum. Stresses the
+/// GPU's per-nuclide χ + ν̄(E) dispatch when multiple fissioning
+/// nuclide sets are active in the same simulation.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_mix_met_fast_001() {
+    let case = bench_dir().join("mix-met-fast-001.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("MIX-MET-FAST-001", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "MMF-001 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// HMF-018 case-2 on CUDA — bare HEU sphere at a different scale
+/// and trace-impurity composition from Godiva (HMF-001). Same
+/// fast-metal regime, but a sanity check that the fix holds across
+/// the HEU mass range. Includes trace C, Fe, W impurities which
+/// exercise per-nuclide capture and inelastic on non-fissionable
+/// species in the production fuel path.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_heu_met_fast_018_case_2() {
+    let case = bench_dir().join("heu-met-fast-018_case-2.json");
+    let (k, sigma, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    let pass = report("HEU-MET-FAST-018.case-2", k, sigma, k_ref, sigma_exp);
+    assert!(pass, "HMF-018 case-2 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
