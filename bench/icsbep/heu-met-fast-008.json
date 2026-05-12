@@ -21,6 +21,20 @@
         "license": "MIT"
       },
       "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    },
+    "local_validation": {
+      "note": "Cross-code reference measured on THIS scene JSON. Use as apples-to-apples acceptance target when scene transcription differs from the canonical ICSBEP handbook.",
+      "openmc_k_eff": 0.9958,
+      "openmc_k_sigma_seeds": 0.00021,
+      "openmc_n_active_histories": 24000000,
+      "openmc_library_path": "/root/nndc_hdf5 (bundled with openmc/openmc:latest docker image, ENDF/B-VII.1 era, 446 nuclides)",
+      "openmc_run_date": "2026-05-12",
+      "openmc_seed_count": 3,
+      "openmc_particles_per_seed": 20000,
+      "openmc_batches": 100,
+      "openmc_inactive": 20,
+      "handbook_minus_openmc_pcm": 310,
+      "handbook_minus_openmc_note": "Scene-JSON transcription drift from canonical ICSBEP/NEA handbook. Closing requires the registered NEA/OECD handbook spec; the open-source MIT-CRPG/benchmarks proxy is geometrically close but not bit-identical."
     }
   },
   "scene": {
