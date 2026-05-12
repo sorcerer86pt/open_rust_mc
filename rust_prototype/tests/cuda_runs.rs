@@ -351,14 +351,28 @@ fn cuda_pu_met_fast_006_flattop_pu() {
 /// fissioning in the reflector. Cross-checks the Fe-54/56/57/58 and
 /// Cu-63/65 cross-section uploads on the GPU.
 ///
-/// KNOWN GAP (2026-05-12): Both CPU and CUDA agree to ~60 pcm at
-/// Δ ≈ −600 pcm, falling outside the ±max(150 pcm, 2σ) envelope. The
-/// CPU↔GPU agreement rules out a backend-specific bug — this is an
-/// engine-level physics gap on Fe / Cu reflector inelastic scattering
-/// (suspected: per-MT pointwise XS interpolation on Fe-56 thresholds,
-/// or missing channels in the reflector composition). Diagnosed but
-/// not yet fixed; the test reports the discrepancy without panicking
-/// so the rest of the suite stays green.
+/// KNOWN GAP (2026-05-12). ICSBEP handbook k_ref = 0.99890 ± 0.00160
+/// is the truth; we miss it by −610 pcm. The gap breaks down as
+/// (running OpenMC on the SAME `bench/icsbep/heu-met-fast-008.json`
+/// for an apples-to-apples comparison — see
+/// `scripts/openmc_scene_runner.py` and `outputs/openmc_hmf008.json`):
+///
+/// * **−286 pcm OpenMC vs ICSBEP handbook** on this exact scene JSON.
+///   OpenMC at 24 M active histories gets k = 0.99604 ± 0.00055.
+///   This is a scene-JSON transcription drift — our JSON comes from
+///   `MIT-CRPG/benchmarks/icsbep/heu-met-fast-008/openmc/` (an
+///   open-source proxy) and isn't bit-identical to the canonical
+///   ICSBEP handbook geometry / composition. Closing this requires
+///   the registered ICSBEP handbook (NEA/OECD) which is not in
+///   this repo.
+/// * **−324 pcm engine vs OpenMC** on the same scene. THIS is the
+///   actionable engine-side gap. Suspected in Fe / Cu reflector
+///   inelastic kinematics or per-MT pointwise interpolation; needs
+///   per-cell tally A/B against `outputs/openmc_hmf008.json`'s rates
+///   to localise.
+///
+/// CPU↔GPU agree to ~60 pcm — not a backend bug. Diagnostic-only
+/// (logs without panicking) until both pieces are closed.
 #[test]
 #[ignore = "ICSBEP diagnostic (CUDA) — opt in via --ignored. Known engine gap; logs only."]
 fn cuda_heu_met_fast_008_fe_cu_reflected_diagnostic() {

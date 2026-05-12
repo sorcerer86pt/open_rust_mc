@@ -630,13 +630,26 @@ fn pu_met_fast_006_flattop_pu() {
 /// dominates the moderation in the reflector, no U fissioning). Tests
 /// the Fe / Cu cross-section libraries on a fast-metal benchmark.
 ///
-/// KNOWN GAP (2026-05-12): Both CPU and CUDA agree to ~60 pcm at
-/// Δ ≈ −600 pcm, outside the ±max(150 pcm, 2σ) envelope. The
-/// CPU↔GPU agreement rules out a backend-specific bug — this is an
-/// engine-level physics gap on Fe / Cu reflector inelastic scattering
-/// (most likely Fe-56 per-MT pointwise XS interpolation or a missing
-/// reflector-composition channel). Diagnostic-only test for now;
-/// asserting is deferred until the gap is closed.
+/// KNOWN GAP (2026-05-12). ICSBEP handbook k_ref = 0.99890 ± 0.00160
+/// is the truth; we miss it by −610 pcm. The gap breaks down as
+/// (running OpenMC on the SAME `bench/icsbep/heu-met-fast-008.json`
+/// — see `scripts/openmc_scene_runner.py` and
+/// `outputs/openmc_hmf008.json` for the apples-to-apples comparison):
+///
+/// * **−286 pcm OpenMC vs ICSBEP handbook** on this scene JSON.
+///   OpenMC at 24 M active histories gets k = 0.99604 ± 0.00055.
+///   Scene-JSON transcription drift — our JSON comes from MIT-CRPG/
+///   benchmarks open-source proxy and isn't bit-identical to the
+///   canonical ICSBEP handbook geometry / composition. Closing this
+///   requires the registered ICSBEP handbook (NEA/OECD).
+/// * **−324 pcm engine vs OpenMC** on the same scene. The actionable
+///   engine-side gap. Suspected in Fe / Cu reflector inelastic
+///   kinematics or per-MT pointwise interpolation; needs per-cell
+///   tally A/B against `outputs/openmc_hmf008.json`'s rates to
+///   localise.
+///
+/// Diagnostic-only test (logs without panicking) until both pieces
+/// are closed.
 #[test]
 #[ignore = "ICSBEP diagnostic — opt in via --ignored. Known engine gap; logs only."]
 fn heu_met_fast_008_fe_cu_reflected_diagnostic() {
