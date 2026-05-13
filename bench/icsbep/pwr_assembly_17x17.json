@@ -1,0 +1,744 @@
+{
+  "_doc": "17x17 ACE7 PWR fuel assembly (KARMA 1.1 benchmark, KAERI). 264 UO2 fuel pins + 24 guide tubes + 1 instrument tube (treated as guide tube here \u2014 same Zircaloy / borated water geometry), 3.0 wt%% U-235 enriched UO2 at 900 K, Zircaloy-4 clad and 500-ppm-borated 0.74 g/cm^3 water moderator at 600 K with c_H_in_H2O.h5 thermal scattering. Assembly pitch 21.60382 cm, pin pitch 1.26230 cm, reflective box on all six faces (k_inf). Reference k_inf from MCNP4C2 continuous ENDF/B-VI R8 is 1.25827 +/- 0.00029 (B03AT3V17, Lee et al., M&C 2011, Table VI).",
+  "benchmark": {
+    "suite": "KARMA-MC11",
+    "case_id": "B03AT3V17",
+    "case_name": "17x17 ACE7 PWR assembly, 3.0 wt%% U-235",
+    "category": "PWR",
+    "k_eff_reference": 1.25827,
+    "k_eff_sigma": 0.00029,
+    "source": "Kyung-Hoon Lee et al. (KAERI), 'KARMA 1.1 Benchmark Calculations,' M&C 2011, Rio de Janeiro, Table VI row B03AT3V17 = 17x17 ACE7 assembly, 3.0 wt%% U-235, no burnable poison, no control, MCNP4C2 continuous ENDF/B-VI R8. ISBN 978-85-63688-00-2.",
+    "recommended_settings": {
+      "_doc": "Reactor-scale paper-quality target. Depth-3 recursive geometry plus thermal-spectrum lattice convergence make this wall-time-heavy (~5-10 min per seed on GPU); 50 inactive is the floor for source-distribution stability in pin lattices.",
+      "batches": 200,
+      "inactive": 50,
+      "particles": 30000,
+      "seeds": 5
+    }
+  },
+  "scene": {
+    "surfaces": [
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 0.40958,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 0.41873,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 0.476,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 0.55312,
+        "bc": "Transmission"
+      },
+      {
+        "type": "CylinderZ",
+        "center_x": 0.0,
+        "center_y": 0.0,
+        "radius": 0.61333,
+        "bc": "Transmission"
+      },
+      {
+        "type": "PlaneX",
+        "x0": -10.72955,
+        "bc": "Reflective"
+      },
+      {
+        "type": "PlaneX",
+        "x0": 10.72955,
+        "bc": "Reflective"
+      },
+      {
+        "type": "PlaneY",
+        "y0": -10.72955,
+        "bc": "Reflective"
+      },
+      {
+        "type": "PlaneY",
+        "y0": 10.72955,
+        "bc": "Reflective"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": -10.72955,
+        "bc": "Reflective"
+      },
+      {
+        "type": "PlaneZ",
+        "z0": 10.72955,
+        "bc": "Reflective"
+      }
+    ],
+    "cells": [
+      {
+        "id": 0,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 900.0
+      },
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 0,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 1
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 1,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 2,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 2,
+          "positive": true
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 3
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 3,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 3
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 5,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "HalfSpace",
+            "surface_idx": 3,
+            "positive": true
+          },
+          "right": {
+            "op": "HalfSpace",
+            "surface_idx": 4,
+            "positive": false
+          }
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 2
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 6,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 4,
+          "positive": true
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 3
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 7,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 5,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 6,
+                "positive": false
+              }
+            },
+            "right": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 7,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 8,
+                "positive": false
+              }
+            }
+          },
+          "right": {
+            "op": "Intersection",
+            "left": {
+              "op": "HalfSpace",
+              "surface_idx": 9,
+              "positive": true
+            },
+            "right": {
+              "op": "HalfSpace",
+              "surface_idx": 10,
+              "positive": false
+            }
+          }
+        },
+        "fill": {
+          "type": "Lattice",
+          "lattice_idx": 0
+        },
+        "temperature": 600.0
+      },
+      {
+        "id": 8,
+        "region": {
+          "op": "Complement",
+          "inner": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {
+                  "op": "HalfSpace",
+                  "surface_idx": 5,
+                  "positive": true
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 6,
+                  "positive": false
+                }
+              },
+              "right": {
+                "op": "Intersection",
+                "left": {
+                  "op": "HalfSpace",
+                  "surface_idx": 7,
+                  "positive": true
+                },
+                "right": {
+                  "op": "HalfSpace",
+                  "surface_idx": 8,
+                  "positive": false
+                }
+              }
+            },
+            "right": {
+              "op": "Intersection",
+              "left": {
+                "op": "HalfSpace",
+                "surface_idx": 9,
+                "positive": true
+              },
+              "right": {
+                "op": "HalfSpace",
+                "surface_idx": 10,
+                "positive": false
+              }
+            }
+          }
+        },
+        "fill": {
+          "type": "Void"
+        },
+        "temperature": 600.0
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [
+          7,
+          8
+        ]
+      },
+      {
+        "id": 1,
+        "cell_indices": [
+          0,
+          1,
+          2,
+          3
+        ]
+      },
+      {
+        "id": 2,
+        "cell_indices": [
+          4,
+          5,
+          6
+        ]
+      }
+    ],
+    "rect_lattices": [
+      {
+        "origin": [
+          -10.72955,
+          -10.72955,
+          -10.72955
+        ],
+        "pitch": [
+          1.2623,
+          1.2623,
+          21.4591
+        ],
+        "shape": [
+          17,
+          17,
+          1
+        ],
+        "universes": [
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "material_overrides": null
+      }
+    ],
+    "materials": [
+      {
+        "name": "UO2 fuel (3.0 wt% U-235, 10.4 g/cm^3, 900 K) - KARMA ACE7",
+        "temperature": 900.0,
+        "nuclides": [
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.000696
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0225
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.0464
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Helium gap (low-density He, 600 K)",
+        "temperature": 600.0,
+        "nuclides": [
+          {
+            "zaid": 2004,
+            "label": "He-4",
+            "atom_density": 2.4e-06
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Zircaloy-4 clad (6.55 g/cm^3, 600 K) - KARMA ACE7",
+        "temperature": 600.0,
+        "nuclides": [
+          {
+            "zaid": 40090,
+            "label": "Zr-90",
+            "atom_density": 0.022932
+          },
+          {
+            "zaid": 40091,
+            "label": "Zr-91",
+            "atom_density": 0.004996
+          },
+          {
+            "zaid": 40092,
+            "label": "Zr-92",
+            "atom_density": 0.007636
+          },
+          {
+            "zaid": 40094,
+            "label": "Zr-94",
+            "atom_density": 0.00774
+          }
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Borated water (0.74 g/cm^3, 600 K, 500 ppm boron, c_H_in_H2O)",
+        "temperature": 600.0,
+        "nuclides": [
+          {
+            "zaid": 1001,
+            "label": "H-1",
+            "atom_density": 0.049486,
+            "thermal_file": "c_H_in_H2O.h5"
+          },
+          {
+            "zaid": 8016,
+            "label": "O-16",
+            "atom_density": 0.024743
+          },
+          {
+            "zaid": 5010,
+            "label": "B-10",
+            "atom_density": 4.12e-06
+          },
+          {
+            "zaid": 5011,
+            "label": "B-11",
+            "atom_density": 1.65e-05
+          }
+        ],
+        "thermal_files": [
+          "c_H_in_H2O.h5"
+        ]
+      }
+    ],
+    "root_universe_id": 0
+  }
+}

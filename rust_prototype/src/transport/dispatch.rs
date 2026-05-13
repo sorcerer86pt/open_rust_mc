@@ -148,10 +148,30 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
 
     fn run(&self, config: &SimConfig) -> EigenvalueOutcome {
         use crate::transport::particle::FissionSite;
+        use crate::transport::rng::Rng;
         use rust_mc_sim::Pcg64;
 
         let n = config.particles_per_batch as usize;
-        let mut source = (self.initial_source)(n, config.seed);
+        // Honour a caller-supplied initial source bank the same way
+        // `simulate::run_eigenvalue_with_geometry` does. The Python
+        // ICSBEP path pre-seeds this via the fissionability-aware
+        // `try_initial_source_in_materials` so any cell whose material
+        // has zero ν̄ is excluded from the batch-1 source; without
+        // honouring that here, the GPU dispatch silently fell back to
+        // the per-runner closure (which is material-agnostic).
+        let mut source: Vec<(f64, f64, f64, f64)> = match config.initial_source_bank.as_ref() {
+            Some(bank) if !bank.is_empty() => {
+                let mut rng = Rng::new(config.seed * 100_000, 1);
+                (0..n)
+                    .map(|_| {
+                        let idx = (rng.uniform() * bank.len() as f64) as usize;
+                        let s = &bank[idx.min(bank.len() - 1)];
+                        (s.pos.x, s.pos.y, s.pos.z, s.energy)
+                    })
+                    .collect()
+            }
+            _ => (self.initial_source)(n, config.seed),
+        };
         let mut batches: Vec<BatchResult> = Vec::with_capacity(config.batches as usize);
         let mut k_sum = 0.0_f64;
         let mut k_count = 0_u32;

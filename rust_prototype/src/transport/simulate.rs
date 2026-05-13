@@ -28,7 +28,11 @@ use crate::transport::tally::{BatchTallies, ParticleTallies, Tallies};
 /// fuel material has 18 (U-235/238 + O-16 + Xe-135 + 14 chain
 /// nuclides for actinide buildup + Sm/Pm/I/Cs poisoning). Avoids
 /// per-collision heap allocation.
-const MAX_NUCLIDES: usize = 32;
+/// Re-export the crate-root limit under the short local name the hot
+/// path uses for array sizing. The single source of truth lives in
+/// `lib.rs::MAX_NUCLIDES_PER_MATERIAL`; this alias is purely for
+/// readability inside this module.
+use crate::MAX_NUCLIDES_PER_MATERIAL as MAX_NUCLIDES;
 
 /// Configuration for a simulation.
 pub struct SimConfig {
@@ -2431,77 +2435,195 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
 /// only those that land inside a cell containing material. For Godiva, this
 /// is the single fuel sphere. For PWR pin cell, this is the cylindrical
 /// fuel region (rejects corners of the bounding box that fall in gap/clad/water).
-pub fn initial_source(
+/// Sampler error returned by [`try_initial_source`]. Carries enough
+/// context (case name, AABB used, attempts spent) so callers from the
+/// Python or sweep harnesses can decide how to surface the failure.
+#[derive(Debug, Clone)]
+pub struct InitialSourceError {
+    pub message: String,
+}
+
+impl std::fmt::Display for InitialSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InitialSourceError {}
+
+/// Fallible version of [`initial_source`]. Returns
+/// `Err(InitialSourceError)` instead of panicking when rejection
+/// sampling cannot place `n` fissile sites in `max_attempts`. The
+/// `initial_source` panicking wrapper is preserved for legacy callers
+/// (CLI binaries and ICSBEP regression tests) that prefer fail-fast
+/// semantics over Result handling; new harnesses (Python sweep,
+/// long-running tooling) should call this variant directly.
+pub fn try_initial_source(
     n: usize,
     geometry: &crate::geometry::Geometry,
     cells: &[Cell],
     seed: u64,
-) -> Vec<FissionSite> {
+) -> Result<Vec<FissionSite>, InitialSourceError> {
+    try_initial_source_in_materials(n, geometry, cells, None, seed)
+}
+
+/// Material-aware initial-source sampler. Matches Serpent 2's default
+/// behaviour: walk every cell, compute its region-tree AABB, build a
+/// table of cells whose material is fissionable (per the caller-
+/// supplied `materials_fissionable` flag list), sample weighted by
+/// per-cell AABB volume, and accept any draw that lands in a cell
+/// whose deepest material is in the fissionable set.
+///
+/// Passing `None` for `materials_fissionable` accepts any Material
+/// cell — preserves the legacy `initial_source(n, geom, cells, seed)`
+/// signature for binaries that haven't been threaded with XS-derived
+/// fissionability flags.
+///
+/// Replaces the historical "first Material cell" / "smallest-volume
+/// material" heuristics, which broke on BWR cruciform absorbers, PWR
+/// burnable poisons, HFIR plate cladding, CANDU spacers, and reflector-
+/// only benchmarks. See `bench/icsbep/` audit notes in CLAUDE.md.
+pub fn try_initial_source_in_materials(
+    n: usize,
+    geometry: &crate::geometry::Geometry,
+    cells: &[Cell],
+    materials_fissionable: Option<&[bool]>,
+    seed: u64,
+) -> Result<Vec<FissionSite>, InitialSourceError> {
     let mut rng = Rng::new(seed * 100_000, 0);
     let mut sites = Vec::with_capacity(n);
 
-    // Find the first material cell (assumed fissile for eigenvalue problems).
-    let target_idx = cells
-        .iter()
-        .position(|c| matches!(c.fill, CellFill::Material(_)));
-
-    // Sampling AABB. For flat geometries the target Material cell
-    // typically has a tight AABB (set by the caller) and we use that.
-    // For nested geometries the Material cell lives in element-local
-    // coords — its AABB is meaningless in world coords. In that case
-    // fall back to the union of every cell that has a finite world
-    // AABB AND every lattice's world-coord extent (lattice cells'
-    // AABBs are element-local; their world bounds come from
-    // `origin + pitch · shape`). LCT-style benchmarks have all
-    // fissile material inside a lattice and zero finite cell AABBs
-    // covering the world extent — without the lattice union the
-    // sampler would default to ±10 cm and miss the geometry entirely.
-    let target_aabb = target_idx.map(|i| cells[i].aabb);
-    let aabb = match target_aabb {
-        Some(a) if a.surface_area().is_finite() && a.surface_area() > 0.0 => a,
-        _ => union_finite_world_aabbs(cells)
-            .map(|cells_aabb| union_with_lattices(cells_aabb, geometry))
-            .or_else(|| lattices_world_aabb(geometry))
-            .unwrap_or(crate::geometry::Aabb::new(
-                Vec3::new(-10.0, -10.0, -10.0),
-                Vec3::new(10.0, 10.0, 10.0),
-            )),
+    // ── Build the per-cell sampling table ────────────────────────────
+    //
+    // A cell qualifies if (a) it's filled with a Material that the
+    // caller marked fissionable, and (b) its region tree produces a
+    // finite, non-empty AABB. Each qualifying cell contributes one
+    // entry with its AABB and an importance weight equal to the
+    // AABB volume — uniform sampling inside the union then matches
+    // the geometry-volume fraction of each cell, which is the right
+    // first-batch prior for k-eigenvalue.
+    struct CellEntry {
+        #[allow(dead_code)] // kept for future diagnostics / debug logging
+        cell_idx: usize,
+        aabb: crate::geometry::Aabb,
+        weight: f64,
+    }
+    let is_fissionable_mat = |m: u32| -> bool {
+        match materials_fissionable {
+            Some(flags) => flags.get(m as usize).copied().unwrap_or(true),
+            None => true,
+        }
     };
-    // 2D-extruded benchmarks (LCT-008, many sol-therm cases) carry
-    // a degenerate z pitch like ±10 000 cm — rejection sampling
-    // would waste 99 %+ of attempts above/below the fuel. Clamp any
-    // axis whose half-extent exceeds 10× the smallest finite half-
-    // extent to that 10× cap, centred at the AABB's midpoint.
-    let aabb = clamp_degenerate_axes(aabb);
 
+    let mut table: Vec<CellEntry> = Vec::new();
+    let surfaces = geometry.surfaces.as_slice();
+    for (idx, c) in cells.iter().enumerate() {
+        let CellFill::Material(m) = c.fill else {
+            continue;
+        };
+        if !is_fissionable_mat(m) {
+            continue;
+        }
+        let aabb = c.region.world_aabb(surfaces);
+        let dx = aabb.max.x - aabb.min.x;
+        let dy = aabb.max.y - aabb.min.y;
+        let dz = aabb.max.z - aabb.min.z;
+        if !(dx.is_finite() && dy.is_finite() && dz.is_finite())
+            || dx <= 0.0
+            || dy <= 0.0
+            || dz <= 0.0
+        {
+            continue;
+        }
+        let weight = dx * dy * dz;
+        table.push(CellEntry {
+            cell_idx: idx,
+            aabb,
+            weight,
+        });
+    }
+
+    // Lattice fallback: when the top-level cells slice carries only
+    // Universe / Lattice fills (LCT, CANDU bundles, hex assemblies),
+    // no Material cell shows up here. Drop to the lattice extent,
+    // which is the world-coord AABB of the lattice's element grid.
+    if table.is_empty() {
+        if let Some(lat_aabb) = lattices_world_aabb(geometry) {
+            let lat_aabb = clamp_degenerate_axes(lat_aabb);
+            let dx = lat_aabb.max.x - lat_aabb.min.x;
+            let dy = lat_aabb.max.y - lat_aabb.min.y;
+            let dz = lat_aabb.max.z - lat_aabb.min.z;
+            if dx.is_finite() && dy.is_finite() && dz.is_finite() && dx > 0.0 && dy > 0.0 && dz > 0.0
+            {
+                table.push(CellEntry {
+                    cell_idx: usize::MAX,
+                    aabb: lat_aabb,
+                    weight: dx * dy * dz,
+                });
+            }
+        }
+    }
+
+    if table.is_empty() {
+        return Err(InitialSourceError {
+            message: format!(
+                "initial_source: no fissionable cells found in geometry with {} cells / \
+                 {} surfaces / {} lattices. Either no material is flagged fissionable, \
+                 or every fissionable cell's region tree produced an empty / unbounded \
+                 AABB.",
+                cells.len(),
+                geometry.surfaces.len(),
+                geometry.lattices.len(),
+            ),
+        });
+    }
+
+    let cumulative: Vec<f64> = {
+        let mut acc = 0.0;
+        table
+            .iter()
+            .map(|e| {
+                acc += e.weight;
+                acc
+            })
+            .collect()
+    };
+    let total_weight = *cumulative.last().unwrap();
+
+    let max_attempts =
+        crate::transport::sim_limits::SimLimits::default().initial_source_max_attempts(n);
     let mut attempts: u64 = 0;
-    let max_attempts: u64 = (n as u64).saturating_mul(10_000).max(1_000_000);
-
     while sites.len() < n {
         attempts += 1;
         if attempts > max_attempts {
-            panic!(
-                "initial_source: rejection sampling failed to find {} fissile points \
-                 in {} attempts inside AABB {:?}. Either the geometry has no Material \
-                 cells, or the target AABB doesn't intersect any fissile region.",
-                n, max_attempts, aabb
-            );
+            return Err(InitialSourceError {
+                message: format!(
+                    "initial_source: rejection sampling failed to find {n} fissile points \
+                     in {max_attempts} attempts across {} candidate cells (total weight = {:.3e}). \
+                     Geometry may have a fissionable material whose region tree resolves to \
+                     a box mostly outside the actual cell volume — e.g. a CSG difference \
+                     that the region-tree AABB walker bounds conservatively.",
+                    table.len(),
+                    total_weight,
+                ),
+            });
         }
-        let x = aabb.min.x + rng.uniform() * (aabb.max.x - aabb.min.x);
-        let y = aabb.min.y + rng.uniform() * (aabb.max.y - aabb.min.y);
-        let z = aabb.min.z + rng.uniform() * (aabb.max.z - aabb.min.z);
+
+        // Pick a cell by cumulative-weight.
+        let xi = rng.uniform() * total_weight;
+        let pick = cumulative.partition_point(|&w| w < xi).min(table.len() - 1);
+        let entry = &table[pick];
+
+        let x = entry.aabb.min.x + rng.uniform() * (entry.aabb.max.x - entry.aabb.min.x);
+        let y = entry.aabb.min.y + rng.uniform() * (entry.aabb.max.y - entry.aabb.min.y);
+        let z = entry.aabb.min.z + rng.uniform() * (entry.aabb.max.z - entry.aabb.min.z);
         let pos = Vec3::new(x, y, z);
 
         if let Some(stack) = geometry::ray::find_cell_recursive(pos, geometry) {
             let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
-            // Accept if the leaf is the target Material cell (flat case)
-            // OR any Material cell (nested case where the leaf is inside
-            // a universe/lattice fill).
             let accept = match cells.get(deepest).map(|c| c.fill) {
-                Some(CellFill::Material(_)) => {
-                    Some(deepest) == target_idx || target_idx.is_none() || stack.len() > 1
-                }
-                _ => false,
+                Some(CellFill::Material(m)) => is_fissionable_mat(m),
+                _ => stack.len() > 1, // nested-fill leaf — the descent already verified containment
             };
             if accept {
                 sites.push(FissionSite {
@@ -2513,20 +2635,23 @@ pub fn initial_source(
         }
     }
 
-    sites
+    Ok(sites)
 }
 
-/// Union of every cell's AABB that's finite (i.e. set by the caller —
-/// the default `Aabb::INFINITE` is excluded). Used as a sampling-box
-/// fallback in `initial_source` for nested geometries where the
-/// fissile cell's AABB is element-local and meaningless in world
-/// coordinates.
-fn union_finite_world_aabbs(cells: &[Cell]) -> Option<crate::geometry::Aabb> {
-    cells
-        .iter()
-        .map(|c| c.aabb)
-        .filter(|a| a.surface_area().is_finite() && a.surface_area() > 0.0)
-        .reduce(crate::geometry::Aabb::union)
+/// Panicking wrapper around [`try_initial_source`] for legacy callers
+/// that want fail-fast behaviour when the geometry can't be sampled.
+/// Sampling AABB resolution and rejection logic are documented inline
+/// in `try_initial_source`.
+pub fn initial_source(
+    n: usize,
+    geometry: &crate::geometry::Geometry,
+    cells: &[Cell],
+    seed: u64,
+) -> Vec<FissionSite> {
+    match try_initial_source(n, geometry, cells, seed) {
+        Ok(sites) => sites,
+        Err(e) => panic!("{}", e.message),
+    }
 }
 
 /// World-coordinate AABB enclosing every rectangular lattice in the
@@ -2550,16 +2675,6 @@ fn lattices_world_aabb(geometry: &crate::geometry::Geometry) -> Option<crate::ge
         .reduce(crate::geometry::Aabb::union)
 }
 
-fn union_with_lattices(
-    cells_aabb: crate::geometry::Aabb,
-    geometry: &crate::geometry::Geometry,
-) -> crate::geometry::Aabb {
-    match lattices_world_aabb(geometry) {
-        Some(lat_aabb) => cells_aabb.union(lat_aabb),
-        None => cells_aabb,
-    }
-}
-
 /// Tighten any axis whose half-extent exceeds 10× the smallest finite
 /// half-extent. 2D-extruded lattice problems (LCT-008, sol-therm cases
 /// with z-pitch like ±10 000 cm) trip rejection sampling because most
@@ -2567,16 +2682,29 @@ fn union_with_lattices(
 /// in-plane radius around the AABB midpoint preserves the fissile
 /// content while keeping the sampling-acceptance probability high.
 fn clamp_degenerate_axes(aabb: crate::geometry::Aabb) -> crate::geometry::Aabb {
-    let center = Vec3::new(
-        0.5 * (aabb.min.x + aabb.max.x),
-        0.5 * (aabb.min.y + aabb.max.y),
-        0.5 * (aabb.min.z + aabb.max.z),
-    );
-    let half = [
-        0.5 * (aabb.max.x - aabb.min.x),
-        0.5 * (aabb.max.y - aabb.min.y),
-        0.5 * (aabb.max.z - aabb.min.z),
-    ];
+    // Per-axis centre and half-extent. Treat any axis whose bound is
+    // infinite on either side as "no centre constraint" — collapsing
+    // it to the AABB's median of the finite axes would land on NaN
+    // via `inf + (-inf)`. Doubly-infinite axes (extruded pin cells,
+    // unbounded planes) get centred at 0 and clamped to the in-plane
+    // scale below.
+    let axis = |lo: f64, hi: f64| -> (f64, f64) {
+        if lo.is_finite() && hi.is_finite() {
+            (0.5 * (lo + hi), 0.5 * (hi - lo))
+        } else if lo.is_finite() {
+            (lo, f64::INFINITY)
+        } else if hi.is_finite() {
+            (hi, f64::INFINITY)
+        } else {
+            // Doubly-unbounded — collapse around the origin and let
+            // the in-plane cap below tighten it.
+            (0.0, f64::INFINITY)
+        }
+    };
+    let (cx, hx) = axis(aabb.min.x, aabb.max.x);
+    let (cy, hy) = axis(aabb.min.y, aabb.max.y);
+    let (cz, hz) = axis(aabb.min.z, aabb.max.z);
+    let half = [hx, hy, hz];
     // Smallest positive half-extent; ignore degenerate (0 or negative)
     // axes so a perfectly planar geometry doesn't collapse the cap to 0.
     let min_pos = half
@@ -2593,14 +2721,10 @@ fn clamp_degenerate_axes(aabb: crate::geometry::Aabb) -> crate::geometry::Aabb {
     // than 10× because the root cell's z range is often a single pin
     // height (a few cm), not the lattice's "infinite" pitch.
     let cap = min_pos;
-    let clamped = [
-        half[0].min(cap),
-        half[1].min(cap),
-        half[2].min(cap),
-    ];
+    let clamped = [half[0].min(cap), half[1].min(cap), half[2].min(cap)];
     crate::geometry::Aabb::new(
-        Vec3::new(center.x - clamped[0], center.y - clamped[1], center.z - clamped[2]),
-        Vec3::new(center.x + clamped[0], center.y + clamped[1], center.z + clamped[2]),
+        Vec3::new(cx - clamped[0], cy - clamped[1], cz - clamped[2]),
+        Vec3::new(cx + clamped[0], cy + clamped[1], cz + clamped[2]),
     )
 }
 

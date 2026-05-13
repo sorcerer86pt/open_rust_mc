@@ -45,6 +45,8 @@ use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
 use open_rust_mc::geometry::lattice::HexOrientation;
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 use open_rust_mc::geometry::{ray, Aabb, Vec3};
+#[cfg(feature = "cuda")]
+use open_rust_mc::geometry::Geometry;
 use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
 use open_rust_mc::photon::electron::{radiation_length_cm, track_integrate_electron_csg_with_ms};
 use open_rust_mc::photon::material::PhotonMaterial as RustPhotonMaterial;
@@ -56,6 +58,8 @@ use open_rust_mc::hdf5_reader::NuclideFileReader;
 use open_rust_mc::transport::hybrid_xs::{HybridSvdWmpXsProvider, HybridTableWmpXsProvider};
 use open_rust_mc::transport::material::Material as RustMaterial;
 use open_rust_mc::transport::rng::Rng;
+#[cfg(feature = "cuda")]
+use open_rust_mc::transport::sim_limits::SimLimits;
 use open_rust_mc::transport::simulate::{self, SimConfig};
 use open_rust_mc::transport::xs_provider::{self, RankPolicy, SvdXsProvider, TableXsProvider};
 use open_rust_mc::wmp::WindowedMultipole;
@@ -425,6 +429,57 @@ impl PyXsMode {
     }
 }
 
+// ── Runner (backend device selector) ─────────────────────────────────────
+
+/// Compute backend the simulation runs on. The CPU path is always
+/// available; `GpuCuda` requires the bindings to be built with
+/// `--features cuda` (which forwards to `open-rust-mc/cuda`).
+///
+/// Use `Runner.recommended()` to pick the build's optimal default,
+/// or `Scene.set_runner(Runner.Cpu | Runner.GpuCuda)` to force one.
+/// Future variants (e.g. ROCm, Metal, distributed cluster runners)
+/// will be added as new enum members without breaking the existing
+/// names.
+#[pyclass(eq, eq_int, name = "Runner", module = "open_rust_mc._core")]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PyRunner {
+    Cpu,
+    GpuCuda,
+}
+
+#[pymethods]
+impl PyRunner {
+    fn __repr__(&self) -> String {
+        match self {
+            PyRunner::Cpu => "Runner.Cpu",
+            PyRunner::GpuCuda => "Runner.GpuCuda",
+        }
+        .to_string()
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            PyRunner::Cpu => "cpu",
+            PyRunner::GpuCuda => "gpu_cuda",
+        }
+    }
+
+    /// Default runner for the current build. Returns `GpuCuda` when the
+    /// bindings were built with `--features cuda`, else `Cpu`. Mirrors
+    /// `open_rust_mc::transport::dispatch::Backend::recommended`.
+    #[staticmethod]
+    fn recommended() -> Self {
+        #[cfg(feature = "cuda")]
+        {
+            PyRunner::GpuCuda
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            PyRunner::Cpu
+        }
+    }
+}
+
 /// Standard 9-nuclide WMP filename convention (ZZAAA.h5) for U-235,
 /// U-238, U-234. Other nuclides return `None`. Used by the hybrid
 /// modes to discover WMP coverage.
@@ -470,6 +525,8 @@ struct PyScene {
     /// Per-MT rank overrides. Empty by default — every reaction uses
     /// `svd_rank`. Set via `set_svd_ranks({mt: rank, ...})`.
     svd_ranks_per_mt: HashMap<u32, usize>,
+    /// Compute backend. Default `Cpu`. Set via `set_runner`.
+    runner: PyRunner,
 }
 
 #[pymethods]
@@ -495,7 +552,30 @@ impl PyScene {
             xs_mode: PyXsMode::Table,
             svd_rank: 5,
             svd_ranks_per_mt: HashMap::new(),
+            runner: PyRunner::Cpu,
         })
+    }
+
+    /// Select the compute backend. Builder-style, returns `self`.
+    ///
+    /// `Runner.Cpu` (the default) runs the rayon-parallel CPU
+    /// transport. `Runner.GpuCuda` dispatches through `CudaRunner` and
+    /// requires the bindings to be built with `--features cuda`. All
+    /// four `XsMode` values dispatch on either backend; on GPU the
+    /// pure-`Table` modes are uploaded via a rank-1 SVD layout that is
+    /// numerically equivalent to the CPU `TableXsProvider`.
+    fn set_runner<'a>(
+        mut slf: PyRefMut<'a, Self>,
+        runner: PyRunner,
+    ) -> PyResult<PyRefMut<'a, Self>> {
+        slf.runner = runner;
+        Ok(slf)
+    }
+
+    /// Read back the currently selected runner.
+    #[getter]
+    fn runner(&self) -> PyRunner {
+        self.runner
     }
 
     /// Set the cross-section provider mode. Builder-style, returns `self`.
@@ -1635,6 +1715,163 @@ fn build_region(expr: &str, surf_idx: &HashMap<String, usize>) -> PyResult<Regio
         .expect("or_groups is non-empty"))
 }
 
+/// GPU dispatch path. Uploads NuclideKernels / material / SAB / WMP
+/// once per run, builds a recursive geometry context, and drives
+/// `CudaRunner::run` through the same `EigenvalueRunner` trait the
+/// CLI binaries use.
+///
+/// All four `XsMode` values arrive here with `kernels` already loaded
+/// at the appropriate rank:
+///   - `Svd` / `HybridSvdWmp`: rank = `scene.svd_rank` (with per-MT
+///     overrides applied to MTs 2/4/16/17/18/102; discrete-level MTs
+///     stay at the global rank because of the GPU's per-level
+///     basis-stride invariant).
+///   - `Table` / `HybridTableWmp`: rank = 1 (the rank-1 SVD layout
+///     reconstructs the loaded pointwise table exactly).
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn run_gpu_eigenvalue(
+    py: Python<'_>,
+    scene: &PyScene,
+    config: &SimConfig,
+    kernels: Vec<xs_provider::NuclideKernels>,
+    rank: usize,
+    materials_rt: &[RustMaterial],
+    surfaces: &[Surface],
+    cells_rt: &[Cell],
+    nuclide_specs: &[(String, f64, f64, usize)],
+    thermal: &[Option<Arc<open_rust_mc::thermal::ThermalScatteringData>>],
+    wmps: &[Option<(Arc<WindowedMultipole>, f64)>],
+) -> PyResult<(
+    Vec<open_rust_mc::transport::simulate::BatchResult>,
+    f64,
+    usize,
+)> {
+    use open_rust_mc::gpu_recursive::GpuRecursiveContext;
+    use open_rust_mc::gpu_transport::GpuTransportContext;
+    use open_rust_mc::transport::dispatch::{CudaRunner, EigenvalueRunner};
+
+    let gpu_err = |label: &str, e: Box<dyn std::error::Error>| {
+        PyValueError::new_err(format!("GPU {label}: {e}"))
+    };
+
+    // ── Build the recursive geometry (single-universe, flat cells) ──
+    let geometry = Geometry::from_slices(surfaces, cells_rt).map_err(|e| {
+        PyValueError::new_err(format!(
+            "failed to assemble GPU geometry from {} surfaces / {} cells: {e:?}",
+            surfaces.len(),
+            cells_rt.len()
+        ))
+    })?;
+
+    let n = config.particles_per_batch as usize;
+    let xs_memory_bytes: usize = kernels.iter().map(|n| n.svd_memory_bytes()).sum();
+    let limits = SimLimits::default();
+
+    // ── Upload XS + materials + (optional) S(α,β) + (optional) WMP ──
+    let gpu = GpuTransportContext::new().map_err(|e| gpu_err("init", e))?;
+    let nuc_data = gpu
+        .upload_nuclide_data(&kernels, rank)
+        .map_err(|e| gpu_err("upload nuclides", e))?;
+
+    let awrs: Vec<f64> = nuclide_specs.iter().map(|(_, awr, _, _)| *awr).collect();
+    let nu_bars: Vec<f64> = nuclide_specs.iter().map(|(_, _, nu, _)| *nu).collect();
+    let mat_data = gpu
+        .upload_material_data(materials_rt, &awrs, &nu_bars)
+        .map_err(|e| gpu_err("upload materials", e))?;
+
+    // Collect every nuclide that has a thermal-scattering library
+    // attached and upload all of them in one multi-slot pack. The GPU
+    // kernel routes each collision to the matching TSL via the
+    // per-nuclide `slot_per_nuc` lookup table, so problems with
+    // simultaneous H-in-H₂O + D-in-D₂O + C-in-graphite all sample
+    // correctly on the GPU.
+    let n_nuc = nuclide_specs.len();
+    let sab_slots: Vec<(
+        &open_rust_mc::thermal::ThermalScatteringData,
+        usize,
+        usize,
+    )> = thermal
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            t.as_ref().map(|tsl| {
+                let (_, _, _, temp_idx) = &nuclide_specs[i];
+                (tsl.as_ref(), *temp_idx, i)
+            })
+        })
+        .collect();
+    // sab_nuc_idx is retained for compatibility with the CudaRunner
+    // field but is no longer authoritative — the slot table is. Set it
+    // to the first SAB-bearing nuclide so legacy kernel paths that
+    // still consult it stay correct for single-TSL scenes.
+    let sab_nuc_idx: i32 = sab_slots
+        .first()
+        .map(|(_, _, idx)| *idx as i32)
+        .unwrap_or(-1);
+    let sab_data = gpu
+        .upload_sab_data_multi(&sab_slots, n_nuc)
+        .map_err(|e| gpu_err("upload S(α,β)", e))?;
+
+    let wmp_has_any = wmps.iter().any(|w| w.is_some());
+    let wmp_data = if wmp_has_any {
+        gpu.upload_wmp_data(wmps)
+            .map_err(|e| gpu_err("upload WMP", e))?
+    } else {
+        gpu.upload_wmp_data_empty(nuclide_specs.len())
+            .map_err(|e| gpu_err("upload empty WMP", e))?
+    };
+
+    let recursive = GpuRecursiveContext::build(&geometry, n).map_err(|e| {
+        PyValueError::new_err(format!("GPU recursive context build failed: {e}"))
+    })?;
+
+    // Per-material kT in eV (Boltzmann constant in eV/K).
+    const K_B_EV_PER_K: f64 = 8.617_333_262e-5;
+    let mat_k_t: Vec<f64> = scene
+        .material_order
+        .iter()
+        .map(|name| scene.materials[name].temperature * K_B_EV_PER_K)
+        .collect();
+
+    // Closure that seeds batch 1 using the same rejection sampler the
+    // CPU path uses. CudaRunner's per-batch loop normalises the
+    // fission bank between iterations internally.
+    let geom_ref = &geometry;
+    let cells_ref = cells_rt;
+    let init_src: Box<dyn Fn(usize, u64) -> Vec<(f64, f64, f64, f64)>> =
+        Box::new(move |n, seed| {
+            simulate::initial_source(n, geom_ref, cells_ref, seed)
+                .into_iter()
+                .map(|s| (s.pos.x, s.pos.y, s.pos.z, s.energy))
+                .collect()
+        });
+
+    let runner = CudaRunner {
+        recursive: &recursive,
+        transport: &gpu,
+        nuc_data: &nuc_data,
+        mat_data: &mat_data,
+        sab_data: &sab_data,
+        wmp_data: &wmp_data,
+        mat_k_t: &mat_k_t,
+        sab_nuc_idx,
+        max_events_per_history: limits.max_events_per_history as i32,
+        fis_capacity: limits.fis_capacity(n),
+        initial_source: init_src,
+    };
+
+    // CudaRunner holds a non-Send Box<dyn Fn> for its initial-source
+    // closure plus non-Send device handles, so `py.allow_threads` is
+    // out of reach without an upstream `Send + Sync` bound. Run with
+    // the GIL held — GPU kernels execute on the device regardless and
+    // the host-side per-batch work is short enough that other Python
+    // threads rarely notice.
+    let _ = py;
+    let outcome = runner.run(config);
+    Ok((outcome.batches, outcome.k_eff, xs_memory_bytes))
+}
+
 #[pyfunction]
 fn run_eigenvalue(
     py: Python<'_>,
@@ -1665,12 +1902,24 @@ fn run_eigenvalue(
         }
     }
 
-    // 2. Load XS data — backend-specific. Time the load step.
+    // 2. Load XS data — backend × mode specific. Time the load step.
+    //
+    // CPU dispatch reads `tables` for Table*-mode and `svd_kernels` for
+    // Svd*-mode. GPU dispatch always reads `svd_kernels` (the device
+    // upload accepts NuclideKernels with mixed Svd / Table per-MT
+    // variants); for the pure-Table modes the kernels are loaded at
+    // rank 1, which the upload adapts into a rank-1 SVD layout that
+    // reconstructs the original pointwise table exactly at the loaded
+    // temperature.
     let t_load_start = std::time::Instant::now();
     let mut tables: Vec<xs_provider::NuclideTableData> = Vec::new();
     let mut svd_kernels: Vec<xs_provider::NuclideKernels> = Vec::new();
-    let need_svd = matches!(scene.xs_mode, PyXsMode::Svd | PyXsMode::HybridSvdWmp);
-    let need_table = matches!(scene.xs_mode, PyXsMode::Table | PyXsMode::HybridTableWmp);
+    let mode_uses_svd = matches!(scene.xs_mode, PyXsMode::Svd | PyXsMode::HybridSvdWmp);
+    let mode_uses_table = matches!(scene.xs_mode, PyXsMode::Table | PyXsMode::HybridTableWmp);
+    let on_gpu = matches!(scene.runner, PyRunner::GpuCuda);
+    let need_table = mode_uses_table && !on_gpu;
+    let need_svd = mode_uses_svd || on_gpu;
+    let kernel_rank: usize = if mode_uses_svd { scene.svd_rank } else { 1 };
     for (file, awr, nubar, temp_idx) in &nuclide_specs {
         let path = scene.data_dir.join(file);
         if !path.exists() {
@@ -1687,7 +1936,7 @@ fn run_eigenvalue(
         if need_svd {
             // Build the per-MT rank policy once per call (cheap, but keep
             // outside the hot path anyway).
-            let mut policy = RankPolicy::new(scene.svd_rank);
+            let mut policy = RankPolicy::new(kernel_rank);
             for (&mt, &rank) in &scene.svd_ranks_per_mt {
                 policy = policy.with_mt(mt, rank);
             }
@@ -1854,56 +2103,87 @@ fn run_eigenvalue(
         urr_equivalence: None,
     };
     let t_sim_start = std::time::Instant::now();
-    let (batch_results, _k_running, xs_memory_bytes) = match scene.xs_mode {
-        PyXsMode::Table => {
-            let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
-            let xs = TableXsProvider {
-                nuclides: tables,
-                thermal,
-            };
-            let (br, k) = py.allow_threads(|| {
-                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
-            });
-            (br, k, xs_mem)
-        }
-        PyXsMode::Svd => {
-            let xs_mem: usize = svd_kernels.iter().map(|n| n.svd_memory_bytes()).sum();
-            let xs = SvdXsProvider {
-                nuclides: svd_kernels,
-                thermal,
-            };
-            let (br, k) = py.allow_threads(|| {
-                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
-            });
-            (br, k, xs_mem)
-        }
-        PyXsMode::HybridSvdWmp => {
-            let inner = SvdXsProvider {
-                nuclides: svd_kernels,
-                thermal,
-            };
-            let xs = HybridSvdWmpXsProvider::new(inner, wmps);
-            // (smooth-only rebuild disabled here pending diagnosis of
-            // a Godiva-specific zero-fission regression in the Python
-            // path; pwr_pincell binary still does the rebuild and
-            // reports the realised memory drop. See xs_mode_demo.)
-            let xs_mem = xs.memory_report().current_total();
-            let (br, k) = py.allow_threads(|| {
-                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
-            });
-            (br, k, xs_mem)
-        }
-        PyXsMode::HybridTableWmp => {
-            let inner = TableXsProvider {
-                nuclides: tables,
-                thermal,
-            };
-            let xs = HybridTableWmpXsProvider::new(inner, wmps);
-            let xs_mem = xs.memory_report().current_total();
-            let (br, k) = py.allow_threads(|| {
-                simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
-            });
-            (br, k, xs_mem)
+    let (batch_results, _k_running, xs_memory_bytes) = match scene.runner {
+        PyRunner::Cpu => match scene.xs_mode {
+            PyXsMode::Table => {
+                let xs_mem: usize = tables.iter().map(|t| t.table_memory_bytes()).sum();
+                let xs = TableXsProvider {
+                    nuclides: tables,
+                    thermal,
+                };
+                let (br, k) = py.allow_threads(|| {
+                    simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+                });
+                (br, k, xs_mem)
+            }
+            PyXsMode::Svd => {
+                let xs_mem: usize = svd_kernels.iter().map(|n| n.svd_memory_bytes()).sum();
+                let xs = SvdXsProvider {
+                    nuclides: svd_kernels,
+                    thermal,
+                };
+                let (br, k) = py.allow_threads(|| {
+                    simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+                });
+                (br, k, xs_mem)
+            }
+            PyXsMode::HybridSvdWmp => {
+                let inner = SvdXsProvider {
+                    nuclides: svd_kernels,
+                    thermal,
+                };
+                let xs = HybridSvdWmpXsProvider::new(inner, wmps);
+                // (smooth-only rebuild disabled here pending diagnosis of
+                // a Godiva-specific zero-fission regression in the Python
+                // path; pwr_pincell binary still does the rebuild and
+                // reports the realised memory drop. See xs_mode_demo.)
+                let xs_mem = xs.memory_report().current_total();
+                let (br, k) = py.allow_threads(|| {
+                    simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+                });
+                (br, k, xs_mem)
+            }
+            PyXsMode::HybridTableWmp => {
+                let inner = TableXsProvider {
+                    nuclides: tables,
+                    thermal,
+                };
+                let xs = HybridTableWmpXsProvider::new(inner, wmps);
+                let xs_mem = xs.memory_report().current_total();
+                let (br, k) = py.allow_threads(|| {
+                    simulate::run_eigenvalue(&config, &surfaces, &cells_rt, &materials_rt, &xs)
+                });
+                (br, k, xs_mem)
+            }
+        },
+        PyRunner::GpuCuda => {
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = (kernel_rank, &svd_kernels, &nuclide_specs, &wmps);
+                return Err(PyValueError::new_err(
+                    "Runner.GpuCuda was requested but these bindings were built without \
+                     the cuda feature. Rebuild the Python extension with \
+                     `maturin develop --features cuda` (CUDA toolkit + an sm_86+ GPU \
+                     required), or call `Scene.set_runner(Runner.Cpu)` to stay on the \
+                     CPU backend.",
+                ));
+            }
+            #[cfg(feature = "cuda")]
+            {
+                run_gpu_eigenvalue(
+                    py,
+                    scene,
+                    &config,
+                    svd_kernels,
+                    kernel_rank,
+                    &materials_rt,
+                    &surfaces,
+                    &cells_rt,
+                    &nuclide_specs,
+                    &thermal,
+                    &wmps,
+                )?
+            }
         }
     };
     let sim_time = t_sim_start.elapsed().as_secs_f64();
@@ -2357,6 +2637,515 @@ impl PyNuclideFile {
     }
 }
 
+// ── ICSBEP loader + runner ────────────────────────────────────────────────
+
+/// Best-effort decode of a `catch_unwind` payload into a human-readable
+/// message. Rust's panic payload is `Box<dyn Any + Send>` — typically
+/// either a `&'static str` or a `String`, depending on whether the
+/// `panic!()` site used a literal or a formatted message.
+fn panic_to_string(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// Result of an ICSBEP regression run. Carries the engine's `k_calc`
+/// alongside the case's acceptance reference (handbook or — when the
+/// JSON ships one — the `local_validation` block recording OpenMC's
+/// measurement on the same scene) and the pass envelope.
+#[pyclass(name = "IcsbepResult", module = "open_rust_mc._core")]
+struct PyIcsbepResult {
+    #[pyo3(get)]
+    case: String,
+    #[pyo3(get)]
+    k_eff: f64,
+    #[pyo3(get)]
+    k_sigma: f64,
+    #[pyo3(get)]
+    k_ref: f64,
+    #[pyo3(get)]
+    sigma_exp: f64,
+    #[pyo3(get)]
+    handbook_k: f64,
+    #[pyo3(get)]
+    handbook_sigma: f64,
+    #[pyo3(get)]
+    ref_source: String,
+    #[pyo3(get)]
+    delta_pcm: f64,
+    #[pyo3(get)]
+    sigma_combined: f64,
+    #[pyo3(get)]
+    sigma_ratio: f64,
+    #[pyo3(get)]
+    bound_pcm: f64,
+    // `pass` is a Python keyword — expose as `passed`.
+    #[pyo3(get, name = "passed")]
+    pass_ok: bool,
+    #[pyo3(get)]
+    runner: PyRunner,
+    #[pyo3(get)]
+    runtime_seconds: f64,
+    #[pyo3(get)]
+    load_time_seconds: f64,
+    #[pyo3(get)]
+    sim_time_seconds: f64,
+    #[pyo3(get)]
+    total_collisions: u64,
+    #[pyo3(get)]
+    total_fissions: u64,
+    #[pyo3(get)]
+    total_leakage: u64,
+    #[pyo3(get)]
+    active_batches: usize,
+    #[pyo3(get)]
+    total_histories: u64,
+}
+
+#[pymethods]
+impl PyIcsbepResult {
+    fn __repr__(&self) -> String {
+        format!(
+            "<IcsbepResult {} {} k={:.5}±{:.5} k_ref={:.5}±{:.5} Δ={:+.0}pcm {:.2}σ bound=±{:.0}pcm [{}]>",
+            self.case,
+            self.runner.__repr__(),
+            self.k_eff,
+            self.k_sigma,
+            self.k_ref,
+            self.sigma_exp,
+            self.delta_pcm,
+            self.sigma_ratio,
+            self.bound_pcm,
+            if self.pass_ok { "PASS" } else { "FAIL" },
+        )
+    }
+}
+
+/// Run an ICSBEP regression case end-to-end from its JSON specification.
+///
+/// `case_json` is a path to one of the `bench/icsbep/*.json` files
+/// (e.g. `bench/icsbep/heu-met-fast-001_case-1.json`). `data_dir`
+/// points at the OpenMC HDF5 distribution's neutron sub-directory.
+///
+/// The function:
+///   1. Parses the JSON, extracts the handbook `k_eff_reference`
+///      and (if present) `local_validation.openmc_k_eff` to derive
+///      the acceptance reference.
+///   2. Loads the scene's recursive geometry via
+///      `scene_io::load_scene_from_json` and resolves materials via
+///      `material_resolve::resolve_materials` against the HDF5
+///      library at `data_dir`.
+///   3. Dispatches the eigenvalue loop through the selected runner
+///      (`Runner.Cpu` — `simulate::run_eigenvalue_with_geometry`;
+///      `Runner.GpuCuda` — `dispatch::CudaRunner`, requires the
+///      bindings built with `--features cuda`).
+///   4. Applies the `|Δ| ≤ max(150 pcm, 2·σ_combined)` envelope —
+///      the same criterion `tests/cuda_runs.rs` and
+///      `tests/icsbep_runs.rs` use.
+///
+/// Returns an `IcsbepResult` with `k_eff`, `k_sigma`, `k_ref`,
+/// `sigma_exp`, `delta_pcm`, `bound_pcm`, `pass`, and timing info.
+#[pyfunction]
+#[pyo3(signature = (case_json, data_dir, settings, runner=PyRunner::Cpu, rank=15))]
+fn run_icsbep_case(
+    py: Python<'_>,
+    case_json: PathBuf,
+    data_dir: PathBuf,
+    settings: &PySettings,
+    runner: PyRunner,
+    rank: usize,
+) -> PyResult<PyIcsbepResult> {
+    use open_rust_mc::geometry::scene_io;
+    use open_rust_mc::transport::material_resolve;
+    use open_rust_mc::transport::nuclides::NuclideLibrary;
+
+    if !case_json.exists() {
+        return Err(PyFileNotFoundError::new_err(format!(
+            "ICSBEP case JSON not found: {}",
+            case_json.display()
+        )));
+    }
+    if !data_dir.exists() {
+        return Err(PyFileNotFoundError::new_err(format!(
+            "data_dir not found: {}",
+            data_dir.display()
+        )));
+    }
+
+    let case_label: String = case_json
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?")
+        .to_string();
+
+    let text = std::fs::read_to_string(&case_json)
+        .map_err(|e| PyValueError::new_err(format!("read {}: {e}", case_json.display())))?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| PyValueError::new_err(format!("parse {}: {e}", case_json.display())))?;
+    let benchmark = &value["benchmark"];
+    let scene = &value["scene"];
+    // Some `bench/icsbep/*.json` files are CLI-runner manifests (no
+    // `scene` block; `runner.binary` names a CLI binary like
+    // `godiva` / `pwr_pincell`) rather than scene specifications.
+    // Surface them with a clear error instead of letting the
+    // SceneDto deserializer choke on the missing object.
+    if scene.is_null() {
+        let runner_binary = value
+            .get("runner")
+            .and_then(|r| r.get("binary"))
+            .and_then(|b| b.as_str())
+            .unwrap_or("<unknown>");
+        return Err(PyValueError::new_err(format!(
+            "case JSON has no `scene` block — this is a CLI-runner manifest \
+             pointing at the `{runner_binary}` binary. Only scene-based \
+             cases are runnable through `run_icsbep_case`. Use the named \
+             CLI binary directly or pick a *_case-*.json file."
+        )));
+    }
+
+    let handbook_k = benchmark["k_eff_reference"]
+        .as_f64()
+        .ok_or_else(|| PyValueError::new_err("benchmark.k_eff_reference missing"))?;
+    let handbook_sigma = benchmark["k_eff_sigma"]
+        .as_f64()
+        .ok_or_else(|| PyValueError::new_err("benchmark.k_eff_sigma missing"))?;
+
+    let (k_ref, sigma_exp, ref_source): (f64, f64, String) = match benchmark.get("local_validation") {
+        Some(lv) if lv.get("openmc_k_eff").and_then(|v: &serde_json::Value| v.as_f64()).is_some() => {
+            let k = lv["openmc_k_eff"].as_f64().unwrap();
+            let s_omc = lv["openmc_k_sigma_seeds"]
+                .as_f64()
+                .unwrap_or(0.001);
+            (
+                k,
+                s_omc.max(handbook_sigma),
+                "local_validation (OpenMC on this scene)".to_string(),
+            )
+        }
+        _ => (
+            handbook_k,
+            handbook_sigma,
+            "k_eff_reference (ICSBEP handbook)".to_string(),
+        ),
+    };
+
+    let t_load_start = std::time::Instant::now();
+    let loaded = scene_io::load_scene_from_json(&scene.to_string())
+        .map_err(|e| PyValueError::new_err(format!("scene_io: {e:?}")))?;
+    let lib = NuclideLibrary::from_data_dir(&data_dir);
+    let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, rank)
+        .map_err(|e| PyValueError::new_err(format!("material_resolve: {e}")))?;
+    // Engine hard limit — single source of truth lives at
+    // `open_rust_mc::MAX_NUCLIDES_PER_MATERIAL`. Both the CPU's
+    // fixed-size MicroXs arrays in `simulate.rs` and the GPU's
+    // `nuc_t[MAX_NUC_PER_MAT]` register array read from the same
+    // value (the GPU sees it through an NVRTC `-D` flag). Materials
+    // that exceed the cap hit an index-out-of-bounds panic at the
+    // first collision; bail early here so sweeps can categorise the
+    // failure cleanly.
+    let max_nuclides = open_rust_mc::MAX_NUCLIDES_PER_MATERIAL;
+    for (mi, mat) in resolved.materials.iter().enumerate() {
+        if mat.nuclides.len() > max_nuclides {
+            return Err(PyValueError::new_err(format!(
+                "material[{mi}] {:?} has {} nuclides, but the engine \
+                 supports at most {max_nuclides} per material \
+                 (MAX_NUCLIDES_PER_MATERIAL — bump in lib.rs and rebuild). \
+                 Split the material or raise the limit.",
+                mat.name,
+                mat.nuclides.len(),
+            )));
+        }
+    }
+    let load_time = t_load_start.elapsed().as_secs_f64();
+
+    // Pre-seed the source bank via the fallible, fissionability-aware
+    // sampler. Mirrors Serpent 2's default: per-cell region-tree AABB
+    // weighted by volume, accept any draw that lands in a cell whose
+    // material has `nu_bar_const > 0`. Replaces the historical
+    // "first Material cell" / "smallest-volume material" heuristics
+    // that broke on multi-shell HMF, BWR control blades, PWR burnable
+    // poisons, HFIR plate cladding, CANDU spacers.
+    let fissionable = resolved.fissionable_materials();
+    let initial_bank = simulate::try_initial_source_in_materials(
+        settings.particles as usize,
+        &loaded.geometry,
+        loaded.geometry.cells.as_slice(),
+        Some(&fissionable),
+        settings.seed,
+    )
+    .map_err(|e| PyValueError::new_err(format!("initial_source: {}", e.message)))?;
+
+    let config = SimConfig {
+        batches: settings.batches,
+        inactive: settings.inactive,
+        particles_per_batch: settings.particles,
+        seed: settings.seed,
+        auto_inactive: None,
+        verbose: false,
+        parallel: true,
+        tallies: Default::default(),
+        statepoint_path: None,
+        survival_biasing: None,
+        initial_source_bank: Some(initial_bank),
+        weight_window: None,
+        disable_delayed_neutrons: false,
+        urr_equivalence: None,
+    };
+
+    // Some ICSBEP cases (degenerate world AABB, missing fissile region,
+    // upload overflow) trigger a Rust `panic!` deep inside the engine
+    // — typically from `simulate::initial_source`'s rejection sampler
+    // or from CUDA's MAX_NUC_PER_MAT check. Without `catch_unwind` the
+    // panic propagates out and aborts the host Python process, which
+    // breaks any sweep that hits one bad case. Wrap the sim call so a
+    // panic surfaces as a normal `PyValueError`, letting the sweep
+    // continue with that case marked ERROR.
+    use std::panic::{self, AssertUnwindSafe};
+
+    let t_sim_start = std::time::Instant::now();
+    let runner_label = match runner {
+        PyRunner::Cpu => "CPU",
+        PyRunner::GpuCuda => "GPU",
+    };
+    let sim_result = panic::catch_unwind(AssertUnwindSafe(|| -> PyResult<(
+        Vec<open_rust_mc::transport::simulate::BatchResult>,
+        f64,
+    )> {
+        match runner {
+            PyRunner::Cpu => {
+                let provider = &resolved.provider;
+                let materials = &resolved.materials;
+                let geometry = &loaded.geometry;
+                let out = py.allow_threads(|| {
+                    simulate::run_eigenvalue_with_geometry(
+                        &config, geometry, materials, provider,
+                    )
+                });
+                Ok(out)
+            }
+            PyRunner::GpuCuda => {
+                #[cfg(not(feature = "cuda"))]
+                {
+                    let _ = (&resolved, &loaded, &config, settings);
+                    return Err(PyValueError::new_err(
+                        "Runner.GpuCuda was requested but these bindings were built without \
+                         the cuda feature. Rebuild with `maturin develop --features cuda` \
+                         (CUDA toolkit + an sm_86+ GPU required) or select Runner.Cpu.",
+                    ));
+                }
+                #[cfg(feature = "cuda")]
+                {
+                    run_gpu_icsbep(&config, &loaded.geometry, &resolved)
+                }
+            }
+        }
+    }));
+    let (batch_results, _k_running) = match sim_result {
+        Ok(Ok(pair)) => pair,
+        Ok(Err(e)) => return Err(e),
+        Err(payload) => {
+            return Err(PyValueError::new_err(format!(
+                "engine panic during {runner_label} dispatch: {}",
+                panic_to_string(&payload),
+            )));
+        }
+    };
+    let sim_time = t_sim_start.elapsed().as_secs_f64();
+    let runtime = load_time + sim_time;
+
+    // Active-batch mean / stderr.
+    let active: Vec<f64> = batch_results
+        .iter()
+        .filter(|b| b.active)
+        .map(|b| b.k_eff)
+        .collect();
+    let n = active.len();
+    if n == 0 {
+        return Err(PyValueError::new_err(
+            "no active batches produced — check settings.batches > settings.inactive",
+        ));
+    }
+    let mean = active.iter().sum::<f64>() / n as f64;
+    let variance = if n > 1 {
+        active.iter().map(|k| (k - mean).powi(2)).sum::<f64>() / (n - 1) as f64
+    } else {
+        0.0
+    };
+    let k_sigma = (variance / n as f64).sqrt();
+
+    let sigma_combined: f64 = (k_sigma * k_sigma + sigma_exp * sigma_exp).sqrt();
+    let delta: f64 = mean - k_ref;
+    let delta_pcm: f64 = delta * 1.0e5;
+    let bound_pcm: f64 = (150.0_f64).max(2.0 * sigma_combined * 1.0e5);
+    let sigma_ratio: f64 = if sigma_combined > 0.0 {
+        delta.abs() / sigma_combined
+    } else {
+        0.0
+    };
+    let pass_ok: bool = delta_pcm.abs() <= bound_pcm;
+
+    let mut total_collisions: u64 = 0;
+    let mut total_fissions: u64 = 0;
+    let mut total_leakage: u64 = 0;
+    for br in batch_results.iter().filter(|b| b.active) {
+        total_collisions += br.collisions as u64;
+        total_fissions += br.fissions as u64;
+        total_leakage += br.leakage as u64;
+    }
+
+    Ok(PyIcsbepResult {
+        case: case_label,
+        k_eff: mean,
+        k_sigma,
+        k_ref,
+        sigma_exp,
+        handbook_k,
+        handbook_sigma,
+        ref_source,
+        delta_pcm,
+        sigma_combined,
+        sigma_ratio,
+        bound_pcm,
+        pass_ok,
+        runner,
+        runtime_seconds: runtime,
+        load_time_seconds: load_time,
+        sim_time_seconds: sim_time,
+        total_collisions,
+        total_fissions,
+        total_leakage,
+        active_batches: n,
+        total_histories: n as u64 * settings.particles as u64,
+    })
+}
+
+/// GPU dispatch for an ICSBEP case. Uploads the resolved
+/// [`SvdXsProvider`] (kernels + thermal) plus an empty WMP placeholder
+/// and drives [`CudaRunner`].
+#[cfg(feature = "cuda")]
+fn run_gpu_icsbep(
+    config: &SimConfig,
+    geometry: &Geometry,
+    resolved: &open_rust_mc::transport::material_resolve::ResolvedMaterials,
+) -> PyResult<(
+    Vec<open_rust_mc::transport::simulate::BatchResult>,
+    f64,
+)> {
+    use open_rust_mc::gpu_recursive::GpuRecursiveContext;
+    use open_rust_mc::gpu_transport::GpuTransportContext;
+    use open_rust_mc::transport::dispatch::{CudaRunner, EigenvalueRunner};
+
+    let gpu_err = |label: &str, e: Box<dyn std::error::Error>| {
+        PyValueError::new_err(format!("GPU {label}: {e}"))
+    };
+
+    let provider = &resolved.provider;
+    let materials_rt = &resolved.materials;
+    let n_nuc = provider.nuclides.len();
+    let n = config.particles_per_batch as usize;
+    let limits = SimLimits::default();
+
+    let gpu = GpuTransportContext::new().map_err(|e| gpu_err("init", e))?;
+    let nuc_data = gpu
+        .upload_nuclide_data(&provider.nuclides, /* rank = global */ 15)
+        .map_err(|e| gpu_err("upload nuclides", e))?;
+
+    let awrs: Vec<f64> = provider.nuclides.iter().map(|n| n.awr).collect();
+    let nu_bars: Vec<f64> = provider
+        .nuclides
+        .iter()
+        .map(|n| n.nu_bar_const)
+        .collect();
+    let mat_data = gpu
+        .upload_material_data(materials_rt, &awrs, &nu_bars)
+        .map_err(|e| gpu_err("upload materials", e))?;
+
+    // Multi-slot SAB upload — every thermal nuclide goes into its own
+    // slot. The first material temperature is used to pick each TSL's
+    // temperature index (mirrors `tests/cuda_runs.rs` semantics).
+    let pick_temp = if !materials_rt.is_empty() {
+        materials_rt[0].temperature
+    } else {
+        294.0
+    };
+    let sab_slots: Vec<(
+        &open_rust_mc::thermal::ThermalScatteringData,
+        usize,
+        usize,
+    )> = provider
+        .thermal
+        .iter()
+        .enumerate()
+        .filter_map(|(i, t)| {
+            t.as_ref().map(|tsl| {
+                let t_idx = tsl.select_temperature(pick_temp, limits.sab_temperature_tolerance);
+                (tsl.as_ref(), t_idx, i)
+            })
+        })
+        .collect();
+    let sab_nuc_idx: i32 = sab_slots
+        .first()
+        .map(|(_, _, idx)| *idx as i32)
+        .unwrap_or(-1);
+    let sab_data = gpu
+        .upload_sab_data_multi(&sab_slots, n_nuc)
+        .map_err(|e| gpu_err("upload S(α,β)", e))?;
+
+    let wmp_data = gpu
+        .upload_wmp_data_empty(n_nuc)
+        .map_err(|e| gpu_err("upload empty WMP", e))?;
+
+    let recursive = GpuRecursiveContext::build(geometry, n).map_err(|e| {
+        PyValueError::new_err(format!("GPU recursive context build failed: {e}"))
+    })?;
+
+    const K_B_EV_PER_K: f64 = 8.617_333_262e-5;
+    let mat_k_t: Vec<f64> = materials_rt
+        .iter()
+        .map(|m| m.temperature * K_B_EV_PER_K)
+        .collect();
+
+    let cells_ref = geometry.cells.as_slice();
+    let init_src: Box<dyn Fn(usize, u64) -> Vec<(f64, f64, f64, f64)>> =
+        Box::new(move |n, seed| {
+            // Use the fallible sampler; if geometry can't be sampled
+            // return an empty bank rather than aborting the process.
+            // The CudaRunner then sees zero histories and produces a
+            // zero k — the wrapping `run_icsbep_case` already
+            // pre-validated the bank above, so this branch only runs
+            // for the per-batch resamples (which reuse fission sites
+            // from the previous batch and never re-enter the rejection
+            // sampler) — leaving the fallback in place is purely
+            // defense-in-depth.
+            simulate::try_initial_source(n, geometry, cells_ref, seed)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| (s.pos.x, s.pos.y, s.pos.z, s.energy))
+                .collect()
+        });
+
+    let runner = CudaRunner {
+        recursive: &recursive,
+        transport: &gpu,
+        nuc_data: &nuc_data,
+        mat_data: &mat_data,
+        sab_data: &sab_data,
+        wmp_data: &wmp_data,
+        mat_k_t: &mat_k_t,
+        sab_nuc_idx,
+        max_events_per_history: limits.max_events_per_history as i32,
+        fis_capacity: limits.fis_capacity(n),
+        initial_source: init_src,
+    };
+
+    let outcome = runner.run(config);
+    Ok((outcome.batches, outcome.k_eff))
+}
+
 // ── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -2374,8 +3163,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySettings>()?;
     m.add_class::<PyScene>()?;
     m.add_class::<PyXsMode>()?;
+    m.add_class::<PyRunner>()?;
     m.add_class::<PyEigenvalueResult>()?;
     m.add_class::<PyGammaHeatingResult>()?;
+    m.add_class::<PyIcsbepResult>()?;
     m.add_class::<PyChain>()?;
     m.add_class::<PyCramOrder>()?;
     m.add_class::<PyNuclideFile>()?;
@@ -2389,6 +3180,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ZPlane, m)?)?;
 
     m.add_function(wrap_pyfunction!(run_eigenvalue, m)?)?;
+    m.add_function(wrap_pyfunction!(run_icsbep_case, m)?)?;
     m.add_function(wrap_pyfunction!(run_gamma_heating, m)?)?;
     m.add_function(wrap_pyfunction!(cram, m)?)?;
     m.add_function(wrap_pyfunction!(deplete_constant_flux, m)?)?;

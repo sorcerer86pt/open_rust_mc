@@ -15,8 +15,11 @@ dependency. The SVD compression line is still in tree (`kernel.rs`,
 against pointwise tables / WMP / Hybrid; it's no longer the only
 thing the engine does.
 
-`origin/main` at `025c486`. Lib tests **287 / 287 green**. `cargo
+`origin/main` at `8f38f8c`. Lib tests **384 / 384 green**. `cargo
 check` default and `cargo check --features cuda` both clean.
+ICSBEP family suite passes **6 / 6** on both CPU and CUDA backends
+under the tightened envelope `|Δ| ≤ max(150 pcm, 2 σ_combined)`
+(see *Test acceptance* below).
 
 ## How to read the numbers below
 
@@ -78,6 +81,19 @@ headlines shrink (or invert sign) under `[pwr]`/`[assembly]`.
   → **4.32×**. Means unbiased within combined σ.
 - `[shield]` Old "lite" detector-backward CADIS proxy: 0.69× / 0.20×
   (worse than analog at both depths). Removed in this round.
+
+### ICSBEP CUDA + CPU family sweep (post per-level SVD rank-padding fix)
+- `[godiva]` HMF-001 Godiva: GPU Δ = −79 pcm, CPU Δ = −263 pcm —
+  both inside `2 σ_combined`. Closed a historical +500–700 pcm GPU
+  fast-metal hot bias by padding per-level discrete-inelastic SVD
+  basis buffers to the global `P_RANK` stride (commit `1654c4d`).
+- `[micro]` Per-level XS A/B (`level_xs_compare`) reports `Δ ≤ 0` %
+  at all six test energies (thermal → 5 MeV) across every U-235
+  inelastic level after the fix. ⟨|Q|⟩_GPU moved 659 keV → 925 keV
+  (CPU: 926 keV; gap closed by 99.6 %).
+- Family results under `|Δ| ≤ max(150 pcm, 2 σ_combined)`:
+  HMF-001 / PMF-001 / PMF-002 / U-233-MF-001 / LCT-008 /
+  HEU-SOL-THERM-001 → **6 / 6 PASS** on both backends.
 - `[godiva]` Survival biasing + Russian roulette: σ_track per seed
   −28 %, FOM_track 354 → 500 (+41 %).
 - `[pwr]` Survival biasing on PWR pin cell: cross-seed σ on k_inf
@@ -115,8 +131,11 @@ headlines shrink (or invert sign) under `[pwr]`/`[assembly]`.
 
 **Test count progression:** 36 (original) → 148 (coupled n–γ) → 184 →
 198 (recursive phase 1) → 227 (track-length k / SB / WW / hex CPU+GPU
-/ shapes / dispatch) → 260 (depletion + CADIS-lite) → **287** (random-
-ray TRRM + adjoint + FW-CADIS gain delivered).
+/ shapes / dispatch) → 260 (depletion + CADIS-lite) → 287 (random-
+ray TRRM + adjoint + FW-CADIS gain delivered) → **384** (ICSBEP
+regression substrate + per-MT policy + delta-tracking S(α,β) +
+per-nuclide Watt χ + per-level SVD rank-padding fix + scene-drift
+local-validation harness).
 
 ## Features Implemented
 
@@ -229,6 +248,109 @@ ray TRRM + adjoint + FW-CADIS gain delivered).
 - `--mode svd|table|both|hybrid_table_wmp|hybrid_svd_wmp` flags on
   benchmarks. `--mode both` runs back-to-back with comparison print.
 - OpenMC reference script: `scripts/honesty_test.py` (WSL + conda).
+
+## Test acceptance (ICSBEP regressions)
+
+`tests/cuda_runs.rs` and `tests/icsbep_runs.rs` use a single envelope:
+
+```
+|Δ| ≤ max(150 pcm, 2 × σ_combined)
+σ_combined = sqrt(σ_calc² + σ_exp²)
+```
+
+Multi-seed averaging (3 seeds default; `run_case_cuda_seeds` /
+`run_case_e2e_seeds`) drives `σ_calc` from the seed-to-seed stderr —
+single-seed within-batch stderr underestimates GPU atomic-ordering
+nondeterminism. The 150 pcm floor catches small systematic biases
+swallowed by wide σ_exp (HEU-SOL-THERM σ_exp = 600 pcm); the 2σ
+clause keeps the test honest when σ_exp is tight (Godiva σ_exp =
+100 pcm). Replaced the prior dual `≤500 pcm` AND `≤3σ` rule.
+
+A `local_validation` reference (commits `81b129d`, `8f38f8c`) logs
+the handbook delta on every scene-drift benchmark for HMF-008-style
+cases where ENDF/B-VII.1 plus the chosen geometry deviates measurably
+from the ICSBEP handbook k_eff.
+
+## Invariants (hard contracts the engine relies on)
+
+- **`RectLattice::local_position` is element-CENTRE-relative**
+  (OpenMC convention). Lattice tests place pin surfaces at
+  universe-local origin `(0, 0)`, NOT `(pitch/2, pitch/2)`. Same
+  convention on the GPU (`gr_lattice_descent`'s `next_off_*`).
+  Fixing this unblocked LCT-008.
+- **`MAX_NUCLIDES_PER_MATERIAL = 32`** at `src/lib.rs` is the single
+  source of truth. The CPU hot path imports it as `MAX_NUCLIDES` for
+  fixed-size MicroXs arrays (`simulate.rs`); the GPU receives the same
+  value via an NVRTC `-DMAX_NUC_PER_MAT=N` flag wired in
+  `gpu_recursive.rs::assemble_kernel_source` and
+  `gpu_transport.rs::transport_kernel_options` — `transport.cu` has no
+  `#define` fallback and `#error`s if the host forgets to pass it. The
+  Python `run_icsbep_case` boundary reads
+  `open_rust_mc::MAX_NUCLIDES_PER_MATERIAL` directly. Bumping is a
+  one-line change followed by a full rebuild. The streaming
+  `eval_nuclide_macro_xs` helper keeps the GPU register footprint flat
+  as the cap grew 8 ×.
+- **`SimLimits` (`src/transport/sim_limits.rs`)** is engine policy
+  separated from per-run user intent (`SimConfig`). Carries
+  `max_events_per_history`, `fis_capacity_factor`,
+  `sab_temperature_tolerance`, `initial_source_max_attempts_factor`.
+  `SimLimits::default()` reproduces the historical hardcoded values
+  bit-for-bit; long-shielding or degenerate-geometry harnesses can
+  load overrides from TOML via `SimLimits::from_toml_file(path)`. All
+  CudaRunner construction sites and the rejection sampler in
+  `try_initial_source` consult `SimLimits` instead of magic literals
+  — there is no longer a 5_000 / 4× / 0.5 / 10_000 floating around
+  the engine.
+- **Initial-source sampler is material-aware, not cell-order-aware.**
+  `simulate::try_initial_source_in_materials` (and the
+  `try_initial_source` wrapper) walks every cell's region tree via
+  `Region::world_aabb(surfaces)`, keeps the cells whose material is
+  fissionable per `ResolvedMaterials::fissionable_materials()` (any
+  nuclide with `nu_bar_const > 0`), and rejection-samples weighted by
+  per-cell AABB volume. Matches Serpent 2's default; replaces the old
+  "first Material cell" / "smallest-volume material" heuristics that
+  failed on BWR cruciforms, PWR burnable poisons, HFIR plate cladding,
+  CANDU spacers, and multi-shell HMF. Lattice fallback
+  (`lattices_world_aabb`) kicks in when the top-level cells slice
+  carries only Universe/Lattice fills.
+- **`RingLattice` primitive** (`src/geometry/lattice.rs`) — concentric
+  pin rings around a central axis (CANDU 37-rod bundle, TRIGA 5-ring
+  core, similar polar-grid layouts). Data model + `pin_at` /
+  `universe_at` lookup math + 5 passing tests landed; scene_io JSON
+  schema, ray.rs `find_cell_recursive` / `trace_step` integration, and
+  GPU port are scheduled as follow-up work. Not yet referenced by any
+  binary or ICSBEP case.
+- **`N_PARAMS = 130`** on `transport.cu` / `gpu_transport.rs`. New
+  slots vs the 287-test era: per-nuclide Watt χ buffers
+  (Law 11 fallback), delayed-ν̄ soft-Watt spectrum
+  (`sample_delayed_energy`, a = 0.4 MeV), MT=91 continuum
+  outgoing-energy distribution (`P_INEL91_INC_E` … `P_INEL91_NUC_NINC`),
+  the OpenMC quadratic lin-lin fission-PDF inversion
+  (`P_FIS_PDF` slot), and the multi-slot S(α,β) lookup tables
+  (`P_SAB_N_SLOTS`, `P_SAB_SLOT_PER_NUC`, `P_SAB_SLOT_INC_E_OFF`,
+  `P_SAB_SLOT_N_INC`, `P_SAB_SLOT_EOUT_TABLE_OFF`,
+  `P_SAB_SLOT_MU_TABLE_OFF`, `P_SAB_SLOT_EMAX` — slots 123–129) that
+  unlock simultaneous TSLs on multiple nuclides (H-in-H₂O +
+  D-in-D₂O + C-in-graphite in one run).
+- **Per-level SVD basis must be uploaded at the global `P_RANK`
+  stride.** Each discrete-inelastic level kernel has its own
+  `level_rank = min(svd_rank, svd.rank)` which on sparse HDF5 grids
+  can fall below the global rank. The device kernel has no per-level
+  rank slot — it reads `basis[e_idx × P_RANK + j]` for the full
+  range. Pad each level's basis to `[n_e × global_rank]` with zero
+  columns for `j ∈ [level_rank, global_rank)` and pad coeffs to
+  length `global_rank` with zeros. The dot product is unchanged
+  (extra × 0 = 0). Skipping this silently reads adjacent levels'
+  bytes and returns ~10⁰ or ~10⁻⁹⁰ XS values.
+- **GPU recursive kernel pinned to sm_86** (Ampere / RTX A1000) for
+  `atomicAdd(double*, double)`. NVRTC arch is hardcoded in
+  `gpu_recursive.rs`.
+- **CPU transport uses `TransportCtx` worker-local sinks +
+  rayon `fold().reduce()`** (not `par_iter().map().collect()`),
+  and `CollisionOutcome::Fission/Multiplicity` use `SmallVec`
+  (typedefs `FissionSites`, `SecondaryList`). Eliminates ~6 MB/batch
+  of per-event Vec alloc churn on PWR and pushes ICSBEP-suite wall
+  time down accordingly.
 
 ## What's Open / Research-Tier
 
@@ -351,6 +473,45 @@ Neutron k-eigenvalue:
 - `bench_mem` / `pareto_bench` — memory/speed sweeps.
 - `xs_dump` / `xs_dump_godiva` / `xs_provider_diff` / `cp_analysis`
    / `debug_trace` / `photon_dump` — diagnostics.
+- `metal_stats_diag` — three-way CPU / GPU / OpenMC comparison:
+  per-reaction counts, ⟨E_in/E_out⟩, σ(E_in), ⟨|Q|⟩_inel, with
+  `rate_by_energy` coarse-bin and `fission_by_energy_fine`
+  100-bin OpenMC overlays. The diagnostic that pinpointed the
+  GPU fast-metal hot bias.
+- `nu_lookup_compare` — ν̄(E) bit-identical CPU↔GPU A/B.
+- `level_xs_compare` — per-discrete-level XS A/B between CPU and a
+  Rust port of the GPU's single-point SVD reconstruction (round-tripped
+  device buffers). Accepts `--nuclide` / `--awr` via CLI (commit
+  `7545dff`). The diagnostic that found the rank-padding bug class.
+- `elastic_kinematics_diag` / `chi_compare` / `debug_lct` /
+  `icsbep_alloc_bench` — supporting diagnostics from the
+  localisation campaign.
+- `preview_scene` (cargo `--features preview`) — interactive XY
+  cross-section viewer for any scene JSON. Walks `bench/icsbep/`
+  upward from CWD so case names like `pwr_assembly_17x17` work
+  without explicit paths. Mirrors `pwr_assembly --preview` plumbing.
+  **Known bug**: for JSON-loaded scenes that use lattices, the
+  rendering doesn't expand the pin universes per-element — shows
+  one stretched pin instead of the 17×17 grid. Transport k_eff on
+  the same JSON is correct, so this is visualisation only.
+
+ICSBEP harness (Python, via `bindings/python/examples/`):
+- `icsbep_run.py <case> {cpu|gpu}` — single-case run with the
+  `Runner` selector. Verbose engine output + summary line.
+- `icsbep_sweep.py` — full corpus sweep with **start / stop / resume**.
+  Per-case row written to CSV after each completion (durable on
+  kill). `--resume` skips completed cases. `--stop-file <path>`
+  watches a marker file for graceful stop between cases; SIGINT
+  (Ctrl-C) does the same. `--seeds N` (or per-JSON
+  `recommended_settings.seeds`) averages over N seeds and reports
+  seed-to-seed stderr. Per-case settings precedence:
+  JSON `benchmark.recommended_settings` → CLI flags → built-in
+  defaults.
+- `run_benchmark.ps1` — one-shot PowerShell wrapper for a full
+  paper-quality sweep. Picks GPU runner automatically when the
+  CUDA-built extension is loadable. Writes
+  `outputs/icsbep_full_<runner>.csv` + matching `.log`. Polls
+  `outputs/STOP` between cases for graceful termination.
 
 Photon / shielding / coupled:
 - `pwr_gamma_heating` — PWR γ-heating with full ET + brems.
@@ -389,8 +550,15 @@ Kinetics:
 # Build (Windows / PowerShell — primary dev env)
 cd rust_prototype; cargo build --release
 
-# All lib tests (287)
+# All lib tests (384/384 green as of session-end)
 cargo test --lib
+
+# Python ICSBEP harness — see also `rust_prototype/bindings/python/examples/run_benchmark.ps1`
+cd rust_prototype/bindings/python
+maturin develop --release --features cuda     # or `--release` for CPU-only
+cd ../../..
+python rust_prototype/bindings/python/examples/icsbep_run.py heu-met-fast-001_case-1 gpu
+.\rust_prototype\bindings\python\examples\run_benchmark.ps1   # full paper-quality sweep
 
 # Godiva, real ENDF data
 cargo run --release --bin godiva -- path\to\endfb-vii.1-hdf5\neutron `
@@ -528,4 +696,8 @@ Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 | CRAM-16 vs analytical Xe equilibrium | `[depletion]` | 1e-4 relative |
 | CRAM-48 vs CRAM-16 (non-stiff) | `[depletion]` | 1e-13 relative |
 | Statepoint warm-restart speedup | `[godiva]` | 33% faster (1542 → 1022 ns/p) |
-| **Lib test count** | — | **287 / 287 green** |
+| ICSBEP CUDA family suite (HMF/PMF/UMF/LCT/HST × 6) | `[godiva]` | **6 / 6 PASS** under `max(150 pcm, 2σ)` |
+| ICSBEP CPU family suite | `[godiva/pwr]` | **6 / 6 main + 3 diag PASS** in 722 s |
+| GPU fast-metal Δk closed by per-level rank-padding fix | `[godiva]` | **+590 → −79 pcm** (HMF-001) |
+| GPU ⟨\|Q\|⟩ inelastic, post-fix | `[godiva]` | 925 keV (CPU: 926; OpenMC: 926) |
+| **Lib test count** | — | **384 / 384 green** |

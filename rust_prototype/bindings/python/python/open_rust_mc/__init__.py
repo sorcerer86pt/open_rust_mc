@@ -35,12 +35,15 @@ from ._core import (
     Settings,
     Scene,
     XsMode,
+    Runner,
     # Results
     EigenvalueResult,
     GammaHeatingResult,
+    IcsbepResult,
     # Top-level functions
     run_eigenvalue,
     run_gamma_heating,
+    run_icsbep_case,
     # Depletion
     Chain,
     CramOrder,
@@ -226,10 +229,13 @@ __all__ = [
     "Settings",
     "Scene",
     "XsMode",
+    "Runner",
     "EigenvalueResult",
     "GammaHeatingResult",
+    "IcsbepResult",
     "run_eigenvalue",
     "run_gamma_heating",
+    "run_icsbep_case",
     # Depletion
     "Chain",
     "CramOrder",

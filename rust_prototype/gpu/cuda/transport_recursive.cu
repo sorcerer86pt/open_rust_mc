@@ -311,14 +311,20 @@ transport_recursive_persistent(
             lcnt_el++;
             l_e_el_in_sum += E;
             l_e_el_in_sq_sum += E * E;
-            if (sab_nuc_idx >= 0 && hit_nuc == sab_nuc_idx
-                && E < SCALAR_D(p, P_SAB_EMAX) && SCALAR_I(p, P_SAB_N_INC) > 0) {
-                double E_sab, mu_sab;
-                sab_sample(E, &rng, p, &E_sab, &mu_sab);
-                E = fmax(E_sab, 1e-11);
-                double phi = 2.0 * PI * pcg_uniform(&rng);
-                rotate_direction(&dx, &dy, &dz, mu_sab, phi);
-                goto end_coll;
+            // S(α,β) via per-nuclide slot lookup. Multiple TSL-bearing
+            // nuclides (e.g. H-in-H₂O + D-in-D₂O) each route to the
+            // correct slot — `sab_nuc_idx` is retained as a kernel
+            // parameter for ABI stability but no longer consulted.
+            if (SCALAR_I(p, P_SAB_N_SLOTS) > 0) {
+                int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[hit_nuc];
+                if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
+                    double E_sab, mu_sab;
+                    sab_sample(E, &rng, sab_slot, p, &E_sab, &mu_sab);
+                    E = fmax(E_sab, 1e-11);
+                    double phi = 2.0 * PI * pcg_uniform(&rng);
+                    rotate_direction(&dx, &dy, &dz, mu_sab, phi);
+                    goto end_coll;
+                }
             }
             double cell_kT = (mat >= 0 && mat < n_materials)
                 ? mat_kT[mat]

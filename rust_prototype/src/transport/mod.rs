@@ -10,6 +10,7 @@ pub mod material_resolve;
 pub mod nuclides;
 pub mod particle;
 pub mod rng;
+pub mod sim_limits;
 pub mod simulate;
 pub mod statepoint;
 pub mod tally;

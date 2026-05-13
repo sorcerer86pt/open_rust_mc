@@ -13,10 +13,17 @@ license = "MIT"
 name = "open_rust_mc"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+# Enables the GpuCuda runner path. Forwards to `open-rust-mc/cuda` so
+# the same CUDA backend the CLI binaries use is reachable from Python.
+cuda = ["open-rust-mc/cuda"]
+
 [dependencies]
 open-rust-mc = { path = "../.." }
 pyo3 = { version = "0.22", features = ["extension-module", "abi3-py39"] }
 rayon = "1"
+serde_json = "1"
 
 [lints.clippy]
 # The engine crate inherits pedantic lints that block PyO3's

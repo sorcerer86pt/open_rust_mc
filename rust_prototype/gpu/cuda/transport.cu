@@ -222,21 +222,34 @@
 #define P_INEL91_PDF        120
 #define P_INEL91_NUC_OFF    121
 #define P_INEL91_NUC_NINC   122
-#define N_PARAMS            115
+
+// ── Multi-slot S(α,β) lookup tables. Slots 43–55 are the flat data
+// arrays (single concatenated stream across all nuclides that carry a
+// TSL); the slots below index that stream per-slot, and
+// `P_SAB_SLOT_PER_NUC[nuc_idx]` returns either the slot index or -1.
+// Callers must dispatch on the per-nuclide lookup rather than a
+// scalar `sab_nuc_idx` for any new code path that wants more than one
+// SAB-bearing nuclide in the same run.
+#define P_SAB_N_SLOTS           123
+#define P_SAB_SLOT_PER_NUC      124
+#define P_SAB_SLOT_INC_E_OFF    125
+#define P_SAB_SLOT_N_INC        126
+#define P_SAB_SLOT_EOUT_TABLE_OFF 127
+#define P_SAB_SLOT_MU_TABLE_OFF 128
+#define P_SAB_SLOT_EMAX         129
+
+#define N_PARAMS            130
 
 // ───────────────────────────────────────────────────────────────────────
-// Per-material nuclide stride. Bumped from 4 to 32 to match the CPU's
-// `MAX_NUCLIDES` (see `transport/simulate.rs`). Solution and LEU-COMP-
-// THERM benchmarks pack 28-30 nuclides per material; 4 was a Godiva /
-// PWR-pin-cell-era constant that blocked every other ICSBEP family.
-//
-// The kernel does NOT carry seven 32-wide per-thread arrays — that
-// would spill ~1.8 KB/thread to local memory. The reaction-channel
-// breakdown is recomputed only for the chosen nuclide at sampling
-// time (see `eval_nuclide_macro_xs` below), so per-thread register
-// footprint stays at one nuc_t[MAX_NUC_PER_MAT] array (256 bytes,
-// same envelope as the pre-refactor 7 × 4 = 28 doubles).
-#define MAX_NUC_PER_MAT     32
+// Per-material nuclide stride. Single source of truth is the Rust
+// constant `MAX_NUCLIDES_PER_MATERIAL` (crate root in `lib.rs`); the
+// NVRTC host injects it as `-DMAX_NUC_PER_MAT=N` on every compile
+// (gpu_transport.rs and gpu_recursive.rs::assemble_kernel_source).
+// Falling back to a literal here would let host / device disagree if
+// the Rust constant ever changes without a clean rebuild.
+#ifndef MAX_NUC_PER_MAT
+#  error "MAX_NUC_PER_MAT not defined — NVRTC must pass -DMAX_NUC_PER_MAT=N from gpu_transport.rs / gpu_recursive.rs"
+#endif
 
 // Access helpers — read from the flat u64 params buffer
 // PTR_F removed — all basis data is now f64 (PTR_D)
@@ -875,11 +888,34 @@ __device__ double sample_level_angular(
                          &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
 }
 
-__device__ double sab_total_xs(double E, Params p) {
-    if (SCALAR_I(p, P_SAB_N_INC) <= 0) return 0.0;
-    const double* e = PTR_D(p, P_SAB_INC_E);
-    const double* xs = PTR_D(p, P_SAB_XS);
-    int n = SCALAR_I(p, P_SAB_N_INC);
+// Per-slot accessor helpers. `slot` is the index returned by
+// `P_SAB_SLOT_PER_NUC[nuc_idx]`. The flat data arrays at slots 43-55
+// hold all packs concatenated; per-slot tables (slots 125-129) point
+// into them. When `n_slots == 0` the caller short-circuits before
+// these are reached.
+__device__ __forceinline__ int sab_slot_inc_e_off(int slot, Params p) {
+    return PTR_I(p, P_SAB_SLOT_INC_E_OFF)[slot];
+}
+__device__ __forceinline__ int sab_slot_n_inc(int slot, Params p) {
+    return PTR_I(p, P_SAB_SLOT_N_INC)[slot];
+}
+__device__ __forceinline__ int sab_slot_eout_table_off(int slot, Params p) {
+    return PTR_I(p, P_SAB_SLOT_EOUT_TABLE_OFF)[slot];
+}
+__device__ __forceinline__ int sab_slot_mu_table_off(int slot, Params p) {
+    return PTR_I(p, P_SAB_SLOT_MU_TABLE_OFF)[slot];
+}
+__device__ __forceinline__ double sab_slot_emax(int slot, Params p) {
+    return PTR_D(p, P_SAB_SLOT_EMAX)[slot];
+}
+
+__device__ double sab_total_xs(double E, int slot, Params p) {
+    if (slot < 0) return 0.0;
+    int n = sab_slot_n_inc(slot, p);
+    if (n <= 0) return 0.0;
+    int e_off = sab_slot_inc_e_off(slot, p);
+    const double* e = &PTR_D(p, P_SAB_INC_E)[e_off];
+    const double* xs = &PTR_D(p, P_SAB_XS)[e_off];
     if (E <= e[0]) return xs[0];
     if (E >= e[n-1]) return xs[n-1];
     int lo=0,hi=n-1;
@@ -889,13 +925,22 @@ __device__ double sab_total_xs(double E, Params p) {
 }
 
 __device__ void sab_sample(
-    double E_in, PcgState* rng, Params p,
+    double E_in, PcgState* rng, int slot, Params p,
     double* E_out, double* mu_out)
 {
-    int n = SCALAR_I(p, P_SAB_N_INC);
+    if (slot < 0) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
+    int n = sab_slot_n_inc(slot, p);
     if (n <= 0) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
 
-    const double* inc_e = PTR_D(p, P_SAB_INC_E);
+    int e_off = sab_slot_inc_e_off(slot, p);
+    int eo_tbl_off = sab_slot_eout_table_off(slot, p);
+    const double* inc_e = &PTR_D(p, P_SAB_INC_E)[e_off];
+    const int* eout_off_arr = &PTR_I(p, P_SAB_EOUT_OFF)[eo_tbl_off];
+    const int* eout_sz_arr  = &PTR_I(p, P_SAB_EOUT_SZ)[eo_tbl_off];
+    // mu_offsets_flat / mu_sizes_flat parallel e_out_flat globally,
+    // so `eo_off + j` already indexes them correctly without a
+    // per-slot table offset.
+    (void)sab_slot_mu_table_off(slot, p);
 
     // Step 1: Find bounding incident energies i_lo, i_hi
     int i_hi = 1;
@@ -913,8 +958,8 @@ __device__ void sab_sample(
     // Step 2: Stochastic table selection
     int ell = (pcg_uniform(rng) > f) ? i_lo : i_hi;
 
-    int eo_off = PTR_I(p, P_SAB_EOUT_OFF)[ell];
-    int eo_sz  = PTR_I(p, P_SAB_EOUT_SZ)[ell];
+    int eo_off = eout_off_arr[ell];
+    int eo_sz  = eout_sz_arr[ell];
     if (eo_sz <= 1) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
 
     const double* eo    = &PTR_D(p, P_SAB_E_OUT)[eo_off];
@@ -945,10 +990,10 @@ __device__ void sab_sample(
     }
 
     // Step 5: Kinematic energy scaling (OpenMC Eq 31/35)
-    int off_lo = PTR_I(p, P_SAB_EOUT_OFF)[i_lo];
-    int sz_lo  = PTR_I(p, P_SAB_EOUT_SZ)[i_lo];
-    int off_hi = PTR_I(p, P_SAB_EOUT_OFF)[i_hi];
-    int sz_hi  = PTR_I(p, P_SAB_EOUT_SZ)[i_hi];
+    int off_lo = eout_off_arr[i_lo];
+    int sz_lo  = eout_sz_arr[i_lo];
+    int off_hi = eout_off_arr[i_hi];
+    int sz_hi  = eout_sz_arr[i_hi];
     const double* eo_all = PTR_D(p, P_SAB_E_OUT);
     double e_min = eo_all[off_lo] + f * (eo_all[off_hi] - eo_all[off_lo]);
     double e_max = eo_all[off_lo + sz_lo - 1] + f * (eo_all[off_hi + sz_hi - 1] - eo_all[off_lo + sz_lo - 1]);
@@ -1363,14 +1408,22 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
         s_el = new_el; s_fis = new_fis; s_cap = new_cap;
     }
 
-    if (sab_nuc_idx >= 0 && ni == sab_nuc_idx
-        && E < SCALAR_D(p, P_SAB_EMAX) && E > 0.0
-        && SCALAR_I(p, P_SAB_N_INC) > 0) {
-        double sab_xs_val = sab_total_xs(E, p);
-        if (sab_xs_val > 0.0) {
-            double delta = sab_xs_val - s_el;
-            micro_t += delta;
-            s_el = sab_xs_val;
+    // S(α,β) override for nuclides that have a TSL slot bound. The
+    // per-nuclide lookup `P_SAB_SLOT_PER_NUC[ni]` is -1 when no TSL is
+    // attached, so this branch is a no-op for the bare-uranium /
+    // metal-fast geometries. `sab_nuc_idx` is retained as a legacy
+    // function parameter for ABI stability but is no longer consulted
+    // — the per-nuclide table is authoritative.
+    (void)sab_nuc_idx;
+    if (SCALAR_I(p, P_SAB_N_SLOTS) > 0 && E > 0.0) {
+        int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[ni];
+        if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
+            double sab_xs_val = sab_total_xs(E, sab_slot, p);
+            if (sab_xs_val > 0.0) {
+                double delta = sab_xs_val - s_el;
+                micro_t += delta;
+                s_el = sab_xs_val;
+            }
         }
     }
 
@@ -1518,14 +1571,19 @@ transport_persistent(
             if (xi_rxn < cum_rxn) {
                 // ═══ Elastic scattering ═══
 
-                // S(alpha,beta) for H1
-                if (hit_nuc==3 && E < SCALAR_D(p, P_SAB_EMAX) && SCALAR_I(p, P_SAB_N_INC) > 0) {
-                    double E_sab, mu_sab;
-                    sab_sample(E, &rng, p, &E_sab, &mu_sab);
-                    E = fmax(E_sab, 1e-11);
-                    double phi=2.0*PI*pcg_uniform(&rng);
-                    rotate_direction(&dx,&dy,&dz,mu_sab,phi);
-                    goto end_coll;
+                // S(α,β) via the per-nuclide slot lookup. The
+                // hardcoded `hit_nuc==3` legacy assumption is gone;
+                // any nuclide can now carry a TSL.
+                if (SCALAR_I(p, P_SAB_N_SLOTS) > 0) {
+                    int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[hit_nuc];
+                    if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
+                        double E_sab, mu_sab;
+                        sab_sample(E, &rng, sab_slot, p, &E_sab, &mu_sab);
+                        E = fmax(E_sab, 1e-11);
+                        double phi=2.0*PI*pcg_uniform(&rng);
+                        rotate_direction(&dx,&dy,&dz,mu_sab,phi);
+                        goto end_coll;
+                    }
                 }
 
                 // Free-gas thermal for light nuclides
@@ -1989,9 +2047,12 @@ extern "C" __global__ void debug_transport_trace(
             cum_rxn += hit_xs.s_el;
             if (xi_rxn < cum_rxn) {
                 trace[row+9] = 0.0; // elastic
-                if (hit_nuc==3 && E < SCALAR_D(p, P_SAB_EMAX) && SCALAR_I(p, P_SAB_N_INC) > 0) {
+                int dbg_sab_slot = (SCALAR_I(p, P_SAB_N_SLOTS) > 0)
+                    ? PTR_I(p, P_SAB_SLOT_PER_NUC)[hit_nuc] : -1;
+                if (dbg_sab_slot >= 0
+                    && E < PTR_D(p, P_SAB_SLOT_EMAX)[dbg_sab_slot]) {
                     double E_sab, mu_sab;
-                    sab_sample(E, &rng, p, &E_sab, &mu_sab);
+                    sab_sample(E, &rng, dbg_sab_slot, p, &E_sab, &mu_sab);
                     E = fmax(E_sab, 1e-11);
                     double phi=2.0*PI*pcg_uniform(&rng);
                     rotate_direction(&dx,&dy,&dz,mu_sab,phi);

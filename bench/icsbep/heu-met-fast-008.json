@@ -39,6 +39,13 @@
       "openmc_inactive": 20,
       "handbook_minus_openmc_pcm": 310,
       "handbook_minus_openmc_note": "Scene-JSON transcription drift from canonical ICSBEP/NEA handbook. Closing requires the registered NEA/OECD handbook spec; the open-source MIT-CRPG/benchmarks proxy is geometrically close but not bit-identical."
+    },
+    "recommended_settings": {
+      "batches": 150,
+      "inactive": 30,
+      "particles": 20000,
+      "seeds": 5,
+      "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence."
     }
   },
   "scene": {

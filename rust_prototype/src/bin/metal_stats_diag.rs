@@ -283,14 +283,20 @@ fn main() {
         let mat_data = gpu
             .upload_material_data(&resolved.materials, &awrs, &nu_bars)
             .expect("upload materials");
+        let n_nuc = resolved.provider.nuclides.len();
         let sab_data = if sab_nuc_idx >= 0 {
             let arc = resolved.provider.thermal[sab_nuc_idx as usize]
                 .as_ref()
                 .expect("sab");
-            let t_idx = arc.select_temperature(loaded.materials[0].temperature, 0.5);
-            gpu.upload_sab_data(arc, t_idx).expect("upload S(α,β)")
+            let t_idx = arc.select_temperature(
+                loaded.materials[0].temperature,
+                open_rust_mc::transport::sim_limits::SimLimits::default()
+                    .sab_temperature_tolerance,
+            );
+            gpu.upload_sab_data(arc, t_idx, sab_nuc_idx as usize, n_nuc)
+                .expect("upload S(α,β)")
         } else {
-            gpu.upload_sab_data_empty().expect("empty S(α,β)")
+            gpu.upload_sab_data_empty(n_nuc).expect("empty S(α,β)")
         };
         let wmp_data = gpu
             .upload_wmp_data_empty(resolved.provider.nuclides.len())

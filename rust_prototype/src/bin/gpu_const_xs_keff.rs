@@ -264,9 +264,10 @@ mod cuda_main {
             },
         ];
 
+        let limits = open_rust_mc::transport::sim_limits::SimLimits::default();
         let n = 50_000;
-        let max_events = 5_000;
-        let fis_capacity = n * 4;
+        let max_events = limits.max_events_per_history as i32;
+        let fis_capacity = limits.fis_capacity(n);
 
         // Source: uniform in [-1, 1]² × [-1, 1]; reject points outside
         // the lattice cell (the GPU/CPU loop will count those as

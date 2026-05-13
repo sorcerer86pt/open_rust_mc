@@ -659,16 +659,23 @@ mod cuda_main {
             .upload_material_data(&materials, &awrs, &nu_bars)
             .expect("upload mat");
         let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
+        let n_nuc = NUCLIDE_SPECS.len();
+        // NUCLIDE_SPECS places H1 at index 3 (PWR layout, mirrors
+        // gpu_pwr_bench).
         let sab_data = if h2o_path.exists() {
             match hdf5_reader::load_thermal_scattering(&h2o_path) {
                 Ok(tsl) => {
-                    let t = tsl.select_temperature(600.0, 0.5);
-                    gpu.upload_sab_data(&tsl, t).expect("sab")
+                    let t = tsl.select_temperature(
+                        600.0,
+                        open_rust_mc::transport::sim_limits::SimLimits::default()
+                            .sab_temperature_tolerance,
+                    );
+                    gpu.upload_sab_data(&tsl, t, 3, n_nuc).expect("sab")
                 }
-                Err(_) => gpu.upload_sab_data_empty().expect("sab"),
+                Err(_) => gpu.upload_sab_data_empty(n_nuc).expect("sab"),
             }
         } else {
-            gpu.upload_sab_data_empty().expect("sab")
+            gpu.upload_sab_data_empty(n_nuc).expect("sab")
         };
         let wmp_data = gpu
             .upload_wmp_data_empty(NUCLIDE_SPECS.len())

@@ -136,7 +136,9 @@ mod cuda_main {
         let mat_data = gpu
             .upload_material_data(&materials, &awrs, &nu_bars)
             .expect("upload material data");
-        let sab_data = gpu.upload_sab_data_empty().expect("upload empty S(α,β)");
+        let sab_data = gpu
+            .upload_sab_data_empty(nuclide_specs.len())
+            .expect("upload empty S(α,β)");
         let wmp_data = gpu
             .upload_wmp_data_empty(nuclide_specs.len())
             .expect("upload empty WMP");

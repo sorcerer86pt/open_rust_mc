@@ -178,7 +178,9 @@ fn run_gpu_comparison(_args: &Args, provider: &xs_provider::SvdXsProvider) {
     let mat_data = gpu
         .upload_material_data(&[heu], &awrs, &nu_bars)
         .expect("upload mat");
-    let sab_data = gpu.upload_sab_data_empty().expect("empty sab");
+    let sab_data = gpu
+        .upload_sab_data_empty(NUCLIDES.len())
+        .expect("empty sab");
 
     let mut f = std::fs::File::create("diag_gpu_vs_cpu_angular.csv").unwrap();
     writeln!(

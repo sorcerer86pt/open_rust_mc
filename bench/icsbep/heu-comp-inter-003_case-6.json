@@ -21,6 +21,13 @@
         "license": "MIT"
       },
       "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+    },
+    "recommended_settings": {
+      "batches": 150,
+      "inactive": 40,
+      "particles": 20000,
+      "seeds": 5,
+      "_doc": "Compound intermediate: heterogeneous geometry, moderate inactive."
     }
   },
   "scene": {

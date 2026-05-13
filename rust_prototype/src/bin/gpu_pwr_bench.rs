@@ -467,24 +467,33 @@ mod cuda_main {
             .upload_material_data(&materials, &awrs, &nu_bars)
             .expect("upload material data");
 
+        // PWR_NUCLIDES indexes H1 at slot 3; that's where the
+        // c_H_in_H2O.h5 TSL gets bound. Godiva has no H-bearing
+        // moderator, so the slot table stays empty.
+        let n_nuc = nuclide_specs.len();
         let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
         let sab_data = if args.no_sab {
             println!("  S(a,b): disabled by --no-sab flag");
-            gpu.upload_sab_data_empty().expect("empty S(a,b)")
+            gpu.upload_sab_data_empty(n_nuc).expect("empty S(a,b)")
         } else if !is_godiva && h2o_path.exists() {
             match open_rust_mc::hdf5_reader::load_thermal_scattering(&h2o_path) {
                 Ok(tsl) => {
-                    let t_idx = tsl.select_temperature(600.0, 0.5);
-                    gpu.upload_sab_data(&tsl, t_idx).expect("upload S(a,b)")
+                    let t_idx = tsl.select_temperature(
+                        600.0,
+                        open_rust_mc::transport::sim_limits::SimLimits::default()
+                            .sab_temperature_tolerance,
+                    );
+                    gpu.upload_sab_data(&tsl, t_idx, /* H1 */ 3, n_nuc)
+                        .expect("upload S(a,b)")
                 }
                 Err(e) => {
                     eprintln!("  WARNING: S(a,b) load failed: {e}");
-                    gpu.upload_sab_data_empty().expect("empty S(a,b)")
+                    gpu.upload_sab_data_empty(n_nuc).expect("empty S(a,b)")
                 }
             }
         } else {
             println!("  S(a,b): not found — using free-gas");
-            gpu.upload_sab_data_empty().expect("empty S(a,b)")
+            gpu.upload_sab_data_empty(n_nuc).expect("empty S(a,b)")
         };
 
         // ── Load Windowed-Multipole data when --mode hybrid ──

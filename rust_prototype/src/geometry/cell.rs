@@ -78,6 +78,115 @@ impl Region {
             Self::Complement(a) => a.surface_indices(out),
         }
     }
+
+    /// Conservative bounding box of this region in world coordinates.
+    ///
+    /// Follows the standard CSG / ray-tracing recursive rule (Roth 1982;
+    /// see also OpenCSG, OpenMC's `bounding_box.py`):
+    ///   - `HalfSpace { positive: false }` over a closed surface →
+    ///     surface AABB (the inside).
+    ///   - `HalfSpace { positive: true }` over a closed surface →
+    ///     infinite (exterior of a sphere/cylinder is unbounded).
+    ///   - Plane half-spaces produce one finite face on the gated axis
+    ///     and infinite faces on the other five.
+    ///   - `Intersection(a, b)` → per-axis tighter bound (saturating min
+    ///     /max so `inf - inf` never produces `NaN`).
+    ///   - `Union(a, b)` → per-axis hull.
+    ///   - `Complement(_)` → infinite (the complement of a bounded
+    ///     region is unbounded; the caller falls back to the parent
+    ///     universe's AABB).
+    ///
+    /// Used by `simulate::try_initial_source` to size the per-cell
+    /// rejection-sampling box without depending on cell-level AABB
+    /// metadata (the JSON loader sets `cell.aabb = Aabb::INFINITE`).
+    pub fn world_aabb(&self, surfaces: &[crate::geometry::Surface]) -> crate::geometry::Aabb {
+        use crate::geometry::{Aabb, Surface, Vec3};
+        const INF: Aabb = Aabb {
+            min: Vec3 {
+                x: f64::NEG_INFINITY,
+                y: f64::NEG_INFINITY,
+                z: f64::NEG_INFINITY,
+            },
+            max: Vec3 {
+                x: f64::INFINITY,
+                y: f64::INFINITY,
+                z: f64::INFINITY,
+            },
+        };
+        match self {
+            Self::HalfSpace {
+                surface_idx,
+                positive,
+            } => {
+                let s = match surfaces.get(*surface_idx) {
+                    Some(s) => s,
+                    None => return INF,
+                };
+                if !*positive {
+                    // Inside a closed surface bounds the cell to the
+                    // surface's own AABB. Planes return INFINITE here
+                    // — the half-slab bound is handled below.
+                    match s {
+                        Surface::PlaneX { x0, .. } => Aabb::new(
+                            Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            Vec3::new(*x0, f64::INFINITY, f64::INFINITY),
+                        ),
+                        Surface::PlaneY { y0, .. } => Aabb::new(
+                            Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            Vec3::new(f64::INFINITY, *y0, f64::INFINITY),
+                        ),
+                        Surface::PlaneZ { z0, .. } => Aabb::new(
+                            Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            Vec3::new(f64::INFINITY, f64::INFINITY, *z0),
+                        ),
+                        _ => s.aabb(),
+                    }
+                } else {
+                    // Positive half-space: outside of a closed surface
+                    // is unbounded; for a plane it's the opposite slab.
+                    match s {
+                        Surface::PlaneX { x0, .. } => Aabb::new(
+                            Vec3::new(*x0, f64::NEG_INFINITY, f64::NEG_INFINITY),
+                            Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+                        ),
+                        Surface::PlaneY { y0, .. } => Aabb::new(
+                            Vec3::new(f64::NEG_INFINITY, *y0, f64::NEG_INFINITY),
+                            Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+                        ),
+                        Surface::PlaneZ { z0, .. } => Aabb::new(
+                            Vec3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, *z0),
+                            Vec3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY),
+                        ),
+                        _ => INF,
+                    }
+                }
+            }
+            Self::Intersection(a, b) => {
+                let aa = a.world_aabb(surfaces);
+                let bb = b.world_aabb(surfaces);
+                // Saturating per-axis intersection. `max(a, b)` on
+                // f64 handles `-INF` correctly; `min` handles `+INF`.
+                // Result is an empty AABB (min > max) if the regions
+                // can't overlap on some axis — caller treats that as
+                // an unbounded fallback.
+                Aabb::new(
+                    Vec3::new(aa.min.x.max(bb.min.x), aa.min.y.max(bb.min.y), aa.min.z.max(bb.min.z)),
+                    Vec3::new(aa.max.x.min(bb.max.x), aa.max.y.min(bb.max.y), aa.max.z.min(bb.max.z)),
+                )
+            }
+            Self::Union(a, b) => {
+                let aa = a.world_aabb(surfaces);
+                let bb = b.world_aabb(surfaces);
+                Aabb::new(
+                    Vec3::new(aa.min.x.min(bb.min.x), aa.min.y.min(bb.min.y), aa.min.z.min(bb.min.z)),
+                    Vec3::new(aa.max.x.max(bb.max.x), aa.max.y.max(bb.max.y), aa.max.z.max(bb.max.z)),
+                )
+            }
+            // The complement of a bounded region is unbounded; let
+            // the caller fall back to the parent universe's AABB.
+            Self::Complement(_) => INF,
+        }
+    }
 }
 
 /// A cell in the geometry.

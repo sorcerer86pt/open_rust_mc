@@ -309,23 +309,28 @@ mod cuda_main {
             .upload_material_data(&materials, &awrs, &nu_bars)
             .expect("upload materials");
 
-        // S(α,β) on H-1 (water at 600 K)
+        // S(α,β) on H-1 (water at 600 K). NUCLIDE_SPECS index 3.
+        let n_nuc = NUCLIDE_SPECS.len();
         let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
         let sab_data = if h2o_path.exists() {
             match hdf5_reader::load_thermal_scattering(&h2o_path) {
                 Ok(tsl) => {
-                    let t_idx = tsl.select_temperature(600.0, 0.5);
+                    let t_idx = tsl.select_temperature(
+                        600.0,
+                        open_rust_mc::transport::sim_limits::SimLimits::default()
+                            .sab_temperature_tolerance,
+                    );
                     println!("  S(α,β): loaded c_H_in_H2O.h5, t_idx = {t_idx}");
-                    gpu.upload_sab_data(&tsl, t_idx).expect("upload S(α,β)")
+                    gpu.upload_sab_data(&tsl, t_idx, 3, n_nuc).expect("upload S(α,β)")
                 }
                 Err(e) => {
                     eprintln!("  WARN: S(α,β) load failed: {e} — using empty");
-                    gpu.upload_sab_data_empty().expect("empty S(α,β)")
+                    gpu.upload_sab_data_empty(n_nuc).expect("empty S(α,β)")
                 }
             }
         } else {
             println!("  S(α,β): c_H_in_H2O.h5 not found — free-gas only");
-            gpu.upload_sab_data_empty().expect("empty S(α,β)")
+            gpu.upload_sab_data_empty(n_nuc).expect("empty S(α,β)")
         };
         let wmp_data = gpu
             .upload_wmp_data_empty(NUCLIDE_SPECS.len())

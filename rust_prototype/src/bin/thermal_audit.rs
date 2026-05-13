@@ -48,7 +48,10 @@ fn main() {
         tsl.energy_max, tsl.awr, tsl.temp_labels
     );
     // Pick T=294K (first index typically).
-    let t_idx = tsl.select_temperature(293.6, 0.5);
+    let t_idx = tsl.select_temperature(
+        293.6,
+        open_rust_mc::transport::sim_limits::SimLimits::default().sab_temperature_tolerance,
+    );
     println!(
         "selected T idx = {}  ({})\n",
         t_idx, tsl.temp_labels[t_idx]

@@ -430,6 +430,15 @@ impl GpuRecursiveContext {
             nvrtc::CompileOptions {
                 use_fast_math: Some(false),
                 arch: Some("sm_86"),
+                // Single source of truth for the per-material nuclide
+                // cap — see `crate::MAX_NUCLIDES_PER_MATERIAL`. The
+                // recursive transport kernel inherits `transport.cu`
+                // via concatenation, and that header `#error`s out if
+                // `MAX_NUC_PER_MAT` isn't supplied here.
+                options: vec![format!(
+                    "-DMAX_NUC_PER_MAT={}",
+                    crate::MAX_NUCLIDES_PER_MATERIAL
+                )],
                 ..Default::default()
             },
         )

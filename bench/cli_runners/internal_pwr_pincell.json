@@ -1,0 +1,25 @@
+{
+  "_doc": "Internal Rust regression — not a published ICSBEP case. The canonical PWR pin cell built into `pwr_pincell` is morally an LCT-007-style geometry (3.1 % UO₂, 1.26 cm pitch, reflective xy, reflective z → k_inf), but the binary's hard-coded composition doesn't match any specific LCT card. Tracked here as an `INTERNAL` suite case so the bench harness exercises the kinf-flavoured output parser and catches regressions in pwr_pincell.rs without falsely advertising as ICSBEP coverage. Replace with real LCT-001..050 entries once `Geometry::from_json` lands or `pwr_pincell` is parameterised on enrichment/pitch.",
+  "benchmark": {
+    "suite": "INTERNAL",
+    "case_id": "internal-pwr-pincell-svd5",
+    "case_name": "PWR pin cell, 3.1 % UO₂, 1.26 cm pitch (k_inf)",
+    "category": "LEU-LATTICE-INTERNAL",
+    "k_eff_reference": 1.32775,
+    "k_eff_sigma": 0.00200,
+    "source": "Internal Rust regression — value pinned to the resume.md `[pwr]` 80 b × 5 k × 5 seeds baseline, sigma reflects current within-engine seed-to-seed scatter, not σ_exp."
+  },
+  "runner": {
+    "binary": "pwr_pincell",
+    "args": [
+      "--mode", "svd",
+      "--rank", "5",
+      "--batches", "100",
+      "--inactive", "20",
+      "--particles", "20000",
+      "--seeds", "3"
+    ],
+    "data_arg": "positional",
+    "k_label": "k_inf"
+  }
+}

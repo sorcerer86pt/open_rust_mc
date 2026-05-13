@@ -1,24 +1,75 @@
 {
-  "_doc": "ICSBEP HEU-MET-FAST-001 — Godiva bare HEU sphere. The single most-used criticality benchmark in the literature. Bare uranium metal sphere, 8.7407 cm radius (critical configuration), 18.74 g/cm³, 93.71 wt% U-235 (the Godiva-IV composition; small variant from the more-common 93.8 % rounded number). Vacuum boundary.",
+  "_doc": "ICSBEP HEU-MET-FAST-001 (Godiva). Single-region bare HEU sphere model, 8.7407 cm radius — the textbook simplification of the actual HMF-001-IV layered configuration. For the full multi-shell Godiva-IV composition see heu-met-fast-001_case-1.json. Vacuum boundary, 18.74 g/cm^3 HEU at 293.6 K with 93.71 wt%% U-235.",
   "benchmark": {
     "suite": "ICSBEP",
     "case_id": "HEU-MET-FAST-001",
-    "case_name": "Godiva",
+    "case_name": "Godiva (single-region scene)",
     "category": "HEU-MET-FAST",
     "k_eff_reference": 1.0000,
     "k_eff_sigma": 0.0010,
-    "source": "ICSBEP Handbook, HMF-001 (NEA/NSC/DOC(95)03, Vol. II)"
+    "source": "ICSBEP Handbook, HMF-001 (NEA/NSC/DOC(95)03, Vol. II)",
+    "recommended_settings": {
+      "_doc": "Paper-quality target: 5 seeds * 150b * 30i * 20000p = 5 x 2.4M active histories. Engine regression minimum is 3 seeds (matches tests/cuda_runs.rs); 5 gives 4 dof on the seed-to-seed variance — tight enough that the bound isn't dominated by sigma_seed uncertainty. For tight HMF / PMF cases (sigma_exp ~ 100 pcm), bump to 10 seeds for handbook-submission rigour.",
+      "batches": 150,
+      "inactive": 30,
+      "particles": 20000,
+      "seeds": 5
+    }
   },
-  "runner": {
-    "binary": "godiva",
-    "args": [
-      "--mode", "table",
-      "--batches", "150",
-      "--inactive", "20",
-      "--particles", "20000",
-      "--seeds", "3"
+  "scene": {
+    "surfaces": [
+      {
+        "type": "Sphere",
+        "center": [0.0, 0.0, 0.0],
+        "radius": 8.7407,
+        "bc": "Vacuum"
+      }
     ],
-    "data_arg": "positional",
-    "k_label": "k_eff (collision)"
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "HalfSpace",
+          "surface_idx": 0,
+          "positive": false
+        },
+        "fill": {
+          "type": "Material",
+          "material_idx": 0
+        },
+        "temperature": 293.6
+      }
+    ],
+    "universes": [
+      {
+        "id": 0,
+        "cell_indices": [0]
+      }
+    ],
+    "materials": [
+      {
+        "name": "HEU (Godiva, 93.71 wt% U-235, 18.74 g/cm^3)",
+        "temperature": 293.6,
+        "nuclides": [
+          {
+            "zaid": 92234,
+            "label": "U-234",
+            "atom_density": 0.00049184
+          },
+          {
+            "zaid": 92235,
+            "label": "U-235",
+            "atom_density": 0.045004
+          },
+          {
+            "zaid": 92238,
+            "label": "U-238",
+            "atom_density": 0.0025
+          }
+        ],
+        "thermal_files": []
+      }
+    ],
+    "root_universe_id": 0
   }
 }

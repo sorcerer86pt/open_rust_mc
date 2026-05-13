@@ -1,0 +1,24 @@
+{
+  "_doc": "ICSBEP HEU-MET-FAST-001 — Godiva bare HEU sphere. The single most-used criticality benchmark in the literature. Bare uranium metal sphere, 8.7407 cm radius (critical configuration), 18.74 g/cm³, 93.71 wt% U-235 (the Godiva-IV composition; small variant from the more-common 93.8 % rounded number). Vacuum boundary.",
+  "benchmark": {
+    "suite": "ICSBEP",
+    "case_id": "HEU-MET-FAST-001",
+    "case_name": "Godiva",
+    "category": "HEU-MET-FAST",
+    "k_eff_reference": 1.0000,
+    "k_eff_sigma": 0.0010,
+    "source": "ICSBEP Handbook, HMF-001 (NEA/NSC/DOC(95)03, Vol. II)"
+  },
+  "runner": {
+    "binary": "godiva",
+    "args": [
+      "--mode", "table",
+      "--batches", "150",
+      "--inactive", "20",
+      "--particles", "20000",
+      "--seeds", "3"
+    ],
+    "data_arg": "positional",
+    "k_label": "k_eff (collision)"
+  }
+}

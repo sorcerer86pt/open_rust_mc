@@ -40,6 +40,35 @@ pub struct ResolvedMaterials {
     pub materials: Vec<Material>,
 }
 
+impl ResolvedMaterials {
+    /// Per-material fissionability flags indexed by material idx.
+    /// A material is fissionable iff at least one of its nuclides has
+    /// a positive constant ν̄ in the loaded XS data (the loader keeps
+    /// `nu_bar_const = 0.0` for non-fissionable nuclides). Mirrors
+    /// Serpent's `is_fissile` predicate (`src/findfismat.c`).
+    ///
+    /// Used by `simulate::try_initial_source` and the Python /
+    /// ICSBEP harness to decide which cells can host the first-batch
+    /// source — replaces the historical "first Material cell" /
+    /// "smallest-volume material" heuristics, which broke on
+    /// reflected-metal, multi-shell, BWR-cruciform, PWR-burnable-
+    /// poison, and HFIR-plate geometries.
+    pub fn fissionable_materials(&self) -> Vec<bool> {
+        self.materials
+            .iter()
+            .map(|m| {
+                m.nuclides.iter().any(|n| {
+                    self.provider
+                        .nuclides
+                        .get(n.xs_kernel_idx)
+                        .map(|nk| nk.nu_bar_const > 0.0)
+                        .unwrap_or(false)
+                })
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
     #[error("material {material} nuclide {nuclide_idx}: neither `zaid` nor `hdf5_file` is set")]

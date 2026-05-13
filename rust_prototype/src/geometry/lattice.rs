@@ -631,3 +631,247 @@ mod tests {
         assert!(d.is_infinite());
     }
 }
+
+// ── RingLattice ──────────────────────────────────────────────────────────
+//
+// Concentric rings of pin-universes around a central axis. Models the
+// CANDU 37-rod / 28-rod / 43-rod fuel bundle (axially horizontal,
+// pins on circles at well-known radii) and the TRIGA Mark-II / Mark-III
+// core (5 concentric rings of fuel rods, B/C/D/E/F). Not interchangeable
+// with `RectLattice` or `HexLattice` — those tile a 2-D plane;
+// `RingLattice` discretises a polar (r, θ) grid.
+//
+// Pin layout per ring follows the CANDU / TRIGA convention:
+//   - Optional centre pin (`center_universe`).
+//   - For each ring i: `n_pins[i]` pins evenly spaced around the circle
+//     at radius `radii[i]`, starting at the `phase[i]` angle (radians,
+//     measured from the +x axis in the cross-section plane).
+//
+// CANDU 37-rod bundle example (transposed for the rust_prototype frame
+// where the bundle axis is along Z by default — rotate via parent
+// universe if the host calandria is horizontal):
+//   center_universe = fuel_pin
+//   radii = [1.4885, 2.8755, 4.331]                       (cm)
+//   n_pins = [6, 12, 18]
+//   phase = [0.0, 0.0, π/18]                              (rad)
+//   pin_radius = 0.6122 cm
+//
+// TRIGA Mark-II five-ring example:
+//   center_universe = trans_rod_position
+//   radii = [3.99, 7.98, 11.97, 15.96, 19.95]             (cm)
+//   n_pins = [6, 12, 18, 24, 30]
+//   phase = [0.0; 5]
+//   pin_radius = 1.88 cm
+//
+// Outside the pin-bounded discs the bundle envelope is filled by the
+// `background_universe` (D₂O coolant for CANDU, water pool for TRIGA).
+
+/// Unique identifier for a ring lattice within a `Geometry`. Parallel
+/// to `LatticeId` / `HexLatticeId`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RingLatticeId(pub u32);
+
+/// Cross-section axis the ring lattice is perpendicular to. Determines
+/// which two cartesian axes the (r, θ) discs live on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RingLatticeAxis {
+    /// Discs in the YZ plane; bundles arrayed along X (CANDU horizontal
+    /// pressure-tube convention).
+    X,
+    /// Discs in the XZ plane.
+    Y,
+    /// Discs in the XY plane; bundles arrayed along Z (typical vertical
+    /// rod stacks — TRIGA-like).
+    Z,
+}
+
+/// Concentric pin-ring lattice. See module-level comment for the CANDU
+/// / TRIGA layouts this primitive captures.
+#[derive(Debug, Clone)]
+pub struct RingLattice {
+    /// Cross-section centre in world coordinates.
+    pub center: Vec3,
+    /// Axis perpendicular to the ring plane.
+    pub axis: RingLatticeAxis,
+    /// Pin universe at the centre (ring 0). `None` for bundles that
+    /// have no central pin (some CANDU variants, TRIGA flux traps).
+    pub center_universe: Option<UniverseId>,
+    /// Outer radii of each ring (cm). The Nth ring spans
+    /// `(radii[N-1], radii[N]]`, with the first ring spanning
+    /// `(0, radii[0]]`. Strictly increasing.
+    pub radii: Vec<f64>,
+    /// Number of pins evenly distributed around each ring. Length
+    /// matches `radii`.
+    pub n_pins: Vec<usize>,
+    /// Angular offset of the first pin in each ring (radians, from
+    /// the +x axis or its analogue in the cross-section plane). Length
+    /// matches `radii`. Zero for most standard layouts.
+    pub phase: Vec<f64>,
+    /// Per-pin radius. The same cylinder radius applies to every pin
+    /// in every ring. CANDU 37-rod uses 0.6122 cm.
+    pub pin_radius: f64,
+    /// Pin universes, indexed `[ring][pin_in_ring]`. Length of the
+    /// outer Vec matches `radii`; inner Vec length matches
+    /// `n_pins[ring]`. Each `UniverseId` defines what a single pin
+    /// (fuel + clad + helium gap + coolant ring) looks like.
+    pub ring_universes: Vec<Vec<UniverseId>>,
+    /// Universe filling the bundle envelope outside any pin's
+    /// `pin_radius` disc — typically the host coolant (D₂O for CANDU,
+    /// light water for TRIGA, gas for some HTGR variants).
+    pub background_universe: UniverseId,
+    /// Axial extent along the lattice axis (relative to `center`).
+    /// `[z_min, z_max]` — points outside this range fall through to
+    /// the parent universe. Set to `(f64::NEG_INFINITY, f64::INFINITY)`
+    /// for axially-infinite lattices.
+    pub axial_extent: [f64; 2],
+}
+
+impl RingLattice {
+    /// Total pin count, summed over rings, plus the optional centre.
+    pub fn total_pins(&self) -> usize {
+        let centre = if self.center_universe.is_some() { 1 } else { 0 };
+        centre + self.n_pins.iter().sum::<usize>()
+    }
+
+    /// Cross-section local coordinates `(u, v)` for a world-frame
+    /// point. `u` and `v` are the two cartesian axes the ring plane
+    /// lives on; `w` is the depth along `self.axis`.
+    #[inline]
+    pub fn local_uv(&self, p: Vec3) -> (f64, f64, f64) {
+        let d = p - self.center;
+        match self.axis {
+            RingLatticeAxis::X => (d.y, d.z, d.x),
+            RingLatticeAxis::Y => (d.x, d.z, d.y),
+            RingLatticeAxis::Z => (d.x, d.y, d.z),
+        }
+    }
+
+    /// Resolve a world-frame point to either a pin slot
+    /// `(ring_idx, pin_idx)` if the point falls inside a pin's
+    /// `pin_radius` disc, or `None` if the point lies in the
+    /// background-universe envelope. Returns `None` when the axial
+    /// depth lies outside `axial_extent` — the caller should then
+    /// treat the position as "not in this lattice" and continue the
+    /// cell-find walk in the parent universe.
+    pub fn pin_at(&self, p: Vec3) -> Option<(usize, usize)> {
+        let (u, v, w) = self.local_uv(p);
+        if w < self.axial_extent[0] || w > self.axial_extent[1] {
+            return None;
+        }
+        let r2 = u * u + v * v;
+        // Centre pin first — its disc bounds the smallest ring.
+        let pin_r2 = self.pin_radius * self.pin_radius;
+        if self.center_universe.is_some() && r2 <= pin_r2 {
+            // Centre pin matches; the caller indexes it as ring=0
+            // with pin_idx=0 outside the per-ring grid.
+            return Some((usize::MAX, 0));
+        }
+        // Walk each ring; a point can only be inside one pin (rings
+        // don't overlap when laid out per CANDU / TRIGA conventions).
+        for (ring_idx, &n) in self.n_pins.iter().enumerate() {
+            let ring_r = self.radii[ring_idx];
+            // Bound the point to a tube around this ring: the pin
+            // centres lie on a circle of radius `ring_r`; a point on
+            // any pin must be within `pin_radius` of that circle.
+            let dr = (r2.sqrt() - ring_r).abs();
+            if dr > self.pin_radius {
+                continue;
+            }
+            let theta = v.atan2(u);
+            let dtheta = 2.0 * std::f64::consts::PI / n as f64;
+            // Index of the nearest pin in this ring after subtracting
+            // the per-ring phase offset.
+            let k = ((theta - self.phase[ring_idx]) / dtheta).round() as i64;
+            let k = ((k % n as i64) + n as i64) as usize % n;
+            let pin_theta = self.phase[ring_idx] + k as f64 * dtheta;
+            let pu = ring_r * pin_theta.cos();
+            let pv = ring_r * pin_theta.sin();
+            let du = u - pu;
+            let dv = v - pv;
+            if du * du + dv * dv <= pin_r2 {
+                return Some((ring_idx, k));
+            }
+        }
+        None
+    }
+
+    /// Universe living at the pin slot returned by `pin_at`, or the
+    /// `background_universe` when the point lies outside any pin.
+    pub fn universe_at(&self, p: Vec3) -> UniverseId {
+        match self.pin_at(p) {
+            Some((usize::MAX, _)) => self.center_universe.expect("centre slot but no centre universe"),
+            Some((ring, pin)) => self.ring_universes[ring][pin],
+            None => self.background_universe,
+        }
+    }
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    fn dummy_universe(id: u32) -> UniverseId {
+        UniverseId(id)
+    }
+
+    /// CANDU 37-rod cross-section: centre + 6 + 12 + 18 = 37 pins.
+    /// Radii / pin radius from AECL-9013 (1986).
+    fn candu_37() -> RingLattice {
+        RingLattice {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            axis: RingLatticeAxis::Z,
+            center_universe: Some(dummy_universe(1)),
+            radii: vec![1.4885, 2.8755, 4.331],
+            n_pins: vec![6, 12, 18],
+            phase: vec![0.0, 0.0, std::f64::consts::PI / 18.0],
+            pin_radius: 0.6122,
+            ring_universes: vec![
+                vec![dummy_universe(2); 6],
+                vec![dummy_universe(3); 12],
+                vec![dummy_universe(4); 18],
+            ],
+            background_universe: dummy_universe(99),
+            axial_extent: [-25.0, 25.0],
+        }
+    }
+
+    #[test]
+    fn pin_count_candu37() {
+        assert_eq!(candu_37().total_pins(), 37);
+    }
+
+    #[test]
+    fn centre_pin_resolves() {
+        let lat = candu_37();
+        let (ring, _) = lat.pin_at(Vec3::new(0.0, 0.0, 0.0)).unwrap();
+        assert_eq!(ring, usize::MAX);
+        assert_eq!(lat.universe_at(Vec3::new(0.0, 0.0, 0.0)), UniverseId(1));
+    }
+
+    #[test]
+    fn ring_pin_resolves() {
+        let lat = candu_37();
+        // Ring 0 pin 0 sits at theta=0, r=1.4885.
+        let p = Vec3::new(1.4885, 0.0, 0.0);
+        let (ring, k) = lat.pin_at(p).unwrap();
+        assert_eq!((ring, k), (0, 0));
+        assert_eq!(lat.universe_at(p), UniverseId(2));
+    }
+
+    #[test]
+    fn between_pins_is_background() {
+        let lat = candu_37();
+        // Point at r=2.18 cm (between rings 0 and 1) — no pin should match.
+        let p = Vec3::new(2.18, 0.0, 0.0);
+        assert!(lat.pin_at(p).is_none());
+        assert_eq!(lat.universe_at(p), UniverseId(99));
+    }
+
+    #[test]
+    fn axial_cutoff_falls_through() {
+        let lat = candu_37();
+        // Inside the radial pin disc but outside z range — should
+        // return None so the parent universe handles it.
+        assert!(lat.pin_at(Vec3::new(0.0, 0.0, 30.0)).is_none());
+    }
+}

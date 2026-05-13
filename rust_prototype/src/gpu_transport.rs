@@ -14,7 +14,22 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 123;
+const N_PARAMS: usize = 130;
+
+/// NVRTC compile-options builder. Every site that compiles
+/// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
+/// constant — the CU has no fallback `#define` anymore (intentionally,
+/// so host / device cannot silently disagree).
+#[allow(dead_code)]
+fn transport_kernel_options() -> nvrtc::CompileOptions {
+    nvrtc::CompileOptions {
+        options: vec![format!(
+            "-DMAX_NUC_PER_MAT={}",
+            crate::MAX_NUCLIDES_PER_MATERIAL
+        )],
+        ..Default::default()
+    }
+}
 
 // ── CUDA kernel source ────────────────────────────────────────────────
 
@@ -186,10 +201,18 @@ pub struct GpuNuclideData {
     pub inel_cdf_log_e_max: CudaSlice<f64>,
 }
 
-/// S(α,β) thermal scattering data on GPU (for one temperature).
+/// S(α,β) thermal scattering data on GPU.
+///
+/// Multiple TSLs (e.g. H-in-H₂O + D-in-D₂O + C-in-graphite) are packed
+/// into the same flat arrays; `slot_per_nuc[nuc_idx]` is `-1` (no SAB)
+/// or `slot_idx` (≥ 0) and indexes into the per-slot offset/size arrays
+/// that locate this slot's run inside each flat array. The legacy
+/// scalars `n_inc` / `energy_max` mirror slot 0 for backward
+/// compatibility with kernels that haven't been ported off the
+/// single-slot fast path.
 pub struct GpuSabData {
+    // Flat data arrays (concatenated across all slots).
     pub inc_energies: CudaSlice<f64>,
-    pub n_inc: i32,
     pub eout_offsets: CudaSlice<i32>,
     pub eout_sizes: CudaSlice<i32>,
     pub e_out: CudaSlice<f64>,
@@ -200,6 +223,33 @@ pub struct GpuSabData {
     pub mu: CudaSlice<f64>,
     pub cdf_mu: CudaSlice<f64>,
     pub xs: CudaSlice<f64>,
+
+    // Per-slot indirection.
+    /// Number of populated slots. `0` means no SAB.
+    pub n_slots: i32,
+    /// `[n_nuc]`: nuclide → slot index, or `-1`. Always allocated even
+    /// when `n_slots == 0` (filled with `-1`) so the kernel can
+    /// indirect unconditionally.
+    pub slot_per_nuc: CudaSlice<i32>,
+    /// `[n_slots]`: offset into `inc_energies` / `xs` where this slot's
+    /// inc-energy grid starts.
+    pub slot_inc_e_off: CudaSlice<i32>,
+    /// `[n_slots]`: number of inc-energy points in this slot.
+    pub slot_n_inc: CudaSlice<i32>,
+    /// `[n_slots]`: offset into `eout_offsets` / `eout_sizes` where
+    /// this slot's per-inc-energy table starts.
+    pub slot_eout_table_off: CudaSlice<i32>,
+    /// `[n_slots]`: offset into `mu_offsets` / `mu_sizes` where this
+    /// slot's per-eout-bin table starts.
+    pub slot_mu_table_off: CudaSlice<i32>,
+    /// `[n_slots]`: per-slot `energy_max` (eV).
+    pub slot_emax: CudaSlice<f64>,
+
+    // Legacy single-slot mirrors (slot 0). Kept so the original
+    // single-slot fast path in transport.cu (`SCALAR_I(p, P_SAB_N_INC)`
+    // / `SCALAR_D(p, P_SAB_EMAX)`) continues to work as a fallback
+    // until every call site is on the slot-aware path.
+    pub n_inc: i32,
     pub energy_max: f64,
 }
 
@@ -269,6 +319,10 @@ impl GpuTransportContext {
         let opts = nvrtc::CompileOptions {
             arch: Some("sm_86"),
             options: vec![
+                // Single source of truth for the per-material nuclide
+                // cap — matches `simulate.rs::MAX_NUCLIDES` and the
+                // Rust-side upload arrays.
+                format!("-DMAX_NUC_PER_MAT={}", crate::MAX_NUCLIDES_PER_MATERIAL),
                 "--ptxas-options=-v".to_string(),
                 "-Xptxas".to_string(),
                 "-warn-spills".to_string(),
@@ -413,7 +467,7 @@ impl GpuTransportContext {
         let d_params = self.stream.clone_htod(&params_vec)?;
 
         // Load debug kernel
-        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        let ptx = nvrtc::compile_ptx_with_opts(TRANSPORT_KERNELS, transport_kernel_options())?;
         let module = self._ctx.load_module(ptx)?;
         let k_debug = module.load_function("debug_angular_sample")?;
 
@@ -546,7 +600,7 @@ impl GpuTransportContext {
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
 
-        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        let ptx = nvrtc::compile_ptx_with_opts(TRANSPORT_KERNELS, transport_kernel_options())?;
         let module = self._ctx.load_module(ptx)?;
         let k_debug = module.load_function("debug_xs_reconstruct")?;
 
@@ -740,6 +794,19 @@ impl GpuTransportContext {
             dptr!(&nuc_data.inel91_pdf),
             dptr!(&nuc_data.inel91_nuc_offsets),
             dptr!(&nuc_data.inel91_nuc_n_inc),
+            // Multi-slot S(α,β) lookup (slots 123-129). The flat data
+            // arrays still live at slots 43-55; these per-slot tables
+            // (length n_slots) plus the per-nuclide lookup (length
+            // n_nuc) drive `sab_total_xs` / `sab_sample` for problems
+            // with more than one TSL-bearing nuclide (e.g. H-in-H2O
+            // + D-in-D2O + C-in-graphite).
+            sab_data.n_slots as u64,
+            dptr!(&sab_data.slot_per_nuc),
+            dptr!(&sab_data.slot_inc_e_off),
+            dptr!(&sab_data.slot_n_inc),
+            dptr!(&sab_data.slot_eout_table_off),
+            dptr!(&sab_data.slot_mu_table_off),
+            dptr!(&sab_data.slot_emax),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1524,13 +1591,11 @@ impl GpuTransportContext {
         nuclide_awrs: &[f64],
         nuclide_nu_bars: &[f64],
     ) -> Result<GpuMaterialData, Box<dyn std::error::Error>> {
-        // Must match `MAX_NUC_PER_MAT` in transport.cu. Bumped from 4 to
-        // 32 to match the CPU's `MAX_NUCLIDES` so LCT / solution
-        // benchmarks (28-30 nuclides/material) fit without truncation.
-        // Per-thread register footprint is held flat by the streaming
-        // reaction-XS recompute — see `eval_nuclide_macro_xs` and the
-        // refactored Pass 1 in `transport.cu` / `transport_recursive.cu`.
-        const MAX_NUC: usize = 32;
+        // Single source of truth: `crate::MAX_NUCLIDES_PER_MATERIAL`.
+        // The GPU sees the same value via the NVRTC `-DMAX_NUC_PER_MAT`
+        // flag wired in `assemble_kernel_source` (gpu_recursive.rs) and
+        // the transport_persistent compile site below.
+        const MAX_NUC: usize = crate::MAX_NUCLIDES_PER_MATERIAL;
         let n_mat = materials.len();
 
         let mut n_nuclides = vec![0_i32; n_mat];
@@ -1561,116 +1626,231 @@ impl GpuTransportContext {
         })
     }
 
-    /// Upload S(α,β) thermal scattering data for one temperature.
+    /// Upload S(α,β) thermal scattering data for one nuclide.
+    ///
+    /// Convenience wrapper around [`upload_sab_data_multi`] for the
+    /// common single-TSL case (PWR H-in-H₂O). `nuc_idx` is the index of
+    /// the SAB-bearing nuclide inside the per-run nuclide table; `n_nuc`
+    /// is the total nuclide count, used to size the `slot_per_nuc`
+    /// lookup table.
     pub fn upload_sab_data(
         &self,
         tsl: &crate::thermal::ThermalScatteringData,
         temp_idx: usize,
+        nuc_idx: usize,
+        n_nuc: usize,
     ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
-        let inel = &tsl.inelastic[temp_idx];
-        match &inel.dist {
-            crate::thermal::InelasticDist::Continuous(c) => {
-                // Pack incident energy grid and XS
-                let inc_e: Vec<f64> = inel.energy.clone();
-                let xs: Vec<f64> = inel.xs.clone();
-                let n_inc = inc_e.len() as i32;
-
-                // Pack outgoing energy CDFs with offsets
-                let mut eout_offsets = Vec::with_capacity(c.n_inc);
-                let mut eout_sizes = Vec::with_capacity(c.n_inc);
-                for i in 0..c.n_inc {
-                    let start = c.offsets[i];
-                    let end = if i + 1 < c.offsets.len() {
-                        c.offsets[i + 1]
-                    } else {
-                        c.e_out.len()
-                    };
-                    eout_offsets.push(start as i32);
-                    eout_sizes.push((end - start) as i32);
-                }
-
-                // Pack mu offsets/sizes (one per outgoing energy bin)
-                let mut mu_offs = Vec::with_capacity(c.mu_offsets.len());
-                let mut mu_szs = Vec::with_capacity(c.mu_offsets.len());
-                for i in 0..c.mu_offsets.len() {
-                    let start = c.mu_offsets[i];
-                    let end = if i + 1 < c.mu_offsets.len() {
-                        c.mu_offsets[i + 1]
-                    } else {
-                        c.mu.len()
-                    };
-                    mu_offs.push(start as i32);
-                    mu_szs.push((end - start) as i32);
-                }
-
-                // Ensure non-empty
-                if mu_offs.is_empty() {
-                    mu_offs.push(0);
-                    mu_szs.push(0);
-                }
-
-                println!(
-                    "  GPU S(a,b): {} inc energies, {} E_out pts, {} mu pts",
-                    n_inc,
-                    c.e_out.len(),
-                    c.mu.len()
-                );
-
-                Ok(GpuSabData {
-                    inc_energies: self.stream.clone_htod(&inc_e)?,
-                    n_inc,
-                    eout_offsets: self.stream.clone_htod(&eout_offsets)?,
-                    eout_sizes: self.stream.clone_htod(&eout_sizes)?,
-                    e_out: self.stream.clone_htod(&c.e_out)?,
-                    cdf_e: self.stream.clone_htod(&c.cdf_e)?,
-                    pdf_e: self.stream.clone_htod(&c.pdf_e)?,
-                    mu_offsets: self.stream.clone_htod(&mu_offs)?,
-                    mu_sizes: self.stream.clone_htod(&mu_szs)?,
-                    mu: self.stream.clone_htod(&c.mu)?,
-                    cdf_mu: self.stream.clone_htod(&c.cdf_mu)?,
-                    xs: self.stream.clone_htod(&xs)?,
-                    energy_max: tsl.energy_max,
-                })
-            }
-            crate::thermal::InelasticDist::Discrete(_) => {
-                // Discrete mode — create empty placeholder (not yet supported on GPU)
-                println!("  GPU S(a,b): discrete mode, using empty placeholder");
-                Ok(GpuSabData {
-                    inc_energies: self.stream.clone_htod(&[0.0_f64])?,
-                    n_inc: 0,
-                    eout_offsets: self.stream.clone_htod(&[0_i32])?,
-                    eout_sizes: self.stream.clone_htod(&[0_i32])?,
-                    e_out: self.stream.clone_htod(&[0.0_f64])?,
-                    cdf_e: self.stream.clone_htod(&[0.0_f64])?,
-                    pdf_e: self.stream.clone_htod(&[0.0_f64])?,
-                    mu_offsets: self.stream.clone_htod(&[0_i32])?,
-                    mu_sizes: self.stream.clone_htod(&[0_i32])?,
-                    mu: self.stream.clone_htod(&[0.0_f64])?,
-                    cdf_mu: self.stream.clone_htod(&[0.0_f64])?,
-                    xs: self.stream.clone_htod(&[0.0_f64])?,
-                    energy_max: 0.0,
-                })
-            }
-        }
+        self.upload_sab_data_multi(&[(tsl, temp_idx, nuc_idx)], n_nuc)
     }
 
-    /// Create an empty S(α,β) placeholder (no thermal scattering data).
-    pub fn upload_sab_data_empty(&self) -> Result<GpuSabData, Box<dyn std::error::Error>> {
+    /// Upload multiple S(α,β) libraries simultaneously, one per
+    /// nuclide. Each tuple is `(tsl, temp_idx, nuc_idx)`. The kernel
+    /// looks up the slot via `slot_per_nuc[nuc_idx]` at every collision
+    /// site so different nuclides (H-in-H₂O, D-in-D₂O, C-in-graphite,
+    /// …) each get the correct TSL routed by the device.
+    ///
+    /// Discrete-mode TSLs are currently uploaded as empty slots; the
+    /// fast continuous-inelastic path is what the kernel consumes.
+    pub fn upload_sab_data_multi(
+        &self,
+        slots: &[(
+            &crate::thermal::ThermalScatteringData,
+            usize, /* temp_idx */
+            usize, /* nuc_idx */
+        )],
+        n_nuc: usize,
+    ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
+        // Concatenated flat arrays.
+        let mut inc_e_flat: Vec<f64> = Vec::new();
+        let mut xs_flat: Vec<f64> = Vec::new();
+        let mut eout_offsets_flat: Vec<i32> = Vec::new();
+        let mut eout_sizes_flat: Vec<i32> = Vec::new();
+        let mut e_out_flat: Vec<f64> = Vec::new();
+        let mut cdf_e_flat: Vec<f64> = Vec::new();
+        let mut pdf_e_flat: Vec<f64> = Vec::new();
+        let mut mu_offsets_flat: Vec<i32> = Vec::new();
+        let mut mu_sizes_flat: Vec<i32> = Vec::new();
+        let mut mu_flat: Vec<f64> = Vec::new();
+        let mut cdf_mu_flat: Vec<f64> = Vec::new();
+
+        // Per-slot metadata.
+        let mut slot_inc_e_off: Vec<i32> = Vec::new();
+        let mut slot_n_inc: Vec<i32> = Vec::new();
+        let mut slot_eout_table_off: Vec<i32> = Vec::new();
+        let mut slot_mu_table_off: Vec<i32> = Vec::new();
+        let mut slot_emax: Vec<f64> = Vec::new();
+
+        // Per-nuclide → slot lookup. Default -1.
+        let mut slot_per_nuc: Vec<i32> = vec![-1; n_nuc.max(1)];
+
+        for (tsl, temp_idx, nuc_idx) in slots.iter().copied() {
+            if nuc_idx >= n_nuc {
+                return Err(format!(
+                    "upload_sab_data_multi: nuc_idx {nuc_idx} >= n_nuc {n_nuc}"
+                )
+                .into());
+            }
+            if slot_per_nuc[nuc_idx] >= 0 {
+                return Err(format!(
+                    "upload_sab_data_multi: nuc_idx {nuc_idx} bound to multiple TSLs"
+                )
+                .into());
+            }
+            let slot_id = slot_inc_e_off.len() as i32;
+            slot_per_nuc[nuc_idx] = slot_id;
+
+            let inel = &tsl.inelastic[temp_idx];
+            match &inel.dist {
+                crate::thermal::InelasticDist::Continuous(c) => {
+                    // Inc-energy block (and parallel xs).
+                    let inc_e_off = inc_e_flat.len() as i32;
+                    let n_inc_this = inel.energy.len() as i32;
+                    inc_e_flat.extend_from_slice(&inel.energy);
+                    xs_flat.extend_from_slice(&inel.xs);
+
+                    // E_out block, with per-inc-energy table offsets.
+                    let eout_table_off = eout_offsets_flat.len() as i32;
+                    let e_out_base = e_out_flat.len() as i32;
+                    for i in 0..c.n_inc {
+                        let start = c.offsets[i];
+                        let end = if i + 1 < c.offsets.len() {
+                            c.offsets[i + 1]
+                        } else {
+                            c.e_out.len()
+                        };
+                        eout_offsets_flat.push(e_out_base + start as i32);
+                        eout_sizes_flat.push((end - start) as i32);
+                    }
+                    e_out_flat.extend_from_slice(&c.e_out);
+                    cdf_e_flat.extend_from_slice(&c.cdf_e);
+                    pdf_e_flat.extend_from_slice(&c.pdf_e);
+
+                    // Mu block, with per-eout-bin table offsets.
+                    let mu_table_off = mu_offsets_flat.len() as i32;
+                    let mu_base = mu_flat.len() as i32;
+                    for i in 0..c.mu_offsets.len() {
+                        let start = c.mu_offsets[i];
+                        let end = if i + 1 < c.mu_offsets.len() {
+                            c.mu_offsets[i + 1]
+                        } else {
+                            c.mu.len()
+                        };
+                        mu_offsets_flat.push(mu_base + start as i32);
+                        mu_sizes_flat.push((end - start) as i32);
+                    }
+                    mu_flat.extend_from_slice(&c.mu);
+                    cdf_mu_flat.extend_from_slice(&c.cdf_mu);
+
+                    slot_inc_e_off.push(inc_e_off);
+                    slot_n_inc.push(n_inc_this);
+                    slot_eout_table_off.push(eout_table_off);
+                    slot_mu_table_off.push(mu_table_off);
+                    slot_emax.push(tsl.energy_max);
+
+                    println!(
+                        "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): {n_inc_this} inc \
+                         energies, {} E_out pts, {} mu pts",
+                        c.e_out.len(),
+                        c.mu.len()
+                    );
+                }
+                crate::thermal::InelasticDist::Discrete(_) => {
+                    println!(
+                        "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): discrete mode — \
+                         empty placeholder"
+                    );
+                    let inc_e_off = inc_e_flat.len() as i32;
+                    inc_e_flat.push(0.0);
+                    xs_flat.push(0.0);
+                    let eout_table_off = eout_offsets_flat.len() as i32;
+                    eout_offsets_flat.push(0);
+                    eout_sizes_flat.push(0);
+                    let mu_table_off = mu_offsets_flat.len() as i32;
+                    mu_offsets_flat.push(0);
+                    mu_sizes_flat.push(0);
+
+                    slot_inc_e_off.push(inc_e_off);
+                    slot_n_inc.push(0);
+                    slot_eout_table_off.push(eout_table_off);
+                    slot_mu_table_off.push(mu_table_off);
+                    slot_emax.push(0.0);
+                }
+            }
+        }
+
+        // Ensure no flat array is empty (cudarc rejects zero-sized
+        // copies). The kernel never reads these padding bytes because
+        // n_slots == 0 short-circuits the SAB branch.
+        if inc_e_flat.is_empty() {
+            inc_e_flat.push(0.0);
+            xs_flat.push(0.0);
+        }
+        if eout_offsets_flat.is_empty() {
+            eout_offsets_flat.push(0);
+            eout_sizes_flat.push(0);
+        }
+        if e_out_flat.is_empty() {
+            e_out_flat.push(0.0);
+            cdf_e_flat.push(0.0);
+            pdf_e_flat.push(0.0);
+        }
+        if mu_offsets_flat.is_empty() {
+            mu_offsets_flat.push(0);
+            mu_sizes_flat.push(0);
+        }
+        if mu_flat.is_empty() {
+            mu_flat.push(0.0);
+            cdf_mu_flat.push(0.0);
+        }
+        if slot_inc_e_off.is_empty() {
+            slot_inc_e_off.push(0);
+            slot_n_inc.push(0);
+            slot_eout_table_off.push(0);
+            slot_mu_table_off.push(0);
+            slot_emax.push(0.0);
+        }
+
+        let n_slots = slots.len() as i32;
+        // Legacy mirrors for the single-slot fast path in transport.cu.
+        let (legacy_n_inc, legacy_emax) = if n_slots > 0 {
+            (slot_n_inc[0], slot_emax[0])
+        } else {
+            (0, 0.0)
+        };
+
         Ok(GpuSabData {
-            inc_energies: self.stream.clone_htod(&[0.0_f64])?,
-            n_inc: 0,
-            eout_offsets: self.stream.clone_htod(&[0_i32])?,
-            eout_sizes: self.stream.clone_htod(&[0_i32])?,
-            e_out: self.stream.clone_htod(&[0.0_f64])?,
-            cdf_e: self.stream.clone_htod(&[0.0_f64])?,
-            pdf_e: self.stream.clone_htod(&[0.0_f64])?,
-            mu_offsets: self.stream.clone_htod(&[0_i32])?,
-            mu_sizes: self.stream.clone_htod(&[0_i32])?,
-            mu: self.stream.clone_htod(&[0.0_f64])?,
-            cdf_mu: self.stream.clone_htod(&[0.0_f64])?,
-            xs: self.stream.clone_htod(&[0.0_f64])?,
-            energy_max: 0.0,
+            inc_energies: self.stream.clone_htod(&inc_e_flat)?,
+            eout_offsets: self.stream.clone_htod(&eout_offsets_flat)?,
+            eout_sizes: self.stream.clone_htod(&eout_sizes_flat)?,
+            e_out: self.stream.clone_htod(&e_out_flat)?,
+            cdf_e: self.stream.clone_htod(&cdf_e_flat)?,
+            pdf_e: self.stream.clone_htod(&pdf_e_flat)?,
+            mu_offsets: self.stream.clone_htod(&mu_offsets_flat)?,
+            mu_sizes: self.stream.clone_htod(&mu_sizes_flat)?,
+            mu: self.stream.clone_htod(&mu_flat)?,
+            cdf_mu: self.stream.clone_htod(&cdf_mu_flat)?,
+            xs: self.stream.clone_htod(&xs_flat)?,
+
+            n_slots,
+            slot_per_nuc: self.stream.clone_htod(&slot_per_nuc)?,
+            slot_inc_e_off: self.stream.clone_htod(&slot_inc_e_off)?,
+            slot_n_inc: self.stream.clone_htod(&slot_n_inc)?,
+            slot_eout_table_off: self.stream.clone_htod(&slot_eout_table_off)?,
+            slot_mu_table_off: self.stream.clone_htod(&slot_mu_table_off)?,
+            slot_emax: self.stream.clone_htod(&slot_emax)?,
+
+            n_inc: legacy_n_inc,
+            energy_max: legacy_emax,
         })
+    }
+
+    /// Create an empty S(α,β) placeholder. `n_nuc` is needed so the
+    /// per-nuclide lookup table is sized correctly for the kernel.
+    pub fn upload_sab_data_empty(
+        &self,
+        n_nuc: usize,
+    ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
+        self.upload_sab_data_multi(&[], n_nuc)
     }
 
     /// Upload per-nuclide Windowed-Multipole data to the GPU. `wmps[i] = None`
@@ -2022,6 +2202,13 @@ impl GpuTransportContext {
             dptr!(&nuc_data.inel91_pdf),              //120 P_INEL91_PDF
             dptr!(&nuc_data.inel91_nuc_offsets),      //121 P_INEL91_NUC_OFF
             dptr!(&nuc_data.inel91_nuc_n_inc),        //122 P_INEL91_NUC_NINC
+            sab_data.n_slots as u64,                  //123 P_SAB_N_SLOTS
+            dptr!(&sab_data.slot_per_nuc),            //124 P_SAB_SLOT_PER_NUC
+            dptr!(&sab_data.slot_inc_e_off),          //125 P_SAB_SLOT_INC_E_OFF
+            dptr!(&sab_data.slot_n_inc),              //126 P_SAB_SLOT_N_INC
+            dptr!(&sab_data.slot_eout_table_off),     //127 P_SAB_SLOT_EOUT_TABLE_OFF
+            dptr!(&sab_data.slot_mu_table_off),       //128 P_SAB_SLOT_MU_TABLE_OFF
+            dptr!(&sab_data.slot_emax),               //129 P_SAB_SLOT_EMAX
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;
@@ -2223,7 +2410,7 @@ impl GpuTransportContext {
         let mut d_trace: CudaSlice<f64> = self.stream.alloc_zeros(trace_size)?;
         let mut d_step_counts: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
 
-        let ptx = nvrtc::compile_ptx(TRANSPORT_KERNELS)?;
+        let ptx = nvrtc::compile_ptx_with_opts(TRANSPORT_KERNELS, transport_kernel_options())?;
         let module = self._ctx.load_module(ptx)?;
         let k_init = module.load_function("init_source")?;
         let k_trace = module.load_function("debug_transport_trace")?;

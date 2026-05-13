@@ -1,25 +1,208 @@
 {
-  "_doc": "Internal Rust regression — not a published ICSBEP case. The canonical PWR pin cell built into `pwr_pincell` is morally an LCT-007-style geometry (3.1 % UO₂, 1.26 cm pitch, reflective xy, reflective z → k_inf), but the binary's hard-coded composition doesn't match any specific LCT card. Tracked here as an `INTERNAL` suite case so the bench harness exercises the kinf-flavoured output parser and catches regressions in pwr_pincell.rs without falsely advertising as ICSBEP coverage. Replace with real LCT-001..050 entries once `Geometry::from_json` lands or `pwr_pincell` is parameterised on enrichment/pitch.",
+  "_doc": "Single PWR pin cell, KARMA 1.1 ACE7 17x17 design (KAERI). 3.0 wt%% U-235 UO2 fuel at 900 K, Zircaloy clad at 600 K, light water moderator at 600 K with 500 ppm soluble boron and c_H_in_H2O.h5 thermal scattering. Reflective square box on all six faces => k_inf. Dimensions: fuel r=0.40958, clad IR=0.41873, clad OR=0.47600, pin pitch=1.26230 cm. Reference k_inf from MCNP4C2 (continuous ENDF/B-VI R8) is 1.24206 +/- 0.00025 — Lee et al., M&C 2011, Rio de Janeiro, Table VI row B01PT3V28.",
   "benchmark": {
-    "suite": "INTERNAL",
-    "case_id": "internal-pwr-pincell-svd5",
-    "case_name": "PWR pin cell, 3.1 % UO₂, 1.26 cm pitch (k_inf)",
-    "category": "LEU-LATTICE-INTERNAL",
-    "k_eff_reference": 1.32775,
-    "k_eff_sigma": 0.00200,
-    "source": "Internal Rust regression — value pinned to the resume.md `[pwr]` 80 b × 5 k × 5 seeds baseline, sigma reflects current within-engine seed-to-seed scatter, not σ_exp."
+    "suite": "KARMA-MC11",
+    "case_id": "B01PT3V28",
+    "case_name": "PWR pin cell, 3.0 wt%% U-235 (KARMA ACE7)",
+    "category": "PWR",
+    "k_eff_reference": 1.24206,
+    "k_eff_sigma": 0.00025,
+    "source": "Kyung-Hoon Lee, Kang-Seog Kim, Ser-Gi Hong, Jae-Seung Song (KAERI), 'KARMA 1.1 Benchmark Calculations for the Numerical Benchmark Problems and the Critical Experiments,' International Conference on Mathematics and Computational Methods Applied to Nuclear Science and Engineering (M&C 2011), Rio de Janeiro, Brazil, May 8-12, 2011. ISBN 978-85-63688-00-2. Reference: B01PT3V28 = single ACE7 pin cell, 3.0 wt%% U-235, no burnable poison, no control, MCNP4C2 continuous ENDF/B-VI R8.",
+    "recommended_settings": {
+      "_doc": "Thermal pin cell with reflective box; needs more inactive (~50) for source convergence in the soft spectrum.",
+      "batches": 200,
+      "inactive": 50,
+      "particles": 20000,
+      "seeds": 5
+    }
   },
-  "runner": {
-    "binary": "pwr_pincell",
-    "args": [
-      "--mode", "svd",
-      "--rank", "5",
-      "--batches", "100",
-      "--inactive", "20",
-      "--particles", "20000",
-      "--seeds", "3"
+  "scene": {
+    "surfaces": [
+      {"type": "CylinderZ", "center_x": 0.0, "center_y": 0.0, "radius": 0.40958, "bc": "Transmission"},
+      {"type": "CylinderZ", "center_x": 0.0, "center_y": 0.0, "radius": 0.41873, "bc": "Transmission"},
+      {"type": "CylinderZ", "center_x": 0.0, "center_y": 0.0, "radius": 0.47600, "bc": "Transmission"},
+      {"type": "PlaneX", "x0": -0.63115, "bc": "Reflective"},
+      {"type": "PlaneX", "x0":  0.63115, "bc": "Reflective"},
+      {"type": "PlaneY", "y0": -0.63115, "bc": "Reflective"},
+      {"type": "PlaneY", "y0":  0.63115, "bc": "Reflective"},
+      {"type": "PlaneZ", "z0": -0.63115, "bc": "Reflective"},
+      {"type": "PlaneZ", "z0":  0.63115, "bc": "Reflective"}
     ],
-    "data_arg": "positional",
-    "k_label": "k_inf"
+    "cells": [
+      {
+        "id": 1,
+        "region": {
+          "op": "Intersection",
+          "left": {"op": "HalfSpace", "surface_idx": 0, "positive": false},
+          "right": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 3, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 4, "positive": false}
+              },
+              "right": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 5, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 6, "positive": false}
+              }
+            },
+            "right": {
+              "op": "Intersection",
+              "left": {"op": "HalfSpace", "surface_idx": 7, "positive": true},
+              "right": {"op": "HalfSpace", "surface_idx": 8, "positive": false}
+            }
+          }
+        },
+        "fill": {"type": "Material", "material_idx": 0},
+        "temperature": 900.0
+      },
+      {
+        "id": 2,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {"op": "HalfSpace", "surface_idx": 0, "positive": true},
+            "right": {"op": "HalfSpace", "surface_idx": 1, "positive": false}
+          },
+          "right": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 3, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 4, "positive": false}
+              },
+              "right": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 5, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 6, "positive": false}
+              }
+            },
+            "right": {
+              "op": "Intersection",
+              "left": {"op": "HalfSpace", "surface_idx": 7, "positive": true},
+              "right": {"op": "HalfSpace", "surface_idx": 8, "positive": false}
+            }
+          }
+        },
+        "fill": {"type": "Material", "material_idx": 1},
+        "temperature": 600.0
+      },
+      {
+        "id": 3,
+        "region": {
+          "op": "Intersection",
+          "left": {
+            "op": "Intersection",
+            "left": {"op": "HalfSpace", "surface_idx": 1, "positive": true},
+            "right": {"op": "HalfSpace", "surface_idx": 2, "positive": false}
+          },
+          "right": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 3, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 4, "positive": false}
+              },
+              "right": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 5, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 6, "positive": false}
+              }
+            },
+            "right": {
+              "op": "Intersection",
+              "left": {"op": "HalfSpace", "surface_idx": 7, "positive": true},
+              "right": {"op": "HalfSpace", "surface_idx": 8, "positive": false}
+            }
+          }
+        },
+        "fill": {"type": "Material", "material_idx": 2},
+        "temperature": 600.0
+      },
+      {
+        "id": 4,
+        "region": {
+          "op": "Intersection",
+          "left": {"op": "HalfSpace", "surface_idx": 2, "positive": true},
+          "right": {
+            "op": "Intersection",
+            "left": {
+              "op": "Intersection",
+              "left": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 3, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 4, "positive": false}
+              },
+              "right": {
+                "op": "Intersection",
+                "left": {"op": "HalfSpace", "surface_idx": 5, "positive": true},
+                "right": {"op": "HalfSpace", "surface_idx": 6, "positive": false}
+              }
+            },
+            "right": {
+              "op": "Intersection",
+              "left": {"op": "HalfSpace", "surface_idx": 7, "positive": true},
+              "right": {"op": "HalfSpace", "surface_idx": 8, "positive": false}
+            }
+          }
+        },
+        "fill": {"type": "Material", "material_idx": 3},
+        "temperature": 600.0
+      }
+    ],
+    "universes": [
+      {"id": 0, "cell_indices": [0, 1, 2, 3]}
+    ],
+    "materials": [
+      {
+        "name": "UO2 fuel (3.0 wt% U-235, 10.4 g/cm^3, 900 K) - KARMA ACE7",
+        "temperature": 900.0,
+        "nuclides": [
+          {"zaid": 92235, "label": "U-235", "atom_density": 0.000696},
+          {"zaid": 92238, "label": "U-238", "atom_density": 0.022500},
+          {"zaid": 8016,  "label": "O-16",  "atom_density": 0.046400}
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Helium gap (low-density He, 600 K)",
+        "temperature": 600.0,
+        "nuclides": [
+          {"zaid": 2004, "label": "He-4", "atom_density": 2.4e-06}
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Zircaloy-4 clad (6.55 g/cm^3, 600 K)",
+        "temperature": 600.0,
+        "nuclides": [
+          {"zaid": 40090, "label": "Zr-90", "atom_density": 0.022932},
+          {"zaid": 40091, "label": "Zr-91", "atom_density": 0.004996},
+          {"zaid": 40092, "label": "Zr-92", "atom_density": 0.007636},
+          {"zaid": 40094, "label": "Zr-94", "atom_density": 0.007740}
+        ],
+        "thermal_files": []
+      },
+      {
+        "name": "Borated water moderator (0.74 g/cm^3, 600 K, 500 ppm boron, c_H_in_H2O)",
+        "temperature": 600.0,
+        "nuclides": [
+          {"zaid": 1001, "label": "H-1",  "atom_density": 0.049486, "thermal_file": "c_H_in_H2O.h5"},
+          {"zaid": 8016, "label": "O-16", "atom_density": 0.024743},
+          {"zaid": 5010, "label": "B-10", "atom_density": 4.12e-06},
+          {"zaid": 5011, "label": "B-11", "atom_density": 1.65e-05}
+        ],
+        "thermal_files": ["c_H_in_H2O.h5"]
+      }
+    ],
+    "root_universe_id": 0
   }
 }
