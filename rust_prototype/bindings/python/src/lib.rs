@@ -1735,7 +1735,7 @@ fn run_gpu_eigenvalue(
     py: Python<'_>,
     scene: &PyScene,
     config: &SimConfig,
-    kernels: Vec<xs_provider::NuclideKernels>,
+    kernels: Vec<Arc<xs_provider::NuclideKernels>>,
     rank: usize,
     materials_rt: &[RustMaterial],
     surfaces: &[Surface],
