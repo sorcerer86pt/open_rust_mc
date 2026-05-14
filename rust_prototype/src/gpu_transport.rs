@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 130;
+const N_PARAMS: usize = 136;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -166,6 +166,21 @@ pub struct GpuNuclideData {
     pub watt_u: CudaSlice<f64>,
     pub watt_nuc_offsets: CudaSlice<i32>,
     pub watt_nuc_n: CudaSlice<i32>,
+    // Maxwell (Law 7) / Evaporation (Law 9) closed-form fission χ
+    // per nuclide. Single shared θ(E_in) table — both laws use the
+    // same parameter table; `maxevap_law[i]` selects the sampler at
+    // collision time (7 = Maxwell, 9 = Evaporation, 0 = none). When
+    // `maxevap_nuc_n[i] == 0` the kernel falls through to Watt (104)
+    // and then to the Cranberg fallback (the existing dispatch
+    // chain in transport.cu::sample_fission_energy). Closes the
+    // wrong-spectrum GPU bias for U-233 (Maxwell), U-234 (Maxwell),
+    // and Pu-240/Pu-241 (Evaporation in several evaluations).
+    pub maxevap_inc_energies: CudaSlice<f64>,
+    pub maxevap_theta: CudaSlice<f64>,
+    pub maxevap_u: CudaSlice<f64>,
+    pub maxevap_law: CudaSlice<i32>,
+    pub maxevap_nuc_offsets: CudaSlice<i32>,
+    pub maxevap_nuc_n: CudaSlice<i32>,
     // URR probability tables
     pub urr_energies: CudaSlice<f64>,
     pub urr_cum_prob: CudaSlice<f64>,
@@ -807,6 +822,15 @@ impl GpuTransportContext {
             dptr!(&sab_data.slot_eout_table_off),
             dptr!(&sab_data.slot_mu_table_off),
             dptr!(&sab_data.slot_emax),
+            // Maxwell (Law 7) / Evaporation (Law 9) closed-form χ —
+            // slots 130-135. See P_MAXEVAP_* in transport.cu and the
+            // dispatch in sample_fission_energy.
+            dptr!(&nuc_data.maxevap_inc_energies),
+            dptr!(&nuc_data.maxevap_theta),
+            dptr!(&nuc_data.maxevap_u),
+            dptr!(&nuc_data.maxevap_law),
+            dptr!(&nuc_data.maxevap_nuc_offsets),
+            dptr!(&nuc_data.maxevap_nuc_n),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1270,6 +1294,17 @@ impl GpuTransportContext {
         let mut watt_nuc_off_vec = vec![0_i32; n_nuc];
         let mut watt_nuc_n_vec = vec![0_i32; n_nuc];
 
+        // Per-nuclide Maxwell (Law 7) / Evaporation (Law 9) θ(E_in)
+        // table — single 1D, shared by both laws; the per-nuclide
+        // `maxevap_law_vec[i]` ∈ {0=none, 7=Maxwell, 9=Evaporation}
+        // selects the sampler on the device.
+        let mut maxevap_inc_e_vec: Vec<f64> = Vec::new();
+        let mut maxevap_theta_vec: Vec<f64> = Vec::new();
+        let mut maxevap_u_vec = vec![0.0_f64; n_nuc];
+        let mut maxevap_law_vec = vec![0_i32; n_nuc];
+        let mut maxevap_nuc_off_vec = vec![0_i32; n_nuc];
+        let mut maxevap_nuc_n_vec = vec![0_i32; n_nuc];
+
         for (nuc_idx, nuc) in nuclides.iter().enumerate() {
             if let Some(ref edist) = nuc.fission_energy_dist {
                 use crate::hdf5_reader::FissionEnergyLaw;
@@ -1330,18 +1365,29 @@ impl GpuTransportContext {
                             ));
                         }
                     }
-                    Some(FissionEnergyLaw::Maxwell(_))
-                    | Some(FissionEnergyLaw::Evaporation(_)) => {
-                        // Not yet handled on GPU — the per-collision
-                        // sampler in transport.cu will fall through to
-                        // the math-correct Watt fallback with Cranberg
-                        // parameters. Logged once at load time so the
-                        // bias is visible.
-                        eprintln!(
-                            "warning: nuclide idx {nuc_idx}: Maxwell / Evaporation \
-                             fission χ not yet uploaded to GPU — falling back to \
-                             U-235 Cranberg Watt parameters at runtime."
-                        );
+                    Some(FissionEnergyLaw::Maxwell(m))
+                    | Some(FissionEnergyLaw::Evaporation(m)) => {
+                        // Maxwell (Law 7) and Evaporation (Law 9) both
+                        // carry the same single 1D θ(E_in) table; the
+                        // device-side sampler chooses between
+                        //     χ(E) ∝ √E · exp(−E/θ)   (Maxwell)
+                        //     χ(E) ∝   E · exp(−E/θ)  (Evaporation)
+                        // based on `maxevap_law_vec[nuc_idx]`. The CPU
+                        // reference samplers live in
+                        // `hdf5_reader.rs::{sample_maxwell,sample_evaporation}`.
+                        let law = match edist.closed_form {
+                            Some(FissionEnergyLaw::Maxwell(_)) => 7,
+                            Some(FissionEnergyLaw::Evaporation(_)) => 9,
+                            _ => 0,
+                        };
+                        let off = maxevap_inc_e_vec.len() as i32;
+                        let n = m.theta_energies.len();
+                        maxevap_nuc_off_vec[nuc_idx] = off;
+                        maxevap_nuc_n_vec[nuc_idx] = n as i32;
+                        maxevap_u_vec[nuc_idx] = m.u;
+                        maxevap_law_vec[nuc_idx] = law;
+                        maxevap_inc_e_vec.extend_from_slice(&m.theta_energies);
+                        maxevap_theta_vec.extend_from_slice(&m.theta_values);
                     }
                 }
             }
@@ -1424,6 +1470,17 @@ impl GpuTransportContext {
             watt_inc_e_vec.push(0.0);
             watt_a_vec.push(0.0);
             watt_b_vec.push(0.0);
+        }
+        // Same sentinel rule for the Maxwell / Evaporation θ(E_in) table.
+        if maxevap_inc_e_vec.is_empty() {
+            maxevap_inc_e_vec.push(0.0);
+            maxevap_theta_vec.push(0.0);
+        }
+        let n_with_maxevap = maxevap_nuc_n_vec.iter().filter(|&&n| n > 0).count();
+        if n_with_maxevap > 0 {
+            println!(
+                "  GPU: Maxwell/Evaporation χ uploaded for {n_with_maxevap} / {n_nuc} nuclide(s)"
+            );
         }
 
         // ── Pack URR probability tables ──
@@ -1564,6 +1621,12 @@ impl GpuTransportContext {
             watt_u: self.stream.clone_htod(&watt_u_vec)?,
             watt_nuc_offsets: self.stream.clone_htod(&watt_nuc_off_vec)?,
             watt_nuc_n: self.stream.clone_htod(&watt_nuc_n_vec)?,
+            maxevap_inc_energies: self.stream.clone_htod(&maxevap_inc_e_vec)?,
+            maxevap_theta: self.stream.clone_htod(&maxevap_theta_vec)?,
+            maxevap_u: self.stream.clone_htod(&maxevap_u_vec)?,
+            maxevap_law: self.stream.clone_htod(&maxevap_law_vec)?,
+            maxevap_nuc_offsets: self.stream.clone_htod(&maxevap_nuc_off_vec)?,
+            maxevap_nuc_n: self.stream.clone_htod(&maxevap_nuc_n_vec)?,
             urr_energies: self.stream.clone_htod(&urr_e_vec)?,
             urr_cum_prob: self.stream.clone_htod(&urr_cp_vec)?,
             urr_total_f: self.stream.clone_htod(&urr_tf_vec)?,
@@ -2209,6 +2272,12 @@ impl GpuTransportContext {
             dptr!(&sab_data.slot_eout_table_off),     //127 P_SAB_SLOT_EOUT_TABLE_OFF
             dptr!(&sab_data.slot_mu_table_off),       //128 P_SAB_SLOT_MU_TABLE_OFF
             dptr!(&sab_data.slot_emax),               //129 P_SAB_SLOT_EMAX
+            dptr!(&nuc_data.maxevap_inc_energies),    //130 P_MAXEVAP_INC_E
+            dptr!(&nuc_data.maxevap_theta),           //131 P_MAXEVAP_THETA
+            dptr!(&nuc_data.maxevap_u),               //132 P_MAXEVAP_U
+            dptr!(&nuc_data.maxevap_law),             //133 P_MAXEVAP_LAW
+            dptr!(&nuc_data.maxevap_nuc_offsets),     //134 P_MAXEVAP_NUC_OFF
+            dptr!(&nuc_data.maxevap_nuc_n),           //135 P_MAXEVAP_NUC_N
         ];
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;

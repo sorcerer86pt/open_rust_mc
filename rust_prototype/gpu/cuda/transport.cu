@@ -238,7 +238,23 @@
 #define P_SAB_SLOT_MU_TABLE_OFF 128
 #define P_SAB_SLOT_EMAX         129
 
-#define N_PARAMS            130
+// ── Maxwell (ENDF Law 7) / Evaporation (ENDF Law 9) closed-form χ.
+// Per-nuclide θ(E_in) table — single 1D, shared by both laws.
+// `P_MAXEVAP_LAW[i]` is 7 for Maxwell, 9 for Evaporation, 0 for neither.
+// Dispatched from sample_fission_energy when tabular χ (P_FIS_*) is
+// absent AND no Watt parameters (P_WATT_*) were uploaded — replaces
+// the prior fall-through to the U-235 Cranberg Watt parameters that
+// was biasing every U-233 (Maxwell), U-234 (Maxwell), and several
+// Pu-240 / Pu-241 (Evaporation) GPU benchmark on fast-spectrum
+// scenes by ~100-400 pcm.
+#define P_MAXEVAP_INC_E         130
+#define P_MAXEVAP_THETA         131
+#define P_MAXEVAP_U             132
+#define P_MAXEVAP_LAW           133
+#define P_MAXEVAP_NUC_OFF       134
+#define P_MAXEVAP_NUC_N         135
+
+#define N_PARAMS            136
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -547,6 +563,63 @@ __device__ __forceinline__ double sample_watt_ab(
     return fmax(e_out, 1e-5);
 }
 
+/// Lin-lin interpolation of θ(E_in) on the per-nuclide grid stored
+/// at P_MAXEVAP_INC_E / P_MAXEVAP_THETA. Mirrors
+/// `MaxwellLaw::theta_at` in `hdf5_reader.rs`.
+__device__ __forceinline__ double maxevap_theta_at(
+    double E_inc, const double* e_grid, const double* theta, int n)
+{
+    if (n <= 0) return 1.0;
+    if (E_inc <= e_grid[0]) return theta[0];
+    if (E_inc >= e_grid[n - 1]) return theta[n - 1];
+    int lo = 0, hi = n - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (e_grid[mid] <= E_inc) lo = mid; else hi = mid;
+    }
+    double frac = (E_inc - e_grid[lo]) / fmax(e_grid[lo + 1] - e_grid[lo], 1e-30);
+    return theta[lo] + frac * (theta[lo + 1] - theta[lo]);
+}
+
+/// Maxwell fission spectrum χ(E) ∝ √E · exp(−E/θ).
+/// Coveyou–Macpherson rejection sampler — mirrors
+/// `MaxwellLaw::sample_maxwell` in `hdf5_reader.rs`:
+///     E = −θ · (ln ξ₁ + cos²(π ξ₂ / 2) · ln ξ₃)
+/// with rejection if E > E_in − u (the closed-form ENDF restriction).
+/// Bounded retry — same 100-try safety valve as the CPU sampler.
+__device__ __forceinline__ double sample_maxwell_theta(
+    double E_inc, double theta, double u, PcgState* rng)
+{
+    double max_e = fmax(E_inc - u, 1e-5);
+    for (int t = 0; t < 100; ++t) {
+        double xi1 = fmax(pcg_uniform(rng), 1e-30);
+        double xi2 = pcg_uniform(rng);
+        double xi3 = fmax(pcg_uniform(rng), 1e-30);
+        double c   = cos(PI * 0.5 * xi2);
+        double e   = -theta * (log(xi1) + c * c * log(xi3));
+        if (e > 0.0 && e <= max_e) return fmax(e, 1e-5);
+    }
+    return fmax(fmin(theta, max_e), 1e-5);
+}
+
+/// Evaporation fission spectrum χ(E) ∝ E · exp(−E/θ).
+/// Direct inversion via the product of two uniforms — mirrors
+/// `MaxwellLaw::sample_evaporation` in `hdf5_reader.rs`:
+///     E = −θ · ln(ξ₁ · ξ₂)
+/// with rejection if E > E_in − u.
+__device__ __forceinline__ double sample_evaporation_theta(
+    double E_inc, double theta, double u, PcgState* rng)
+{
+    double max_e = fmax(E_inc - u, 1e-5);
+    for (int t = 0; t < 100; ++t) {
+        double xi1 = fmax(pcg_uniform(rng), 1e-30);
+        double xi2 = fmax(pcg_uniform(rng), 1e-30);
+        double e   = -theta * log(xi1 * xi2);
+        if (e > 0.0 && e <= max_e) return fmax(e, 1e-5);
+    }
+    return fmax(fmin(theta, max_e), 1e-5);
+}
+
 __device__ double sample_fission_energy(
     double E_inc, PcgState* rng, Params p, int hit_nuc)
 {
@@ -590,11 +663,33 @@ __device__ double sample_fission_energy(
             }
             return fmin(sample_watt_ab(a_eV, b_inv_eV, rng), max_e);
         }
-        // No Watt parameters either — fall back to U-235 Cranberg.
-        // This path fires only for nuclides whose evaluation carries
-        // a fission-spectrum law the engine doesn't yet handle on
-        // GPU (Maxwell / Evaporation / Madland-Nix). The host upload
-        // logs a one-time warning when it skips one of those laws.
+        // Maxwell (Law 7) / Evaporation (Law 9) — single θ(E_in)
+        // table per nuclide, sampler chosen by `P_MAXEVAP_LAW`. The
+        // host packs this slot for every nuclide whose ENDF
+        // evaluation carries one of those laws (U-233 / U-234 are
+        // Maxwell; Pu-240 / Pu-241 are Evaporation in several
+        // evaluations). Closes the wrong-spectrum GPU bias that the
+        // Cranberg fallback below was producing on those nuclides.
+        int me_law = __ldg(&PTR_I(p, P_MAXEVAP_LAW)[hit_nuc]);
+        int me_n   = __ldg(&PTR_I(p, P_MAXEVAP_NUC_N)[hit_nuc]);
+        if (me_n > 0 && (me_law == 7 || me_law == 9)) {
+            int me_off = __ldg(&PTR_I(p, P_MAXEVAP_NUC_OFF)[hit_nuc]);
+            const double* me_e  = &PTR_D(p, P_MAXEVAP_INC_E)[me_off];
+            const double* me_th = &PTR_D(p, P_MAXEVAP_THETA)[me_off];
+            double theta  = maxevap_theta_at(E_inc, me_e, me_th, me_n);
+            double u_cut  = __ldg(&PTR_D(p, P_MAXEVAP_U)[hit_nuc]);
+            if (me_law == 7) {
+                return sample_maxwell_theta(E_inc, theta, u_cut, rng);
+            } else {
+                return sample_evaporation_theta(E_inc, theta, u_cut, rng);
+            }
+        }
+        // No Watt / Maxwell / Evaporation parameters — fall back to
+        // U-235 Cranberg. This path now fires only for nuclides whose
+        // evaluation carries a law the engine still doesn't handle
+        // (Madland-Nix, ...). Safe to keep as a numerical floor; the
+        // upload no longer logs a warning for Maxwell / Evaporation
+        // since those are handled above.
         return sample_watt_ab(0.988e6, 2.249e-6, rng);
     }
     const double* inc_e = &PTR_D(p, P_FIS_INC_E)[fi_off];
