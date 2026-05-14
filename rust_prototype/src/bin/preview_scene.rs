@@ -89,6 +89,32 @@ fn resolve_data_dir(name: &Path) -> PathBuf {
 #[command(
     name = "preview_scene",
     about = "Interactive XY-cross-section preview of an ICSBEP / internal scene JSON",
+    long_about = "\
+Render a top-down XY cross-section of an ICSBEP scene JSON.
+
+Three output paths:
+
+  - Interactive window (default, requires --features preview):
+      Scroll wheel = multiplicative zoom around viewport centre
+      Window drag  = pan
+      Window resize = zoom (world bounds constant)
+      R = reset to initial viewport
+      L = toggle legend
+      Escape = quit
+
+  - Headless PNG  (--png-out <PATH>):
+      Single static render. Use --resolution to control pixel size
+      (4000×4000 gives ample detail for zoom-in via any image
+      viewer; PNG compresses solid-colour regions to ~1-5 MB).
+      Works without the `preview` feature.
+
+  - Headless PPM (--ppm-out <PATH>):
+      Same as PNG but raw RGB. Use if downstream tools require it.
+
+Auto-viewport: walks geometry surfaces + lattices, centres on the
+midpoint, samples outward to tighten when the explicit bounds are
+loose. --zoom <factor> scales the result for scenes where the
+fixture is small inside a large containment (PST-012)."
 )]
 struct Args {
     /// Path to the scene JSON (e.g. bench/icsbep/pwr_assembly_17x17.json).
@@ -129,6 +155,14 @@ struct Args {
     /// `cargo run --bin preview_scene -- ... --ppm-out out.ppm`.
     #[arg(long)]
     ppm_out: Option<PathBuf>,
+
+    /// Render the cross-section to a PNG file and exit (no window).
+    /// PNG is preferred over PPM for geometry diagrams — solid-
+    /// colour regions compress aggressively (a 4000×4000 PPM is
+    /// 48 MB raw; the same content as PNG lands at ~2-5 MB). Open
+    /// in any browser, image viewer, or converted IDE preview.
+    #[arg(long)]
+    png_out: Option<PathBuf>,
 
     /// Multiplier applied to the auto-computed half-size. Default
     /// `1.0` = the binary's best guess. Use values < 1 to zoom in
@@ -244,7 +278,8 @@ fn run_preview(args: &Args) {
                 open_rust_mc::geometry::Vec3::new( 0.0, -1.0, 0.0), z_slice, rough_half);
             let tight = [probe_x_pos, probe_x_neg, probe_y_pos, probe_y_neg]
                 .iter().fold(0.0_f64, |a, &b| a.max(b));
-            let half = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+            let half_raw = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+            let half = half_raw * args.zoom;
             Viewport {
                 x_min: cx - half,
                 x_max: cx + half,
@@ -255,7 +290,7 @@ fn run_preview(args: &Args) {
                 height: args.resolution,
             }
         }
-        (None, None) => Viewport::square_centered(10.0, z_slice, args.resolution),
+        (None, None) => Viewport::square_centered(10.0 * args.zoom, z_slice, args.resolution),
     };
 
     // ── Per-pixel render closure (matches pwr_assembly's structure) ──
@@ -649,14 +684,8 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
         eprintln!();
     }
 
-    // Write PPM P6 (binary RGB).
-    use std::io::Write;
-    let mut out = std::fs::File::create(ppm_path)
-        .unwrap_or_else(|e| panic!("create {}: {e}", ppm_path.display()));
-    write!(out, "P6\n{} {}\n255\n", res, res).unwrap();
-    for px in &buf {
-        out.write_all(px).unwrap();
-    }
+    // Write the frame to disk in the requested format.
+    write_image(ppm_path, &buf, res);
     eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
         ppm_path.display(), res, res, 0.5 * (x_max - x_min), z_slice);
 
@@ -703,22 +732,54 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             .and_then(|s| s.to_str())
             .unwrap_or("preview");
         let parent = ppm_path.parent().unwrap_or_else(|| Path::new("."));
-        let stage_path = parent.join(format!("{stem}_zoom{factor}.ppm"));
-        let mut s_out = std::fs::File::create(&stage_path)
-            .unwrap_or_else(|e| panic!("create {}: {e}", stage_path.display()));
-        write!(s_out, "P6\n{} {}\n255\n", res, res).unwrap();
-        for px in &s_buf {
-            s_out.write_all(px).unwrap();
-        }
+        let ext = ppm_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("ppm");
+        let stage_path = parent.join(format!("{stem}_zoom{factor}.{ext}"));
+        write_image(&stage_path, &s_buf, res);
         eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
             stage_path.display(), res, res, stage_half, z_slice);
     }
 }
 
+/// Write an RGB framebuffer to disk. Picks PPM (binary P6) or PNG
+/// from the path's extension; PNG is encoded by the `png` crate
+/// with default compression (level 6), which is plenty for the
+/// solid-colour geometry diagrams the preview emits. PPM stays as
+/// a fallback for the dep-free case (no `png` crate available
+/// historically — kept for forward / backward compatibility and
+/// for downstream tools that prefer raw RGB).
+fn write_image(path: &Path, buf: &[[u8; 3]], res: u32) {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("ppm");
+    if ext.eq_ignore_ascii_case("png") {
+        let file = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), res, res);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        // Flatten [[u8; 3]] → [u8] (already contiguous in memory).
+        let flat: &[u8] = bytemuck::cast_slice(buf);
+        writer.write_image_data(flat).expect("png data");
+    } else {
+        use std::io::Write as _;
+        let mut out = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        write!(out, "P6\n{} {}\n255\n", res, res).unwrap();
+        for px in buf {
+            out.write_all(px).unwrap();
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
-    if let Some(ppm) = args.ppm_out.as_deref() {
-        render_ppm(&args, ppm);
+    // Headless render: `--ppm-out` and `--png-out` both route through
+    // `render_ppm` (despite the legacy name) since the format is
+    // picked up from the file extension by `write_image`.
+    if let Some(out) = args.png_out.as_deref().or(args.ppm_out.as_deref()) {
+        render_ppm(&args, out);
         return;
     }
     run_preview(&args);

@@ -72,6 +72,12 @@ serde_json = "1"
 dashmap = "6"
 blake3 = "1"
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
+# Native PNG encoder for `preview_scene` headless renders. Solid-
+# colour geometry diagrams compress aggressively (~10-100× smaller
+# than the raw PPM), so 4000×4000 renders land at ~2-5 MB instead
+# of 48 MB. Pure-Rust, only deflate / miniz_oxide as transitive
+# deps — no native code.
+png = "0.17"
 
 [features]
 default = []
