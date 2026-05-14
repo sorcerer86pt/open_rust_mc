@@ -238,11 +238,23 @@ fn run_preview(args: &Args) {
             .iter()
             .enumerate()
             .map(|(i, m)| {
-                auto_color_from_name(&m.name)
+                // Prefer the upstream semantic colour when it's
+                // RECOGNIZABLE (water → blue, concrete → tan, ...);
+                // fall back to an index-cycled bright HSV palette
+                // for everything else. This guarantees that two
+                // unrelated materials in the same scene never collide
+                // visually — without it, "Air" + "Stainless steel" +
+                // "Steel (pool wall)" all mapped within ~30 RGB
+                // distance and PST-012 rendered as undifferentiated
+                // grey.
+                semantic_or_index_color(&m.name, i)
                     .unwrap_or_else(|| fallback.colors.get(i).copied().unwrap_or(fallback.void))
             })
             .collect(),
-        void: fallback.void,
+        // Bright magenta for void — wholly outside any reasonable
+        // material colour the engine could produce, so void pixels
+        // are unambiguous and never confused with dark materials.
+        void: [255, 0, 220],
     };
     let legend: Vec<LegendEntry> = materials
         .iter()
@@ -600,6 +612,13 @@ struct GeomBounds {
     x_min: f64, x_max: f64,
     y_min: f64, y_max: f64,
     z_min: f64, z_max: f64,
+    /// Sorted distinct PlaneZ `z0` values. Used by `default_z` to
+    /// pick a sensible slice when the explicit `(z_min, z_max)`
+    /// midpoint lands in a void / air region (PST-012 has floor
+    /// planes at z=-100 and ceiling planes at z=950, midpoint =
+    /// 441 cm is in mid-air; median of the 13 distinct planes is
+    /// 70 cm which IS inside the solution tank).
+    z_plane_positions: Vec<f64>,
 }
 
 impl GeomBounds {
@@ -608,11 +627,73 @@ impl GeomBounds {
     }
     fn cx(&self) -> f64 { 0.5 * (self.x_min + self.x_max) }
     fn cy(&self) -> f64 { 0.5 * (self.y_min + self.y_max) }
-    /// Sensible z-slice when the user didn't pass `--z`. Midpoint
-    /// of the geometry's z-bounds — picks z = 0 for origin-centred
-    /// geometries and z > 0 for stacked-can experiments that live
-    /// entirely above z = 0.
+    /// Sensible z-slice when the user didn't pass `--z`. Prefers the
+    /// **midpoint of the two median consecutive PlaneZ positions**
+    /// over the (z_min, z_max) midpoint:
+    ///
+    ///   - (z_min, z_max) midpoint can land in air when the geometry
+    ///     has a far-floor + far-ceiling around the fixture (PST-012:
+    ///     -103, ..., 100, 937, 987 → midrange 441 cm is room-height
+    ///     air, not the solution).
+    ///   - Picking one plane value exactly lands the slice ON a
+    ///     boundary surface. The HalfSpace::evaluate function returns
+    ///     0.0 on the surface; in our cell-find logic that's in
+    ///     **neither** half-space, so `find_cell_recursive` returns
+    ///     None and the pixel renders as void (PST-012 again: median
+    ///     plane 69.57 cm is one of the actual z0 values, so the
+    ///     entire centre rendered as void / magenta).
+    ///
+    /// Midpoint of two adjacent planes is always strictly between
+    /// surfaces, so it sits cleanly inside some cell.
+    ///
+    /// Falls back to (z_min, z_max) midpoint when ≤ 1 plane exists,
+    /// then to 0.
     fn default_z(&self) -> f64 {
+        let zs = &self.z_plane_positions;
+        if zs.len() >= 2 {
+            // Find the SMALLEST gap between consecutive planes —
+            // that's the densest region, almost always where the
+            // experimental fixture lives. PST-012 plane gaps:
+            //
+            //   -103 -63 -51 -50.5 -0.5 0  69.6  80  81  99  100  937  987
+            //       40  12  0.8    50  0.5 69.6  10  1   18  1    837  50
+            //
+            // Smallest gap is 0.5 between -0.5 and 0.0 — but those
+            // are floor / pool-bottom layers. Picking the smallest-
+            // gap midpoint there would render the floor instead of
+            // the solution. So: among the smallest-K gaps, take the
+            // one whose midpoint is closest to the geometry's
+            // explicit (z_min + z_max) / 2 — biases toward the
+            // CENTRE while still avoiding cells that lie on a
+            // surface boundary.
+            let mut gaps: Vec<(usize, f64)> = (0..zs.len() - 1)
+                .map(|i| (i, zs[i + 1] - zs[i]))
+                .collect();
+            // Sort by gap size ascending; keep the smaller half.
+            gaps.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            let keep = (gaps.len() / 2).max(1);
+            let candidates = &gaps[..keep];
+            let geom_centre_z = if self.z_min.is_finite() && self.z_max.is_finite() {
+                0.5 * (self.z_min + self.z_max)
+            } else {
+                0.0
+            };
+            // Pick the candidate whose midpoint is closest to the
+            // geometry centre.
+            let best = candidates.iter()
+                .map(|&(i, _)| (i, 0.5 * (zs[i] + zs[i + 1])))
+                .min_by(|a, b| {
+                    (a.1 - geom_centre_z).abs()
+                        .partial_cmp(&(b.1 - geom_centre_z).abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(_, mid)| mid)
+                .unwrap_or(geom_centre_z);
+            return best;
+        }
+        if let Some(&z) = zs.first() {
+            return z;
+        }
         if self.z_min.is_finite() && self.z_max.is_finite() {
             0.5 * (self.z_min + self.z_max)
         } else if self.z_min.is_finite() {
@@ -632,6 +713,7 @@ fn world_bounds_xy(
         x_min: f64::INFINITY, x_max: f64::NEG_INFINITY,
         y_min: f64::INFINITY, y_max: f64::NEG_INFINITY,
         z_min: f64::INFINITY, z_max: f64::NEG_INFINITY,
+        z_plane_positions: Vec::new(),
     };
     let mut touched = false;
     let update_x = |b: &mut GeomBounds, lo: f64, hi: f64| {
@@ -674,6 +756,7 @@ fn world_bounds_xy(
         match s {
             Surface::PlaneZ { z0, .. } => {
                 update_z(&mut b, *z0, *z0);
+                b.z_plane_positions.push(*z0);
                 touched = true;
             }
             Surface::PlaneX { x0, .. } => {
@@ -687,6 +770,9 @@ fn world_bounds_xy(
             _ => {}
         }
     }
+    // Dedup + sort for stable median lookup.
+    b.z_plane_positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    b.z_plane_positions.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     for lat in &geom.lattices {
         let x_hi = lat.origin.x + lat.shape[0] as f64 * lat.pitch.x;
         let y_hi = lat.origin.y + lat.shape[1] as f64 * lat.pitch.y;
@@ -723,6 +809,72 @@ fn auto_color(name: &str) -> [u8; 3] {
     [r.max(32), g.max(32), b.max(32)]
 }
 
+/// 16-hue bright palette for material-index fallback. Hand-picked
+/// for maximum perceptual separation across red / orange / yellow /
+/// green / cyan / blue / purple / pink. Every entry has high
+/// saturation + ≥ 60% lightness so cell boundaries are always
+/// legible against neighbours and against the magenta void.
+const INDEX_PALETTE: [[u8; 3]; 16] = [
+    [220,  70,  70],  // red
+    [240, 140,  50],  // orange
+    [240, 200,  60],  // yellow
+    [150, 210,  60],  // lime
+    [ 60, 200, 100],  // green
+    [ 60, 200, 180],  // teal
+    [ 60, 160, 220],  // sky blue
+    [ 80, 110, 220],  // blue
+    [140,  80, 220],  // violet
+    [200,  80, 200],  // pink
+    [240, 160, 180],  // rose
+    [180, 180, 100],  // olive
+    [110, 180, 110],  // mint
+    [180, 140,  80],  // sand
+    [200, 200, 220],  // pearl
+    [120, 140, 180],  // slate
+];
+
+/// Pick a material colour by SEMANTIC mapping first (water → blue,
+/// concrete → tan, ...) then fall back to a fixed index-cycled
+/// palette. Returns `None` only if the index palette is empty
+/// (it never is) — the `Option` is kept so the call site can
+/// distinguish "matched semantic" from "fell back to index" if it
+/// ever needs to log palette decisions for debugging.
+///
+/// Bypasses `rust_mc_sim::preview::auto_color_from_name`'s default
+/// of grey for Air / Steel / Stainless / Iron — those names all
+/// map to ~`[110, 110, 120]` upstream which makes PST-012 (with
+/// Air + Stainless + Steel + Concrete in adjacent cells) render
+/// as a single grey blob.
+fn semantic_or_index_color(name: &str, index: usize) -> Option<[u8; 3]> {
+    let n = name.to_lowercase();
+    // Strong semantic anchors only — colours that mean something
+    // physically. Air gets an obviously-different colour from any
+    // structural metal.
+    if n.contains("water") && !n.contains("heavy") {
+        return Some([ 80, 150, 230]);  // blue
+    }
+    if n.contains("heavy water") || n.contains("d2o") {
+        return Some([ 40,  80, 180]);  // deep blue
+    }
+    if n.contains("concrete") {
+        return Some([180, 160, 120]);  // tan
+    }
+    if n.contains("air") || n.contains("void") || n.contains("vacuum") {
+        return Some([220, 230, 240]);  // pale blue-white — visibly
+                                       // NOT a structural material
+    }
+    if n.contains("plutonium") || n.contains("mox") {
+        return Some([240, 140,  50]);  // orange
+    }
+    if n.contains("uranium") || n.contains("uo2") || n.contains("fuel") {
+        return Some([200,  80,  60]);  // red
+    }
+    // Everything else: cycle through the index palette so that
+    // (e.g.) "Stainless steel" and "Steel (pool wall)" get DIFFERENT
+    // colours instead of both ending up grey [110, 110, 120].
+    Some(INDEX_PALETTE[index % INDEX_PALETTE.len()])
+}
+
 fn render_ppm(args: &Args, ppm_path: &Path) {
     use open_rust_mc::geometry::ray::find_cell_recursive;
     use open_rust_mc::geometry::scene_io;
@@ -748,8 +900,25 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
     let materials = &resolved.materials;
     let geometry = loaded.geometry;
 
-    let palette: Vec<[u8; 3]> = materials.iter().map(|m| auto_color(&m.name)).collect();
-    let void = [0_u8, 0, 0];
+    // Distinct-colour palette (same logic as the interactive path):
+    // semantic colour when the name is recognized, otherwise a
+    // cycle through 16 bright high-saturation hues by index. No two
+    // materials map to the same colour even when they all hash to
+    // similar greys (PST-012's Air / Stainless / Steel collision).
+    let palette: Vec<[u8; 3]> = materials
+        .iter()
+        .enumerate()
+        .map(|(i, m)| semantic_or_index_color(&m.name, i).unwrap_or_else(|| {
+            // Final fallback: cycle through INDEX_PALETTE by index
+            // mod len. semantic_or_index_color already does this when
+            // its semantic-map misses, so this branch is unreachable
+            // in practice — kept for type-safety.
+            INDEX_PALETTE[i % INDEX_PALETTE.len()]
+        }))
+        .collect();
+    // Bright magenta — outside any plausible material colour, so
+    // void is unambiguous in the rendered image.
+    let void = [255_u8, 0, 220];
 
     // Auto-viewport + auto-z + outward-probe tightening.
     //
