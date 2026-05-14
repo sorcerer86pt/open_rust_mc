@@ -21,7 +21,7 @@
 //! file but never a corrupt cache entry.
 
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use super::binary_format::{
     DecodeError, EncodeError, decode_nuclide_kernels, encode_nuclide_kernels,
@@ -33,9 +33,6 @@ use crate::transport::xs_provider::NuclideKernels;
 pub struct L2DiskStore {
     dir: PathBuf,
     name: String,
-    /// Latched once on first encode-Unimplemented so the warning log
-    /// fires once per process, not per cache miss.
-    warned_unimplemented: OnceLock<()>,
 }
 
 impl L2DiskStore {
@@ -51,11 +48,7 @@ impl L2DiskStore {
             return None;
         }
         let name = format!("L2 disk {}", dir.display());
-        Some(Self {
-            dir,
-            name,
-            warned_unimplemented: OnceLock::new(),
-        })
+        Some(Self { dir, name })
     }
 
     /// Resolve a default cache dir from `OPEN_RUST_MC_CACHE_DIR` →
@@ -77,16 +70,6 @@ impl L2DiskStore {
         self.dir.join(key.disk_filename())
     }
 
-    fn warn_unimplemented_once(&self) {
-        let _ = self.warned_unimplemented.get_or_init(|| {
-            eprintln!(
-                "note: nuclide_cache L2 disk store is staged — \
-                 binary format per-type encoders not yet implemented; \
-                 cache writes are no-ops until they land. L1 in-process \
-                 cache is unaffected."
-            );
-        });
-    }
 }
 
 impl NuclideStore for L2DiskStore {
@@ -113,7 +96,6 @@ impl NuclideStore for L2DiskStore {
         };
         match decode_nuclide_kernels(&payload) {
             Ok(k) => Some(Arc::new(k)),
-            Err(DecodeError::Unimplemented) => None,
             Err(e) => {
                 eprintln!(
                     "warning: nuclide_cache L2 decode error on {}: {e}; \
@@ -129,10 +111,6 @@ impl NuclideStore for L2DiskStore {
     fn put(&self, key: NuclideKey, value: Arc<NuclideKernels>) {
         let payload = match encode_nuclide_kernels(&value) {
             Ok(p) => p,
-            Err(EncodeError::Unimplemented) => {
-                self.warn_unimplemented_once();
-                return;
-            }
             Err(EncodeError::Io(e)) => {
                 eprintln!("warning: nuclide_cache L2 encode I/O error: {e}");
                 return;

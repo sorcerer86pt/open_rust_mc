@@ -205,6 +205,19 @@ impl PointwiseTable {
     pub fn is_empty(&self) -> bool {
         self.energies.is_empty()
     }
+
+    /// Read-only view of the (shared) energy grid. Exposed so the
+    /// `nuclide_cache::binary_format` encoder can serialise the table
+    /// without touching the inner `Arc<[f64]>` directly.
+    pub fn energies_slice(&self) -> &[f64] {
+        &self.energies
+    }
+
+    /// Read-only view of the XS values. Pairs 1:1 with
+    /// [`PointwiseTable::energies_slice`].
+    pub fn xs_slice(&self) -> &[f64] {
+        &self.xs
+    }
 }
 
 // ── Stochastic temperature interpolation ───────────────────────────────
