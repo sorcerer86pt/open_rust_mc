@@ -400,6 +400,33 @@ impl GpuTransportContext {
         })
     }
 
+    /// Process-wide shared context. First caller pays the NVRTC
+    /// compile + CUDA init cost (~30-150 ms on RTX A1000); every
+    /// subsequent caller — across cases in an ICSBEP sweep, across
+    /// PyO3 entry points, across rayon worker threads — gets the
+    /// same `Arc<GpuTransportContext>` and therefore shares the
+    /// per-context `nuclide_buffer_cache`. This is what makes the
+    /// `Arc::as_ptr()`-keyed cache actually fire across cases: a
+    /// fresh context per case (the prior pattern) had an empty cache
+    /// every time.
+    ///
+    /// Returns `Err` only on first-call failure (no CUDA device, no
+    /// driver, NVRTC compile error). Failures are *not* cached —
+    /// retry-on-error works because the error path doesn't write to
+    /// the OnceLock; only a successful init seals the slot.
+    pub fn shared() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        static SHARED: std::sync::OnceLock<Arc<GpuTransportContext>> =
+            std::sync::OnceLock::new();
+        if let Some(arc) = SHARED.get() {
+            return Ok(Arc::clone(arc));
+        }
+        let ctx = Arc::new(Self::new()?);
+        // Either we win the race and store our Arc, or someone else
+        // beat us — either way the slot now holds a valid Arc.
+        let _ = SHARED.set(Arc::clone(&ctx));
+        Ok(Arc::clone(SHARED.get().expect("OnceLock just set above")))
+    }
+
     /// Debug: sample angular distributions at given (energy, xi) pairs.
     /// Returns (stairstep_mu, interpolated_mu) for comparison with CPU.
     pub fn debug_angular_sample(
@@ -2769,6 +2796,25 @@ impl GpuTransportContext {
 mod tests {
     use super::*;
     use crate::transport::xs_provider::NuclideKernels;
+
+    /// `GpuTransportContext::shared()` must return the same `Arc` on
+    /// every call within one process — that's what makes the
+    /// per-context `nuclide_buffer_cache` survive across ICSBEP
+    /// cases. Verifies pointer identity, not just value equality.
+    #[test]
+    fn shared_singleton_returns_same_arc() {
+        let a = match GpuTransportContext::shared() {
+            Ok(x) => x,
+            // No CUDA device on this machine — the singleton path is
+            // still correct by construction; skip the runtime check.
+            Err(_) => return,
+        };
+        let b = GpuTransportContext::shared().expect("second call must succeed once first did");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "shared() must return the same Arc across calls"
+        );
+    }
 
     /// The cache key collides iff the rank matches AND every
     /// `Arc::as_ptr` matches at the same index. Different ordering of

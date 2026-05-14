@@ -1770,7 +1770,7 @@ fn run_gpu_eigenvalue(
     let limits = SimLimits::default();
 
     // ── Upload XS + materials + (optional) S(α,β) + (optional) WMP ──
-    let gpu = GpuTransportContext::new().map_err(|e| gpu_err("init", e))?;
+    let gpu = GpuTransportContext::shared().map_err(|e| gpu_err("init", e))?;
     let nuc_data = gpu
         .upload_nuclide_data(&kernels, rank)
         .map_err(|e| gpu_err("upload nuclides", e))?;
@@ -3050,7 +3050,7 @@ fn run_gpu_icsbep(
     let n = config.particles_per_batch as usize;
     let limits = SimLimits::default();
 
-    let gpu = GpuTransportContext::new().map_err(|e| gpu_err("init", e))?;
+    let gpu = GpuTransportContext::shared().map_err(|e| gpu_err("init", e))?;
     let nuc_data = gpu
         .upload_nuclide_data(&provider.nuclides, /* rank = global */ 15)
         .map_err(|e| gpu_err("upload nuclides", e))?;
