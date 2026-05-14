@@ -42,6 +42,10 @@ pub mod binary_format;
 pub mod key;
 pub mod l1_memory;
 pub mod l2_disk;
+#[cfg(feature = "cache-remote")]
+pub mod l3_remote;
+#[cfg(feature = "cache-remote")]
+pub mod wire_protocol;
 
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -84,10 +88,15 @@ pub struct TieredStore {
 impl TieredStore {
     pub fn new() -> Self {
         let l2 = l2_disk::L2DiskStore::from_env();
+        #[cfg(feature = "cache-remote")]
+        let l3: Option<Box<dyn NuclideStore>> = l3_remote::L3RemoteStore::from_env()
+            .map(|s| Box::new(s) as Box<dyn NuclideStore>);
+        #[cfg(not(feature = "cache-remote"))]
+        let l3: Option<Box<dyn NuclideStore>> = None;
         Self {
             l1: l1_memory::L1MemoryStore::new(),
             l2,
-            l3: None,
+            l3,
         }
     }
 

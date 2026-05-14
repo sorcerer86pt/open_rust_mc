@@ -77,6 +77,14 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 default = []
 cuda = ["cudarc"]
 preview = ["rust-mc-sim/preview"]
+# Multi-PC nuclide kernel cache daemon. When enabled, `nuclide_cache`
+# can connect to a TCP server (set via `OPEN_RUST_MC_CACHE_SERVER`) as
+# its L3 tier — slaves on a LAN fetch parsed kernels from a master
+# that already has them in L1/L2. Server binary
+# `nuclide_cache_server` and the `l3_remote` client both require this
+# feature. Disabled by default because most setups (single-PC + L1
+# + L2) need neither.
+cache-remote = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
@@ -136,6 +144,10 @@ required-features = ["cuda"]
 
 [[bin]]
 name = "xs_provider_diff"
+
+[[bin]]
+name = "nuclide_cache_server"
+required-features = ["cache-remote"]
 
 [[bench]]
 name = "reconstruction"
