@@ -898,18 +898,14 @@ fn build_kernel_from_data(
     }
 
     let mut kernel = SvdKernel::new(basis, vt_coeffs, Arc::clone(shared_grid), rank, n_e, n_t);
-    // Build the log-uniform hash index. Without it `row_index` falls
-    // back to `row_index_binary`, which returns the **upper** bracket
-    // (binary_search Err insertion point) — yet `lookup`/
-    // `reconstruct_interp` in this provider treat the returned index
-    // as the **lower** bracket. The mismatch silently turned every
-    // off-grid SVD lookup into a step function at the upper bracket
-    // (log_frac clamps to 0). On U-235 thermal capture this dragged
-    // CPU SVD k_inf by ~19 000 pcm vs the pointwise-table provider.
-    // Building the hash forces `LogHashIndex::lookup` (lower-bracket
-    // semantics, matches `PointwiseTable::lookup`) and restores the
-    // proper log-log interpolation between adjacent union-grid points.
-    kernel.build_hash(8192);
+    // Single-source-of-truth runtime rehydration. See
+    // `crate::kernel::rehydrate_for_runtime` for the full bug story
+    // (LogHashIndex lower-bracket vs row_index_binary upper-bracket
+    // mismatch, ~19 000 pcm U-235 thermal regression if omitted).
+    // The nuclide_cache binary-format decoder calls the same helper
+    // so live-load and cache-decode produce semantically identical
+    // kernels.
+    crate::kernel::rehydrate_for_runtime(&mut kernel);
 
     // Use Ducru kernel reconstruction if multiple temperatures available,
     // otherwise fall back to direct index lookup.
@@ -3165,11 +3161,15 @@ mod tests {
             n_e,
             1, // n_t
         );
-        // Production code (`build_kernel_from_data`) builds the hash so
-        // `row_index` returns the lower bracket; mirror that here so
-        // the test exercises the same lookup path the eigenvalue
-        // simulation hits.
-        kernel.build_hash(8192);
+        // Test-specific: bypass `rehydrate_for_runtime`'s `n_rows >
+        // HASH_MIN_ROWS` gate and build the hash unconditionally. The
+        // fixtures use 5-point grids by design (closed-form 1/√E law,
+        // log-log interpolation is exact at rank 1) and we still want
+        // the lower-bracket lookup convention the production transport
+        // path relies on. Production kernels are always larger than
+        // HASH_MIN_ROWS so the gate matches reality there; this site is
+        // the deliberate exception.
+        kernel.build_hash(crate::kernel::HASH_BIN_COUNT);
         let coeffs = vec![1.0];
         ReactionKernel::Svd { kernel, coeffs }
     }

@@ -327,7 +327,17 @@ fn decode_svd_kernel<R: Read>(r: &mut R) -> Result<SvdKernel, DecodeError> {
     let basis = read_vec_f64(r)?;
     let vt = read_vec_f64(r)?;
     let row_axis: Arc<[f64]> = row_axis_vec.into();
-    Ok(SvdKernel::from_factors(basis, vt, row_axis, rank, n_rows, n_cols))
+    let mut kernel = SvdKernel::from_factors(basis, vt, row_axis, rank, n_rows, n_cols);
+    // Apply the SAME runtime-rehydration policy the live HDF5 loader
+    // applies (see `kernel::rehydrate_for_runtime` for the full bug
+    // story). One source of truth for "kernel is ready for transport
+    // hot-path lookup", regardless of whether it came from HDF5 or
+    // from a cached binary stream. Without this call the L2 disk cache
+    // serves kernels that round-trip byte-exact but use the
+    // upper-bracket index convention — silently dragging k_eff by
+    // ~6000 pcm on thermal cases.
+    crate::kernel::rehydrate_for_runtime(&mut kernel);
+    Ok(kernel)
 }
 
 fn encode_reaction_kernel<W: Write>(w: &mut W, k: &ReactionKernel) -> io::Result<()> {

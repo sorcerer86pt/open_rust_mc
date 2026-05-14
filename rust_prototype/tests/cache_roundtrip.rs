@@ -167,3 +167,86 @@ fn pu239_real_hdf5_roundtrip() {
 fn zr90_real_hdf5_roundtrip() {
     byte_exact_roundtrip("Zr90.h5", 89.132, 0.0);
 }
+
+/// **Lookup-equivalence regression.** Byte-exact roundtrip is a
+/// necessary condition but not sufficient: a decoded `NuclideKernels`
+/// can serialize to identical bytes while behaving differently at
+/// transport time. Specifically, the L2 disk-cache miss path used to
+/// reconstruct `SvdKernel` via `from_factors`, which leaves
+/// `kernel.hash = None`, and `row_index_binary` (the fallback) returns
+/// the **upper** bracket — but every other lookup site in the codebase
+/// uses the **lower** bracket convention `LogHashIndex::lookup`
+/// returns. The off-by-one index produced wrong XS lookups → ~6000
+/// pcm k_eff drift on `heu-comp-inter-003` thermal cases on a freshly
+/// populated L2 disk cache.
+///
+/// This test asserts the cure: after `decode_nuclide_kernels`, every
+/// SVD kernel goes through `kernel::rehydrate_for_runtime` (just like
+/// the live HDF5 load path) and produces **bit-identical XS lookups**
+/// at off-grid energies as a kernel loaded directly from HDF5. If the
+/// decoder ever drifts again, this test catches it without needing a
+/// full ICSBEP sweep to surface the regression.
+#[test]
+fn decoded_kernel_lookup_matches_live_load_at_off_grid_energies() {
+    use open_rust_mc::transport::simulate::XsProvider;
+    use open_rust_mc::transport::xs_provider::SvdXsProvider;
+    use std::sync::Arc;
+
+    let Some(dir) = data_dir() else {
+        eprintln!("[skip] ENDF data dir not found — set ICSBEP_DATA_DIR");
+        return;
+    };
+    let path = dir.join("U235.h5");
+    if !path.is_file() {
+        return;
+    }
+
+    let live = load_nuclide(&path, 5, 0, 233.025, 2.43);
+    let bytes = encode_nuclide_kernels(&live).unwrap();
+    let decoded = decode_nuclide_kernels(&bytes).unwrap();
+
+    // Build two providers, one with the live kernel, one with the
+    // decoded kernel. Compare XS lookups at off-grid energies — these
+    // are the exact queries the upper/lower-bracket bug corrupted.
+    let live_p = SvdXsProvider {
+        nuclides: vec![Arc::new(live)],
+        thermal: vec![None],
+    };
+    let dec_p = SvdXsProvider {
+        nuclides: vec![Arc::new(decoded)],
+        thermal: vec![None],
+    };
+
+    // Energies deliberately placed BETWEEN grid points so the
+    // bracket-convention bug manifests. Span the thermal → fast range
+    // since heu-comp-inter-003 spectra extend across all four orders
+    // of magnitude.
+    let test_energies = [
+        0.025_1, 0.099, 1.001, 9.99, 99.9, 1_000.3, 9_999.7, 1.5e5, 7.7e6,
+    ];
+    for &e in &test_energies {
+        let a = live_p.lookup(0, e);
+        let b = dec_p.lookup(0, e);
+        // Bit-exact equality is achievable because both providers
+        // walk the same hashed `LogHashIndex::lookup` once the
+        // decoder calls `rehydrate_for_runtime`. Any difference at
+        // this scale is the bracket-convention bug regressing.
+        assert_eq!(
+            a.total, b.total,
+            "total XS mismatch at E = {e:.3e}: live = {} dec = {}",
+            a.total, b.total,
+        );
+        assert_eq!(
+            a.fission, b.fission,
+            "fission XS mismatch at E = {e:.3e}",
+        );
+        assert_eq!(
+            a.capture, b.capture,
+            "capture XS mismatch at E = {e:.3e}",
+        );
+        assert_eq!(
+            a.elastic, b.elastic,
+            "elastic XS mismatch at E = {e:.3e}",
+        );
+    }
+}
