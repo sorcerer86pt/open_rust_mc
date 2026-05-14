@@ -1,0 +1,909 @@
+  GPU transport kernels compiled (8 kernels)
+  GPU: pointwise XS = 17.2 MB
+  GPU: 123 discrete levels, 753.8 MB level basis
+  GPU: MT=91 continuum table = 17738 pts (3 / 3 nuclides covered)
+  GPU: basis=88.3 MB, grids=2.5 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  resume: 21 case(s) already in E:\git\open_rust_mc\outputs\icsbep_full_gpu.csv, skipping those
+Sweeping 355 case(s) on GPU runner
+  CLI defaults: batches=150, inactive=30, particles=20000, seeds=5, base_seed=42, rank=15
+  per-case settings: JSON `benchmark.recommended_settings` overrides CLI defaults
+  CSV (append, flushed per case): E:\git\open_rust_mc\outputs\icsbep_full_gpu.csv
+  stop-file (create to terminate gracefully): E:\git\open_rust_mc\outputs\STOP
+
+heu-met-fast-003_case-4: PASS -- k=0.99882+/-0.00032, delta=-118pcm, bound=+/-603pcm, 0.39sigma, 20.0s (5seed x 150b x 30i x 20000p) [22/376]
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+heu-met-fast-003_case-5: PASS -- k=1.00383+/-0.00043, delta=+383pcm, bound=+/-606pcm, 1.26sigma, 23.6s (5seed x 150b x 30i x 20000p) [23/376]
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+heu-met-fast-003_case-6: PASS -- k=1.00395+/-0.00039, delta=+395pcm, bound=+/-605pcm, 1.30sigma, 25.6s (5seed x 150b x 30i x 20000p) [24/376]
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 3 nuclides covered)
+heu-met-fast-003_case-7: PASS -- k=1.00406+/-0.00048, delta=+406pcm, bound=+/-608pcm, 1.34sigma, 29.9s (5seed x 150b x 30i x 20000p) [25/376]
+  GPU: pointwise XS = 22.9 MB
+  GPU: 177 discrete levels, 820.1 MB level basis
+  GPU: MT=91 continuum table = 17738 pts (3 / 8 nuclides covered)
+  GPU: basis=112.7 MB, grids=3.3 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+heu-met-fast-003_case-8: PASS -- k=1.00028+/-0.00043, delta=+28pcm, bound=+/-1004pcm, 0.06sigma, 14.5s (5seed x 150b x 30i x 20000p) [26/376]
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 8 nuclides covered)
+heu-met-fast-003_case-9: PASS -- k=1.00008+/-0.00029, delta=+8pcm, bound=+/-1002pcm, 0.02sigma, 17.8s (5seed x 150b x 30i x 20000p) [27/376]
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\H1.h5 (rank=15)...
+    AWR = 0.999 (6 temps, 590 energy pts)
+    Elastic angular dist: 96 energies, CM=true
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  Table (590 pts, 4.6 KB)
+    MT=102 (capture) rank=15
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    Pointwise XS: 590 energy pts × 7 channels = 32.3 KB
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU: pointwise XS = 19.4 MB
+  GPU: 185 discrete levels, 841.3 MB level basis
+  GPU: MT=91 continuum table = 26342 pts (5 / 7 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 7 nuclide(s)
+  GPU: basis=99.1 MB, grids=2.8 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU S(α,β) slot 0 (nuc 4): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 7 nuclides covered)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 4): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 7 nuclides covered)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 4): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 7 nuclides covered)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 4): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 7 nuclides covered)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 4): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 7 nuclides covered)
+heu-met-fast-004_case-1: PASS -- k=1.00187+/-0.00026, delta=-13pcm, bound=+/-150pcm, 0.51sigma, 100.7s (5seed x 150b x 30i x 20000p) [28/376]
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\W180.h5 (rank=15)...
+    AWR = 178.401 (6 temps, 3113 energy pts)
+    Discrete levels: 9/9 (continuum=true, angle_dists=8)
+    Elastic angular dist: 149 energies, CM=true
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 9 levels, CDF=14.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=28 (n,np)    rank=15
+    MT=37 (n,4n)     rank=15
+    Missing channels: max=1.5559 b
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    Pointwise XS: 3113 energy pts × 7 channels = 170.2 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cu63.h5 (rank=15)...
+    AWR = 62.389 (6 temps, 30750 energy pts)
+    Discrete levels: 23/23 (continuum=true, angle_dists=22)
+    Elastic angular dist: 47 energies, CM=true
+    Total XS: summed 33 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 23 levels, CDF=36.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.4074 b
+    Total XS: summed 33 leaf reactions (no MT=3 available)
+    Pointwise XS: 30750 energy pts × 7 channels = 1681.6 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cu65.h5 (rank=15)...
+    AWR = 64.370 (6 temps, 23743 energy pts)
+    Discrete levels: 14/14 (continuum=true, angle_dists=13)
+    Elastic angular dist: 49 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 14 levels, CDF=21.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.4254 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 23743 energy pts × 7 channels = 1298.4 KB
+  GPU: pointwise XS = 41.2 MB
+  GPU: 385 discrete levels, 1136.8 MB level basis
+  GPU: MT=91 continuum table = 24721 pts (5 / 22 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 22 nuclide(s)
+  GPU: basis=179.1 MB, grids=5.9 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+heu-met-fast-008: PASS -- k=0.99490+/-0.00035, delta=-90pcm, bound=+/-328pcm, 0.55sigma, 26.9s (5seed x 150b x 30i x 20000p) [29/376]
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU: pointwise XS = 41.1 MB
+  GPU: 366 discrete levels, 1124.5 MB level basis
+  GPU: MT=91 continuum table = 26342 pts (5 / 24 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 24 nuclide(s)
+  GPU: basis=178.8 MB, grids=5.9 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+heu-met-fast-009_case-1: PASS -- k=0.99906+/-0.00029, delta=-14pcm, bound=+/-305pcm, 0.09sigma, 626.0s (5seed x 150b x 30i x 20000p) [30/376]
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=15)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  Table (3063 pts, 23.9 KB)
+    MT=4  (inelastic) rank=15
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\O17.h5 (rank=15)...
+    AWR = 16.853 (6 temps, 620 energy pts)
+    Discrete levels: 13/13 (continuum=true, angle_dists=13)
+    Elastic angular dist: 20 energies, CM=true
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  Table (620 pts, 4.8 KB)
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 13 levels, CDF=20.4 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=11.8212 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 620 energy pts × 7 channels = 33.9 KB
+  Thermal: c_Be_in_BeO  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 63455 E_out pts, 1015280 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64854 E_out pts, 1037664 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64219 E_out pts, 1027504 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64121 E_out pts, 1025936 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63542 E_out pts, 1016672 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63017 E_out pts, 1008272 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 62318 E_out pts, 997088 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 61819 E_out pts, 989104 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 174 Bragg edges
+    400K elastic: coherent, 161 Bragg edges
+    500K elastic: coherent, 151 Bragg edges
+    600K elastic: coherent, 143 Bragg edges
+    700K elastic: coherent, 136 Bragg edges
+    800K elastic: coherent, 127 Bragg edges
+    1000K elastic: coherent, 116 Bragg edges
+    1200K elastic: coherent, 107 Bragg edges
+  Thermal: c_O_in_BeO  nuclides=["O0", "O16", "O17", "O18"]  energy_max=2.02 eV  AWR=15.858
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 53054 E_out pts, 848864 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53565 E_out pts, 857040 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53791 E_out pts, 860656 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53949 E_out pts, 863184 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53772 E_out pts, 860352 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53704 E_out pts, 859264 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53291 E_out pts, 852656 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 52914 E_out pts, 846624 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 173 Bragg edges
+    400K elastic: coherent, 157 Bragg edges
+    500K elastic: coherent, 145 Bragg edges
+    600K elastic: coherent, 137 Bragg edges
+    700K elastic: coherent, 130 Bragg edges
+    800K elastic: coherent, 122 Bragg edges
+    1000K elastic: coherent, 112 Bragg edges
+    1200K elastic: coherent, 100 Bragg edges
+  GPU: pointwise XS = 41.1 MB
+  GPU: 366 discrete levels, 1124.5 MB level basis
+  GPU: MT=91 continuum table = 26342 pts (5 / 24 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 24 nuclide(s)
+  GPU: basis=179.0 MB, grids=5.9 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 63455 E_out pts, 1015280 mu pts
+  GPU S(α,β) slot 1 (nuc 22): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU S(α,β) slot 2 (nuc 23): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be_in_BeO  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 63455 E_out pts, 1015280 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64854 E_out pts, 1037664 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64219 E_out pts, 1027504 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64121 E_out pts, 1025936 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63542 E_out pts, 1016672 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63017 E_out pts, 1008272 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 62318 E_out pts, 997088 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 61819 E_out pts, 989104 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 174 Bragg edges
+    400K elastic: coherent, 161 Bragg edges
+    500K elastic: coherent, 151 Bragg edges
+    600K elastic: coherent, 143 Bragg edges
+    700K elastic: coherent, 136 Bragg edges
+    800K elastic: coherent, 127 Bragg edges
+    1000K elastic: coherent, 116 Bragg edges
+    1200K elastic: coherent, 107 Bragg edges
+  Thermal: c_O_in_BeO  nuclides=["O0", "O16", "O17", "O18"]  energy_max=2.02 eV  AWR=15.858
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 53054 E_out pts, 848864 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53565 E_out pts, 857040 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53791 E_out pts, 860656 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53949 E_out pts, 863184 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53772 E_out pts, 860352 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53704 E_out pts, 859264 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53291 E_out pts, 852656 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 52914 E_out pts, 846624 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 173 Bragg edges
+    400K elastic: coherent, 157 Bragg edges
+    500K elastic: coherent, 145 Bragg edges
+    600K elastic: coherent, 137 Bragg edges
+    700K elastic: coherent, 130 Bragg edges
+    800K elastic: coherent, 122 Bragg edges
+    1000K elastic: coherent, 112 Bragg edges
+    1200K elastic: coherent, 100 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 63455 E_out pts, 1015280 mu pts
+  GPU S(α,β) slot 1 (nuc 22): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU S(α,β) slot 2 (nuc 23): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be_in_BeO  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 63455 E_out pts, 1015280 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64854 E_out pts, 1037664 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64219 E_out pts, 1027504 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64121 E_out pts, 1025936 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63542 E_out pts, 1016672 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63017 E_out pts, 1008272 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 62318 E_out pts, 997088 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 61819 E_out pts, 989104 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 174 Bragg edges
+    400K elastic: coherent, 161 Bragg edges
+    500K elastic: coherent, 151 Bragg edges
+    600K elastic: coherent, 143 Bragg edges
+    700K elastic: coherent, 136 Bragg edges
+    800K elastic: coherent, 127 Bragg edges
+    1000K elastic: coherent, 116 Bragg edges
+    1200K elastic: coherent, 107 Bragg edges
+  Thermal: c_O_in_BeO  nuclides=["O0", "O16", "O17", "O18"]  energy_max=2.02 eV  AWR=15.858
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 53054 E_out pts, 848864 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53565 E_out pts, 857040 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53791 E_out pts, 860656 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53949 E_out pts, 863184 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53772 E_out pts, 860352 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53704 E_out pts, 859264 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53291 E_out pts, 852656 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 52914 E_out pts, 846624 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 173 Bragg edges
+    400K elastic: coherent, 157 Bragg edges
+    500K elastic: coherent, 145 Bragg edges
+    600K elastic: coherent, 137 Bragg edges
+    700K elastic: coherent, 130 Bragg edges
+    800K elastic: coherent, 122 Bragg edges
+    1000K elastic: coherent, 112 Bragg edges
+    1200K elastic: coherent, 100 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 63455 E_out pts, 1015280 mu pts
+  GPU S(α,β) slot 1 (nuc 22): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU S(α,β) slot 2 (nuc 23): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be_in_BeO  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 63455 E_out pts, 1015280 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64854 E_out pts, 1037664 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64219 E_out pts, 1027504 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64121 E_out pts, 1025936 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63542 E_out pts, 1016672 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63017 E_out pts, 1008272 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 62318 E_out pts, 997088 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 61819 E_out pts, 989104 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 174 Bragg edges
+    400K elastic: coherent, 161 Bragg edges
+    500K elastic: coherent, 151 Bragg edges
+    600K elastic: coherent, 143 Bragg edges
+    700K elastic: coherent, 136 Bragg edges
+    800K elastic: coherent, 127 Bragg edges
+    1000K elastic: coherent, 116 Bragg edges
+    1200K elastic: coherent, 107 Bragg edges
+  Thermal: c_O_in_BeO  nuclides=["O0", "O16", "O17", "O18"]  energy_max=2.02 eV  AWR=15.858
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 53054 E_out pts, 848864 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53565 E_out pts, 857040 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53791 E_out pts, 860656 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53949 E_out pts, 863184 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53772 E_out pts, 860352 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53704 E_out pts, 859264 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53291 E_out pts, 852656 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 52914 E_out pts, 846624 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 173 Bragg edges
+    400K elastic: coherent, 157 Bragg edges
+    500K elastic: coherent, 145 Bragg edges
+    600K elastic: coherent, 137 Bragg edges
+    700K elastic: coherent, 130 Bragg edges
+    800K elastic: coherent, 122 Bragg edges
+    1000K elastic: coherent, 112 Bragg edges
+    1200K elastic: coherent, 100 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 63455 E_out pts, 1015280 mu pts
+  GPU S(α,β) slot 1 (nuc 22): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU S(α,β) slot 2 (nuc 23): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+  Thermal: c_Be_in_BeO  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 63455 E_out pts, 1015280 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64854 E_out pts, 1037664 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64219 E_out pts, 1027504 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 64121 E_out pts, 1025936 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63542 E_out pts, 1016672 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 63017 E_out pts, 1008272 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 62318 E_out pts, 997088 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 61819 E_out pts, 989104 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 174 Bragg edges
+    400K elastic: coherent, 161 Bragg edges
+    500K elastic: coherent, 151 Bragg edges
+    600K elastic: coherent, 143 Bragg edges
+    700K elastic: coherent, 136 Bragg edges
+    800K elastic: coherent, 127 Bragg edges
+    1000K elastic: coherent, 116 Bragg edges
+    1200K elastic: coherent, 107 Bragg edges
+  Thermal: c_O_in_BeO  nuclides=["O0", "O16", "O17", "O18"]  energy_max=2.02 eV  AWR=15.858
+  Temperatures: ["294K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 53054 E_out pts, 848864 mu pts
+    294K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53565 E_out pts, 857040 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53791 E_out pts, 860656 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53949 E_out pts, 863184 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53772 E_out pts, 860352 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53704 E_out pts, 859264 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 53291 E_out pts, 852656 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 52914 E_out pts, 846624 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    294K elastic: coherent, 173 Bragg edges
+    400K elastic: coherent, 157 Bragg edges
+    500K elastic: coherent, 145 Bragg edges
+    600K elastic: coherent, 137 Bragg edges
+    700K elastic: coherent, 130 Bragg edges
+    800K elastic: coherent, 122 Bragg edges
+    1000K elastic: coherent, 112 Bragg edges
+    1200K elastic: coherent, 100 Bragg edges
+  GPU S(α,β) slot 0 (nuc 21): 99 inc energies, 63455 E_out pts, 1015280 mu pts
+  GPU S(α,β) slot 1 (nuc 22): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU S(α,β) slot 2 (nuc 23): 99 inc energies, 53054 E_out pts, 848864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 24 nuclides covered)
+heu-met-fast-009_case-2: PASS -- k=0.99670+/-0.00018, delta=-250pcm, bound=+/-302pcm, 1.65sigma, 636.5s (5seed x 150b x 30i x 20000p) [31/376]
+  Thermal: c_H_in_CH2  nuclides=[]  energy_max=1.42 eV  AWR=0.999
+  Temperatures: ["296K", "350K"]
+    Continuous: 95 inc energies, 32973 E_out pts, 527568 mu pts
+    296K inelastic: 95 energies, type=incoherent_inelastic
+    Continuous: 95 inc energies, 33607 E_out pts, 537712 mu pts
+    350K inelastic: 95 energies, type=incoherent_inelastic
+    296K elastic: incoherent, σ_b=164.0 b, W'=34.9570 eV⁻¹
+    350K elastic: incoherent, σ_b=164.0 b, W'=40.2820 eV⁻¹
+  GPU: pointwise XS = 40.9 MB
+  GPU: 345 discrete levels, 1122.5 MB level basis
+  GPU: MT=91 continuum table = 23405 pts (4 / 22 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 22 nuclide(s)
+  GPU: basis=178.0 MB, grids=5.8 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU S(α,β) slot 0 (nuc 21): 95 inc energies, 32973 E_out pts, 527568 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  Thermal: c_H_in_CH2  nuclides=[]  energy_max=1.42 eV  AWR=0.999
+  Temperatures: ["296K", "350K"]
+    Continuous: 95 inc energies, 32973 E_out pts, 527568 mu pts
+    296K inelastic: 95 energies, type=incoherent_inelastic
+    Continuous: 95 inc energies, 33607 E_out pts, 537712 mu pts
+    350K inelastic: 95 energies, type=incoherent_inelastic
+    296K elastic: incoherent, σ_b=164.0 b, W'=34.9570 eV⁻¹
+    350K elastic: incoherent, σ_b=164.0 b, W'=40.2820 eV⁻¹
+  GPU S(α,β) slot 0 (nuc 21): 95 inc energies, 32973 E_out pts, 527568 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  Thermal: c_H_in_CH2  nuclides=[]  energy_max=1.42 eV  AWR=0.999
+  Temperatures: ["296K", "350K"]
+    Continuous: 95 inc energies, 32973 E_out pts, 527568 mu pts
+    296K inelastic: 95 energies, type=incoherent_inelastic
+    Continuous: 95 inc energies, 33607 E_out pts, 537712 mu pts
+    350K inelastic: 95 energies, type=incoherent_inelastic
+    296K elastic: incoherent, σ_b=164.0 b, W'=34.9570 eV⁻¹
+    350K elastic: incoherent, σ_b=164.0 b, W'=40.2820 eV⁻¹
+  GPU S(α,β) slot 0 (nuc 21): 95 inc energies, 32973 E_out pts, 527568 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  Thermal: c_H_in_CH2  nuclides=[]  energy_max=1.42 eV  AWR=0.999
+  Temperatures: ["296K", "350K"]
+    Continuous: 95 inc energies, 32973 E_out pts, 527568 mu pts
+    296K inelastic: 95 energies, type=incoherent_inelastic
+    Continuous: 95 inc energies, 33607 E_out pts, 537712 mu pts
+    350K inelastic: 95 energies, type=incoherent_inelastic
+    296K elastic: incoherent, σ_b=164.0 b, W'=34.9570 eV⁻¹
+    350K elastic: incoherent, σ_b=164.0 b, W'=40.2820 eV⁻¹
+  GPU S(α,β) slot 0 (nuc 21): 95 inc energies, 32973 E_out pts, 527568 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  Thermal: c_H_in_CH2  nuclides=[]  energy_max=1.42 eV  AWR=0.999
+  Temperatures: ["296K", "350K"]
+    Continuous: 95 inc energies, 32973 E_out pts, 527568 mu pts
+    296K inelastic: 95 energies, type=incoherent_inelastic
+    Continuous: 95 inc energies, 33607 E_out pts, 537712 mu pts
+    350K inelastic: 95 energies, type=incoherent_inelastic
+    296K elastic: incoherent, σ_b=164.0 b, W'=34.9570 eV⁻¹
+    350K elastic: incoherent, σ_b=164.0 b, W'=40.2820 eV⁻¹
+  GPU S(α,β) slot 0 (nuc 21): 95 inc energies, 32973 E_out pts, 527568 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+heu-met-fast-011: FAIL -- k=1.00275+/-0.00038, delta=+385pcm, bound=+/-310pcm, 2.48sigma, 3733.6s (5seed x 150b x 30i x 20000p) [32/376]
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+heu-met-fast-012: PASS -- k=0.99772+/-0.00052, delta=-148pcm, bound=+/-375pcm, 0.79sigma, 492.4s (5seed x 150b x 30i x 20000p) [33/376]
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Si28.h5 (rank=15)...
+    AWR = 27.737 (6 temps, 8229 energy pts)
+    Discrete levels: 18/18 (continuum=true, angle_dists=17)
+    Elastic angular dist: 438 energies, CM=true
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 18 levels, CDF=28.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.9275 b
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    Pointwise XS: 8229 energy pts × 7 channels = 450.0 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Si29.h5 (rank=15)...
+    AWR = 28.728 (6 temps, 4957 energy pts)
+    Discrete levels: 15/15 (continuum=true, angle_dists=14)
+    Elastic angular dist: 438 energies, CM=true
+    Total XS: summed 23 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 15 levels, CDF=23.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.9494 b
+    Total XS: summed 23 leaf reactions (no MT=3 available)
+    Pointwise XS: 4957 energy pts × 7 channels = 271.1 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Si30.h5 (rank=15)...
+    AWR = 29.716 (6 temps, 6155 energy pts)
+    Discrete levels: 7/7 (continuum=true, angle_dists=6)
+    Elastic angular dist: 438 energies, CM=true
+    Total XS: summed 15 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 7 levels, CDF=11.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.9712 b
+    Total XS: summed 15 leaf reactions (no MT=3 available)
+    Pointwise XS: 6155 energy pts × 7 channels = 336.6 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cr50.h5 (rank=15)...
+    AWR = 49.517 (6 temps, 41076 energy pts)
+    Discrete levels: 7/7 (continuum=true, angle_dists=6)
+    Elastic angular dist: 401 energies, CM=true
+    Total XS: summed 16 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 7 levels, CDF=11.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.2458 b
+    Total XS: summed 16 leaf reactions (no MT=3 available)
+    Pointwise XS: 41076 energy pts × 7 channels = 2246.3 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cr52.h5 (rank=15)...
+    AWR = 51.494 (6 temps, 36695 energy pts)
+    Discrete levels: 11/11 (continuum=true, angle_dists=10)
+    Elastic angular dist: 401 energies, CM=true
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 11 levels, CDF=17.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.2788 b
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    Pointwise XS: 36695 energy pts × 7 channels = 2006.8 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cr53.h5 (rank=15)...
+    AWR = 52.486 (6 temps, 27958 energy pts)
+    Discrete levels: 14/14 (continuum=true, angle_dists=13)
+    Elastic angular dist: 401 energies, CM=true
+    Total XS: summed 22 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 14 levels, CDF=21.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.2946 b
+    Total XS: summed 22 leaf reactions (no MT=3 available)
+    Pointwise XS: 27958 energy pts × 7 channels = 1529.0 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cr54.h5 (rank=15)...
+    AWR = 53.476 (6 temps, 16936 energy pts)
+    Discrete levels: 5/5 (continuum=true, angle_dists=4)
+    Elastic angular dist: 401 energies, CM=true
+    Total XS: summed 11 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 5 levels, CDF=7.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    Missing channels: max=1.3114 b
+    Total XS: summed 11 leaf reactions (no MT=3 available)
+    Pointwise XS: 16936 energy pts × 7 channels = 926.2 KB
+  GPU: pointwise XS = 49.8 MB
+  GPU: 462 discrete levels, 1249.6 MB level basis
+  GPU: MT=91 continuum table = 23405 pts (4 / 29 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 29 nuclide(s)
+  GPU: basis=209.3 MB, grids=7.1 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU: WMP payload = 0.0 KB (0 / 29 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 29 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 29 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 29 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 29 nuclides covered)
+heu-met-fast-013: PASS -- k=0.99615+/-0.00017, delta=-285pcm, bound=+/-302pcm, 1.89sigma, 556.5s (5seed x 150b x 30i x 20000p) [34/376]
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Mg24.h5 (rank=15)...
+    AWR = 23.779 (6 temps, 2840 energy pts)
+    Discrete levels: 12/12 (continuum=true, angle_dists=12)
+    Elastic angular dist: 55 energies, CM=true
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 12 levels, CDF=18.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.4366 b
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    Pointwise XS: 2840 energy pts × 7 channels = 155.3 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Mg25.h5 (rank=15)...
+    AWR = 24.771 (6 temps, 1812 energy pts)
+    Discrete levels: 18/18 (continuum=true, angle_dists=18)
+    Elastic angular dist: 61 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 18 levels, CDF=28.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.2526 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 1812 energy pts × 7 channels = 99.1 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Mg26.h5 (rank=15)...
+    AWR = 25.759 (6 temps, 1310 energy pts)
+    Discrete levels: 14/14 (continuum=true, angle_dists=14)
+    Elastic angular dist: 57 energies, CM=true
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 14 levels, CDF=21.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.1195 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 1310 energy pts × 7 channels = 71.6 KB
+  GPU: pointwise XS = 42.5 MB
+  GPU: 469 discrete levels, 1183.0 MB level basis
+  GPU: MT=91 continuum table = 26352 pts (8 / 26 nuclides covered)
+  GPU: Maxwell/Evaporation χ uploaded for 1 / 26 nuclide(s)
+  GPU: basis=184.3 MB, grids=6.1 MB, nu-bar=89 pts, fis_spec=36187 pts, delayed_nu_bar=10 pts (2 nuclides)
+  GPU: WMP payload = 0.0 KB (0 / 26 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 26 nuclides covered)
+  GPU: WMP payload = 0.0 KB (0 / 26 nuclides covered)
