@@ -1,4 +1,4 @@
-//! L2 disk store — content-addressed files under the user cache dir.
+//! L2 disk store — content-addressed files under a cross-platform cache dir.
 //!
 //! Path resolution (in order of precedence):
 //!
@@ -6,9 +6,15 @@
 //!    (case-insensitive), the L2 store is disabled — useful for
 //!    benchmarks that need a cold start every run, and for
 //!    debugging the HDF5 parse path.
-//! 2. `%LOCALAPPDATA%\open_rust_mc\cache` on Windows.
-//! 3. `$XDG_CACHE_HOME/open_rust_mc` or `~/.cache/open_rust_mc`
-//!    elsewhere.
+//! 2. `std::env::temp_dir().join("open_rust_mc_cache")` on every
+//!    platform. Resolves to e.g. `C:\Users\<user>\AppData\Local\Temp\
+//!    open_rust_mc_cache` on Windows, `/tmp/open_rust_mc_cache` on
+//!    Linux, `$TMPDIR/open_rust_mc_cache` on macOS. Same API on every
+//!    OS, no `#[cfg(target_os)]` gymnastics, no XDG vs LOCALAPPDATA
+//!    branching. The trade-off: on systems that wipe `/tmp` at boot
+//!    (some Linux distros, most container runtimes) the cache is
+//!    lost across reboots — set `OPEN_RUST_MC_CACHE_DIR` explicitly
+//!    to a persistent path when that matters.
 //!
 //! Filenames are derived from the `NuclideKey` via [`NuclideKey::disk_filename`]
 //! — a hex-encoded blake3 file hash + policy hash + temp idx +
@@ -52,9 +58,13 @@ impl L2DiskStore {
     }
 
     /// Resolve a default cache dir from `OPEN_RUST_MC_CACHE_DIR` →
-    /// platform default. Returns `None` when explicitly disabled or
-    /// when no directory can be derived (e.g. no `HOME` on a degraded
-    /// environment).
+    /// `std::env::temp_dir() / open_rust_mc_cache`. Returns `None` when
+    /// the env override is set to `off` (case-insensitive).
+    ///
+    /// `std::env::temp_dir()` is documented to never panic and to
+    /// always return *some* path, so this method effectively never
+    /// returns `None` for the default branch. Set
+    /// `OPEN_RUST_MC_CACHE_DIR=off` to disable the L2 store.
     pub fn from_env() -> Option<Self> {
         if let Ok(env) = std::env::var("OPEN_RUST_MC_CACHE_DIR") {
             if env.eq_ignore_ascii_case("off") {
@@ -62,8 +72,7 @@ impl L2DiskStore {
             }
             return Self::at(PathBuf::from(env));
         }
-        let base = default_cache_dir()?;
-        Self::at(base.join("open_rust_mc").join("cache"))
+        Self::at(std::env::temp_dir().join("open_rust_mc_cache"))
     }
 
     fn path_for(&self, key: &NuclideKey) -> PathBuf {
@@ -157,18 +166,3 @@ impl NuclideStore for L2DiskStore {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn default_cache_dir() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(PathBuf::from).or_else(|| {
-        std::env::var_os("USERPROFILE")
-            .map(|h| PathBuf::from(h).join("AppData").join("Local"))
-    })
-}
-
-#[cfg(not(target_os = "windows"))]
-fn default_cache_dir() -> Option<PathBuf> {
-    if let Some(xdg) = std::env::var_os("XDG_CACHE_HOME") {
-        return Some(PathBuf::from(xdg));
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache"))
-}
