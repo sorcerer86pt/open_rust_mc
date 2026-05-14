@@ -57,6 +57,13 @@ clap = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
 cudarc = { workspace = true, optional = true }
+# Direct dep on minifb for the preview_scene binary's cursor-aware
+# event loop. The upstream `rust_mc_sim::preview::show_window` zooms
+# around the viewport centre; cursor-centred zoom needs direct
+# access to `window.get_mouse_pos()` and a forked event loop here.
+# Transitive via `rust-mc-sim/preview` anyway when our `preview`
+# feature is on, so this is purely a re-export at the API surface.
+minifb = { version = "0.27", optional = true }
 
 # Local-only dependencies
 hdf5-pure = "0.1"
@@ -82,7 +89,7 @@ png = "0.17"
 [features]
 default = []
 cuda = ["cudarc"]
-preview = ["rust-mc-sim/preview"]
+preview = ["rust-mc-sim/preview", "dep:minifb"]
 # Multi-PC nuclide kernel cache daemon. When enabled, `nuclide_cache`
 # can connect to a TCP server (set via `OPEN_RUST_MC_CACHE_SERVER`) as
 # its L3 tier — slaves on a LAN fetch parsed kernels from a master

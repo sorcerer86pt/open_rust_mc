@@ -204,7 +204,7 @@ fn run_preview(args: &Args) {
     use open_rust_mc::transport::material_resolve;
     use open_rust_mc::transport::nuclides::NuclideLibrary;
     use rust_mc_sim::preview::{
-        auto_color_from_name, show_window, LegendEntry, MaterialPalette, Viewport,
+        auto_color_from_name, LegendEntry, MaterialPalette, Viewport,
     };
 
     let case_path = resolve_case_path(&args.case_json);
@@ -344,7 +344,174 @@ fn run_preview(args: &Args) {
             .and_then(|s| s.to_str())
             .unwrap_or("?"),
     );
-    show_window(initial, &title, legend, render);
+    show_window_cursor_zoom(initial, &title, legend, render);
+}
+
+/// Custom event loop with **cursor-centred zoom** (the upstream
+/// `rust_mc_sim::preview::show_window` zooms around the viewport
+/// midpoint, which makes inspecting off-centre features awkward —
+/// you have to drag-pan to the feature, then zoom, then re-pan).
+///
+/// Differences from upstream:
+///
+/// - **Scroll wheel** zooms around the cursor position. The world
+///   point under the cursor stays under the cursor after zoom,
+///   matching every modern map app (Google Maps, OSM, Figma, ...).
+/// - **Right-click + drag** pans the viewport. Upstream has no pan;
+///   the only way to recenter was to resize the window
+///   asymmetrically.
+/// - Same `R` / `L` / `Escape` keybinds, same render closure
+///   contract.
+///
+/// Geometry is borrowed via the closure, so this only runs under
+/// the `preview` feature (the closure itself uses
+/// `find_cell_recursive` which is always available).
+#[cfg(feature = "preview")]
+fn show_window_cursor_zoom<F>(
+    initial: rust_mc_sim::preview::Viewport,
+    title: &str,
+    _legend: Vec<rust_mc_sim::preview::LegendEntry>,
+    mut render: F,
+)
+where
+    F: FnMut(&rust_mc_sim::preview::Viewport) -> Vec<u32>,
+{
+    use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+    use rust_mc_sim::preview::Viewport;
+
+    let mut viewport = initial;
+    let mut window = Window::new(
+        title,
+        viewport.width as usize,
+        viewport.height as usize,
+        WindowOptions {
+            resize: true,
+            ..WindowOptions::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("preview_scene window: {e}"));
+    window.set_target_fps(60);
+
+    // Initial render.
+    let mut buf = render(&viewport);
+    window
+        .update_with_buffer(&buf, viewport.width as usize, viewport.height as usize)
+        .ok();
+
+    let mut last_size = (viewport.width as usize, viewport.height as usize);
+    let mut prev_r = false;
+    let mut prev_mouse: Option<(f32, f32)> = None;
+
+    while window.is_open() && !window.is_key_down(Key::Escape) {
+        let cur_size = window.get_size();
+        let mut needs_render = false;
+
+        // Resize: keep px/cm constant so dragging the window edge
+        // gives more world area at the same scale (upstream behaviour).
+        if cur_size != last_size && cur_size.0 > 0 && cur_size.1 > 0 {
+            let cx = (viewport.x_min + viewport.x_max) * 0.5;
+            let cy = (viewport.y_min + viewport.y_max) * 0.5;
+            let px_per_cm = (viewport.width as f64 / (viewport.x_max - viewport.x_min)).abs();
+            let new_w_world = cur_size.0 as f64 / px_per_cm;
+            let new_h_world = cur_size.1 as f64 / px_per_cm;
+            viewport.x_min = cx - new_w_world * 0.5;
+            viewport.x_max = cx + new_w_world * 0.5;
+            viewport.y_min = cy - new_h_world * 0.5;
+            viewport.y_max = cy + new_h_world * 0.5;
+            viewport.width = cur_size.0 as u32;
+            viewport.height = cur_size.1 as u32;
+            last_size = cur_size;
+            needs_render = true;
+        }
+
+        // Cursor-centred scroll-zoom. The world coordinate under the
+        // cursor before and after the zoom is held constant — the
+        // viewport bounds slide so the point under the mouse stays
+        // pinned.
+        //
+        // Scroll-delta clamping: minifb passes the raw OS scroll
+        // value through `get_scroll_wheel`. Precision mice / trackpads
+        // on Windows emit many small-magnitude events per perceptual
+        // notch (sy ≈ 0.1 each); raw `|sy| > 0` would zoom 50+× per
+        // gesture and the viewport collapses into sub-pixel void.
+        // Clamping `|sy|` ≤ 1 and using `0.85^|sy|` keeps perceptual
+        // zoom roughly one notch per event, regardless of the OS
+        // event-coalescing policy.
+        if let Some((_, sy)) = window.get_scroll_wheel() {
+            if sy.abs() > 0.05 {
+                let mag = (sy.abs() as f64).min(1.0);
+                let step = 0.85_f64.powf(mag);
+                let factor = if sy > 0.0 { step } else { 1.0 / step };
+                let (mx, my) = window
+                    .get_mouse_pos(MouseMode::Discard)
+                    .unwrap_or((viewport.width as f32 / 2.0, viewport.height as f32 / 2.0));
+                let fx = (mx as f64 / viewport.width as f64).clamp(0.0, 1.0);
+                let fy = (my as f64 / viewport.height as f64).clamp(0.0, 1.0);
+                let world_w = viewport.x_max - viewport.x_min;
+                let world_h = viewport.y_max - viewport.y_min;
+                // World point currently under the cursor. y is flipped:
+                // py=0 = top of screen = world y_max.
+                let wx = viewport.x_min + fx * world_w;
+                let wy = viewport.y_max - fy * world_h;
+                let new_w = world_w * factor;
+                let new_h = world_h * factor;
+                // Floors to keep us out of the sub-pixel void where
+                // floating-point precision degrades and find_cell
+                // queries return nonsense. 1e-3 cm = 10 micrometres
+                // is plenty for any realistic scene.
+                const MIN_HALF_CM: f64 = 1.0e-3;
+                if new_w > MIN_HALF_CM && new_h > MIN_HALF_CM {
+                    // Recenter so (wx, wy) maps to the same (mx, my)
+                    // screen position after the zoom.
+                    viewport.x_min = wx - fx * new_w;
+                    viewport.x_max = viewport.x_min + new_w;
+                    viewport.y_max = wy + fy * new_h;
+                    viewport.y_min = viewport.y_max - new_h;
+                    needs_render = true;
+                }
+            }
+        }
+
+        // Right-click drag = pan. Holding the button and moving the
+        // cursor slides the viewport by the corresponding world
+        // delta. Left button intentionally reserved for selection /
+        // future click-to-probe.
+        let mouse_now = window.get_mouse_pos(MouseMode::Discard);
+        if window.get_mouse_down(MouseButton::Right) {
+            if let (Some((mx, my)), Some((pmx, pmy))) = (mouse_now, prev_mouse) {
+                let dx_px = (mx - pmx) as f64;
+                let dy_px = (my - pmy) as f64;
+                let world_per_px_x = (viewport.x_max - viewport.x_min) / viewport.width as f64;
+                let world_per_px_y = (viewport.y_max - viewport.y_min) / viewport.height as f64;
+                let dx_world = dx_px * world_per_px_x;
+                let dy_world = dy_px * world_per_px_y;
+                viewport.x_min -= dx_world;
+                viewport.x_max -= dx_world;
+                viewport.y_min += dy_world; // y flipped
+                viewport.y_max += dy_world;
+                needs_render = true;
+            }
+            prev_mouse = mouse_now;
+        } else {
+            prev_mouse = None;
+        }
+
+        // R = reset.
+        let r_now = window.is_key_down(Key::R);
+        if r_now && !prev_r {
+            viewport = initial;
+            last_size = (initial.width as usize, initial.height as usize);
+            needs_render = true;
+        }
+        prev_r = r_now;
+
+        if needs_render {
+            buf = render(&viewport);
+        }
+        window
+            .update_with_buffer(&buf, viewport.width as usize, viewport.height as usize)
+            .ok();
+    }
 }
 
 #[cfg(not(feature = "preview"))]
