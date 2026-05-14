@@ -130,6 +130,25 @@ struct Args {
     #[arg(long)]
     ppm_out: Option<PathBuf>,
 
+    /// Multiplier applied to the auto-computed half-size. Default
+    /// `1.0` = the binary's best guess. Use values < 1 to zoom in
+    /// when the auto-zoom shows the experimental fixture surrounded
+    /// by a large pool / containment / building (e.g. PST-012 has
+    /// concrete walls at ±655 cm but the actual solution is at
+    /// ±64 cm — `--zoom 0.1` gives a ±65.5 cm view that shows the
+    /// fixture details). Ignored when `--half-size` is explicit.
+    #[arg(long, default_value_t = 1.0)]
+    zoom: f64,
+
+    /// Convenience companion to `--ppm-out`: emit ALSO a
+    /// `<stem>_zoom<N>.ppm` per stage at the listed zoom factors.
+    /// Useful for "show me the geometry at every interesting scale"
+    /// without re-invoking the binary per zoom. Example:
+    /// `--zoom-stages 0.5,0.1,0.02`. Each stage uses the same
+    /// auto-centred bounds, scaled by the factor.
+    #[arg(long, value_delimiter = ',')]
+    zoom_stages: Vec<f64>,
+
     /// Print, for a 3×3 grid of sample positions across the viewport,
     /// what `find_cell_recursive` returns: the full CoordStack path
     /// (universe / cell_idx / lattice indices at each level) plus the
@@ -557,10 +576,12 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             // user can always pass --half-size explicitly.
             let tight = [probe_x_pos, probe_x_neg, probe_y_pos, probe_y_neg]
                 .iter().fold(0.0_f64, |a, &b| a.max(b));
-            let half = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+            let half_raw = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+            let half = half_raw * args.zoom;
             (cx - half, cx + half, cy - half, cy + half)
         }
-        (None, None) => (-10.0, 10.0, -10.0, 10.0),
+        (None, None) => (-10.0 * args.zoom, 10.0 * args.zoom,
+                         -10.0 * args.zoom, 10.0 * args.zoom),
     };
     let res = args.resolution;
     let dx = (x_max - x_min) / res as f64;
@@ -636,7 +657,62 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
     for px in &buf {
         out.write_all(px).unwrap();
     }
-    eprintln!("wrote {} ({}×{})", ppm_path.display(), res, res);
+    eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
+        ppm_path.display(), res, res, 0.5 * (x_max - x_min), z_slice);
+
+    // Optional multi-stage emit. Each stage scales the auto-half by
+    // a user-supplied factor and writes <stem>_zoom<factor>.ppm.
+    // Skipped when `--half-size` was explicit (overriding the auto
+    // half makes the stage semantics ambiguous).
+    if args.half_size.is_some() || args.zoom_stages.is_empty() {
+        return;
+    }
+    let (cx, cy) = ((x_min + x_max) * 0.5, (y_min + y_max) * 0.5);
+    let base_half = 0.5 * (x_max - x_min) / args.zoom;
+    for &factor in &args.zoom_stages {
+        let stage_half = base_half * factor;
+        let s_xmin = cx - stage_half;
+        let s_xmax = cx + stage_half;
+        let s_ymin = cy - stage_half;
+        let s_ymax = cy + stage_half;
+        let s_dx = (s_xmax - s_xmin) / res as f64;
+        let s_dy = (s_ymax - s_ymin) / res as f64;
+        let mut s_buf = vec![[0u8, 0, 0]; (res * res) as usize];
+        for py in 0..res {
+            let world_y = s_ymax - (py as f64 + 0.5) * s_dy;
+            for px in 0..res {
+                let world_x = s_xmin + (px as f64 + 0.5) * s_dx;
+                let pos = Vec3::new(world_x, world_y, z_slice);
+                let color = match find_cell_recursive(pos, &geometry) {
+                    Some(stack) => {
+                        let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                        match geometry.cells[deepest].fill {
+                            CellFill::Material(m) => {
+                                palette.get(m as usize).copied().unwrap_or(void)
+                            }
+                            _ => void,
+                        }
+                    }
+                    None => void,
+                };
+                s_buf[(py * res + px) as usize] = color;
+            }
+        }
+        let stem = ppm_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("preview");
+        let parent = ppm_path.parent().unwrap_or_else(|| Path::new("."));
+        let stage_path = parent.join(format!("{stem}_zoom{factor}.ppm"));
+        let mut s_out = std::fs::File::create(&stage_path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", stage_path.display()));
+        write!(s_out, "P6\n{} {}\n255\n", res, res).unwrap();
+        for px in &s_buf {
+            s_out.write_all(px).unwrap();
+        }
+        eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
+            stage_path.display(), res, res, stage_half, z_slice);
+    }
 }
 
 fn main() {
