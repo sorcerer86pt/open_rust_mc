@@ -622,19 +622,19 @@ mod cuda_main {
         let mut table_nuclides = Vec::new();
         for &(filename, awr, nu_bar, nuc_temp_idx) in NUCLIDE_SPECS {
             let path = args.data_dir.join(filename);
-            svd_kernels.push(xs_provider::load_nuclide(
+            svd_kernels.push(std::sync::Arc::new(xs_provider::load_nuclide(
                 &path,
                 args.rank,
                 nuc_temp_idx,
                 awr,
                 nu_bar,
-            ));
-            table_nuclides.push(xs_provider::load_nuclide_table(
+            )));
+            table_nuclides.push(std::sync::Arc::new(xs_provider::load_nuclide_table(
                 &path,
                 nuc_temp_idx,
                 awr,
                 nu_bar,
-            ));
+            )));
         }
         let thermal = load_thermal(&args.data_dir);
         let provider = xs_provider::TableXsProvider {

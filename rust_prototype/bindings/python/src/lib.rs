@@ -1168,7 +1168,8 @@ fn run_gamma_heating(
             }
         }
     }
-    let mut tables = Vec::with_capacity(nuclide_specs.len());
+    let mut tables: Vec<std::sync::Arc<xs_provider::NuclideTableData>> =
+        Vec::with_capacity(nuclide_specs.len());
     for (file, awr, nubar, temp_idx) in &nuclide_specs {
         let path = scene.data_dir.join(file);
         if !path.exists() {
@@ -1177,9 +1178,9 @@ fn run_gamma_heating(
                 path.display()
             )));
         }
-        tables.push(xs_provider::load_nuclide_table(
+        tables.push(std::sync::Arc::new(xs_provider::load_nuclide_table(
             &path, *temp_idx, *awr, *nubar,
-        ));
+        )));
     }
     // Thermal scattering (same logic as run_eigenvalue).
     let mut thermal_files: Vec<Option<String>> = vec![None; nuclide_specs.len()];
@@ -1912,8 +1913,8 @@ fn run_eigenvalue(
     // reconstructs the original pointwise table exactly at the loaded
     // temperature.
     let t_load_start = std::time::Instant::now();
-    let mut tables: Vec<xs_provider::NuclideTableData> = Vec::new();
-    let mut svd_kernels: Vec<xs_provider::NuclideKernels> = Vec::new();
+    let mut tables: Vec<std::sync::Arc<xs_provider::NuclideTableData>> = Vec::new();
+    let mut svd_kernels: Vec<std::sync::Arc<xs_provider::NuclideKernels>> = Vec::new();
     let mode_uses_svd = matches!(scene.xs_mode, PyXsMode::Svd | PyXsMode::HybridSvdWmp);
     let mode_uses_table = matches!(scene.xs_mode, PyXsMode::Table | PyXsMode::HybridTableWmp);
     let on_gpu = matches!(scene.runner, PyRunner::GpuCuda);
@@ -1929,9 +1930,9 @@ fn run_eigenvalue(
             )));
         }
         if need_table {
-            tables.push(xs_provider::load_nuclide_table(
+            tables.push(std::sync::Arc::new(xs_provider::load_nuclide_table(
                 &path, *temp_idx, *awr, *nubar,
-            ));
+            )));
         }
         if need_svd {
             // Build the per-MT rank policy once per call (cheap, but keep
@@ -1940,9 +1941,9 @@ fn run_eigenvalue(
             for (&mt, &rank) in &scene.svd_ranks_per_mt {
                 policy = policy.with_mt(mt, rank);
             }
-            svd_kernels.push(xs_provider::load_nuclide_with_policy(
+            svd_kernels.push(std::sync::Arc::new(xs_provider::load_nuclide_with_policy(
                 &path, &policy, *temp_idx, *awr, *nubar,
-            ));
+            )));
         }
     }
 

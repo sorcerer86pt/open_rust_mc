@@ -837,9 +837,15 @@ impl GpuTransportContext {
     }
 
     /// Upload SVD nuclide data to GPU.
+    ///
+    /// Takes `&[Arc<NuclideKernels>]` so the GPU upload path shares the
+    /// same handle the CPU `SvdXsProvider` holds — and the same handle
+    /// the process-wide `nuclide_cache` returns. Lets a future GPU-side
+    /// buffer cache key on `Arc::as_ptr()` (skip the `clone_htod` pass
+    /// when the same `Arc` is re-uploaded).
     pub fn upload_nuclide_data(
         &self,
-        nuclides: &[crate::transport::xs_provider::NuclideKernels],
+        nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
         rank: usize,
     ) -> Result<GpuNuclideData, Box<dyn std::error::Error>> {
         let n_nuc = nuclides.len();

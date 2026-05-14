@@ -479,8 +479,17 @@ impl NuclideKernels {
 }
 
 /// Cross-section provider backed by SVD-compressed kernels.
+///
+/// Each `Arc<NuclideKernels>` is shared with the process-wide
+/// `nuclide_cache::TieredStore` (see `transport::nuclide_cache`). When
+/// the same `.h5` file appears in multiple materials, multiple scenes,
+/// or successive ICSBEP cases in the same process, every `SvdXsProvider`
+/// holds the same Arc — one parsed kernel, one heap allocation, refcount
+/// gates lifetime. The wider engine accesses each kernel by `&[Arc<…>]`
+/// and lets `Arc::deref` thread the existing `&NuclideKernels` callers
+/// through unchanged.
 pub struct SvdXsProvider {
-    pub nuclides: Vec<NuclideKernels>,
+    pub nuclides: Vec<Arc<NuclideKernels>>,
     /// Thermal scattering data per nuclide (None if no S(α,β) for this nuclide).
     pub thermal: Vec<Option<Arc<ThermalScatteringData>>>,
 }
@@ -1893,8 +1902,12 @@ impl NuclideTableData {
 ///
 /// This is the baseline: binary search + log-log interpolation per energy point.
 /// Used for the "honesty test" comparison against SVD reconstruction.
+///
+/// Mirrors `SvdXsProvider` in holding `Arc`-wrapped nuclides so the
+/// process-wide `nuclide_cache::TieredStore` can dedupe table data
+/// across scenes / cases in one Python session.
 pub struct TableXsProvider {
-    pub nuclides: Vec<NuclideTableData>,
+    pub nuclides: Vec<Arc<NuclideTableData>>,
     /// Thermal scattering data per nuclide (None if no S(α,β) for this nuclide).
     pub thermal: Vec<Option<Arc<ThermalScatteringData>>>,
 }
@@ -3302,7 +3315,7 @@ mod tests {
         let nuc = make_nuclide_with_partials(vec![(103, np_kernel)]);
 
         let provider = SvdXsProvider {
-            nuclides: vec![nuc],
+            nuclides: vec![Arc::new(nuc)],
             thermal: vec![None],
         };
 

@@ -375,7 +375,7 @@ fn load_xs(args: &Args) -> xs_provider::SvdXsProvider {
         thermal[IDX_H1] = Some(Arc::new(tsl));
     }
     xs_provider::SvdXsProvider {
-        nuclides: kernels,
+        nuclides: kernels.into_iter().map(Arc::new).collect(),
         thermal,
     }
 }

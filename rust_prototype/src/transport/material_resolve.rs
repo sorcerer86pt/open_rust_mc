@@ -146,7 +146,7 @@ pub fn resolve_materials_with_data_dir(
     // (zaid, temp_idx) → kernel_idx — share kernels across materials
     // when temperature columns coincide.
     let mut kernel_idx: HashMap<(u32, usize), usize> = HashMap::new();
-    let mut kernels: Vec<NuclideKernels> = Vec::new();
+    let mut kernels: Vec<Arc<NuclideKernels>> = Vec::new();
     let mut engine_mats: Vec<Material> = Vec::with_capacity(materials.len());
 
     // Track which kernel each (material_idx, nuclide_dto_idx) ended up
@@ -486,7 +486,7 @@ fn load_kernel_for(
     resolved: &ResolvedNuclide,
     svd_rank: usize,
     has_thermal: bool,
-) -> NuclideKernels {
+) -> Arc<NuclideKernels> {
     let mut policy = xs_provider::RankPolicy::new(svd_rank);
     if has_thermal {
         // MT=2 free-atom elastic is replaced at runtime by the
@@ -500,12 +500,37 @@ fn load_kernel_for(
         // configured SVD rank.
         policy = policy.with_table(2);
     }
-    xs_provider::load_nuclide_with_policy(
+    // Route through the process-wide nuclide cache. On a cache hit
+    // (same h5 file by blake3, same policy, same temperature idx)
+    // this returns the shared `Arc<NuclideKernels>` without touching
+    // disk. On miss it falls through to the HDF5 loader, then
+    // write-throughs to every cache tier. ICSBEP sweeps that
+    // previously re-parsed U-235 35× per run now pay one parse +
+    // 34 hashmap lookups.
+    let resolved_path = resolved.path.clone();
+    let awr = resolved.awr;
+    let nu_bar = resolved.nu_bar_const;
+    let temp_idx = resolved.temp_idx;
+    // Clone policy for the loader closure — the key computation borrows
+    // `&policy` and the move closure needs an owned copy. `RankPolicy`
+    // derives Clone, and the per-call allocation cost is dwarfed by the
+    // HDF5 parse that follows on a cache miss.
+    let policy_for_loader = policy.clone();
+    crate::transport::nuclide_cache::get_or_load(
         &resolved.path,
         &policy,
         resolved.temp_idx,
-        resolved.awr,
-        resolved.nu_bar_const,
+        awr,
+        nu_bar,
+        move || {
+            xs_provider::load_nuclide_with_policy(
+                &resolved_path,
+                &policy_for_loader,
+                temp_idx,
+                awr,
+                nu_bar,
+            )
+        },
     )
 }
 

@@ -114,7 +114,7 @@ fn xs_weighted_mean_q(rows: &[(usize, u32, f64, f64, f64)]) -> (f64, f64) {
 }
 
 #[cfg(feature = "cuda")]
-fn gpu_round_trip_check(kern: &NuclideKernels) -> Result<(), Box<dyn std::error::Error>> {
+fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box<dyn std::error::Error>> {
     use open_rust_mc::gpu_transport::GpuTransportContext;
 
     let gpu = GpuTransportContext::new()?;
@@ -251,7 +251,7 @@ fn gpu_round_trip_check(kern: &NuclideKernels) -> Result<(), Box<dyn std::error:
 }
 
 #[cfg(not(feature = "cuda"))]
-fn gpu_round_trip_check(_kern: &NuclideKernels) -> Result<(), Box<dyn std::error::Error>> {
+fn gpu_round_trip_check(_kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box<dyn std::error::Error>> {
     println!("(CUDA feature disabled; build with --features cuda)");
     Ok(())
 }
@@ -270,7 +270,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(DEFAULT_AWR);
     let path = dir.join(&nuclide_file);
     println!("Loading {} (AWR fallback = {})", path.display(), awr_fallback);
-    let kern = load_nuclide(&path, 15, 0, awr_fallback, 2.43);
+    let kern = std::sync::Arc::new(load_nuclide(&path, 15, 0, awr_fallback, 2.43));
 
     println!("\nLevel inventory ({} discrete levels):", kern.discrete_levels.len());
     for (li, lvl) in kern.discrete_levels.iter().enumerate().take(12) {

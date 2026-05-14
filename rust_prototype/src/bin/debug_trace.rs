@@ -49,7 +49,7 @@ fn main() {
         kernels.push(xs_provider::load_nuclide(&path, args.rank, 1, awr, nu_bar));
     }
     let provider = xs_provider::SvdXsProvider {
-        nuclides: kernels,
+        nuclides: kernels.into_iter().map(std::sync::Arc::new).collect(),
         thermal: vec![],
     };
 

@@ -52,7 +52,7 @@ fn main() {
         svd_kernels.push(xs_provider::load_nuclide(&path, rank, t_idx, awr, nu_bar));
     }
     let svd = xs_provider::SvdXsProvider {
-        nuclides: svd_kernels,
+        nuclides: svd_kernels.into_iter().map(std::sync::Arc::new).collect(),
         thermal: vec![None; NUCLIDE_SPECS.len()], // skip SAB for diff
     };
 
@@ -63,7 +63,7 @@ fn main() {
         tab_nuclides.push(xs_provider::load_nuclide_table(&path, t_idx, awr, nu_bar));
     }
     let tab = xs_provider::TableXsProvider {
-        nuclides: tab_nuclides,
+        nuclides: tab_nuclides.into_iter().map(std::sync::Arc::new).collect(),
         thermal: vec![None; NUCLIDE_SPECS.len()],
     };
 

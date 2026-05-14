@@ -112,7 +112,7 @@ fn main() {
             }
             let thermal = vec![None; kernels.len()];
             let provider = xs_provider::TableXsProvider {
-                nuclides: kernels,
+                nuclides: kernels.into_iter().map(std::sync::Arc::new).collect(),
                 thermal,
             };
             for (i, (_, _, _, _, target_k)) in NUCLIDE_SPECS.iter().enumerate() {
@@ -136,7 +136,7 @@ fn main() {
             }
             let thermal = vec![None; kernels.len()];
             let provider = xs_provider::SvdXsProvider {
-                nuclides: kernels,
+                nuclides: kernels.into_iter().map(std::sync::Arc::new).collect(),
                 thermal,
             };
             for (i, (_, _, _, _, target_k)) in NUCLIDE_SPECS.iter().enumerate() {

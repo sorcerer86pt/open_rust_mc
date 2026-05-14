@@ -64,6 +64,14 @@ ndarray-npy = "0.9"
 smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
 serde_json = "1"
+# Nuclide kernel cache — see src/transport/nuclide_cache. DashMap drives
+# the in-process L1 store, blake3 keys the L2 disk store (content-addressed
+# so swapping ENDF/B-VII.1 for VIII.0 in the same path auto-invalidates
+# entries), bytemuck does zero-copy reinterpretation of raw f64/i32 blobs
+# for the binary on-disk format.
+dashmap = "6"
+blake3 = "1"
+bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 
 [features]
 default = []

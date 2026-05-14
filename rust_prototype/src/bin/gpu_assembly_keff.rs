@@ -291,9 +291,9 @@ mod cuda_main {
         for &(fname, awr, nu_bar, t_idx) in NUCLIDE_SPECS {
             let path = args.data_dir.join(fname);
             println!("  loading {fname}...");
-            kernels.push(xs_provider::load_nuclide(
+            kernels.push(std::sync::Arc::new(xs_provider::load_nuclide(
                 &path, args.rank, t_idx, awr, nu_bar,
-            ));
+            )));
         }
         let load_ms = t0.elapsed().as_secs_f64() * 1000.0;
         println!("  loaded in {load_ms:.0} ms");

@@ -556,7 +556,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     );
     (
         xs_provider::SvdXsProvider {
-            nuclides: kernels,
+            nuclides: kernels.into_iter().map(std::sync::Arc::new).collect(),
             thermal: vec![],
         },
         xs_mem,
@@ -618,7 +618,7 @@ fn load_table(args: &Args) -> (xs_provider::TableXsProvider, usize, f64) {
     );
     (
         xs_provider::TableXsProvider {
-            nuclides: tables,
+            nuclides: tables.into_iter().map(std::sync::Arc::new).collect(),
             thermal: vec![],
         },
         xs_mem,

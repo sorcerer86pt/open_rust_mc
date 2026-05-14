@@ -52,7 +52,7 @@ fn main() {
     // Build a rank-15 SVD provider for U-235 at the chosen temperature.
     let kernel = xs_provider::load_nuclide(&path, 15, t_idx, 233.025, 2.43);
     let provider = xs_provider::SvdXsProvider {
-        nuclides: vec![kernel],
+        nuclides: vec![std::sync::Arc::new(kernel)],
         thermal: vec![None],
     };
 

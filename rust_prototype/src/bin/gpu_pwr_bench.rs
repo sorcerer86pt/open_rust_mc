@@ -431,7 +431,7 @@ mod cuda_main {
                 // Null out pointwise XS so GPU uses SVD path for main channels.
                 k.pointwise_xs = None;
             }
-            kernels.push(k);
+            kernels.push(std::sync::Arc::new(k));
         }
         if args.force_svd {
             println!(

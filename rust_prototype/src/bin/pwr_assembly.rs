@@ -437,7 +437,7 @@ fn load_svd(args: &Args) -> (xs_provider::SvdXsProvider, usize, f64) {
     let thermal = load_thermal(&args.data_dir);
     let xs_mem: usize = kernels.iter().map(|k| k.svd_memory_bytes()).sum();
     let provider = xs_provider::SvdXsProvider {
-        nuclides: kernels,
+        nuclides: kernels.into_iter().map(std::sync::Arc::new).collect(),
         thermal,
     };
     let load_ms = t0.elapsed().as_secs_f64() * 1000.0;

@@ -709,7 +709,7 @@ fn load_table_xs(data_dir: &Path) -> Result<TableXsProvider, String> {
     }
     let thermal = load_thermal(data_dir);
     Ok(TableXsProvider {
-        nuclides: tables,
+        nuclides: tables.into_iter().map(std::sync::Arc::new).collect(),
         thermal,
     })
 }

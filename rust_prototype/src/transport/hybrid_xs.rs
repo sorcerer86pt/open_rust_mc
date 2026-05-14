@@ -60,11 +60,34 @@ impl HybridSvdWmpXsProvider {
     pub fn rebuild_smooth_only(&mut self) -> (usize, usize) {
         let mut before = 0_usize;
         let mut after = 0_usize;
-        for (i, nuc) in self.inner.nuclides.iter_mut().enumerate() {
+        for (i, nuc_arc) in self.inner.nuclides.iter_mut().enumerate() {
             let Some((wmp, _)) = self.wmps[i].as_ref() else {
                 continue;
             };
             let (e_lo, e_hi) = (wmp.e_min, wmp.e_max);
+
+            // Mutation in place is only safe when this `SvdXsProvider`
+            // is the *sole* owner of the kernel — the process-wide
+            // `nuclide_cache::TieredStore` may hold another `Arc` to
+            // the same `NuclideKernels`, and trimming the SVD basis
+            // would corrupt the cached canonical form for any future
+            // consumer. `Arc::get_mut` returns `Some(_)` iff the
+            // strong + weak refcount is 1; on a cache hit it returns
+            // `None` and the smooth-only trim is silently skipped,
+            // which is benign (memory optimisation only — the WMP
+            // evaluator still answers the resonance window).
+            let Some(nuc) = std::sync::Arc::get_mut(nuc_arc) else {
+                // Account memory anyway so the report's accounting is
+                // honest about the un-trimmed kernels.
+                for slot in [&nuc_arc.elastic, &nuc_arc.fission, &nuc_arc.capture] {
+                    if let Some(rxn) = slot.as_ref() {
+                        before += rxn.memory_bytes();
+                        after += rxn.memory_bytes();
+                    }
+                }
+                continue;
+            };
+
             for slot in [&mut nuc.elastic, &mut nuc.fission, &mut nuc.capture] {
                 if let Some(rxn) = slot.as_mut() {
                     before += rxn.memory_bytes();

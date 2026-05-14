@@ -332,7 +332,7 @@ fn main() {
     }
 
     let xs_provider = xs_provider::SvdXsProvider {
-        nuclides: kernels,
+        nuclides: kernels.into_iter().map(std::sync::Arc::new).collect(),
         thermal,
     };
 

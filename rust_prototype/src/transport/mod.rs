@@ -7,6 +7,7 @@ pub mod hybrid_xs;
 pub mod kinetics;
 pub mod material;
 pub mod material_resolve;
+pub mod nuclide_cache;
 pub mod nuclides;
 pub mod particle;
 pub mod rng;

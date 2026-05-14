@@ -113,7 +113,7 @@ fn summarize_table(kern: &NuclideKernels, name: &str) {
     }
 }
 
-fn cpu_only_report(kerns: &[NuclideKernels], names: &[String]) {
+fn cpu_only_report(kerns: &[std::sync::Arc<NuclideKernels>], names: &[String]) {
     println!("\n=== CPU-only ν̄(E) sweep ===");
     print!("{:>12}", "E (eV)");
     for n in names {
@@ -131,7 +131,7 @@ fn cpu_only_report(kerns: &[NuclideKernels], names: &[String]) {
 
 #[cfg(feature = "cuda")]
 fn gpu_round_trip_report(
-    kerns: &[NuclideKernels],
+    kerns: &[std::sync::Arc<NuclideKernels>],
     names: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     use open_rust_mc::gpu_transport::GpuTransportContext;
@@ -279,7 +279,7 @@ fn gpu_round_trip_report(
 
 #[cfg(not(feature = "cuda"))]
 fn gpu_round_trip_report(
-    _kerns: &[NuclideKernels],
+    _kerns: &[std::sync::Arc<NuclideKernels>],
     _names: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n(CUDA feature disabled; rebuild with `--features cuda` for the GPU A/B)");
@@ -298,7 +298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("  skipping {} — not found", path.display());
             continue;
         }
-        let kern = load_nuclide(&path, 5, 0, awr_fb, nu_fb);
+        let kern = std::sync::Arc::new(load_nuclide(&path, 5, 0, awr_fb, nu_fb));
         let name = file.trim_end_matches(".h5").to_string();
         summarize_table(&kern, &name);
         kerns.push(kern);
