@@ -30,8 +30,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::binary_format::{
-    DecodeError, EncodeError, decode_nuclide_kernels, encode_nuclide_kernels,
-    read_header_and_payload, write_header_and_payload,
+    EncodeError, decode_nuclide_kernels, encode_nuclide_kernels,
 };
 use super::{NuclideKey, NuclideStore};
 use crate::transport::xs_provider::NuclideKernels;
@@ -88,22 +87,18 @@ impl NuclideStore for L2DiskStore {
             Ok(b) => b,
             Err(_) => return None,
         };
-        let mut r: &[u8] = &bytes;
-        let payload = match read_header_and_payload(&mut r) {
-            Ok(p) => p,
-            Err(e) => {
-                if !matches!(e, DecodeError::Io(_)) {
-                    eprintln!(
-                        "warning: nuclide_cache L2 entry {} unreadable ({e}); \
-                         removing and falling through to HDF5 load",
-                        path.display()
-                    );
-                    let _ = std::fs::remove_file(&path);
-                }
-                return None;
-            }
-        };
-        match decode_nuclide_kernels(&payload) {
+        // `encode_nuclide_kernels` produces a complete header+payload
+        // stream — the disk file is exactly those bytes. Decoding goes
+        // through one validated path; the header's payload_blake3
+        // catches torn writes / on-disk corruption before we touch the
+        // body. (Earlier versions of this file double-wrapped: the
+        // put path called both `encode_nuclide_kernels` *and*
+        // `write_header_and_payload`, and the read path peeled one
+        // header before handing the rest to `decode_nuclide_kernels`.
+        // The double-wrap was redundant, two integrity hashes for one
+        // file, and made the on-disk bytes diverge from the wire
+        // bytes the L3 daemon ships. v3 of FORMAT_VERSION drops it.)
+        match decode_nuclide_kernels(&bytes) {
             Ok(k) => Some(Arc::new(k)),
             Err(e) => {
                 eprintln!(
@@ -118,7 +113,7 @@ impl NuclideStore for L2DiskStore {
     }
 
     fn put(&self, key: NuclideKey, value: Arc<NuclideKernels>) {
-        let payload = match encode_nuclide_kernels(&value) {
+        let bytes = match encode_nuclide_kernels(&value) {
             Ok(p) => p,
             Err(EncodeError::Io(e)) => {
                 eprintln!("warning: nuclide_cache L2 encode I/O error: {e}");
@@ -137,16 +132,9 @@ impl NuclideStore for L2DiskStore {
                 return;
             }
         };
-        // The header carries the blake3 over `payload`; tearing the
-        // write here leaves a malformed file, but read_header_and_payload
-        // will detect it and drop the entry next time.
-        let mut buf = Vec::with_capacity(payload.len() + 64);
-        if let Err(e) = write_header_and_payload(&mut buf, &payload) {
-            eprintln!("warning: nuclide_cache L2 header write error: {e}");
-            return;
-        }
+        // Write the encoded stream verbatim — header already inside.
         use std::io::Write;
-        if let Err(e) = f.write_all(&buf) {
+        if let Err(e) = f.write_all(&bytes) {
             eprintln!("warning: nuclide_cache L2 payload write error: {e}");
             return;
         }
@@ -163,6 +151,56 @@ impl NuclideStore for L2DiskStore {
 
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::nuclide_cache::binary_format::encode_nuclide_kernels;
+    use crate::transport::xs_provider::{NuclideKernels, RankPolicy};
+
+    /// Writes a valid `.nuc` to a temp dir via the disk store's
+    /// public `put`, then reads it back via the store's `try_get`.
+    /// The same write path is what `nuclide_cache_server` uses on
+    /// startup eager-preload (with `--cache-dir`), so this roundtrip
+    /// also validates that subsequent daemon restarts can pick up
+    /// the cached files.
+    #[test]
+    fn disk_roundtrip_via_put_then_get() {
+        let dir = std::env::temp_dir().join("orm_l2_disk_roundtrip_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = L2DiskStore::at(dir.clone()).expect("at");
+
+        let h5 = std::env::temp_dir().join("orm_l2_disk_test.h5");
+        std::fs::write(&h5, b"contents-fixture").unwrap();
+        let policy = RankPolicy::new(5);
+        let key = NuclideKey::from_inputs(&h5, &policy, 0).unwrap();
+        let kernel = Arc::new(NuclideKernels::empty(238.0289, 2.43));
+
+        // put — write through to disk atomically
+        store.put(key.clone(), Arc::clone(&kernel));
+        // file must exist after the put
+        assert!(
+            dir.join(key.disk_filename()).exists(),
+            "L2DiskStore::put must leave a .nuc file behind"
+        );
+
+        // try_get — read back, blake3 must verify, NuclideKernels
+        // must reconstruct
+        let got = store.try_get(&key).expect("must hit after put");
+        assert_eq!(got.awr, 238.0289);
+        assert_eq!(got.nu_bar_const, 2.43);
+
+        // Also: encoded payload is byte-identical between
+        // disk-roundtrip and a fresh encode — that's the contract
+        // the daemon eager-preload relies on.
+        let direct = encode_nuclide_kernels(&NuclideKernels::empty(238.0289, 2.43)).unwrap();
+        let from_disk = std::fs::read(dir.join(key.disk_filename())).unwrap();
+        assert_eq!(direct, from_disk);
+
+        let _ = std::fs::remove_file(&h5);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

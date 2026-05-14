@@ -65,7 +65,14 @@ pub const MAGIC: &[u8; 8] = b"ORM_NK01";
 ///   ReactionKernel + EnergyDistribution + AngularDistribution +
 ///   NuBarTable + DiscreteLevel + InelasticCdf + UrrProbabilityTables
 ///   + PhotonProduct + partial_kernels).
-pub const FORMAT_VERSION: u32 = 2;
+/// - v3: L2 disk path no longer double-wraps the encoded stream —
+///   the on-disk file is exactly the `encode_nuclide_kernels` output,
+///   one header per file. Earlier v2 disk entries are silently
+///   invalidated at read (their outer header still parses but the
+///   inner payload's first bytes (ASCII `O` from `ORM_NK01`) decode
+///   to an invalid `NuclideKernels.elastic` discriminant, surfacing
+///   as `DecodeError::BadDiscriminant`).
+pub const FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
