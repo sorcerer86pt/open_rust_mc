@@ -1217,12 +1217,161 @@ impl GpuTransportContext {
         }
     }
 
-    /// Uncached upload — the original implementation, kept private so
-    /// the public `upload_nuclide_data` can wrap it with the cache.
-    /// Hot path is unchanged from before: build every `Vec<f64>` /
-    /// `Vec<i32>` packing block, then `clone_htod` each into a
-    /// `CudaSlice`.
+    /// Uncached upload via the per-nuclide pipeline. Splits the work
+    /// into two stages:
+    ///   1. `upload_one_nuclide` extracts each nuclide's data into
+    ///      its own `PerNuclideGpu` (per-nuclide CudaSlices, no
+    ///      inter-nuclide concatenation).
+    ///   2. `assemble_*_cat` reconstructs the flat-pack
+    ///      `GpuNuclideData` via direct device-to-device copies —
+    ///      no round-trip through host memory.
+    ///
+    /// Byte-identical to the legacy path (preserved as
+    /// `upload_nuclide_data_uncached_legacy`); the per-category
+    /// `assemble_*_cat_matches_legacy_bundle_byte_for_byte` tests
+    /// in `gpu_per_nuclide::tests` prove parity.
+    ///
+    /// The per-nuclide PerNuclideGpu values are dropped at the end
+    /// of this function in Stage C step B; future steps C (per-
+    /// nuclide LFU cache) and D (kernel pointer-array ABI) reuse
+    /// them across cases for the cross-case sharing win.
     pub(crate) fn upload_nuclide_data_uncached(
+        &self,
+        nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
+        rank: usize,
+    ) -> Result<GpuNuclideData, Box<dyn std::error::Error>> {
+        use crate::gpu_per_nuclide::*;
+
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| upload_one_nuclide(&self.stream, n, rank).map(Arc::new))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let a = assemble_a_cat(&self.stream, &per_nucs)?;
+        let b = assemble_b_cat(&self.stream, &per_nucs)?;
+        let c = assemble_c_cat(&self.stream, &per_nucs)?;
+        let a4 = assemble_a4_cat(&self.stream, &per_nucs)?;
+        let a5 = assemble_a5_cat(&self.stream, &per_nucs)?;
+        let a6 = assemble_a6_cat(&self.stream, &per_nucs)?;
+        let a7 = assemble_a7_cat(&self.stream, &per_nucs)?;
+        let a8 = assemble_a8_cat(&self.stream, &per_nucs)?;
+
+        Ok(GpuNuclideData {
+            // Category A.1 + B
+            all_basis: b.all_basis,
+            all_coeffs: b.all_coeffs,
+            all_energy_grids: a.all_energy_grids,
+            basis_offsets: self.stream.clone_htod(&b.basis_offsets_vec)?,
+            grid_offsets: self.stream.clone_htod(&a.grid_offsets_vec)?,
+            n_energies: self.stream.clone_htod(&a.n_energies_vec)?,
+            has_reaction: self.stream.clone_htod(&b.has_reaction_vec)?,
+            coeffs_offsets: self.stream.clone_htod(&b.coeffs_offsets_vec)?,
+            rank: rank as i32,
+            // Category A.2
+            total_xs: a.total_xs,
+            total_xs_offsets: self.stream.clone_htod(&a.total_xs_off_vec)?,
+            has_total_xs: self.stream.clone_htod(&a.has_total_xs_vec)?,
+            pointwise_xs: a.pointwise_xs,
+            pw_offsets: self.stream.clone_htod(&a.pw_off_vec)?,
+            has_pw: self.stream.clone_htod(&a.has_pw_vec)?,
+            // Category A.3
+            nu_bar_energies: a.nu_bar_energies,
+            nu_bar_values: a.nu_bar_values,
+            nu_bar_offsets: self.stream.clone_htod(&a.nu_bar_offsets_vec)?,
+            nu_bar_sizes: self.stream.clone_htod(&a.nu_bar_sizes_vec)?,
+            delayed_nu_bar_energies: a.delayed_nu_bar_energies,
+            delayed_nu_bar_values: a.delayed_nu_bar_values,
+            delayed_nu_bar_offsets: self
+                .stream
+                .clone_htod(&a.delayed_nu_bar_offsets_vec)?,
+            delayed_nu_bar_sizes: self.stream.clone_htod(&a.delayed_nu_bar_sizes_vec)?,
+            // Category C
+            level_q_values: c.level_q_values,
+            level_thresholds: c.level_thresholds,
+            level_offsets: self.stream.clone_htod(&c.level_offsets_vec)?,
+            level_counts: self.stream.clone_htod(&c.level_counts_vec)?,
+            level_basis: c.level_basis,
+            level_coeffs: c.level_coeffs,
+            level_basis_offsets: self.stream.clone_htod(&c.level_basis_offsets_vec)?,
+            level_coeffs_offsets: self.stream.clone_htod(&c.level_coeffs_offsets_vec)?,
+            level_has_kernel: c.level_has_kernel,
+            level_mt: c.level_mt,
+            lev_ang_energies: c.lev_ang_energies,
+            lev_ang_mu: c.lev_ang_mu,
+            lev_ang_cdf: c.lev_ang_cdf,
+            lev_ang_dist_off: self.stream.clone_htod(&c.lev_ang_dist_off_vec)?,
+            lev_ang_dist_sz: self.stream.clone_htod(&c.lev_ang_dist_sz_vec)?,
+            lev_ang_lev_off: self.stream.clone_htod(&c.lev_ang_lev_off_vec)?,
+            lev_ang_lev_ne: self.stream.clone_htod(&c.lev_ang_lev_ne_vec)?,
+            // Category A.4
+            ang_energies: a4.ang_energies,
+            ang_mu: a4.ang_mu,
+            ang_cdf: a4.ang_cdf,
+            ang_dist_offsets: self.stream.clone_htod(&a4.ang_dist_offsets_vec)?,
+            ang_dist_sizes: self.stream.clone_htod(&a4.ang_dist_sizes_vec)?,
+            ang_nuc_offsets: self.stream.clone_htod(&a4.ang_nuc_offsets_vec)?,
+            ang_nuc_n_energies: self.stream.clone_htod(&a4.ang_nuc_n_energies_vec)?,
+            ang_is_cm: self.stream.clone_htod(&a4.ang_is_cm_vec)?,
+            // Category A.5
+            fis_inc_energies: a5.fis_inc_energies,
+            fis_dist_offsets: self.stream.clone_htod(&a5.fis_dist_offsets_vec)?,
+            fis_dist_sizes: self.stream.clone_htod(&a5.fis_dist_sizes_vec)?,
+            fis_e_out: a5.fis_e_out,
+            fis_cdf: a5.fis_cdf,
+            fis_pdf: a5.fis_pdf,
+            fis_nuc_offsets: self.stream.clone_htod(&a5.fis_nuc_offsets_vec)?,
+            fis_nuc_n_inc: self.stream.clone_htod(&a5.fis_nuc_n_inc_vec)?,
+            watt_inc_energies: a5.watt_inc_energies,
+            watt_a: a5.watt_a,
+            watt_b: a5.watt_b,
+            watt_u: self.stream.clone_htod(&a5.watt_u_vec)?,
+            watt_nuc_offsets: self.stream.clone_htod(&a5.watt_nuc_offsets_vec)?,
+            watt_nuc_n: self.stream.clone_htod(&a5.watt_nuc_n_vec)?,
+            maxevap_inc_energies: a5.maxevap_inc_energies,
+            maxevap_theta: a5.maxevap_theta,
+            maxevap_u: self.stream.clone_htod(&a5.maxevap_u_vec)?,
+            maxevap_law: self.stream.clone_htod(&a5.maxevap_law_vec)?,
+            maxevap_nuc_offsets: self.stream.clone_htod(&a5.maxevap_nuc_offsets_vec)?,
+            maxevap_nuc_n: self.stream.clone_htod(&a5.maxevap_nuc_n_vec)?,
+            // Category A.6
+            inel91_inc_energies: a6.inel91_inc_energies,
+            inel91_dist_offsets: self.stream.clone_htod(&a6.inel91_dist_offsets_vec)?,
+            inel91_dist_sizes: self.stream.clone_htod(&a6.inel91_dist_sizes_vec)?,
+            inel91_e_out: a6.inel91_e_out,
+            inel91_cdf: a6.inel91_cdf,
+            inel91_pdf: a6.inel91_pdf,
+            inel91_nuc_offsets: self.stream.clone_htod(&a6.inel91_nuc_offsets_vec)?,
+            inel91_nuc_n_inc: self.stream.clone_htod(&a6.inel91_nuc_n_inc_vec)?,
+            // Category A.7
+            urr_energies: a7.urr_energies,
+            urr_cum_prob: a7.urr_cum_prob,
+            urr_total_f: a7.urr_total_f,
+            urr_elastic_f: a7.urr_elastic_f,
+            urr_fission_f: a7.urr_fission_f,
+            urr_capture_f: a7.urr_capture_f,
+            urr_offsets: self.stream.clone_htod(&a7.urr_offsets_vec)?,
+            urr_n_energies: self.stream.clone_htod(&a7.urr_n_energies_vec)?,
+            urr_n_bands: self.stream.clone_htod(&a7.urr_n_bands_vec)?,
+            urr_multiply_smooth: self.stream.clone_htod(&a7.urr_multiply_smooth_vec)?,
+            // Category A.8
+            inel_cdf_data: a8.inel_cdf_data,
+            inel_cdf_off: self.stream.clone_htod(&a8.inel_cdf_off_vec)?,
+            inel_cdf_n_e: self.stream.clone_htod(&a8.inel_cdf_n_e_vec)?,
+            inel_cdf_n_t: self.stream.clone_htod(&a8.inel_cdf_n_t_vec)?,
+            inel_cdf_n_lev: self.stream.clone_htod(&a8.inel_cdf_n_lev_vec)?,
+            inel_cdf_log_e_min: self.stream.clone_htod(&a8.inel_cdf_log_e_min_vec)?,
+            inel_cdf_log_e_max: self.stream.clone_htod(&a8.inel_cdf_log_e_max_vec)?,
+        })
+    }
+
+    /// Legacy uncached upload — inline host-side packing of every
+    /// per-nuclide field into a single concatenated Vec per slab,
+    /// then one `clone_htod` per slab. Kept private as the byte-
+    /// equality reference for the new per-nuclide path
+    /// (`upload_nuclide_data_uncached`). Will be removed once the
+    /// per-nuclide path is wired into the cache and Stage C step C/D
+    /// (per-nuclide LFU + kernel ABI swap) lands.
+    pub(crate) fn upload_nuclide_data_uncached_legacy(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
         rank: usize,

@@ -2770,6 +2770,227 @@ mod tests {
     }
 
     #[test]
+    fn full_bundle_wire_in_matches_legacy_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::hdf5_reader::{
+            DiscreteLevelInfo, EnergyDistribution, FissionEnergyLaw, MaxwellLaw,
+            NuBarTable, TabularEnergyDist, UrrProbabilityTables, WattLaw,
+        };
+        use crate::transport::xs_provider::DiscreteLevel;
+
+        // A bundle with ALL field categories non-trivially populated
+        // across multiple nuclides — the strongest end-to-end check
+        // that the new per-nuclide wire-in produces the same flat
+        // GpuNuclideData as the legacy inline-packing path.
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.43);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.fission = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![0.0, 0.0, 1.5],
+        ));
+        nuc_a.total_xs_raw = Some(vec![20.0, 10.0, 2.5]);
+        nuc_a.nu_bar_table = Some(NuBarTable {
+            energies: vec![1.0, 1.0e6],
+            values: vec![2.43, 2.95],
+        });
+        nuc_a.discrete_levels.push(DiscreteLevel {
+            info: DiscreteLevelInfo { mt: 51, q_value: -1.0e5, threshold: 1.0e5 },
+            kernel: Some(ReactionKernel::from_table(
+                vec![1.0e4, 1.0e6],
+                vec![2.0, 4.0],
+            )),
+        });
+        nuc_a.discrete_level_angles.push(None);
+        nuc_a.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![1.0e3, 1.0e6],
+            distributions: vec![
+                TabularEnergyDist {
+                    e_out: vec![1.0e4, 1.0e7],
+                    pdf: vec![1.0e-7, 1.0e-7],
+                    cdf: vec![0.0, 1.0],
+                },
+                TabularEnergyDist {
+                    e_out: vec![1.0e4, 1.0e6, 1.0e7],
+                    pdf: vec![1.0e-7, 1.0e-7, 1.0e-7],
+                    cdf: vec![0.0, 0.5, 1.0],
+                },
+            ],
+            closed_form: None,
+        });
+        nuc_a.urr_tables = Some(UrrProbabilityTables {
+            energies: vec![1.0e4, 1.0e5],
+            n_bands: 2,
+            cum_prob: vec![vec![0.5, 1.0], vec![0.5, 1.0]],
+            total_factor: vec![vec![1.0, 2.0], vec![1.1, 2.1]],
+            elastic_factor: vec![vec![0.5, 1.0], vec![0.55, 1.05]],
+            fission_factor: vec![vec![0.0, 1.0], vec![0.0, 1.05]],
+            capture_factor: vec![vec![0.5, 0.5], vec![0.4, 0.45]],
+            multiply_smooth: true,
+            interpolation: 2,
+        });
+
+        let mut nuc_b = NuclideKernels::empty(233.0, 2.49);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![9.0, 4.5, 0.9],
+        ));
+        nuc_b.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![],
+            distributions: vec![],
+            closed_form: Some(FissionEnergyLaw::Watt(WattLaw {
+                a_energies: vec![1.0e3, 1.0e6],
+                a_values: vec![1.0e6, 1.5e6],
+                b_energies: vec![1.0e3, 1.0e6],
+                b_values: vec![2.0, 3.0],
+                u: 0.0,
+            })),
+        });
+
+        let mut nuc_c = NuclideKernels::empty(16.0, 0.0);
+        nuc_c.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+        nuc_c.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![],
+            distributions: vec![],
+            closed_form: Some(FissionEnergyLaw::Maxwell(MaxwellLaw {
+                theta_energies: vec![1.0e3, 1.0e7],
+                theta_values: vec![1.0e6, 1.4e6],
+                u: 1.0e3,
+            })),
+        });
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b), Arc::new(nuc_c)];
+        let rank = 5;
+
+        let legacy = ctx
+            .upload_nuclide_data_uncached_legacy(&nuclides, rank)
+            .unwrap();
+        let new = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
+
+        let cmp_f64 = |label: &str, a: &CudaSlice<f64>, b: &CudaSlice<f64>| {
+            let mut va = vec![0.0_f64; a.len()];
+            let mut vb = vec![0.0_f64; b.len()];
+            stream.memcpy_dtoh(a, &mut va).unwrap();
+            stream.memcpy_dtoh(b, &mut vb).unwrap();
+            assert_eq!(va, vb, "{label}");
+        };
+        let cmp_i32 = |label: &str, a: &CudaSlice<i32>, b: &CudaSlice<i32>| {
+            let mut va = vec![0_i32; a.len()];
+            let mut vb = vec![0_i32; b.len()];
+            stream.memcpy_dtoh(a, &mut va).unwrap();
+            stream.memcpy_dtoh(b, &mut vb).unwrap();
+            assert_eq!(va, vb, "{label}");
+        };
+
+        cmp_f64("all_basis", &new.all_basis, &legacy.all_basis);
+        cmp_f64("all_coeffs", &new.all_coeffs, &legacy.all_coeffs);
+        cmp_f64(
+            "all_energy_grids",
+            &new.all_energy_grids,
+            &legacy.all_energy_grids,
+        );
+        cmp_i32("basis_offsets", &new.basis_offsets, &legacy.basis_offsets);
+        cmp_i32("grid_offsets", &new.grid_offsets, &legacy.grid_offsets);
+        cmp_i32("n_energies", &new.n_energies, &legacy.n_energies);
+        cmp_i32("has_reaction", &new.has_reaction, &legacy.has_reaction);
+        cmp_i32("coeffs_offsets", &new.coeffs_offsets, &legacy.coeffs_offsets);
+        assert_eq!(new.rank, legacy.rank, "rank");
+        cmp_f64("total_xs", &new.total_xs, &legacy.total_xs);
+        cmp_i32(
+            "total_xs_offsets",
+            &new.total_xs_offsets,
+            &legacy.total_xs_offsets,
+        );
+        cmp_i32("has_total_xs", &new.has_total_xs, &legacy.has_total_xs);
+        cmp_f64("pointwise_xs", &new.pointwise_xs, &legacy.pointwise_xs);
+        cmp_i32("pw_offsets", &new.pw_offsets, &legacy.pw_offsets);
+        cmp_i32("has_pw", &new.has_pw, &legacy.has_pw);
+        cmp_f64("nu_bar_energies", &new.nu_bar_energies, &legacy.nu_bar_energies);
+        cmp_f64("nu_bar_values", &new.nu_bar_values, &legacy.nu_bar_values);
+        cmp_i32("nu_bar_offsets", &new.nu_bar_offsets, &legacy.nu_bar_offsets);
+        cmp_i32("nu_bar_sizes", &new.nu_bar_sizes, &legacy.nu_bar_sizes);
+        cmp_f64("level_q_values", &new.level_q_values, &legacy.level_q_values);
+        cmp_f64("level_thresholds", &new.level_thresholds, &legacy.level_thresholds);
+        cmp_i32("level_offsets", &new.level_offsets, &legacy.level_offsets);
+        cmp_i32("level_counts", &new.level_counts, &legacy.level_counts);
+        cmp_f64("level_basis", &new.level_basis, &legacy.level_basis);
+        cmp_f64("level_coeffs", &new.level_coeffs, &legacy.level_coeffs);
+        cmp_i32(
+            "level_basis_offsets",
+            &new.level_basis_offsets,
+            &legacy.level_basis_offsets,
+        );
+        cmp_i32(
+            "level_coeffs_offsets",
+            &new.level_coeffs_offsets,
+            &legacy.level_coeffs_offsets,
+        );
+        cmp_i32(
+            "level_has_kernel",
+            &new.level_has_kernel,
+            &legacy.level_has_kernel,
+        );
+        cmp_i32("level_mt", &new.level_mt, &legacy.level_mt);
+        cmp_f64("ang_energies", &new.ang_energies, &legacy.ang_energies);
+        cmp_f64("ang_mu", &new.ang_mu, &legacy.ang_mu);
+        cmp_f64("ang_cdf", &new.ang_cdf, &legacy.ang_cdf);
+        cmp_i32("ang_nuc_offsets", &new.ang_nuc_offsets, &legacy.ang_nuc_offsets);
+        cmp_i32(
+            "ang_nuc_n_energies",
+            &new.ang_nuc_n_energies,
+            &legacy.ang_nuc_n_energies,
+        );
+        cmp_i32("ang_is_cm", &new.ang_is_cm, &legacy.ang_is_cm);
+        cmp_f64("fis_inc_energies", &new.fis_inc_energies, &legacy.fis_inc_energies);
+        cmp_f64("fis_e_out", &new.fis_e_out, &legacy.fis_e_out);
+        cmp_f64("fis_cdf", &new.fis_cdf, &legacy.fis_cdf);
+        cmp_f64("fis_pdf", &new.fis_pdf, &legacy.fis_pdf);
+        cmp_i32("fis_nuc_offsets", &new.fis_nuc_offsets, &legacy.fis_nuc_offsets);
+        cmp_i32("fis_nuc_n_inc", &new.fis_nuc_n_inc, &legacy.fis_nuc_n_inc);
+        cmp_f64(
+            "watt_inc_energies",
+            &new.watt_inc_energies,
+            &legacy.watt_inc_energies,
+        );
+        cmp_f64("watt_a", &new.watt_a, &legacy.watt_a);
+        cmp_f64("watt_b", &new.watt_b, &legacy.watt_b);
+        cmp_f64("watt_u", &new.watt_u, &legacy.watt_u);
+        cmp_i32(
+            "watt_nuc_offsets",
+            &new.watt_nuc_offsets,
+            &legacy.watt_nuc_offsets,
+        );
+        cmp_i32("watt_nuc_n", &new.watt_nuc_n, &legacy.watt_nuc_n);
+        cmp_f64(
+            "maxevap_inc_energies",
+            &new.maxevap_inc_energies,
+            &legacy.maxevap_inc_energies,
+        );
+        cmp_f64("maxevap_theta", &new.maxevap_theta, &legacy.maxevap_theta);
+        cmp_i32("maxevap_law", &new.maxevap_law, &legacy.maxevap_law);
+        cmp_f64("urr_energies", &new.urr_energies, &legacy.urr_energies);
+        cmp_f64("urr_cum_prob", &new.urr_cum_prob, &legacy.urr_cum_prob);
+        cmp_f64("urr_total_f", &new.urr_total_f, &legacy.urr_total_f);
+        cmp_i32("urr_offsets", &new.urr_offsets, &legacy.urr_offsets);
+        cmp_f64("inel_cdf_data", &new.inel_cdf_data, &legacy.inel_cdf_data);
+        cmp_i32("inel_cdf_off", &new.inel_cdf_off, &legacy.inel_cdf_off);
+    }
+
+    #[test]
     fn assemble_a8_cat_matches_legacy_bundle_byte_for_byte() {
         let Some(stream) = try_cuda_stream() else {
             eprintln!("skipping: no CUDA device");
