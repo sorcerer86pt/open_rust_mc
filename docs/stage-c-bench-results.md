@@ -1,5 +1,23 @@
 # Stage C — bench results on A1000
 
+## Step D correctness — 3-case ICSBEP sweep (full per-nuc kernel ABI)
+
+After converting every simple per-nuclide kernel access path to read
+through pointer arrays — main SVD basis/coeffs, pointwise_xs,
+total_xs, ν̄(E) + delayed-ν̄(E), six URR sub-tables, and synthesized
+inelastic CDF — with per-nuc CudaSlices owned by the cache.
+
+| case                    | k_calc      ± σ       |  Δ pcm | bound | runtime |
+|-------------------------|-----------------------|-------:|------:|--------:|
+| heu-met-fast-001_case-1 | 1.000439 ± 0.000396   |  +43.9 |   215 |   57 s  |
+| pu-met-fast-001         | 1.000725 ± 0.000456   |  +72.5 |   410 |   15 s  |
+| u233-met-fast-001       | 0.999605 ± 0.000397   |  -39.5 |   215 |   17 s  |
+
+**3 / 3 PASS, 89 s wall on RTX A1000.** Production transport with
+every per-nuc kernel access on the pointer-array path passes ICSBEP
+on fast-metal scenes. k deltas remain within statistical noise
+(0.35-0.41σ) of the handbook reference.
+
 ## Step D correctness — 3-case ICSBEP sweep (post-kernel-ABI swap)
 
 After landing the per-nuclide pointer-array kernel ABI
