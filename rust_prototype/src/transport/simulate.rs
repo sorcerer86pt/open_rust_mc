@@ -1,12 +1,7 @@
-//! Eigenvalue simulation — power iteration for k_eff.
-//!
-//! Algorithm:
-//!   1. Start with a source bank of neutrons
-//!   2. Transport each neutron until absorption or leakage
-//!   3. Collect fission sites into the fission bank
-//!   4. k_eff = (fission bank size) / (source bank size)
-//!   5. Normalize the fission bank -> new source bank
-//!   6. Repeat
+//! Eigenvalue simulation — power iteration for k_eff. See
+//! `docs/engine-notes.md § transport/simulate.rs` for SimConfig knob
+//! semantics, Windows-stdout / rayon-loader-lock workarounds, and
+//! the ablation-only flags.
 
 use std::io::Write;
 
@@ -23,101 +18,44 @@ use crate::transport::particle::{FissionBank, FissionSite, Particle};
 use crate::transport::rng::Rng;
 use crate::transport::tally::{BatchTallies, ParticleTallies, Tallies};
 
-/// Maximum nuclides per material for stack-allocated XS buffers.
-/// Godiva has 3, the basic PWR pin cell has 8, the actinides-chain
-/// fuel material has 18 (U-235/238 + O-16 + Xe-135 + 14 chain
-/// nuclides for actinide buildup + Sm/Pm/I/Cs poisoning). Avoids
-/// per-collision heap allocation.
-/// Re-export the crate-root limit under the short local name the hot
-/// path uses for array sizing. The single source of truth lives in
-/// `lib.rs::MAX_NUCLIDES_PER_MATERIAL`; this alias is purely for
-/// readability inside this module.
 use crate::MAX_NUCLIDES_PER_MATERIAL as MAX_NUCLIDES;
 
-/// Configuration for a simulation.
+/// See `docs/engine-notes.md § SimConfig knobs` for each field's
+/// purpose, OS-specific deadlock workarounds, and which paths honour
+/// which flags.
 pub struct SimConfig {
     pub batches: u32,
-    /// Fixed number of inactive (settle) batches. Ignored when
-    /// `auto_inactive == Some(_)`; used as a fallback otherwise.
+    /// Fallback when `auto_inactive` is `None`.
     pub inactive: u32,
     pub particles_per_batch: u32,
-    /// Global seed — different seeds produce independent runs for statistical benchmarking.
     pub seed: u64,
-    /// Optional runtime source-convergence detector. When set, the
-    /// simulator monitors Shannon entropy of the fission-site bank and
-    /// promotes batches from inactive to active once the entropy
-    /// plateaus. The fixed `inactive` count is replaced by this
-    /// criterion, bounded by the policy's `min_inactive` / `max_inactive`.
+    /// Shannon-entropy convergence detector for the inactive→active
+    /// transition. Overrides `inactive` when `Some(_)`.
     pub auto_inactive: Option<EntropyConvergence>,
-    /// When `true` (default for CLI binaries), the engine prints
-    /// per-batch `k_eff`, entropy, collision/fission/leak counters to
-    /// stdout. When `false` (Python/FFI callers), the engine stays
-    /// silent and the caller consumes the returned `BatchResult`s.
-    /// Matters on Windows: locking stdout from a host process that
-    /// also uses stdout (e.g. Python) can deadlock; setting this to
-    /// `false` eliminates that risk.
+    /// `false` on PyO3 callers to avoid the Windows stdout deadlock.
     pub verbose: bool,
-    /// When `true` (default), transport the per-batch particle bank
-    /// in parallel via `rayon::par_iter`. When `false`, fall back to
-    /// a sequential `iter().map().collect()`. The sequential path is
-    /// slower but sidesteps rayon's first-use thread-pool creation,
-    /// which on Windows can deadlock against Python's loader lock
-    /// when called from a PyO3 extension.
+    /// `false` on PyO3 callers to avoid the Windows loader-lock
+    /// deadlock at rayon first-use.
     pub parallel: bool,
-    /// Optional tallies (surface currents, mesh flux). When `None`,
-    /// the transport loop's tally hooks are no-ops — zero hot-path
-    /// cost. See `transport::tally` for shapes.
     pub tallies: Tallies,
-    /// When set, write an HDF5 statepoint at the end of the run:
-    /// per-batch arrays, tally arrays, and the post-normalize source
-    /// bank ready for restart. See `transport::statepoint`.
     pub statepoint_path: Option<std::path::PathBuf>,
-    /// Optional implicit-capture + Russian-roulette variance reduction.
-    /// When `Some(_)`, the surface-tracking transport replaces analog
-    /// absorption-as-kill with weight reduction `w *= σ_s/σ_t`, banks
-    /// fission as stochastic-rounded `w·ν·σ_f/σ_t` sites, and rouletes
-    /// once weight drops below `w_min`. Surface tracking + non-thermal
-    /// collision branch only; thermal-scattering and delta-tracking
-    /// paths fall back to analog regardless of this setting.
+    /// Surface-tracking + non-thermal branch only; thermal + delta
+    /// paths fall back to analog regardless.
     pub survival_biasing: Option<SurvivalBiasing>,
-    /// Optional initial source bank to resume from. When `None`, the
-    /// engine rejection-samples a uniform initial source from the
-    /// fissile cells (the default behavior). When `Some(bank)`, the
-    /// bank is used as the source for batch 1 — typically loaded from
-    /// a statepoint via `transport::statepoint::read_source_bank` to
-    /// continue an earlier run.
+    /// Resume from a statepoint bank when `Some(_)`.
     pub initial_source_bank: Option<Vec<FissionSite>>,
-    /// Optional Cartesian-mesh weight window. When set, the transport
-    /// loop applies splitting / Russian roulette at every advance to
-    /// keep particle weight inside the per-voxel band. See
-    /// `transport::weight_window` for shape and semantics.
     pub weight_window: Option<crate::transport::weight_window::WeightWindow>,
-    /// When `true`, suppresses delayed-neutron emission entirely:
-    /// every banked fission neutron draws its energy from the prompt
-    /// fission spectrum, ignoring `ν_d(E)`. Used for ablation studies
-    /// against the production path (which always samples ~0.65 % of
-    /// fission neutrons from the soft-Watt delayed spectrum).
+    /// Ablation only — production always samples ν_d(E).
     pub disable_delayed_neutrons: bool,
-    /// Optional URR equivalence-theory configuration. When set, the
-    /// transport loop applies the Stoker-Weiss / NJOY rational
-    /// equivalence correction to the per-nuclide URR sample for
-    /// each `xs_kernel_idx` flagged on `UrrEquivalence::absorber_xs_idx`,
-    /// using the cell-local Dancoff factor. When `None`, the URR
-    /// path is infinite-medium-only (current default).
+    /// `None` → infinite-medium URR.
     pub urr_equivalence: Option<crate::transport::urr_equivalence::UrrEquivalence>,
 }
 
-/// Implicit-capture + Russian-roulette settings.
-///
-/// Common OpenMC-style defaults: `w_min = 0.25`, `w_survive = 1.0`.
-/// Particles with weight below `w_min` are rouletted: with probability
-/// `w/w_survive` they survive at weight `w_survive`; otherwise killed.
-/// Net effect is unbiased — expected weight is preserved.
+/// Implicit-capture + Russian roulette. OpenMC defaults
+/// `w_min=0.25`, `w_survive=1.0`; expectation preserved.
 #[derive(Debug, Clone, Copy)]
 pub struct SurvivalBiasing {
-    /// Weight threshold below which Russian roulette fires.
     pub w_min: f64,
-    /// Weight that surviving rouletted particles are restored to.
     pub w_survive: f64,
 }
 
@@ -151,30 +89,20 @@ impl Default for SimConfig {
     }
 }
 
-/// Policy for Shannon-entropy plateau detection. Defaults are tuned for
-/// Godiva / PWR pin cell at $10^4$-$10^5$ particles / batch, where the
-/// entropy equilibrates in $<50$ batches.
+/// Shannon-entropy plateau detector. Defaults sit above the
+/// statistical noise floor for 10k-50k particles/batch (measured CV
+/// ≈ 2e-3 once settled).
 #[derive(Debug, Clone, Copy)]
 pub struct EntropyConvergence {
-    /// Never declare converged before this many batches have run.
     pub min_inactive: u32,
-    /// Always start accumulating by this batch even if not converged
-    /// (catches pathological long-transient sources).
     pub max_inactive: u32,
-    /// Size of the sliding window over which the coefficient of
-    /// variation (σ/μ) of entropy is computed.
+    /// Sliding window for CV(σ/μ).
     pub window: u32,
-    /// Convergence threshold on the window's coefficient of variation.
-    /// OpenMC uses values around 1e-3 for moderate meshes.
     pub cv_tol: f64,
 }
 
 impl Default for EntropyConvergence {
     fn default() -> Self {
-        // cv_tol 5e-3 sits above the statistical noise floor for the
-        // typical 10k-50k particles/batch used in paper benchmarks
-        // (measured CV ≈ 2e-3 once settled) while still tight enough
-        // that transient bias is well below the k_eff standard error.
         Self {
             min_inactive: 20,
             max_inactive: 200,
@@ -185,9 +113,6 @@ impl Default for EntropyConvergence {
 }
 
 impl EntropyConvergence {
-    /// Return `true` if the last `window` entries of `history` have
-    /// coefficient of variation below `cv_tol`. Requires at least
-    /// `window` samples and `history.len() >= min_inactive`.
     pub fn has_converged(&self, history: &[f64]) -> bool {
         let n = history.len() as u32;
         if n < self.min_inactive || n < self.window {
@@ -205,10 +130,7 @@ impl EntropyConvergence {
     }
 }
 
-// ── Delta tracking support ──────────────────────────────────────────
-
-/// Coarse table of majorant macroscopic total XS, used for delta tracking.
-/// Stores max(Σ_t) over all materials at log-spaced energy points.
+/// Majorant macroscopic Σ_t over all materials, log-spaced grid.
 pub struct MajorantTable {
     log_e_min: f64,
     inv_step: f64,
@@ -216,7 +138,6 @@ pub struct MajorantTable {
 }
 
 impl MajorantTable {
-    /// Look up majorant Σ_t at a given energy (1/cm).
     #[inline]
     fn lookup(&self, energy: f64) -> f64 {
         let log_e = energy.max(1e-11).ln();
@@ -227,26 +148,20 @@ impl MajorantTable {
     }
 }
 
-/// Transport algorithm selection — detected automatically from geometry.
 enum TrackingMode {
-    /// Standard surface tracking — for single-material or reflective-only geometries.
     Surface,
-    /// Woodcock delta tracking — for heterogeneous geometries with transmission boundaries.
-    /// Avoids surface intersection at internal material interfaces.
+    /// Woodcock; avoids surface intersection at internal interfaces.
     Delta(MajorantTable),
 }
 
-/// Detect which tracking algorithm to use based on geometry and materials.
-///
-/// Returns `Delta` if multiple materials exist with moderate XS contrast,
-/// `Surface` otherwise. Prints the decision to stdout.
+/// `Delta` when multiple materials with moderate XS contrast, else
+/// `Surface`.
 fn detect_tracking_mode<XS: XsProvider>(
     cells: &[Cell],
     materials: &[Material],
     xs_provider: &XS,
     verbose: bool,
 ) -> TrackingMode {
-    // Count unique material indices
     let mut mat_indices: Vec<usize> = cells
         .iter()
         .filter_map(|c| match c.fill {
@@ -362,10 +277,8 @@ fn detect_tracking_mode<XS: XsProvider>(
 
 /// Cross-section provider trait — abstracts over SVD kernel vs table lookup.
 ///
-/// The transport loop doesn't care how cross-sections are obtained.
-/// Must be Send + Sync for rayon parallel transport.
+/// `Send + Sync` for rayon parallel transport.
 pub trait XsProvider: Send + Sync {
-    /// Get microscopic cross-sections for a nuclide at a given energy.
     fn lookup(&self, nuclide_idx: usize, energy: f64) -> MicroXs;
 
     fn discrete_level_info(&self, _nuclide_idx: usize) -> Vec<DiscreteLevelInfo> {
@@ -384,10 +297,8 @@ pub trait XsProvider: Send + Sync {
         None
     }
 
-    /// Per-discrete-level CM-frame angular distributions, aligned 1:1 with
-    /// `discrete_level_info(nuclide_idx)`. Default empty slice = isotropic
-    /// fallback everywhere. Providers that load ENDF MT=51-91 angular data
-    /// from HDF5 override this.
+    /// Per-discrete-level CM angular dist (ENDF MT=51-91), aligned
+    /// 1:1 with `discrete_level_info`. Empty = isotropic fallback.
     fn discrete_level_angles(&self, _nuclide_idx: usize) -> &[Option<AngularDistribution>] {
         &[]
     }
@@ -396,27 +307,22 @@ pub trait XsProvider: Send + Sync {
         None
     }
 
-    /// ENDF MT=91 continuum inelastic outgoing-energy distribution.
-    /// Default `None` → caller falls back to the evaporation spectrum
-    /// (historical behaviour). Providers that load from HDF5 override.
+    /// ENDF MT=91; `None` → evaporation fallback.
     fn inelastic_continuum_edist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
         None
     }
 
-    /// ENDF MT=16 (n,2n) outgoing-energy distribution.
+    /// ENDF MT=16.
     fn n2n_edist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
         None
     }
 
-    /// ENDF MT=17 (n,3n) outgoing-energy distribution.
+    /// ENDF MT=17.
     fn n3n_edist(&self, _nuclide_idx: usize) -> Option<&EnergyDistribution> {
         None
     }
 
-    /// Charged-particle-emission reaction data (MT=22 / MT=24 / MT=28).
-    /// Returns the bundle that `process_collision` consumes when one
-    /// of those reactions is sampled. Default empty for providers that
-    /// don't load them — those reactions then have zero XS in
+    /// MT=22 / 24 / 28. Empty → those reactions have zero XS in
     /// `MicroXs` and the dispatch branches never fire.
     fn charged_particle_edists(
         &self,
@@ -427,58 +333,37 @@ pub trait XsProvider: Send + Sync {
 
     fn apply_urr(&self, _nuclide_idx: usize, _xs: &mut MicroXs, _energy: f64, _xi: f64) {}
 
-    /// True when `energy` falls inside the URR (unresolved-resonance
-    /// region) probability-table range for `nuclide_idx`. Used by the
-    /// equivalence-theory path to gate the spatial self-shielding
-    /// correction — it's only valid inside the URR window. Default
-    /// `false` for providers without URR data.
+    /// Inside the URR probability-table range — gates the
+    /// equivalence-theory self-shielding correction.
     fn is_urr(&self, _nuclide_idx: usize, _energy: f64) -> bool {
         false
     }
 
-    /// Photon products for a nuclide, one entry per ENDF MT with a
-    /// `particle="photon"` product in the HDF5 file. Used by coupled
-    /// neutron-photon transport to sample `(multiplicity, E_γ)` at
-    /// each capture / fission / inelastic site. Default empty slice =
-    /// no photon production modelled.
+    /// Per-MT photon products (multiplicity, E_γ) for coupled n-γ.
     fn photon_products(&self, _nuclide_idx: usize) -> &[(u32, crate::hdf5_reader::PhotonProduct)] {
         &[]
     }
 
-    /// Get thermal scattering data for a nuclide, if available.
-    ///
-    /// Returns `Some` if the nuclide has associated S(α,β) thermal scattering data
-    /// (e.g., H1 in H₂O). The transport loop uses this to replace free-gas elastic
-    /// scattering with thermal scattering below `energy_max` (~4 eV).
+    /// S(α,β) thermal data; replaces free-gas elastic below
+    /// `energy_max` (~4 eV) in the transport loop.
     fn thermal_scattering(&self, _nuclide_idx: usize) -> Option<&ThermalScatteringData> {
         None
     }
 
-    /// Energy-dependent delayed-only ν̄ for a nuclide (sum of all
-    /// delayed-product yields). Returns 0 when the nuclide has no
-    /// delayed neutron data, or for non-fissile nuclides. Used by
-    /// the fission-yield path to compute β(E) = ν_d / ν_total and
-    /// pick prompt vs delayed for each banked fission neutron.
+    /// Sum of delayed-product yields; drives β(E) = ν_d / ν_total in
+    /// the fission-yield path.
     fn delayed_nu_bar_at(&self, _nuclide_idx: usize, _energy: f64) -> f64 {
         0.0
     }
 
-    /// Microscopic XS for a single ENDF MT not exposed via [`MicroXs`]
-    /// — used by the per-MT reaction-rate tally so granular channels
-    /// (e.g. MT=103 (n,p), MT=107 (n,α)) can be reported separately
-    /// without changing the hot-path lookup contract. Returns `None`
-    /// when the provider does not stock that MT for `nuclide_idx`,
-    /// or when the requested MT is already covered by a `MicroXs`
-    /// field (caller is expected to read it from there).
-    ///
-    /// Default `None` keeps `ConstantXs` and other test providers
-    /// inert. Real providers override.
+    /// MT not exposed via `MicroXs` (e.g. MT=103, MT=107) for the
+    /// per-MT reaction-rate tally. `None` when the provider doesn't
+    /// stock the MT for that nuclide.
     fn partial_xs(&self, _nuclide_idx: usize, _energy: f64, _mt: u32) -> Option<f64> {
         None
     }
 }
 
-/// Simple constant cross-section provider for testing.
 pub struct ConstantXs {
     pub xs: Vec<MicroXs>,
 }
@@ -489,7 +374,6 @@ impl XsProvider for ConstantXs {
     }
 }
 
-/// Results from a batch.
 #[derive(Debug, Clone)]
 pub struct BatchResult {
     pub batch: u32,
@@ -498,18 +382,14 @@ pub struct BatchResult {
     pub absorptions: u32,
     pub fissions: u32,
     pub collisions: u32,
-    /// Number of thermal scattering events (S(α,β)).
+    /// S(α,β) events.
     pub thermal_scatters: u32,
-    /// Number of surface crossings (reflections + transmissions).
+    /// Reflections + transmissions.
     pub surface_crossings: u32,
-    /// Shannon entropy (bits) of the fission site distribution on a
-    /// coarse Cartesian mesh. Stabilises across inactive batches once
-    /// the source has converged; used to gauge when active batches can
-    /// start (OpenMC uses the same diagnostic).
+    /// Bits, on a coarse Cartesian mesh. OpenMC convention.
     pub shannon_entropy: f64,
-    /// True when this batch was counted towards the active tally.
-    /// In fixed-inactive mode this is simply `batch > config.inactive`.
-    /// In auto-inactive mode it reflects the entropy-plateau decision.
+    /// Active = counted towards tallies. Fixed-inactive: `batch >
+    /// config.inactive`. Auto-inactive: entropy-plateau decision.
     pub active: bool,
     /// Per-cell count of non-fission absorption events (radiative
     /// capture and other `(n,X)` absorptions). Indexed by the cell's

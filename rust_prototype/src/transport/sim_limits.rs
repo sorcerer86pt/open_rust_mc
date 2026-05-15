@@ -1,26 +1,14 @@
-//! Engine-policy bounds and tolerances — knobs that aren't user
-//! intent per run (those live in [`SimConfig`]) but instead bound the
-//! engine's behaviour so it stays responsive on pathological inputs.
+//! Engine-policy bounds — separates "engine should stay responsive"
+//! from per-run user intent (which lives in `SimConfig`). Defaults
+//! reproduce the engine's historical behaviour bit-for-bit.
 //!
-//! All fields have sensible defaults that reproduce the engine's
-//! historical behaviour bit-for-bit. Long-shielding / large-lattice /
-//! degraded-source problems can override via TOML; the file is
-//! optional, and any unspecified key falls back to the default.
-//!
-//! Layout of the TOML file:
-//!
+//! TOML example:
 //! ```toml
-//! # config/sim_limits.toml
-//! max_events_per_history = 5000          # GPU per-history step budget
-//! fis_capacity_factor = 4                # GPU fission-bank preallocation × particles
-//! sab_temperature_tolerance = 0.5        # tsl.select_temperature tolerance
-//! initial_source_max_attempts_factor = 10000  # rejection sampler budget × particles
+//! max_events_per_history = 5000
+//! fis_capacity_factor = 4
+//! sab_temperature_tolerance = 0.5
+//! initial_source_max_attempts_factor = 10000
 //! ```
-//!
-//! Callers use [`SimLimits::default()`] for the historical values, or
-//! [`SimLimits::from_toml_file`] when a config file is supplied via
-//! CLI / env. The struct is `Clone`, so threading it through a
-//! per-run setup is cheap.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -28,33 +16,16 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SimLimits {
-    /// Per-history step budget on the GPU. Each particle terminates
-    /// after this many collisions / surface crossings even if not
-    /// absorbed / leaked, preventing runaway histories on degenerate
-    /// geometries. CPU transport carries its own death conditions and
-    /// does not consult this. Historical value: 5_000.
+    /// GPU per-history step budget. CPU transport ignores this.
     pub max_events_per_history: u32,
-
-    /// Multiplier on `SimConfig::particles_per_batch` for the GPU
-    /// fission-bank preallocation. Each batch reserves `n × factor`
-    /// slots for the next-generation bank; if the realised bank
-    /// exceeds this, the excess is dropped (the bank is resampled
-    /// down to `n` regardless, so overflow just biases the normalise
-    /// step). Historical value: 4×.
+    /// `n × factor` slot reserve for the GPU fission bank; overflow
+    /// dropped (bank resampled to `n` regardless).
     pub fis_capacity_factor: usize,
-
-    /// Tolerance passed to `ThermalScatteringData::select_temperature`
-    /// when picking which TSL temperature index to bind on the GPU.
-    /// Smaller values prefer exact-match temperatures; larger ones
-    /// interpolate more aggressively. Historical value: 0.5.
+    /// Tolerance for `ThermalScatteringData::select_temperature` on
+    /// the GPU TSL binding.
     pub sab_temperature_tolerance: f64,
-
-    /// Multiplier on `SimConfig::particles_per_batch` for the
-    /// rejection-sampler attempt budget inside
-    /// `simulate::try_initial_source`. The sampler returns an error
-    /// after `n × factor` attempts rather than spinning forever on a
-    /// geometry whose fissile region the AABB heuristic missed.
-    /// Historical value: 10_000.
+    /// `n × factor` attempt cap on `try_initial_source` rejection
+    /// sampling; returns an error rather than spinning.
     pub initial_source_max_attempts_factor: u64,
 }
 
@@ -82,16 +53,13 @@ pub enum SimLimitsError {
 }
 
 impl SimLimits {
-    /// Parse [`SimLimits`] from an in-memory TOML string. Unknown
-    /// keys are rejected so typos surface loudly instead of silently
-    /// defaulting.
+    /// `deny_unknown_fields` — typos surface loudly.
     pub fn from_toml_str(text: &str) -> Result<Self, SimLimitsError> {
         toml::from_str(text).map_err(SimLimitsError::Parse)
     }
 
-    /// Load [`SimLimits`] from a TOML file on disk. Returns the
-    /// historical defaults when `path` doesn't exist (so callers can
-    /// pass an optional config path without branching).
+    /// Returns defaults when `path` doesn't exist — callers pass an
+    /// optional path without branching.
     pub fn from_toml_file(path: impl AsRef<Path>) -> Result<Self, SimLimitsError> {
         let path = path.as_ref();
         if !path.exists() {
@@ -104,9 +72,7 @@ impl SimLimits {
         Self::from_toml_str(&text)
     }
 
-    /// `fis_capacity_factor × particles_per_batch` saturating to at
-    /// least 1 slot so device allocators never see a zero-size
-    /// request.
+    /// Floors at 1 so device allocators never see a zero-size request.
     #[inline]
     pub fn fis_capacity(&self, particles_per_batch: usize) -> usize {
         particles_per_batch
@@ -114,9 +80,8 @@ impl SimLimits {
             .max(1)
     }
 
-    /// `initial_source_max_attempts_factor × n` with a 1_000_000-attempt
-    /// floor — matches the historical `simulate::try_initial_source`
-    /// behaviour for tiny `n`.
+    /// 1M-attempt floor — historical `try_initial_source` behaviour
+    /// on tiny `n`.
     #[inline]
     pub fn initial_source_max_attempts(&self, n: usize) -> u64 {
         (n as u64)
