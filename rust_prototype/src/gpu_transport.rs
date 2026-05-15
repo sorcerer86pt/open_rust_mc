@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 150;
+const N_PARAMS: usize = 151;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -183,6 +183,10 @@ pub struct GpuNuclideData {
     pub urr_ef_ptrs: CudaSlice<u64>,
     pub urr_ff_ptrs: CudaSlice<u64>,
     pub urr_cf_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's synthesized
+    /// inelastic CDF tensor, or `0`. Kernel gates on
+    /// `inel_cdf_off[ni] >= 0`.
+    pub inel_cdf_ptrs: CudaSlice<u64>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -485,7 +489,8 @@ impl GpuNuclideData {
             + self.urr_tf_ptrs.num_bytes()
             + self.urr_ef_ptrs.num_bytes()
             + self.urr_ff_ptrs.num_bytes()
-            + self.urr_cf_ptrs.num_bytes();
+            + self.urr_cf_ptrs.num_bytes()
+            + self.inel_cdf_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1154,6 +1159,7 @@ impl GpuTransportContext {
             dptr!(&nuc_data.urr_ef_ptrs),
             dptr!(&nuc_data.urr_ff_ptrs),
             dptr!(&nuc_data.urr_cf_ptrs),
+            dptr!(&nuc_data.inel_cdf_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1354,6 +1360,11 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.capture_factor),
         )?;
+        let inel_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel_cdf.as_ref().map(|c| &c.data),
+        )?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -1371,6 +1382,7 @@ impl GpuTransportContext {
             urr_ef_ptrs,
             urr_ff_ptrs,
             urr_cf_ptrs,
+            inel_cdf_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1626,6 +1638,11 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.capture_factor),
         )?;
+        let inel_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel_cdf.as_ref().map(|c| &c.data),
+        )?;
 
         Ok(GpuNuclideData {
             per_nucs,
@@ -1643,6 +1660,7 @@ impl GpuTransportContext {
             urr_ef_ptrs,
             urr_ff_ptrs,
             urr_cf_ptrs,
+            inel_cdf_ptrs,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2488,6 +2506,7 @@ impl GpuTransportContext {
             urr_ef_ptrs: self.stream.clone_htod(&[0_u64])?,
             urr_ff_ptrs: self.stream.clone_htod(&[0_u64])?,
             urr_cf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            inel_cdf_ptrs: self.stream.clone_htod(&[0_u64])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,

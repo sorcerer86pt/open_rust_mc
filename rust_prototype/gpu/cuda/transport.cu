@@ -275,8 +275,9 @@
 #define P_URR_EF_PTRS           147
 #define P_URR_FF_PTRS           148
 #define P_URR_CF_PTRS           149
+#define P_INEL_CDF_PTRS         150
 
-#define N_PARAMS            150
+#define N_PARAMS            151
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1883,7 +1884,9 @@ transport_persistent(
                     if (idx >= cdf_n_e - 1) idx = cdf_n_e - 2;
                     if (idx < 0) idx = 0;
                     double alpha = f_idx - (double)idx;
-                    const double* cdf_base = &PTR_D(p, P_INEL_CDF_DATA)[cdf_off];
+                    // Stage C step D — per-nuclide pointer load.
+                    const double* cdf_base =
+                        (const double*) __ldg(&PTR_U64(p, P_INEL_CDF_PTRS)[hit_nuc]);
                     double xi_l = pcg_uniform(&rng);
                     int sampled = cdf_n_lev - 1;
                     int row_lo = idx       * cdf_n_lev;
