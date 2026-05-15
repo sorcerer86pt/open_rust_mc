@@ -196,6 +196,11 @@ pub struct AngularSlicesGpu {
     pub dist_local_off: Vec<i32>,
     /// `[n_energies]`.
     pub dist_sz: Vec<i32>,
+    /// Real data length of `mu` / `cdf` excluding the trailing
+    /// sentinel that `build_angular_slices` inserts when every
+    /// distribution is empty. Bundle assembly slices to this length
+    /// so per-nuclide sentinels aren't concatenated.
+    pub mu_real_len: usize,
 }
 
 impl AngularSlicesGpu {
@@ -914,7 +919,7 @@ pub fn assemble_c_cat(
     let coeffs_n = total_coeffs.max(1);
     let ang_e_n = total_ang_e.max(1);
     let ang_mu_n = total_ang_mu.max(1);
-    let ang_dist_n = total_ang_dist.max(1);
+    let _ang_dist_n = total_ang_dist.max(1);
 
     let mut level_q_values = unsafe { stream.alloc::<f64>(level_n)? };
     let mut level_thresholds = unsafe { stream.alloc::<f64>(level_n)? };
@@ -1075,6 +1080,102 @@ pub fn assemble_c_cat(
         lev_ang_dist_sz_vec,
         lev_ang_lev_off_vec,
         lev_ang_lev_ne_vec,
+    })
+}
+
+/// Assembled cat-A.4 (elastic angular) bundle slices.
+pub struct AssembledBundleA4Cat {
+    pub ang_energies: CudaSlice<f64>,
+    pub ang_mu: CudaSlice<f64>,
+    pub ang_cdf: CudaSlice<f64>,
+    pub ang_dist_offsets_vec: Vec<i32>,
+    pub ang_dist_sizes_vec: Vec<i32>,
+    pub ang_nuc_offsets_vec: Vec<i32>,
+    pub ang_nuc_n_energies_vec: Vec<i32>,
+    pub ang_is_cm_vec: Vec<i32>,
+}
+
+/// Bundle assembly for category A.4 (elastic angular distribution).
+/// Mirrors upload_nuclide_data_uncached:1578-1613. Per-nuclide
+/// elastic_angle is optional; when absent the per-nuclide offset /
+/// n_energies / is_cm slots stay zero.
+pub fn assemble_a4_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleA4Cat, Box<dyn std::error::Error>> {
+    let total_e: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.elastic_angle.as_ref())
+        .map(|a| a.n_energies as usize)
+        .sum();
+    let total_mu: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.elastic_angle.as_ref())
+        .map(|a| a.mu_real_len)
+        .sum();
+
+    let mut ang_energies = unsafe { stream.alloc::<f64>(total_e.max(1))? };
+    let mut ang_mu = unsafe { stream.alloc::<f64>(total_mu.max(1))? };
+    let mut ang_cdf = unsafe { stream.alloc::<f64>(total_mu.max(1))? };
+    if total_e == 0 {
+        stream.memset_zeros(&mut ang_energies)?;
+    }
+    if total_mu == 0 {
+        stream.memset_zeros(&mut ang_mu)?;
+        stream.memset_zeros(&mut ang_cdf)?;
+    }
+
+    let mut ang_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_e);
+    let mut ang_dist_sizes_vec: Vec<i32> = Vec::with_capacity(total_e);
+    let mut ang_nuc_offsets_vec = vec![0_i32; per_nucs.len()];
+    let mut ang_nuc_n_energies_vec = vec![0_i32; per_nucs.len()];
+    let mut ang_is_cm_vec = vec![0_i32; per_nucs.len()];
+
+    let mut run_e = 0_usize;
+    let mut run_mu = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        let Some(ang) = p.elastic_angle.as_ref() else {
+            continue;
+        };
+        let ne = ang.n_energies as usize;
+        ang_nuc_offsets_vec[nuc_idx] = run_e as i32;
+        ang_nuc_n_energies_vec[nuc_idx] = ang.n_energies;
+        ang_is_cm_vec[nuc_idx] = ang.is_cm;
+
+        if ne > 0 {
+            let mut dst = ang_energies.slice_mut(run_e..run_e + ne);
+            stream.memcpy_dtod(&ang.energies.slice(0..ne), &mut dst)?;
+        }
+        let ml = ang.mu_real_len;
+        if ml > 0 {
+            let mut dst_mu = ang_mu.slice_mut(run_mu..run_mu + ml);
+            stream.memcpy_dtod(&ang.mu.slice(0..ml), &mut dst_mu)?;
+            let mut dst_cdf = ang_cdf.slice_mut(run_mu..run_mu + ml);
+            stream.memcpy_dtod(&ang.cdf.slice(0..ml), &mut dst_cdf)?;
+        }
+        for ei in 0..ne {
+            ang_dist_offsets_vec.push(ang.dist_local_off[ei] + run_mu as i32);
+            ang_dist_sizes_vec.push(ang.dist_sz[ei]);
+        }
+        run_e += ne;
+        run_mu += ml;
+    }
+
+    // Bundle-level sentinels (slot 1610-1613).
+    if ang_dist_offsets_vec.is_empty() {
+        ang_dist_offsets_vec.push(0);
+        ang_dist_sizes_vec.push(0);
+    }
+
+    Ok(AssembledBundleA4Cat {
+        ang_energies,
+        ang_mu,
+        ang_cdf,
+        ang_dist_offsets_vec,
+        ang_dist_sizes_vec,
+        ang_nuc_offsets_vec,
+        ang_nuc_n_energies_vec,
+        ang_is_cm_vec,
     })
 }
 
@@ -1254,6 +1355,7 @@ fn build_angular_slices(
         mu_buf.extend_from_slice(&dist.mu);
         cdf_buf.extend_from_slice(&dist.cdf);
     }
+    let mu_real_len = mu_buf.len();
     if mu_buf.is_empty() {
         mu_buf.push(0.0);
         cdf_buf.push(0.0);
@@ -1266,6 +1368,7 @@ fn build_angular_slices(
         cdf: stream.clone_htod(&cdf_buf)?,
         dist_local_off,
         dist_sz,
+        mu_real_len,
     })
 }
 
@@ -1883,6 +1986,115 @@ mod tests {
             assembled.lev_ang_lev_ne_vec,
             dtoh_i32(&bundle_legacy.lev_ang_lev_ne),
             "lev_ang_lev_ne",
+        );
+    }
+
+    #[test]
+    fn assemble_a4_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::hdf5_reader::{AngularDistribution, TabularMuDist};
+
+        // nuc_a: 2 incident-energy bins, each with a mu/cdf dist.
+        // nuc_b: no elastic angle data.
+        // Forces non-zero `ang_nuc_offsets[1]` shifting in the bundle.
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.elastic_angle = Some(AngularDistribution {
+            energies: vec![1.0e3, 1.0e6],
+            distributions: vec![
+                TabularMuDist {
+                    mu: vec![-1.0, 0.0, 1.0],
+                    pdf: vec![0.5, 0.5, 0.5],
+                    cdf: vec![0.0, 0.5, 1.0],
+                    histogram: false,
+                },
+                TabularMuDist {
+                    mu: vec![-1.0, 1.0],
+                    pdf: vec![0.5, 0.5],
+                    cdf: vec![0.0, 1.0],
+                    histogram: false,
+                },
+            ],
+            center_of_mass: true,
+        });
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_a4_cat(&stream, &per_nucs).expect("assemble_a4_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+
+        assert_eq!(
+            dtoh_f64(&assembled.ang_energies),
+            dtoh_f64(&bundle_legacy.ang_energies),
+            "ang_energies",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.ang_mu),
+            dtoh_f64(&bundle_legacy.ang_mu),
+            "ang_mu",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.ang_cdf),
+            dtoh_f64(&bundle_legacy.ang_cdf),
+            "ang_cdf",
+        );
+        assert_eq!(
+            assembled.ang_dist_offsets_vec,
+            dtoh_i32(&bundle_legacy.ang_dist_offsets),
+            "ang_dist_offsets",
+        );
+        assert_eq!(
+            assembled.ang_dist_sizes_vec,
+            dtoh_i32(&bundle_legacy.ang_dist_sizes),
+            "ang_dist_sizes",
+        );
+        assert_eq!(
+            assembled.ang_nuc_offsets_vec,
+            dtoh_i32(&bundle_legacy.ang_nuc_offsets),
+            "ang_nuc_offsets",
+        );
+        assert_eq!(
+            assembled.ang_nuc_n_energies_vec,
+            dtoh_i32(&bundle_legacy.ang_nuc_n_energies),
+            "ang_nuc_n_energies",
+        );
+        assert_eq!(
+            assembled.ang_is_cm_vec,
+            dtoh_i32(&bundle_legacy.ang_is_cm),
+            "ang_is_cm",
         );
     }
 
