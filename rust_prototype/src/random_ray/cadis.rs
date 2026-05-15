@@ -1,17 +1,6 @@
-//! FW-CADIS bridge: random-ray adjoint flux → existing `WeightWindow`.
-//!
-//! `WeightWindow::from_flux(aabb, n, flux, w_ref, ratio, phi_floor)`
-//! interprets `flux` as a forward-flux importance proxy and produces
-//! a window where `w_target ∝ flux_max / flux`. Passing the **adjoint**
-//! flux ψ*(r) here is precisely the CADIS recipe — high-importance
-//! voxels (where ψ* is large) get small w_target so analog-weight
-//! particles split, low-importance voxels get large w_target so they
-//! roulette out.
-//!
-//! `weight_window_from_adjoint` runs an adjoint random-ray solve and
-//! plumbs the result through that API. Group-summed ψ* is the default
-//! reduction; a per-group response weight (e.g. detector-response
-//! cross-section) can be passed instead.
+//! FW-CADIS bridge. `WeightWindow::from_flux` takes a forward-flux
+//! proxy and emits `w_target ∝ flux_max / flux`. Feed it ψ*(r) and
+//! you get the CADIS recipe directly.
 
 use crate::geometry::{Aabb, Geometry};
 use crate::transport::weight_window::WeightWindow;
@@ -20,12 +9,9 @@ use super::fsr::FsrMesh;
 use super::mgxs::MgxsLibrary;
 use super::solver::{AdjointFlag, RandomRaySolver, RaySolverConfig, SolverResult};
 
-/// Build a `WeightWindow` from a random-ray adjoint solve.
-///
-/// `cfg.adjoint` is forced to `Adjoint`. `response` is per-group
-/// detector response weights — pass `None` to group-sum ψ* uniformly,
-/// or `Some([R_g; n_groups])` for response-weighted importance
-/// (FW-CADIS proper). Length must match `library.n_groups`.
+/// Forces `cfg.adjoint = Adjoint`. `response = None` → uniform
+/// group-sum; `Some(R_g)` → response-weighted (FW-CADIS proper),
+/// length must match `library.n_groups`.
 #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
 pub fn weight_window_from_adjoint(
     geom: &Geometry,
@@ -51,8 +37,7 @@ pub fn weight_window_from_adjoint(
     cfg.adjoint = AdjointFlag::Adjoint;
     let result = solver.run(&cfg);
 
-    // Reduce ψ*(r,g) → ψ*(r): either uniform group sum or
-    // response-weighted.
+    // ψ*(r,g) → ψ*(r): uniform or response-weighted.
     let n_fsrs = result.n_fsrs;
     let n_g = result.n_groups;
     let mut importance = vec![0.0_f64; n_fsrs];

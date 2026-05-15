@@ -1,16 +1,6 @@
-//! Multigroup cross-section data for random-ray transport.
-//!
-//! `MaterialMgxs` holds per-group total / absorption / νΣ_f / χ, plus a
-//! group-to-group scattering matrix `Σ_s[g_in][g_out]`. `MgxsLibrary` is
-//! a vector of these indexed by the material id used by `Geometry`
-//! (`EffectiveFill::Material(u32)`). `n_groups` is fixed across the
-//! library — mixing group structures is rejected at construction.
-//!
-//! Adjoint mode is a *view* of the same data with the scattering matrix
-//! transposed and (χ, νΣ_f) swapped. `MaterialMgxs::adjoint_view` lets
-//! the integrator sweep with the adjoint operator without copying any
-//! XS data — the solver passes a `bool is_adjoint` flag through and the
-//! per-segment integrator picks the right look-up.
+//! Multigroup XS for random-ray transport. Adjoint is a view (no
+//! copy): transposed `Σ_s`, swapped `(χ, νΣ_f)`. Solver passes
+//! `is_adjoint` flag; integrator picks the right lookup.
 
 use thiserror::Error;
 
@@ -30,11 +20,7 @@ pub enum MgxsError {
     ChiNotNormalised { got: f64 },
 }
 
-/// Group-to-group scattering matrix. Row-major: `data[g_in * n + g_out]`.
-///
-/// `data[g_in * n + g_out]` is Σ_s,g_in→g_out — the macroscopic
-/// scattering cross section for a neutron starting in group `g_in` and
-/// ending in group `g_out`.
+/// `Σ_s,g_in→g_out` row-major `data[g_in*n + g_out]`.
 #[derive(Debug, Clone)]
 pub struct ScatterMatrix {
     pub n_groups: usize,
@@ -53,19 +39,17 @@ impl ScatterMatrix {
         Ok(Self { n_groups, data })
     }
 
-    /// Σ_s,g_in→g_out (forward).
     #[inline]
     pub fn forward(&self, g_in: usize, g_out: usize) -> f64 {
         self.data[g_in * self.n_groups + g_out]
     }
 
-    /// Σ_s,g_out→g_in (adjoint — transpose of `forward`).
+    /// Transpose of `forward`.
     #[inline]
     pub fn adjoint(&self, g_in: usize, g_out: usize) -> f64 {
         self.data[g_out * self.n_groups + g_in]
     }
 
-    /// Total out-scatter from group `g_in`: `Σ_g_out Σ_s,g_in→g_out`.
     pub fn total_out(&self, g_in: usize) -> f64 {
         let mut acc = 0.0;
         for g_out in 0..self.n_groups {
@@ -75,18 +59,16 @@ impl ScatterMatrix {
     }
 }
 
-/// Per-material multigroup cross sections.
 #[derive(Debug, Clone)]
 pub struct MaterialMgxs {
     pub n_groups: usize,
-    /// Σ_t per group (cm⁻¹). Must be strictly positive.
+    /// cm⁻¹; must be > 0.
     pub sigma_t: Vec<f64>,
-    /// Σ_a per group (cm⁻¹).
+    /// cm⁻¹.
     pub sigma_a: Vec<f64>,
-    /// νΣ_f per group (cm⁻¹).
+    /// cm⁻¹.
     pub nu_sigma_f: Vec<f64>,
-    /// χ per group (prompt + delayed fission spectrum, normalised so
-    /// `Σ χ_g = 1`). All zeros for non-fissionable materials.
+    /// `Σ χ_g = 1` (prompt + delayed); all zeros for non-fissionable.
     pub chi: Vec<f64>,
     /// Group-to-group scattering matrix.
     pub scatter: ScatterMatrix,

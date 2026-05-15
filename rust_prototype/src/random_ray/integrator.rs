@@ -1,58 +1,30 @@
-//! MoC analytic segment integrator (multigroup, flat source).
-//!
-//! Along a characteristic in a flat-source region (FSR) with constant
-//! Σ_t,g and isotropic source Q_f,g, the angular flux ψ_g (per
-//! steradian) satisfies
+//! Closed-form MoC ODE across a flat segment of length `l`,
+//! `τ = Σ_t·l`:
 //!
 //! ```text
-//!   dψ_g/ds = -Σ_t,g · ψ_g + q_g,    q_g = Q_f,g / (4π)
+//! ψ_out = ψ_in·exp(−τ) + (q/Σ_t)·(1−exp(−τ))
+//! ψ_avg = ψ_in·F + (q/Σ_t)·(1−F),  F = (1−exp(−τ))/τ
 //! ```
 //!
-//! Closed-form solution over a segment of length `l`, with `τ = Σ_t·l`:
-//!
-//! ```text
-//!   ψ_out = ψ_in · exp(-τ) + (q/Σ_t) · (1 - exp(-τ))
-//!   ψ_avg = ψ_in · F + (q/Σ_t) · (1 - F),  F = (1 - exp(-τ))/τ
-//! ```
-//!
-//! The track-length estimator for the FSR scalar flux is
-//!
-//! ```text
-//!   φ_f,g = 4π · ⟨ψ⟩_segments_in_f
-//!         = 4π · (Σ_segments l · ψ_avg) / (Σ_segments l)
-//! ```
-//!
-//! `solve_segment` returns ψ_out and the track-length contribution
-//! `l · ψ_avg` so the solver can atomic-add into per-FSR accumulators.
+//! Track-length estimator: `φ_f,g = 4π·Σ l·ψ_avg / Σ l`.
 
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentResult {
     pub psi_out: f64,
-    /// `l · ψ_avg` — the contribution this segment makes to the
-    /// track-length flux numerator for this (FSR, group).
     pub track_psi: f64,
 }
 
-/// Numerically stable `(1 - exp(-τ))/τ`.
-///
-/// Tail expansion `1 - τ/2 + τ²/6 - τ³/24 + …` for small τ avoids the
-/// catastrophic cancellation in the direct formula.
+/// Series tail for small τ avoids cancellation in `(1-exp(-τ))/τ`.
 #[inline]
 pub fn exp_m1_over(tau: f64) -> f64 {
     if tau.abs() < 1e-4 {
-        // Horner-evaluated truncated series to ~8 sig figs at τ=1e-4.
         1.0 - tau * (0.5 - tau * (1.0 / 6.0 - tau * (1.0 / 24.0)))
     } else {
         (1.0 - (-tau).exp()) / tau
     }
 }
 
-/// Solve the MoC ODE across one flat segment.
-///
-/// `sigma_t` is Σ_t,g (cm⁻¹), strictly positive.
-/// `q_per_sr` is the per-steradian source `Q_f,g/(4π)`.
-/// `length` is the segment length (cm).
-/// `psi_in` is the angular flux entering the segment.
+/// `q_per_sr = Q_f,g / (4π)`.
 #[inline]
 pub fn solve_segment(sigma_t: f64, q_per_sr: f64, length: f64, psi_in: f64) -> SegmentResult {
     debug_assert!(sigma_t > 0.0, "Σ_t must be positive");
