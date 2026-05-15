@@ -68,17 +68,65 @@ pub struct GpuTransportContext {
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
     k_transport_persistent: CudaFunction,
-    /// Byte-budgeted LRU. `(key, arc, device_bytes)` triples; front =
-    /// oldest. Eviction is byte-budgeted (see
-    /// `bundle_cache_budget_bytes`), not count-budgeted, so the cache
-    /// adapts to actual bundle footprint.
-    nuclide_buffer_cache: std::sync::Mutex<
-        std::collections::VecDeque<(GpuUploadKey, Arc<GpuNuclideData>, usize)>,
-    >,
+    /// Byte-budgeted LFU-with-recency (see
+    /// `transport::nuclide_cache::eviction`). Same policy as the
+    /// host-side L1 cache.
+    nuclide_buffer_cache: std::sync::Mutex<BundleCache>,
     cached_bundle_budget: std::sync::OnceLock<usize>,
-    /// Predictor for next-upload size; drives pre-eviction in
-    /// `upload_nuclide_data` so peak VRAM stays at one bundle.
+    /// Predictor for next-upload size; drives pre-eviction so peak
+    /// VRAM stays at one bundle.
     last_bundle_bytes: std::sync::atomic::AtomicUsize,
+}
+
+use crate::transport::nuclide_cache::eviction::{
+    EvictionStats, LfuEntries, LfuEntriesMut, DEFAULT_AGE_DECAY,
+    evict_to_budget,
+};
+
+struct BundleCache {
+    entries: std::collections::HashMap<GpuUploadKey, (Arc<GpuNuclideData>, EvictionStats)>,
+    counter: u64,
+    total_bytes: usize,
+}
+
+impl BundleCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            counter: 0,
+            total_bytes: 0,
+        }
+    }
+}
+
+struct BundleCacheAdapter<'a> {
+    inner: &'a mut BundleCache,
+}
+
+impl LfuEntries for BundleCacheAdapter<'_> {
+    type Key = GpuUploadKey;
+    fn total_bytes(&self) -> usize {
+        self.inner.total_bytes
+    }
+    fn len(&self) -> usize {
+        self.inner.entries.len()
+    }
+    fn iter_stats(&self) -> Box<dyn Iterator<Item = (&Self::Key, &EvictionStats)> + '_> {
+        Box::new(self.inner.entries.iter().map(|(k, (_, s))| (k, s)))
+    }
+    fn remove(&mut self, key: &Self::Key) {
+        if let Some((_, stats)) = self.inner.entries.remove(key) {
+            self.inner.total_bytes = self.inner.total_bytes.saturating_sub(stats.bytes);
+        }
+    }
+}
+
+impl LfuEntriesMut for BundleCacheAdapter<'_> {
+    fn set_preload_weight(&mut self, key: &Self::Key, weight: u64) {
+        if let Some((_, stats)) = self.inner.entries.get_mut(key) {
+            stats.preload_weight = weight;
+        }
+    }
 }
 
 /// SVD data + physics tables uploaded to GPU for all nuclides.
@@ -522,9 +570,7 @@ impl GpuTransportContext {
             k_energy_bin_count,
             k_energy_bin_scatter,
             k_transport_persistent,
-            nuclide_buffer_cache: std::sync::Mutex::new(
-                std::collections::VecDeque::new(),
-            ),
+            nuclide_buffer_cache: std::sync::Mutex::new(BundleCache::new()),
             cached_bundle_budget: std::sync::OnceLock::new(),
             last_bundle_bytes: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -1048,32 +1094,33 @@ impl GpuTransportContext {
                 .nuclide_buffer_cache
                 .lock()
                 .expect("nuclide_buffer_cache poisoned");
-            if let Some(pos) = guard.iter().position(|(k, _, _)| k == &key) {
-                let entry = guard.remove(pos).expect("position just located");
-                let arc = Arc::clone(&entry.1);
-                guard.push_back(entry);
+            // Hit: bump counter, stats, return.
+            if guard.entries.contains_key(&key) {
+                guard.counter = guard.counter.wrapping_add(1);
+                let now = guard.counter;
+                let (arc, stats) = guard
+                    .entries
+                    .get_mut(&key)
+                    .expect("contains_key just checked");
+                let arc = Arc::clone(arc);
+                stats.hits = stats.hits.wrapping_add(1);
+                stats.last_touch = now;
                 return Ok(arc);
             }
-            let mut evicted = 0;
-            if predicted > 0 {
-                let total_bytes = |q: &std::collections::VecDeque<(
-                    GpuUploadKey,
-                    Arc<GpuNuclideData>,
-                    usize,
-                )>| -> usize { q.iter().map(|(_, _, b)| *b).sum() };
-                while !guard.is_empty()
-                    && total_bytes(&guard).saturating_add(predicted) > budget
-                {
-                    guard.pop_front();
-                    evicted += 1;
-                }
-            }
+            // Miss: pre-evict using the previous bundle's size as
+            // predictor. First call (predicted = 0) skips pre-evict
+            // and lets the post-upload trim handle it.
+            let now = guard.counter;
+            let mut adapter = BundleCacheAdapter { inner: &mut guard };
+            let evicted = if predicted > 0 {
+                evict_to_budget(&mut adapter, predicted, budget, now, DEFAULT_AGE_DECAY)
+            } else {
+                0
+            };
             evicted > 0
         };
-        // cuMemFreeAsync (CUDA 11.2+) leaves freed bytes in the
-        // stream pool; trim returns them to the driver so the next
-        // allocation reuses them rather than growing peak VRAM.
         if evicted_any {
+            // cuMemFreeAsync parks freed bytes in the stream pool.
             self.trim_async_mempool();
         }
         let fresh = self.upload_nuclide_data_uncached(nuclides, rank)?;
@@ -1086,29 +1133,30 @@ impl GpuTransportContext {
                 .nuclide_buffer_cache
                 .lock()
                 .expect("nuclide_buffer_cache poisoned");
-            // Concurrent uploader may have populated the same key.
-            if let Some(pos) = guard.iter().position(|(k, _, _)| k == &key) {
-                let entry = guard.remove(pos).expect("position just located");
-                let existing = Arc::clone(&entry.1);
-                guard.push_back(entry);
-                return Ok(existing);
+            // Concurrent insert race.
+            if guard.entries.contains_key(&key) {
+                guard.counter = guard.counter.wrapping_add(1);
+                let now = guard.counter;
+                let (existing, stats) = guard
+                    .entries
+                    .get_mut(&key)
+                    .expect("contains_key just checked");
+                let arc = Arc::clone(existing);
+                stats.hits = stats.hits.wrapping_add(1);
+                stats.last_touch = now;
+                return Ok(arc);
             }
-            // Post-upload trim: pre-eviction used the previous bundle's
-            // size, so a larger new bundle can still exceed budget.
-            // Always leave at least one
-            // entry (the one we're about to insert) when the bundle
-            // exceeds budget on its own.
-            let total_bytes = |q: &std::collections::VecDeque<(
-                GpuUploadKey,
-                Arc<GpuNuclideData>,
-                usize,
-            )>| -> usize { q.iter().map(|(_, _, b)| *b).sum() };
-            while !guard.is_empty()
-                && total_bytes(&guard).saturating_add(bytes) > budget
+            // Post-upload trim with the actual size.
             {
-                guard.pop_front();
+                let now = guard.counter;
+                let mut adapter = BundleCacheAdapter { inner: &mut guard };
+                let _ = evict_to_budget(&mut adapter, bytes, budget, now, DEFAULT_AGE_DECAY);
             }
-            guard.push_back((key, Arc::clone(&arc), bytes));
+            let counter = guard.counter;
+            guard.counter = guard.counter.wrapping_add(1);
+            let stats = EvictionStats::new(bytes, counter);
+            guard.total_bytes = guard.total_bytes.saturating_add(bytes);
+            guard.entries.insert(key, (Arc::clone(&arc), stats));
         }
         Ok(arc)
     }
@@ -1117,10 +1165,13 @@ impl GpuTransportContext {
     /// mempool. Callers that need to free GPU memory between long
     /// sweeps without dropping the whole context should call this.
     pub fn clear_nuclide_buffer_cache(&self) {
-        self.nuclide_buffer_cache
+        let mut guard = self
+            .nuclide_buffer_cache
             .lock()
-            .expect("nuclide_buffer_cache poisoned")
-            .clear();
+            .expect("nuclide_buffer_cache poisoned");
+        guard.entries.clear();
+        guard.total_bytes = 0;
+        drop(guard);
         self.trim_async_mempool();
     }
 
@@ -3069,50 +3120,18 @@ mod tests {
         assert_ne!(k1, k_other);
     }
 
-    /// Byte-budgeted LRU: inserting bundles whose cumulative bytes
-    /// exceed the budget must evict from the front until the new
-    /// bundle fits. Always leaves at least one entry. Guards the
-    /// 376-case ICSBEP sweep from re-introducing the monotonic VRAM
-    /// growth that stalled the GPU run.
+    /// BundleCache::new is empty; EvictionStats round-trips
+    /// bytes / counter. Actual eviction semantics covered by
+    /// `nuclide_cache::eviction::tests` and L1MemoryStore tests.
     #[test]
-    fn bundle_cache_byte_budget_eviction() {
-        use std::collections::VecDeque;
-        let mk = |i: usize| GpuUploadKey {
-            rank: 5,
-            nuc_ptrs: vec![i],
-        };
-        let push = |cache: &mut VecDeque<(GpuUploadKey, usize, usize)>,
-                    key: GpuUploadKey,
-                    val: usize,
-                    bytes: usize,
-                    budget: usize| {
-            let total_bytes = |q: &VecDeque<(GpuUploadKey, usize, usize)>| -> usize {
-                q.iter().map(|(_, _, b)| *b).sum()
-            };
-            while !cache.is_empty() && total_bytes(cache).saturating_add(bytes) > budget {
-                cache.pop_front();
-            }
-            cache.push_back((key, val, bytes));
-        };
-
-        // Budget = 2 GiB, each bundle = 0.6 GiB → 3 fit, 4th evicts oldest.
-        let budget = 2usize * 1024 * 1024 * 1024;
-        let bundle_bytes = 600usize * 1024 * 1024;
-        let mut cache: VecDeque<(GpuUploadKey, usize, usize)> = VecDeque::new();
-        for i in 0..3 {
-            push(&mut cache, mk(i), i * 100, bundle_bytes, budget);
-        }
-        assert_eq!(cache.len(), 3);
-        push(&mut cache, mk(3), 400, bundle_bytes, budget);
-        assert_eq!(cache.len(), 3, "4th insert should evict oldest");
-        assert!(cache.iter().all(|(k, _, _)| k != &mk(0)));
-        assert_eq!(cache.back().map(|(_, v, _)| *v), Some(400));
-
-        // Bundle exceeds budget alone — must still cache it (better
-        // than re-uploading on every call) and evict all others.
-        let huge = budget + 1;
-        push(&mut cache, mk(99), 9999, huge, budget);
-        assert_eq!(cache.len(), 1, "single bundle larger than budget must still cache");
-        assert_eq!(cache.back().map(|(_, v, _)| *v), Some(9999));
+    fn bundle_cache_initialises_empty() {
+        let cache = BundleCache::new();
+        assert_eq!(cache.entries.len(), 0);
+        assert_eq!(cache.total_bytes, 0);
+        assert_eq!(cache.counter, 0);
+        let s = EvictionStats::new(100, 0);
+        assert_eq!(s.bytes, 100);
+        assert_eq!(s.last_touch, 0);
+        assert_eq!(s.hits, 0);
     }
 }

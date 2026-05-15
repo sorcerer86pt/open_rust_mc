@@ -2759,6 +2759,8 @@ fn run_icsbep_case(
     use open_rust_mc::transport::material_resolve;
     use open_rust_mc::transport::nuclides::NuclideLibrary;
 
+    open_rust_mc::hardware_profile::log_startup_banner();
+
     if !case_json.exists() {
         return Err(PyFileNotFoundError::new_err(format!(
             "ICSBEP case JSON not found: {}",
