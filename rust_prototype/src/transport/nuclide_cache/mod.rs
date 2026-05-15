@@ -18,6 +18,7 @@
 //! time-based eviction.
 
 pub mod binary_format;
+pub mod eviction;
 pub mod key;
 pub mod l1_memory;
 pub mod l2_disk;
