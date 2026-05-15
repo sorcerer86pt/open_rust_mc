@@ -39,20 +39,23 @@ fn transport_kernel_options() -> nvrtc::CompileOptions {
 /// SVD basis data is passed via global memory, coefficients via shared memory.
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 
-/// Pointer-identity key. Works because `nuclide_cache::TieredStore`
-/// returns the same `Arc<NuclideKernels>` for the same
+/// Per-nuclide pointer-identity key. Works because
+/// `nuclide_cache::TieredStore` returns the same
+/// `Arc<NuclideKernels>` for the same
 /// `(file_hash, policy_hash, temp_idx)` tuple — Arc address therefore
-/// implies byte-identical content. Callers that bypass the upstream
-/// cache will always miss; correctness is preserved via re-upload.
+/// implies byte-identical content. Two cases sharing U-235 hit the
+/// same key and reuse the GPU upload across cases (the cross-case
+/// sharing win that's the whole point of Stage C).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
-struct GpuUploadKey {
+struct PerNuclideCacheKey {
+    nuc_ptr: usize,
     rank: usize,
-    nuc_ptrs: Vec<usize>,
 }
 
-/// Bundle cache budget = `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
-/// Overridable via `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION` or
-/// `_BYTES`. Floor: at least one bundle fits even if oversized.
+/// Per-nuclide cache budget = `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
+/// Same env vars as before — `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES`
+/// / `_FRACTION` — semantics shift from "one bundle's bytes" to
+/// "the union of cached per-nuclide bytes."
 const BUNDLE_CACHE_DEFAULT_FRACTION: f64 = 0.75;
 const BUNDLE_CACHE_FRACTION_MIN: f64 = 0.05;
 const BUNDLE_CACHE_FRACTION_MAX: f64 = 0.95;
@@ -68,14 +71,12 @@ pub struct GpuTransportContext {
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
     k_transport_persistent: CudaFunction,
-    /// Byte-budgeted LFU-with-recency (see
-    /// `transport::nuclide_cache::eviction`). Same policy as the
-    /// host-side L1 cache.
-    nuclide_buffer_cache: std::sync::Mutex<BundleCache>,
+    /// Per-nuclide byte-budgeted LFU-with-recency cache (Stage C
+    /// step C). Cross-case sharing comes from upstream Arc-dedup in
+    /// `nuclide_cache::TieredStore::L1MemoryStore`: same nuclide
+    /// across cases → same Arc::as_ptr → same cache key.
+    per_nuclide_cache: std::sync::Mutex<PerNuclideCache>,
     cached_bundle_budget: std::sync::OnceLock<usize>,
-    /// Predictor for next-upload size; drives pre-eviction so peak
-    /// VRAM stays at one bundle.
-    last_bundle_bytes: std::sync::atomic::AtomicUsize,
 }
 
 use crate::transport::nuclide_cache::eviction::{
@@ -83,13 +84,16 @@ use crate::transport::nuclide_cache::eviction::{
     evict_to_budget,
 };
 
-struct BundleCache {
-    entries: std::collections::HashMap<GpuUploadKey, (Arc<GpuNuclideData>, EvictionStats)>,
+struct PerNuclideCache {
+    entries: std::collections::HashMap<
+        PerNuclideCacheKey,
+        (Arc<crate::gpu_per_nuclide::PerNuclideGpu>, EvictionStats),
+    >,
     counter: u64,
     total_bytes: usize,
 }
 
-impl BundleCache {
+impl PerNuclideCache {
     fn new() -> Self {
         Self {
             entries: std::collections::HashMap::new(),
@@ -99,12 +103,12 @@ impl BundleCache {
     }
 }
 
-struct BundleCacheAdapter<'a> {
-    inner: &'a mut BundleCache,
+struct PerNuclideCacheAdapter<'a> {
+    inner: &'a mut PerNuclideCache,
 }
 
-impl LfuEntries for BundleCacheAdapter<'_> {
-    type Key = GpuUploadKey;
+impl LfuEntries for PerNuclideCacheAdapter<'_> {
+    type Key = PerNuclideCacheKey;
     fn total_bytes(&self) -> usize {
         self.inner.total_bytes
     }
@@ -121,7 +125,7 @@ impl LfuEntries for BundleCacheAdapter<'_> {
     }
 }
 
-impl LfuEntriesMut for BundleCacheAdapter<'_> {
+impl LfuEntriesMut for PerNuclideCacheAdapter<'_> {
     fn set_preload_weight(&mut self, key: &Self::Key, weight: u64) {
         if let Some((_, stats)) = self.inner.entries.get_mut(key) {
             stats.preload_weight = weight;
@@ -570,9 +574,8 @@ impl GpuTransportContext {
             k_energy_bin_count,
             k_energy_bin_scatter,
             k_transport_persistent,
-            nuclide_buffer_cache: std::sync::Mutex::new(BundleCache::new()),
+            per_nuclide_cache: std::sync::Mutex::new(PerNuclideCache::new()),
             cached_bundle_budget: std::sync::OnceLock::new(),
-            last_bundle_bytes: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -1070,105 +1073,246 @@ impl GpuTransportContext {
         v
     }
 
-    /// Upload SVD nuclide data through the bounded LRU. Re-uploads
-    /// with the same Arc set + rank hit the cache (`Arc::as_ptr`
-    /// implies byte-identical content via the upstream
-    /// `nuclide_cache` Arc-de-dup). Misses pre-evict to make room
-    /// for the new bundle *before* allocating — lazy eviction would
-    /// double peak VRAM and OOM a 4 GB card.
+    /// Upload SVD nuclide data through the per-nuclide LFU cache.
+    /// For each nuclide, looks up `(Arc::as_ptr, rank)` in the
+    /// per-nuclide cache — hits reuse the existing GPU upload,
+    /// misses run `upload_one_nuclide` and insert the result. Pre-
+    /// evicts before each miss using the new nuclide's estimated
+    /// device-side cost so peak VRAM stays bounded.
+    ///
+    /// The flat-pack `GpuNuclideData` is assembled fresh on every
+    /// call from the (cached + new) per-nuclide pieces via direct
+    /// device-to-device copies (no H→D round-trip). Assembly cost
+    /// is small (~20 ms per 4 GB bundle) and dominated by DtoD
+    /// bandwidth, so caching the assembled bundle for repeat
+    /// same-composition uploads is not worth the doubled VRAM.
     pub fn upload_nuclide_data(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
         rank: usize,
     ) -> Result<Arc<GpuNuclideData>, Box<dyn std::error::Error>> {
-        let key = GpuUploadKey {
-            rank,
-            nuc_ptrs: nuclides.iter().map(|a| Arc::as_ptr(a) as usize).collect(),
+        use crate::gpu_per_nuclide::{
+            assemble_a4_cat, assemble_a5_cat, assemble_a6_cat, assemble_a7_cat,
+            assemble_a8_cat, assemble_a_cat, assemble_b_cat, assemble_c_cat,
+            upload_one_nuclide, PerNuclideGpu,
         };
+
         let budget = self.bundle_cache_budget_bytes();
-        let predicted = self
-            .last_bundle_bytes
-            .load(std::sync::atomic::Ordering::Relaxed);
-        let evicted_any = {
-            let mut guard = self
-                .nuclide_buffer_cache
-                .lock()
-                .expect("nuclide_buffer_cache poisoned");
-            // Hit: bump counter, stats, return.
-            if guard.entries.contains_key(&key) {
-                guard.counter = guard.counter.wrapping_add(1);
-                let now = guard.counter;
-                let (arc, stats) = guard
-                    .entries
-                    .get_mut(&key)
-                    .expect("contains_key just checked");
-                let arc = Arc::clone(arc);
-                stats.hits = stats.hits.wrapping_add(1);
-                stats.last_touch = now;
-                return Ok(arc);
-            }
-            // Miss: pre-evict using the previous bundle's size as
-            // predictor. First call (predicted = 0) skips pre-evict
-            // and lets the post-upload trim handle it.
-            let now = guard.counter;
-            let mut adapter = BundleCacheAdapter { inner: &mut guard };
-            let evicted = if predicted > 0 {
-                evict_to_budget(&mut adapter, predicted, budget, now, DEFAULT_AGE_DECAY)
-            } else {
-                0
+        let mut per_nucs: Vec<Arc<PerNuclideGpu>> = Vec::with_capacity(nuclides.len());
+
+        for nuc in nuclides {
+            let key = PerNuclideCacheKey {
+                nuc_ptr: Arc::as_ptr(nuc) as usize,
+                rank,
             };
-            evicted > 0
-        };
-        if evicted_any {
-            // cuMemFreeAsync parks freed bytes in the stream pool.
-            self.trim_async_mempool();
-        }
-        let fresh = self.upload_nuclide_data_uncached(nuclides, rank)?;
-        let bytes = fresh.device_bytes();
-        let arc = Arc::new(fresh);
-        self.last_bundle_bytes
-            .store(bytes, std::sync::atomic::Ordering::Relaxed);
-        {
-            let mut guard = self
-                .nuclide_buffer_cache
-                .lock()
-                .expect("nuclide_buffer_cache poisoned");
-            // Concurrent insert race.
-            if guard.entries.contains_key(&key) {
-                guard.counter = guard.counter.wrapping_add(1);
-                let now = guard.counter;
-                let (existing, stats) = guard
-                    .entries
-                    .get_mut(&key)
-                    .expect("contains_key just checked");
-                let arc = Arc::clone(existing);
-                stats.hits = stats.hits.wrapping_add(1);
-                stats.last_touch = now;
-                return Ok(arc);
-            }
-            // Post-upload trim with the actual size.
+            // Lookup.
             {
-                let now = guard.counter;
-                let mut adapter = BundleCacheAdapter { inner: &mut guard };
-                let _ = evict_to_budget(&mut adapter, bytes, budget, now, DEFAULT_AGE_DECAY);
+                let mut guard = self
+                    .per_nuclide_cache
+                    .lock()
+                    .expect("per_nuclide_cache poisoned");
+                if guard.entries.contains_key(&key) {
+                    guard.counter = guard.counter.wrapping_add(1);
+                    let now = guard.counter;
+                    let (arc, stats) = guard
+                        .entries
+                        .get_mut(&key)
+                        .expect("contains_key just checked");
+                    let arc = Arc::clone(arc);
+                    stats.hits = stats.hits.wrapping_add(1);
+                    stats.last_touch = now;
+                    per_nucs.push(arc);
+                    continue;
+                }
             }
-            let counter = guard.counter;
-            guard.counter = guard.counter.wrapping_add(1);
-            let stats = EvictionStats::new(bytes, counter);
-            guard.total_bytes = guard.total_bytes.saturating_add(bytes);
-            guard.entries.insert(key, (Arc::clone(&arc), stats));
+
+            // Miss path: pre-evict (estimate the new nuclide's bytes
+            // from the host-side approx; device-side overhead vs
+            // host roughly tracks within an order of magnitude for
+            // our payloads), upload, insert.
+            let predicted = nuc.approx_host_bytes();
+            let evicted_any = {
+                let mut guard = self
+                    .per_nuclide_cache
+                    .lock()
+                    .expect("per_nuclide_cache poisoned");
+                let now = guard.counter;
+                let mut adapter = PerNuclideCacheAdapter { inner: &mut guard };
+                let evicted = evict_to_budget(
+                    &mut adapter,
+                    predicted,
+                    budget,
+                    now,
+                    DEFAULT_AGE_DECAY,
+                );
+                evicted > 0
+            };
+            if evicted_any {
+                self.trim_async_mempool();
+            }
+
+            let fresh = upload_one_nuclide(&self.stream, nuc, rank)?;
+            let bytes = fresh.device_bytes();
+            let arc = Arc::new(fresh);
+            {
+                let mut guard = self
+                    .per_nuclide_cache
+                    .lock()
+                    .expect("per_nuclide_cache poisoned");
+                // Concurrent-insert race: another thread may have
+                // already populated this key while we uploaded.
+                if guard.entries.contains_key(&key) {
+                    guard.counter = guard.counter.wrapping_add(1);
+                    let now = guard.counter;
+                    let (existing, stats) = guard
+                        .entries
+                        .get_mut(&key)
+                        .expect("contains_key just checked");
+                    let arc = Arc::clone(existing);
+                    stats.hits = stats.hits.wrapping_add(1);
+                    stats.last_touch = now;
+                    per_nucs.push(arc);
+                    continue;
+                }
+                // Post-upload trim with the actual size.
+                {
+                    let now = guard.counter;
+                    let mut adapter = PerNuclideCacheAdapter { inner: &mut guard };
+                    let _ = evict_to_budget(
+                        &mut adapter,
+                        bytes,
+                        budget,
+                        now,
+                        DEFAULT_AGE_DECAY,
+                    );
+                }
+                let counter = guard.counter;
+                guard.counter = guard.counter.wrapping_add(1);
+                let stats = EvictionStats::new(bytes, counter);
+                guard.total_bytes = guard.total_bytes.saturating_add(bytes);
+                guard.entries.insert(key, (Arc::clone(&arc), stats));
+            }
+            per_nucs.push(arc);
         }
-        Ok(arc)
+
+        // Assemble the flat-pack bundle. Pure DtoD; no H→D for the
+        // already-cached payloads.
+        let a = assemble_a_cat(&self.stream, &per_nucs)?;
+        let b = assemble_b_cat(&self.stream, &per_nucs)?;
+        let c = assemble_c_cat(&self.stream, &per_nucs)?;
+        let a4 = assemble_a4_cat(&self.stream, &per_nucs)?;
+        let a5 = assemble_a5_cat(&self.stream, &per_nucs)?;
+        let a6 = assemble_a6_cat(&self.stream, &per_nucs)?;
+        let a7 = assemble_a7_cat(&self.stream, &per_nucs)?;
+        let a8 = assemble_a8_cat(&self.stream, &per_nucs)?;
+
+        Ok(Arc::new(GpuNuclideData {
+            all_basis: b.all_basis,
+            all_coeffs: b.all_coeffs,
+            all_energy_grids: a.all_energy_grids,
+            basis_offsets: self.stream.clone_htod(&b.basis_offsets_vec)?,
+            grid_offsets: self.stream.clone_htod(&a.grid_offsets_vec)?,
+            n_energies: self.stream.clone_htod(&a.n_energies_vec)?,
+            has_reaction: self.stream.clone_htod(&b.has_reaction_vec)?,
+            coeffs_offsets: self.stream.clone_htod(&b.coeffs_offsets_vec)?,
+            rank: rank as i32,
+            total_xs: a.total_xs,
+            total_xs_offsets: self.stream.clone_htod(&a.total_xs_off_vec)?,
+            has_total_xs: self.stream.clone_htod(&a.has_total_xs_vec)?,
+            pointwise_xs: a.pointwise_xs,
+            pw_offsets: self.stream.clone_htod(&a.pw_off_vec)?,
+            has_pw: self.stream.clone_htod(&a.has_pw_vec)?,
+            nu_bar_energies: a.nu_bar_energies,
+            nu_bar_values: a.nu_bar_values,
+            nu_bar_offsets: self.stream.clone_htod(&a.nu_bar_offsets_vec)?,
+            nu_bar_sizes: self.stream.clone_htod(&a.nu_bar_sizes_vec)?,
+            delayed_nu_bar_energies: a.delayed_nu_bar_energies,
+            delayed_nu_bar_values: a.delayed_nu_bar_values,
+            delayed_nu_bar_offsets: self
+                .stream
+                .clone_htod(&a.delayed_nu_bar_offsets_vec)?,
+            delayed_nu_bar_sizes: self.stream.clone_htod(&a.delayed_nu_bar_sizes_vec)?,
+            level_q_values: c.level_q_values,
+            level_thresholds: c.level_thresholds,
+            level_offsets: self.stream.clone_htod(&c.level_offsets_vec)?,
+            level_counts: self.stream.clone_htod(&c.level_counts_vec)?,
+            level_basis: c.level_basis,
+            level_coeffs: c.level_coeffs,
+            level_basis_offsets: self.stream.clone_htod(&c.level_basis_offsets_vec)?,
+            level_coeffs_offsets: self.stream.clone_htod(&c.level_coeffs_offsets_vec)?,
+            level_has_kernel: c.level_has_kernel,
+            level_mt: c.level_mt,
+            lev_ang_energies: c.lev_ang_energies,
+            lev_ang_mu: c.lev_ang_mu,
+            lev_ang_cdf: c.lev_ang_cdf,
+            lev_ang_dist_off: self.stream.clone_htod(&c.lev_ang_dist_off_vec)?,
+            lev_ang_dist_sz: self.stream.clone_htod(&c.lev_ang_dist_sz_vec)?,
+            lev_ang_lev_off: self.stream.clone_htod(&c.lev_ang_lev_off_vec)?,
+            lev_ang_lev_ne: self.stream.clone_htod(&c.lev_ang_lev_ne_vec)?,
+            ang_energies: a4.ang_energies,
+            ang_mu: a4.ang_mu,
+            ang_cdf: a4.ang_cdf,
+            ang_dist_offsets: self.stream.clone_htod(&a4.ang_dist_offsets_vec)?,
+            ang_dist_sizes: self.stream.clone_htod(&a4.ang_dist_sizes_vec)?,
+            ang_nuc_offsets: self.stream.clone_htod(&a4.ang_nuc_offsets_vec)?,
+            ang_nuc_n_energies: self.stream.clone_htod(&a4.ang_nuc_n_energies_vec)?,
+            ang_is_cm: self.stream.clone_htod(&a4.ang_is_cm_vec)?,
+            fis_inc_energies: a5.fis_inc_energies,
+            fis_dist_offsets: self.stream.clone_htod(&a5.fis_dist_offsets_vec)?,
+            fis_dist_sizes: self.stream.clone_htod(&a5.fis_dist_sizes_vec)?,
+            fis_e_out: a5.fis_e_out,
+            fis_cdf: a5.fis_cdf,
+            fis_pdf: a5.fis_pdf,
+            fis_nuc_offsets: self.stream.clone_htod(&a5.fis_nuc_offsets_vec)?,
+            fis_nuc_n_inc: self.stream.clone_htod(&a5.fis_nuc_n_inc_vec)?,
+            watt_inc_energies: a5.watt_inc_energies,
+            watt_a: a5.watt_a,
+            watt_b: a5.watt_b,
+            watt_u: self.stream.clone_htod(&a5.watt_u_vec)?,
+            watt_nuc_offsets: self.stream.clone_htod(&a5.watt_nuc_offsets_vec)?,
+            watt_nuc_n: self.stream.clone_htod(&a5.watt_nuc_n_vec)?,
+            maxevap_inc_energies: a5.maxevap_inc_energies,
+            maxevap_theta: a5.maxevap_theta,
+            maxevap_u: self.stream.clone_htod(&a5.maxevap_u_vec)?,
+            maxevap_law: self.stream.clone_htod(&a5.maxevap_law_vec)?,
+            maxevap_nuc_offsets: self.stream.clone_htod(&a5.maxevap_nuc_offsets_vec)?,
+            maxevap_nuc_n: self.stream.clone_htod(&a5.maxevap_nuc_n_vec)?,
+            inel91_inc_energies: a6.inel91_inc_energies,
+            inel91_dist_offsets: self.stream.clone_htod(&a6.inel91_dist_offsets_vec)?,
+            inel91_dist_sizes: self.stream.clone_htod(&a6.inel91_dist_sizes_vec)?,
+            inel91_e_out: a6.inel91_e_out,
+            inel91_cdf: a6.inel91_cdf,
+            inel91_pdf: a6.inel91_pdf,
+            inel91_nuc_offsets: self.stream.clone_htod(&a6.inel91_nuc_offsets_vec)?,
+            inel91_nuc_n_inc: self.stream.clone_htod(&a6.inel91_nuc_n_inc_vec)?,
+            urr_energies: a7.urr_energies,
+            urr_cum_prob: a7.urr_cum_prob,
+            urr_total_f: a7.urr_total_f,
+            urr_elastic_f: a7.urr_elastic_f,
+            urr_fission_f: a7.urr_fission_f,
+            urr_capture_f: a7.urr_capture_f,
+            urr_offsets: self.stream.clone_htod(&a7.urr_offsets_vec)?,
+            urr_n_energies: self.stream.clone_htod(&a7.urr_n_energies_vec)?,
+            urr_n_bands: self.stream.clone_htod(&a7.urr_n_bands_vec)?,
+            urr_multiply_smooth: self.stream.clone_htod(&a7.urr_multiply_smooth_vec)?,
+            inel_cdf_data: a8.inel_cdf_data,
+            inel_cdf_off: self.stream.clone_htod(&a8.inel_cdf_off_vec)?,
+            inel_cdf_n_e: self.stream.clone_htod(&a8.inel_cdf_n_e_vec)?,
+            inel_cdf_n_t: self.stream.clone_htod(&a8.inel_cdf_n_t_vec)?,
+            inel_cdf_n_lev: self.stream.clone_htod(&a8.inel_cdf_n_lev_vec)?,
+            inel_cdf_log_e_min: self.stream.clone_htod(&a8.inel_cdf_log_e_min_vec)?,
+            inel_cdf_log_e_max: self.stream.clone_htod(&a8.inel_cdf_log_e_max_vec)?,
+        }))
     }
 
-    /// Drop the per-context GPU buffer cache and trim the async
+    /// Drop the per-context GPU per-nuclide cache and trim the async
     /// mempool. Callers that need to free GPU memory between long
     /// sweeps without dropping the whole context should call this.
     pub fn clear_nuclide_buffer_cache(&self) {
         let mut guard = self
-            .nuclide_buffer_cache
+            .per_nuclide_cache
             .lock()
-            .expect("nuclide_buffer_cache poisoned");
+            .expect("per_nuclide_cache poisoned");
         guard.entries.clear();
         guard.total_bytes = 0;
         drop(guard);
@@ -1231,10 +1375,11 @@ impl GpuTransportContext {
     /// `assemble_*_cat_matches_legacy_bundle_byte_for_byte` tests
     /// in `gpu_per_nuclide::tests` prove parity.
     ///
-    /// The per-nuclide PerNuclideGpu values are dropped at the end
-    /// of this function in Stage C step B; future steps C (per-
-    /// nuclide LFU cache) and D (kernel pointer-array ABI) reuse
-    /// them across cases for the cross-case sharing win.
+    /// Production path inlines this logic directly into
+    /// `upload_nuclide_data` (per-nuclide cache hits, then assembly).
+    /// Kept around purely as the byte-equality reference for
+    /// `gpu_per_nuclide::tests`.
+    #[allow(dead_code)]
     pub(crate) fn upload_nuclide_data_uncached(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
@@ -1366,11 +1511,11 @@ impl GpuTransportContext {
 
     /// Legacy uncached upload — inline host-side packing of every
     /// per-nuclide field into a single concatenated Vec per slab,
-    /// then one `clone_htod` per slab. Kept private as the byte-
-    /// equality reference for the new per-nuclide path
-    /// (`upload_nuclide_data_uncached`). Will be removed once the
-    /// per-nuclide path is wired into the cache and Stage C step C/D
-    /// (per-nuclide LFU + kernel ABI swap) lands.
+    /// then one `clone_htod` per slab. Kept as the byte-equality
+    /// reference for the new per-nuclide path; never called in
+    /// production. Removed in a follow-up commit once Step D drops
+    /// the assembled-flat-pack `GpuNuclideData` entirely.
+    #[allow(dead_code)]
     pub(crate) fn upload_nuclide_data_uncached_legacy(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
@@ -3211,8 +3356,8 @@ mod tests {
 
     /// `GpuTransportContext::shared()` must return the same `Arc` on
     /// every call within one process — that's what makes the
-    /// per-context `nuclide_buffer_cache` survive across ICSBEP
-    /// cases. Verifies pointer identity, not just value equality.
+    /// per-context `per_nuclide_cache` survive across ICSBEP cases.
+    /// Verifies pointer identity, not just value equality.
     #[test]
     fn shared_singleton_returns_same_arc() {
         let a = match GpuTransportContext::shared() {
@@ -3228,51 +3373,56 @@ mod tests {
         );
     }
 
-    /// The cache key collides iff the rank matches AND every
-    /// `Arc::as_ptr` matches at the same index. Different ordering of
-    /// the same Arcs must NOT collide — the GPU upload positions each
-    /// nuclide by index, so swapping two preserves identity but the
-    /// `mat_nuclide_idx` table downstream is sensitive to order.
+    /// The per-nuclide cache key collides iff the same Arc + rank.
+    /// Different nuclide Arcs or different rank values must produce
+    /// distinct keys — pointer identity from upstream `nuclide_cache`
+    /// guarantees byte-identical content per pointer.
     #[test]
-    fn upload_key_collides_iff_pointers_match_in_order() {
+    fn per_nuclide_key_collides_iff_arc_and_rank_match() {
         let a: Arc<NuclideKernels> = Arc::new(NuclideKernels::empty(1.0, 2.43));
         let b: Arc<NuclideKernels> = Arc::new(NuclideKernels::empty(16.0, 2.43));
 
-        let mk_key = |slice: &[Arc<NuclideKernels>], rank: usize| GpuUploadKey {
-            rank,
-            nuc_ptrs: slice.iter().map(|a| Arc::as_ptr(a) as usize).collect(),
+        let k_a5 = PerNuclideCacheKey {
+            nuc_ptr: Arc::as_ptr(&a) as usize,
+            rank: 5,
         };
+        let k_a5_again = PerNuclideCacheKey {
+            nuc_ptr: Arc::as_ptr(&a) as usize,
+            rank: 5,
+        };
+        assert_eq!(k_a5, k_a5_again, "same Arc + same rank must collide");
 
-        let k1 = mk_key(&[Arc::clone(&a), Arc::clone(&b)], 5);
-        let k2 = mk_key(&[Arc::clone(&a), Arc::clone(&b)], 5);
-        assert_eq!(k1, k2, "same Arcs + same rank must collide");
+        let k_a7 = PerNuclideCacheKey {
+            nuc_ptr: Arc::as_ptr(&a) as usize,
+            rank: 7,
+        };
+        assert_ne!(k_a5, k_a7, "different rank must produce different key");
 
-        // Different rank — no collision.
-        let k_rank = mk_key(&[Arc::clone(&a), Arc::clone(&b)], 7);
-        assert_ne!(k1, k_rank);
+        let k_b5 = PerNuclideCacheKey {
+            nuc_ptr: Arc::as_ptr(&b) as usize,
+            rank: 5,
+        };
+        assert_ne!(k_a5, k_b5, "different Arc must produce different key");
 
-        // Reversed order — different key. The GPU upload positions
-        // each nuclide by index; swapping two preserves Arc identity
-        // but would scramble downstream `mat_nuclide_idx` lookups.
-        let k_rev = mk_key(&[Arc::clone(&b), Arc::clone(&a)], 5);
-        assert_ne!(k1, k_rev);
-
-        // Distinct Arc (different allocation, same contents) — no
-        // collision. Pointer identity ≠ value identity here, which is
-        // exactly what we want: the upstream `nuclide_cache` returns
-        // the same Arc for the same (path, blake3, policy) tuple, so
-        // pointer-collision implies byte-identical content.
+        // Distinct Arc with same contents — pointer identity, not
+        // value identity. Upstream `nuclide_cache` guarantees same
+        // (path, blake3, policy) → same Arc, so pointer-collision
+        // implies byte-identical content; this test confirms we
+        // honour pointer identity strictly.
         let c: Arc<NuclideKernels> = Arc::new(NuclideKernels::empty(1.0, 2.43));
-        let k_other = mk_key(&[Arc::clone(&c), Arc::clone(&b)], 5);
-        assert_ne!(k1, k_other);
+        let k_c5 = PerNuclideCacheKey {
+            nuc_ptr: Arc::as_ptr(&c) as usize,
+            rank: 5,
+        };
+        assert_ne!(k_a5, k_c5);
     }
 
-    /// BundleCache::new is empty; EvictionStats round-trips
-    /// bytes / counter. Actual eviction semantics covered by
+    /// PerNuclideCache::new is empty; EvictionStats round-trips bytes
+    /// / counter. Actual eviction semantics covered by
     /// `nuclide_cache::eviction::tests` and L1MemoryStore tests.
     #[test]
-    fn bundle_cache_initialises_empty() {
-        let cache = BundleCache::new();
+    fn per_nuclide_cache_initialises_empty() {
+        let cache = PerNuclideCache::new();
         assert_eq!(cache.entries.len(), 0);
         assert_eq!(cache.total_bytes, 0);
         assert_eq!(cache.counter, 0);
