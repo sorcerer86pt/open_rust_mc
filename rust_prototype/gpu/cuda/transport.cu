@@ -304,8 +304,20 @@
 #define P_ANG_DIST_LOCAL_OFF    161
 #define P_LEV_ANG_LEV_LOCAL_OFF 162
 #define P_LEV_ANG_DIST_LOCAL_OFF 163
+// Fission tabular + MT=91 per-nuc base pointers and un-shifted
+// per-(global inc_e) offset arrays. 8 ptr slots + 2 int arrays.
+#define P_FIS_INC_E_PTRS        164
+#define P_FIS_E_OUT_PTRS        165
+#define P_FIS_CDF_PTRS          166
+#define P_FIS_PDF_PTRS          167
+#define P_FIS_DIST_LOCAL_OFF    168
+#define P_INEL91_INC_E_PTRS     169
+#define P_INEL91_E_OUT_PTRS     170
+#define P_INEL91_CDF_PTRS       171
+#define P_INEL91_PDF_PTRS       172
+#define P_INEL91_DIST_LOCAL_OFF 173
 
-#define N_PARAMS            164
+#define N_PARAMS            174
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -744,23 +756,31 @@ __device__ double sample_fission_energy(
         // since those are handled above.
         return sample_watt_ab(0.988e6, 2.249e-6, rng);
     }
-    const double* inc_e = &PTR_D(p, P_FIS_INC_E)[fi_off];
+    // Stage C step D — per-nuc base pointers for the four tabular
+    // fission buffers. The dist_off lookups use the global-indexed
+    // `P_FIS_DIST_LOCAL_OFF` (un-shifted values).
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_PDF_PTRS)[hit_nuc]);
 
     // Edge: below grid — sample directly from first bin.
     if (E_inc <= inc_e[0]) {
-        int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off];
+        int off = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[fi_off];
+        int sz  = PTR_I(p, P_FIS_DIST_SZ)[fi_off];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_FIS_E_OUT)[off],
-                                    &PTR_D(p, P_FIS_CDF)[off],
-                                    &PTR_D(p, P_FIS_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
     // Edge: above grid — sample from last bin.
     if (E_inc >= inc_e[fi_n-1]) {
-        int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+fi_n-1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+fi_n-1];
+        int off = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[fi_off + fi_n - 1];
+        int sz  = PTR_I(p, P_FIS_DIST_SZ)[fi_off + fi_n - 1];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_FIS_E_OUT)[off],
-                                    &PTR_D(p, P_FIS_CDF)[off],
-                                    &PTR_D(p, P_FIS_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
 
     // Binary search for bracket
@@ -774,21 +794,21 @@ __device__ double sample_fission_energy(
     int chosen_lo = fi_off + ie;
     int chosen_hi = fi_off + ie + 1;
     int chosen = pick_hi ? chosen_hi : chosen_lo;
-    int off_l = PTR_I(p, P_FIS_DIST_OFF)[chosen];
+    int off_l = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[chosen];
     int sz_l  = PTR_I(p, P_FIS_DIST_SZ)[chosen];
-    const double* eo_l = &PTR_D(p, P_FIS_E_OUT)[off_l];
-    const double* cd_l = &PTR_D(p, P_FIS_CDF)[off_l];
-    const double* pd_l = &PTR_D(p, P_FIS_PDF)[off_l];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
     double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
 
     // Scaled kinematic adjustment: remap e_out from chosen bin's
     // [el1_lo, el1_hi] to the interpolated [e1, eK] between both bins.
-    int off_a = PTR_I(p, P_FIS_DIST_OFF)[chosen_lo];
+    int off_a = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[chosen_lo];
     int sz_a  = PTR_I(p, P_FIS_DIST_SZ)[chosen_lo];
-    int off_b = PTR_I(p, P_FIS_DIST_OFF)[chosen_hi];
+    int off_b = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[chosen_hi];
     int sz_b  = PTR_I(p, P_FIS_DIST_SZ)[chosen_hi];
-    const double* eo_a = &PTR_D(p, P_FIS_E_OUT)[off_a];
-    const double* eo_b = &PTR_D(p, P_FIS_E_OUT)[off_b];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
     double el1_lo = eo_l[0];
     double el1_hi = (sz_l > 0) ? eo_l[sz_l-1] : el1_lo;
     double ea_lo  = eo_a[0];
@@ -822,23 +842,27 @@ __device__ double sample_inel91_energy(
     int fi_off = __ldg(&PTR_I(p, P_INEL91_NUC_OFF)[hit_nuc]);
     int fi_n   = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
     if (fi_n <= 0) return -1.0;  // caller must guard with NUC_NINC > 0
-    const double* inc_e = &PTR_D(p, P_INEL91_INC_E)[fi_off];
+    // Stage C step D — per-nuc base pointers.
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_PDF_PTRS)[hit_nuc]);
 
     if (E_inc <= inc_e[0]) {
-        int off = PTR_I(p, P_INEL91_DIST_OFF)[fi_off];
+        int off = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[fi_off];
         int sz  = PTR_I(p, P_INEL91_DIST_SZ)[fi_off];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_INEL91_E_OUT)[off],
-                                    &PTR_D(p, P_INEL91_CDF)[off],
-                                    &PTR_D(p, P_INEL91_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
     if (E_inc >= inc_e[fi_n - 1]) {
-        int off = PTR_I(p, P_INEL91_DIST_OFF)[fi_off + fi_n - 1];
+        int off = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[fi_off + fi_n - 1];
         int sz  = PTR_I(p, P_INEL91_DIST_SZ)[fi_off + fi_n - 1];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_INEL91_E_OUT)[off],
-                                    &PTR_D(p, P_INEL91_CDF)[off],
-                                    &PTR_D(p, P_INEL91_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
 
     int ie;
@@ -856,19 +880,19 @@ __device__ double sample_inel91_energy(
     int chosen_lo = fi_off + ie;
     int chosen_hi = fi_off + ie + 1;
     int chosen = pick_hi ? chosen_hi : chosen_lo;
-    int off_l = PTR_I(p, P_INEL91_DIST_OFF)[chosen];
+    int off_l = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen];
     int sz_l  = PTR_I(p, P_INEL91_DIST_SZ)[chosen];
-    const double* eo_l = &PTR_D(p, P_INEL91_E_OUT)[off_l];
-    const double* cd_l = &PTR_D(p, P_INEL91_CDF)[off_l];
-    const double* pd_l = &PTR_D(p, P_INEL91_PDF)[off_l];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
     double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
 
-    int off_a = PTR_I(p, P_INEL91_DIST_OFF)[chosen_lo];
+    int off_a = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_lo];
     int sz_a  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_lo];
-    int off_b = PTR_I(p, P_INEL91_DIST_OFF)[chosen_hi];
+    int off_b = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_hi];
     int sz_b  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_hi];
-    const double* eo_a = &PTR_D(p, P_INEL91_E_OUT)[off_a];
-    const double* eo_b = &PTR_D(p, P_INEL91_E_OUT)[off_b];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
     double el1_lo = eo_l[0];
     double el1_hi = (sz_l > 0) ? eo_l[sz_l - 1] : el1_lo;
     double ea_lo  = eo_a[0];

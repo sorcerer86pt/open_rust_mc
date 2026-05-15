@@ -1270,6 +1270,7 @@ pub fn assemble_a7_cat(
 pub struct AssembledBundleA6Cat {
     pub inel91_inc_energies: CudaSlice<f64>,
     pub inel91_dist_offsets_vec: Vec<i32>,
+    pub inel91_dist_local_off_vec: Vec<i32>,
     pub inel91_dist_sizes_vec: Vec<i32>,
     pub inel91_e_out: CudaSlice<f64>,
     pub inel91_cdf: CudaSlice<f64>,
@@ -1306,6 +1307,7 @@ pub fn assemble_a6_cat(
     }
 
     let mut inel91_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_inc);
+    let mut inel91_dist_local_off_vec: Vec<i32> = Vec::with_capacity(total_inc);
     let mut inel91_dist_sizes_vec: Vec<i32> = Vec::with_capacity(total_inc);
     let mut inel91_nuc_offsets_vec = vec![0_i32; n_nuc];
     let mut inel91_nuc_n_inc_vec = vec![0_i32; n_nuc];
@@ -1332,6 +1334,7 @@ pub fn assemble_a6_cat(
         }
         for di in 0..ni {
             inel91_dist_offsets_vec.push(t.dist_local_off[di] + run_eout as i32);
+            inel91_dist_local_off_vec.push(t.dist_local_off[di]);
             inel91_dist_sizes_vec.push(t.dist_sz[di]);
         }
         run_inc += ni;
@@ -1340,12 +1343,14 @@ pub fn assemble_a6_cat(
 
     if inel91_dist_offsets_vec.is_empty() {
         inel91_dist_offsets_vec.push(0);
+        inel91_dist_local_off_vec.push(0);
         inel91_dist_sizes_vec.push(0);
     }
 
     Ok(AssembledBundleA6Cat {
         inel91_inc_energies,
         inel91_dist_offsets_vec,
+        inel91_dist_local_off_vec,
         inel91_dist_sizes_vec,
         inel91_e_out,
         inel91_cdf,
@@ -1355,6 +1360,11 @@ pub fn assemble_a6_cat(
     })
 }
 
+/// Assembled cat-A.6 — see `AssembledBundleA6Cat`. Step D needs a
+/// `lev_ang_dist_local_off`-style un-shifted parallel for both
+/// fission tabular and MT=91 paths; we extend the existing structs
+/// rather than adding new ones.
+///
 /// Assembled cat-A.5 (fission outgoing-energy distribution) bundle
 /// slices. Three exclusive branches: a nuclide contributes to at
 /// most one of `fis_*` (Tabular), `watt_*` (Law 11), or `maxevap_*`
@@ -1366,6 +1376,10 @@ pub struct AssembledBundleA5Cat {
     // Tabular (Law 4 / 61).
     pub fis_inc_energies: CudaSlice<f64>,
     pub fis_dist_offsets_vec: Vec<i32>,
+    /// `[total_inc_tab]` — un-shifted within-nuc fis_e_out offsets,
+    /// parallel to `fis_dist_offsets_vec`. Step D pairs with
+    /// `P_FIS_E_OUT_PTRS[hit_nuc]`.
+    pub fis_dist_local_off_vec: Vec<i32>,
     pub fis_dist_sizes_vec: Vec<i32>,
     pub fis_e_out: CudaSlice<f64>,
     pub fis_cdf: CudaSlice<f64>,
@@ -1424,6 +1438,7 @@ pub fn assemble_a5_cat(
     }
 
     let mut fis_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_inc_tab);
+    let mut fis_dist_local_off_vec: Vec<i32> = Vec::with_capacity(total_inc_tab);
     let mut fis_dist_sizes_vec: Vec<i32> = Vec::with_capacity(total_inc_tab);
     let mut fis_nuc_offsets_vec = vec![0_i32; n_nuc];
     let mut fis_nuc_n_inc_vec = vec![0_i32; n_nuc];
@@ -1494,6 +1509,7 @@ pub fn assemble_a5_cat(
                 }
                 for di in 0..ni {
                     fis_dist_offsets_vec.push(t.dist_local_off[di] + run_tab_eout as i32);
+                    fis_dist_local_off_vec.push(t.dist_local_off[di]);
                     fis_dist_sizes_vec.push(t.dist_sz[di]);
                 }
                 run_tab_inc += ni;
@@ -1537,12 +1553,14 @@ pub fn assemble_a5_cat(
     //    already allocated to size 1 above when totals were 0. ──
     if fis_dist_offsets_vec.is_empty() {
         fis_dist_offsets_vec.push(0);
+        fis_dist_local_off_vec.push(0);
         fis_dist_sizes_vec.push(0);
     }
 
     Ok(AssembledBundleA5Cat {
         fis_inc_energies,
         fis_dist_offsets_vec,
+        fis_dist_local_off_vec,
         fis_dist_sizes_vec,
         fis_e_out,
         fis_cdf,

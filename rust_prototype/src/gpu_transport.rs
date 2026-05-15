@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 164;
+const N_PARAMS: usize = 174;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -219,6 +219,21 @@ pub struct GpuNuclideData {
     /// idx (same as `lev_ang_dist_off`); pairs with
     /// `lev_ang_mu_ptrs[hit_nuc]`.
     pub lev_ang_dist_local_off: CudaSlice<i32>,
+    /// Step D — per-nuc base pointers for the fission tabular branch
+    /// (Law 4/61). `[n_nuc]` each.
+    pub fis_inc_e_ptrs: CudaSlice<u64>,
+    pub fis_e_out_ptrs: CudaSlice<u64>,
+    pub fis_cdf_ptrs: CudaSlice<u64>,
+    pub fis_pdf_ptrs: CudaSlice<u64>,
+    /// `[total_inc_tab]` — un-shifted within-nuc fis_e_out offsets.
+    /// Pairs with `fis_e_out_ptrs[hit_nuc]`.
+    pub fis_dist_local_off: CudaSlice<i32>,
+    /// Step D — per-nuc base pointers for MT=91 continuum.
+    pub inel91_inc_e_ptrs: CudaSlice<u64>,
+    pub inel91_e_out_ptrs: CudaSlice<u64>,
+    pub inel91_cdf_ptrs: CudaSlice<u64>,
+    pub inel91_pdf_ptrs: CudaSlice<u64>,
+    pub inel91_dist_local_off: CudaSlice<i32>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -535,7 +550,17 @@ impl GpuNuclideData {
             + self.lev_ang_cdf_ptrs.num_bytes()
             + self.ang_dist_local_off.num_bytes()
             + self.lev_ang_lev_local_off.num_bytes()
-            + self.lev_ang_dist_local_off.num_bytes();
+            + self.lev_ang_dist_local_off.num_bytes()
+            + self.fis_inc_e_ptrs.num_bytes()
+            + self.fis_e_out_ptrs.num_bytes()
+            + self.fis_cdf_ptrs.num_bytes()
+            + self.fis_pdf_ptrs.num_bytes()
+            + self.fis_dist_local_off.num_bytes()
+            + self.inel91_inc_e_ptrs.num_bytes()
+            + self.inel91_e_out_ptrs.num_bytes()
+            + self.inel91_cdf_ptrs.num_bytes()
+            + self.inel91_pdf_ptrs.num_bytes()
+            + self.inel91_dist_local_off.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1218,6 +1243,16 @@ impl GpuTransportContext {
             dptr!(&nuc_data.ang_dist_local_off),
             dptr!(&nuc_data.lev_ang_lev_local_off),
             dptr!(&nuc_data.lev_ang_dist_local_off),
+            dptr!(&nuc_data.fis_inc_e_ptrs),
+            dptr!(&nuc_data.fis_e_out_ptrs),
+            dptr!(&nuc_data.fis_cdf_ptrs),
+            dptr!(&nuc_data.fis_pdf_ptrs),
+            dptr!(&nuc_data.fis_dist_local_off),
+            dptr!(&nuc_data.inel91_inc_e_ptrs),
+            dptr!(&nuc_data.inel91_e_out_ptrs),
+            dptr!(&nuc_data.inel91_cdf_ptrs),
+            dptr!(&nuc_data.inel91_pdf_ptrs),
+            dptr!(&nuc_data.inel91_dist_local_off),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1485,6 +1520,61 @@ impl GpuTransportContext {
             self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
         let lev_ang_dist_local_off =
             self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
+        let fis_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.inc_energies),
+                _ => None,
+            },
+        )?;
+        let fis_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.e_out),
+                _ => None,
+            },
+        )?;
+        let fis_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.cdf),
+                _ => None,
+            },
+        )?;
+        let fis_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.pdf),
+                _ => None,
+            },
+        )?;
+        let fis_dist_local_off = self.stream.clone_htod(&a5.fis_dist_local_off_vec)?;
+        let inel91_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.inc_energies),
+        )?;
+        let inel91_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.e_out),
+        )?;
+        let inel91_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.cdf),
+        )?;
+        let inel91_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.pdf),
+        )?;
+        let inel91_dist_local_off =
+            self.stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -1516,6 +1606,16 @@ impl GpuTransportContext {
             ang_dist_local_off,
             lev_ang_lev_local_off,
             lev_ang_dist_local_off,
+            fis_inc_e_ptrs,
+            fis_e_out_ptrs,
+            fis_cdf_ptrs,
+            fis_pdf_ptrs,
+            fis_dist_local_off,
+            inel91_inc_e_ptrs,
+            inel91_e_out_ptrs,
+            inel91_cdf_ptrs,
+            inel91_pdf_ptrs,
+            inel91_dist_local_off,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1838,6 +1938,61 @@ impl GpuTransportContext {
             self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
         let lev_ang_dist_local_off =
             self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
+        let fis_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.inc_energies),
+                _ => None,
+            },
+        )?;
+        let fis_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.e_out),
+                _ => None,
+            },
+        )?;
+        let fis_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.cdf),
+                _ => None,
+            },
+        )?;
+        let fis_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| match &p.fission_edist {
+                crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.pdf),
+                _ => None,
+            },
+        )?;
+        let fis_dist_local_off = self.stream.clone_htod(&a5.fis_dist_local_off_vec)?;
+        let inel91_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.inc_energies),
+        )?;
+        let inel91_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.e_out),
+        )?;
+        let inel91_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.cdf),
+        )?;
+        let inel91_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.inel91.as_ref().map(|t| &t.pdf),
+        )?;
+        let inel91_dist_local_off =
+            self.stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
 
         Ok(GpuNuclideData {
             per_nucs,
@@ -1869,6 +2024,16 @@ impl GpuTransportContext {
             ang_dist_local_off,
             lev_ang_lev_local_off,
             lev_ang_dist_local_off,
+            fis_inc_e_ptrs,
+            fis_e_out_ptrs,
+            fis_cdf_ptrs,
+            fis_pdf_ptrs,
+            fis_dist_local_off,
+            inel91_inc_e_ptrs,
+            inel91_e_out_ptrs,
+            inel91_cdf_ptrs,
+            inel91_pdf_ptrs,
+            inel91_dist_local_off,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2728,6 +2893,16 @@ impl GpuTransportContext {
             ang_dist_local_off: self.stream.clone_htod(&[0_i32])?,
             lev_ang_lev_local_off: self.stream.clone_htod(&[0_i32])?,
             lev_ang_dist_local_off: self.stream.clone_htod(&[0_i32])?,
+            fis_inc_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            fis_e_out_ptrs: self.stream.clone_htod(&[0_u64])?,
+            fis_cdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            fis_pdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            fis_dist_local_off: self.stream.clone_htod(&[0_i32])?,
+            inel91_inc_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            inel91_e_out_ptrs: self.stream.clone_htod(&[0_u64])?,
+            inel91_cdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            inel91_pdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            inel91_dist_local_off: self.stream.clone_htod(&[0_i32])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,
