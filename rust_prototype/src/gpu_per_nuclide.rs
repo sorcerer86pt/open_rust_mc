@@ -42,6 +42,37 @@ impl NuBarSlicesGpu {
     }
 }
 
+/// Per-nuclide elastic angular distribution (category A.4) — also
+/// reused by the per-level angular slot of `LevelSlicesGpu` (same
+/// schema, different host source).
+///
+/// Layout matches `gpu_transport.rs` bundle: per (e_inc_idx) the CDF
+/// span is `mu[dist_local_off..+dist_sz]` / `cdf[…]`. Bundle assembly
+/// shifts every `dist_local_off` by the running global offset; this
+/// per-nuclide copy starts at 0.
+pub struct AngularSlicesGpu {
+    pub n_energies: i32,
+    pub is_cm: i32,
+    pub energies: CudaSlice<f64>,
+    pub mu: CudaSlice<f64>,
+    pub cdf: CudaSlice<f64>,
+    /// `[n_energies]` host-side; offset into this nuclide's `mu` /
+    /// `cdf` buffers (starts at 0 per nuclide).
+    pub dist_local_off: Vec<i32>,
+    /// `[n_energies]`.
+    pub dist_sz: Vec<i32>,
+}
+
+impl AngularSlicesGpu {
+    pub fn device_bytes(&self) -> usize {
+        self.energies.num_bytes()
+            + self.mu.num_bytes()
+            + self.cdf.num_bytes()
+            + (self.dist_local_off.len() + self.dist_sz.len())
+                * std::mem::size_of::<i32>()
+    }
+}
+
 /// Per-nuclide discrete inelastic level bundle (category C).
 ///
 /// One `LevelSlicesGpu` per nuclide carries every MT=51-91 level's
@@ -168,6 +199,9 @@ pub struct PerNuclideGpu {
 
     // ── Category C — discrete inelastic levels (MT=51-91) ──
     pub levels: LevelSlicesGpu,
+
+    // ── Category A.4 — elastic angular distribution ──
+    pub elastic_angle: Option<AngularSlicesGpu>,
     // ── Future categories land here per `docs/stage-c-data-model.md` ──
 }
 
@@ -195,6 +229,9 @@ impl PerNuclideGpu {
             total += s.num_bytes();
         }
         total += self.levels.device_bytes();
+        if let Some(a) = &self.elastic_angle {
+            total += a.device_bytes();
+        }
         total
     }
 }
@@ -334,6 +371,14 @@ pub fn upload_one_nuclide(
     // padding (commit `1654c4d` invariant).
     let levels = build_level_slices(stream, nuc, rank)?;
 
+    // Category A.4 — elastic angular distribution.
+    let elastic_angle = nuc
+        .elastic_angle
+        .as_ref()
+        .filter(|ad| !ad.energies.is_empty())
+        .map(|ad| build_angular_slices(stream, ad))
+        .transpose()?;
+
     Ok(PerNuclideGpu {
         rank: rank as i32,
         n_energy,
@@ -346,6 +391,43 @@ pub fn upload_one_nuclide(
         basis,
         coeffs,
         levels,
+        elastic_angle,
+    })
+}
+
+/// Pack an `AngularDistribution` into per-nuclide GPU layout. Mirrors
+/// the legacy bundle's elastic-angular packing at
+/// `gpu_transport.rs::upload_nuclide_data_uncached` slot 1588-1602.
+/// Per-energy `dist_local_off` is nuclide-local; bundle assembly
+/// shifts it.
+fn build_angular_slices(
+    stream: &Arc<CudaStream>,
+    ad: &crate::hdf5_reader::AngularDistribution,
+) -> Result<AngularSlicesGpu, Box<dyn std::error::Error>> {
+    let n_energies = ad.energies.len();
+    let mut mu_buf: Vec<f64> = Vec::new();
+    let mut cdf_buf: Vec<f64> = Vec::new();
+    let mut dist_local_off: Vec<i32> = Vec::with_capacity(n_energies);
+    let mut dist_sz: Vec<i32> = Vec::with_capacity(n_energies);
+    for (i, _e) in ad.energies.iter().enumerate() {
+        let dist = &ad.distributions[i];
+        dist_local_off.push(mu_buf.len() as i32);
+        dist_sz.push(dist.mu.len() as i32);
+        mu_buf.extend_from_slice(&dist.mu);
+        cdf_buf.extend_from_slice(&dist.cdf);
+    }
+    if mu_buf.is_empty() {
+        mu_buf.push(0.0);
+        cdf_buf.push(0.0);
+    }
+    Ok(AngularSlicesGpu {
+        n_energies: n_energies as i32,
+        is_cm: if ad.center_of_mass { 1 } else { 0 },
+        energies: stream.clone_htod(&ad.energies)?,
+        mu: stream.clone_htod(&mu_buf)?,
+        cdf: stream.clone_htod(&cdf_buf)?,
+        dist_local_off,
+        dist_sz,
     })
 }
 
