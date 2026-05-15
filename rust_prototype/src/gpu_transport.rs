@@ -1222,7 +1222,7 @@ impl GpuTransportContext {
     /// Hot path is unchanged from before: build every `Vec<f64>` /
     /// `Vec<i32>` packing block, then `clone_htod` each into a
     /// `CudaSlice`.
-    fn upload_nuclide_data_uncached(
+    pub(crate) fn upload_nuclide_data_uncached(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
         rank: usize,
@@ -1483,18 +1483,16 @@ impl GpuTransportContext {
                         // the main per-MT channels (basis = log10(xs)
                         // at slot 0, zero elsewhere; coeffs = [1, 0,
                         // ...]).
-                        let rank = nuclides
-                            .iter()
-                            .flat_map(|n| {
-                                n.elastic.as_ref().into_iter().chain(n.fission.as_ref())
-                            })
-                            .find_map(|k| match k {
-                                crate::transport::xs_provider::ReactionKernel::Svd { kernel, .. } => {
-                                    Some(kernel.rank())
-                                }
-                                _ => None,
-                            })
-                            .unwrap_or(1);
+                        //
+                        // Uses the function-level `rank` parameter
+                        // directly. The previous code re-derived a
+                        // local `rank` by scanning for the first Svd
+                        // kernel in elastic/fission, falling back to
+                        // 1 when none existed — in production the
+                        // first Svd kernel is always present and the
+                        // derived rank equals the global rank, so the
+                        // shadowing was a no-op outside synthetic
+                        // tests that omit SVD channels.
                         lev_has_kernel_vec.push(1);
                         lev_basis_off_vec.push(lev_basis_vec.len() as i32);
                         for &v in xs {

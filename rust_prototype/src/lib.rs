@@ -21,6 +21,8 @@ pub mod hardware_profile;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "cuda")]
+pub mod gpu_per_nuclide;
+#[cfg(feature = "cuda")]
 pub mod gpu_random_ray;
 #[cfg(feature = "cuda")]
 pub mod gpu_recursive;
