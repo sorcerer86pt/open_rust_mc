@@ -1083,6 +1083,99 @@ pub fn assemble_c_cat(
     })
 }
 
+/// Assembled cat-A.6 (MT=91 continuum inelastic outgoing-energy)
+/// bundle slices. Tabular layout, identical to the fission Tabular
+/// branch but indexed against `inel91_*` fields. When no nuclide
+/// carries MT=91 data the bundle gets the standard 1-element
+/// sentinel slices (legacy slot 1831-1842).
+pub struct AssembledBundleA6Cat {
+    pub inel91_inc_energies: CudaSlice<f64>,
+    pub inel91_dist_offsets_vec: Vec<i32>,
+    pub inel91_dist_sizes_vec: Vec<i32>,
+    pub inel91_e_out: CudaSlice<f64>,
+    pub inel91_cdf: CudaSlice<f64>,
+    pub inel91_pdf: CudaSlice<f64>,
+    pub inel91_nuc_offsets_vec: Vec<i32>,
+    pub inel91_nuc_n_inc_vec: Vec<i32>,
+}
+
+pub fn assemble_a6_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleA6Cat, Box<dyn std::error::Error>> {
+    let n_nuc = per_nucs.len();
+    let total_inc: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.inel91.as_ref().map(|t| t.n_inc as usize))
+        .sum();
+    let total_eout: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.inel91.as_ref().map(|t| t.e_out.len()))
+        .sum();
+
+    let mut inel91_inc_energies = unsafe { stream.alloc::<f64>(total_inc.max(1))? };
+    let mut inel91_e_out = unsafe { stream.alloc::<f64>(total_eout.max(1))? };
+    let mut inel91_cdf = unsafe { stream.alloc::<f64>(total_eout.max(1))? };
+    let mut inel91_pdf = unsafe { stream.alloc::<f64>(total_eout.max(1))? };
+    if total_inc == 0 {
+        stream.memset_zeros(&mut inel91_inc_energies)?;
+    }
+    if total_eout == 0 {
+        stream.memset_zeros(&mut inel91_e_out)?;
+        stream.memset_zeros(&mut inel91_cdf)?;
+        stream.memset_zeros(&mut inel91_pdf)?;
+    }
+
+    let mut inel91_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_inc);
+    let mut inel91_dist_sizes_vec: Vec<i32> = Vec::with_capacity(total_inc);
+    let mut inel91_nuc_offsets_vec = vec![0_i32; n_nuc];
+    let mut inel91_nuc_n_inc_vec = vec![0_i32; n_nuc];
+
+    let mut run_inc = 0_usize;
+    let mut run_eout = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        let Some(t) = p.inel91.as_ref() else { continue };
+        let ni = t.n_inc as usize;
+        inel91_nuc_offsets_vec[nuc_idx] = run_inc as i32;
+        inel91_nuc_n_inc_vec[nuc_idx] = t.n_inc;
+        if ni > 0 {
+            let mut dst = inel91_inc_energies.slice_mut(run_inc..run_inc + ni);
+            stream.memcpy_dtod(&t.inc_energies.slice(0..ni), &mut dst)?;
+        }
+        let elen = t.e_out.len();
+        if elen > 0 {
+            let mut dst_e = inel91_e_out.slice_mut(run_eout..run_eout + elen);
+            stream.memcpy_dtod(&t.e_out, &mut dst_e)?;
+            let mut dst_c = inel91_cdf.slice_mut(run_eout..run_eout + elen);
+            stream.memcpy_dtod(&t.cdf, &mut dst_c)?;
+            let mut dst_p = inel91_pdf.slice_mut(run_eout..run_eout + elen);
+            stream.memcpy_dtod(&t.pdf, &mut dst_p)?;
+        }
+        for di in 0..ni {
+            inel91_dist_offsets_vec.push(t.dist_local_off[di] + run_eout as i32);
+            inel91_dist_sizes_vec.push(t.dist_sz[di]);
+        }
+        run_inc += ni;
+        run_eout += elen;
+    }
+
+    if inel91_dist_offsets_vec.is_empty() {
+        inel91_dist_offsets_vec.push(0);
+        inel91_dist_sizes_vec.push(0);
+    }
+
+    Ok(AssembledBundleA6Cat {
+        inel91_inc_energies,
+        inel91_dist_offsets_vec,
+        inel91_dist_sizes_vec,
+        inel91_e_out,
+        inel91_cdf,
+        inel91_pdf,
+        inel91_nuc_offsets_vec,
+        inel91_nuc_n_inc_vec,
+    })
+}
+
 /// Assembled cat-A.5 (fission outgoing-energy distribution) bundle
 /// slices. Three exclusive branches: a nuclide contributes to at
 /// most one of `fis_*` (Tabular), `watt_*` (Law 11), or `maxevap_*`
@@ -2405,6 +2498,110 @@ mod tests {
             assembled.maxevap_nuc_n_vec,
             dtoh_i32(&bundle_legacy.maxevap_nuc_n),
             "maxevap_nuc_n"
+        );
+    }
+
+    #[test]
+    fn assemble_a6_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::hdf5_reader::{EnergyDistribution, TabularEnergyDist};
+
+        // nuc_a has MT=91; nuc_b doesn't. Forces non-trivial nuc_offsets.
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.inelastic_continuum_edist = Some(EnergyDistribution {
+            energies: vec![1.0e5, 1.0e7],
+            distributions: vec![
+                TabularEnergyDist {
+                    e_out: vec![1.0e4, 1.0e5],
+                    pdf: vec![1.0e-5, 1.0e-5],
+                    cdf: vec![0.0, 1.0],
+                },
+                TabularEnergyDist {
+                    e_out: vec![1.0e4, 1.0e6, 1.0e7],
+                    pdf: vec![1.0e-7, 1.0e-7, 1.0e-7],
+                    cdf: vec![0.0, 0.5, 1.0],
+                },
+            ],
+            closed_form: None,
+        });
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_a6_cat(&stream, &per_nucs).expect("assemble_a6_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        assert_eq!(
+            dtoh_f64(&assembled.inel91_inc_energies),
+            dtoh_f64(&bundle_legacy.inel91_inc_energies),
+            "inel91_inc_energies"
+        );
+        assert_eq!(
+            assembled.inel91_dist_offsets_vec,
+            dtoh_i32(&bundle_legacy.inel91_dist_offsets),
+            "inel91_dist_offsets"
+        );
+        assert_eq!(
+            assembled.inel91_dist_sizes_vec,
+            dtoh_i32(&bundle_legacy.inel91_dist_sizes),
+            "inel91_dist_sizes"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.inel91_e_out),
+            dtoh_f64(&bundle_legacy.inel91_e_out),
+            "inel91_e_out"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.inel91_cdf),
+            dtoh_f64(&bundle_legacy.inel91_cdf),
+            "inel91_cdf"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.inel91_pdf),
+            dtoh_f64(&bundle_legacy.inel91_pdf),
+            "inel91_pdf"
+        );
+        assert_eq!(
+            assembled.inel91_nuc_offsets_vec,
+            dtoh_i32(&bundle_legacy.inel91_nuc_offsets),
+            "inel91_nuc_offsets"
+        );
+        assert_eq!(
+            assembled.inel91_nuc_n_inc_vec,
+            dtoh_i32(&bundle_legacy.inel91_nuc_n_inc),
+            "inel91_nuc_n_inc"
         );
     }
 
