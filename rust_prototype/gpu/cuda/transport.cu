@@ -254,7 +254,70 @@
 #define P_MAXEVAP_NUC_OFF       134
 #define P_MAXEVAP_NUC_N         135
 
-#define N_PARAMS            136
+// Stage C step D — per-nuclide pointer arrays. Each slot stores a
+// flat `u64` table sized `[n_nuc × N_REACTIONS]` (P_BASIS_PTRS /
+// P_COEFFS_PTRS) or `[n_nuc]` (the rest) containing the
+// `CUdeviceptr` of the corresponding per-nuclide CudaSlice.
+// Accessed via `(const T*) PTR_U64(p, P_*)[key]`. Absent slots
+// store `0`; the kernel gates on has_* sentinels so it never loads
+// through a null pointer.
+#define P_BASIS_PTRS            136
+#define P_COEFFS_PTRS           137
+#define P_PW_XS_PTRS            138
+#define P_TOTAL_XS_PTRS         139
+#define P_NB_E_PTRS             140
+#define P_NB_V_PTRS             141
+#define P_DNB_E_PTRS            142
+#define P_DNB_V_PTRS            143
+#define P_URR_E_PTRS            144
+#define P_URR_CP_PTRS           145
+#define P_URR_TF_PTRS           146
+#define P_URR_EF_PTRS           147
+#define P_URR_FF_PTRS           148
+#define P_URR_CF_PTRS           149
+#define P_INEL_CDF_PTRS         150
+// Per-nuc base pointers into the per-nuclide LevelSlicesGpu.basis /
+// .coeffs CudaSlices. `[n_nuc]` u64 entries; the kernel uses
+// `hit_nuc` (already in scope at every discrete-level access site)
+// to pick the right per-nuc base, then indexes by the per-level
+// within-nuc offset arrays below.
+#define P_LEVEL_BASIS_PTRS      151
+#define P_LEVEL_COEFFS_PTRS     152
+// Per-(global level) within-nuc byte offsets into the per-nuc
+// basis / coeffs buffers. `[total_levels]` i32 entries — same
+// indexing as the legacy `P_LEVEL_BOFF` / `P_LEVEL_COFF` slabs,
+// but un-shifted (no global running-offset added). Preserves the
+// `1654c4d` rank-padding invariant: every level's basis is padded
+// to `[n_e × global_rank]` per LevelSlicesGpu::build_level_slices.
+#define P_LEVEL_BLOCAL_OFF      153
+#define P_LEVEL_CLOCAL_OFF      154
+// Per-nuc base pointers for elastic + per-level angular CDFs.
+// Slots 155-160 are u64 [n_nuc]; slots 161-162 are i32
+// arrays of within-nuc offsets (sized [total_ang_e] /
+// [total_lev_ang_dist] respectively).
+#define P_ANG_E_PTRS            155
+#define P_ANG_MU_PTRS           156
+#define P_ANG_CDF_PTRS          157
+#define P_LEV_ANG_E_PTRS        158
+#define P_LEV_ANG_MU_PTRS       159
+#define P_LEV_ANG_CDF_PTRS      160
+#define P_ANG_DIST_LOCAL_OFF    161
+#define P_LEV_ANG_LEV_LOCAL_OFF 162
+#define P_LEV_ANG_DIST_LOCAL_OFF 163
+// Fission tabular + MT=91 per-nuc base pointers and un-shifted
+// per-(global inc_e) offset arrays. 8 ptr slots + 2 int arrays.
+#define P_FIS_INC_E_PTRS        164
+#define P_FIS_E_OUT_PTRS        165
+#define P_FIS_CDF_PTRS          166
+#define P_FIS_PDF_PTRS          167
+#define P_FIS_DIST_LOCAL_OFF    168
+#define P_INEL91_INC_E_PTRS     169
+#define P_INEL91_E_OUT_PTRS     170
+#define P_INEL91_CDF_PTRS       171
+#define P_INEL91_PDF_PTRS       172
+#define P_INEL91_DIST_LOCAL_OFF 173
+
+#define N_PARAMS            174
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -273,6 +336,7 @@
 #define PTR_I(p, idx)   ((const int*)    (p)[(idx)])
 #define PTR_B(p, idx)   ((const signed char*) (p)[(idx)])
 #define PTR_D2(p, idx)  ((const double2*) (p)[(idx)])
+#define PTR_U64(p, idx) ((const unsigned long long*) (p)[(idx)])
 #define SCALAR_I(p, idx) ((int)(p)[(idx)])
 #define SCALAR_D(p, idx) __longlong_as_double((long long)(p)[(idx)])
 
@@ -692,23 +756,31 @@ __device__ double sample_fission_energy(
         // since those are handled above.
         return sample_watt_ab(0.988e6, 2.249e-6, rng);
     }
-    const double* inc_e = &PTR_D(p, P_FIS_INC_E)[fi_off];
+    // Stage C step D — per-nuc base pointers for the four tabular
+    // fission buffers. The dist_off lookups use the global-indexed
+    // `P_FIS_DIST_LOCAL_OFF` (un-shifted values).
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_FIS_PDF_PTRS)[hit_nuc]);
 
     // Edge: below grid — sample directly from first bin.
     if (E_inc <= inc_e[0]) {
-        int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off];
+        int off = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[fi_off];
+        int sz  = PTR_I(p, P_FIS_DIST_SZ)[fi_off];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_FIS_E_OUT)[off],
-                                    &PTR_D(p, P_FIS_CDF)[off],
-                                    &PTR_D(p, P_FIS_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
     // Edge: above grid — sample from last bin.
     if (E_inc >= inc_e[fi_n-1]) {
-        int off=PTR_I(p, P_FIS_DIST_OFF)[fi_off+fi_n-1], sz=PTR_I(p, P_FIS_DIST_SZ)[fi_off+fi_n-1];
+        int off = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[fi_off + fi_n - 1];
+        int sz  = PTR_I(p, P_FIS_DIST_SZ)[fi_off + fi_n - 1];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_FIS_E_OUT)[off],
-                                    &PTR_D(p, P_FIS_CDF)[off],
-                                    &PTR_D(p, P_FIS_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
 
     // Binary search for bracket
@@ -722,21 +794,21 @@ __device__ double sample_fission_energy(
     int chosen_lo = fi_off + ie;
     int chosen_hi = fi_off + ie + 1;
     int chosen = pick_hi ? chosen_hi : chosen_lo;
-    int off_l = PTR_I(p, P_FIS_DIST_OFF)[chosen];
+    int off_l = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[chosen];
     int sz_l  = PTR_I(p, P_FIS_DIST_SZ)[chosen];
-    const double* eo_l = &PTR_D(p, P_FIS_E_OUT)[off_l];
-    const double* cd_l = &PTR_D(p, P_FIS_CDF)[off_l];
-    const double* pd_l = &PTR_D(p, P_FIS_PDF)[off_l];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
     double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
 
     // Scaled kinematic adjustment: remap e_out from chosen bin's
     // [el1_lo, el1_hi] to the interpolated [e1, eK] between both bins.
-    int off_a = PTR_I(p, P_FIS_DIST_OFF)[chosen_lo];
+    int off_a = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[chosen_lo];
     int sz_a  = PTR_I(p, P_FIS_DIST_SZ)[chosen_lo];
-    int off_b = PTR_I(p, P_FIS_DIST_OFF)[chosen_hi];
+    int off_b = PTR_I(p, P_FIS_DIST_LOCAL_OFF)[chosen_hi];
     int sz_b  = PTR_I(p, P_FIS_DIST_SZ)[chosen_hi];
-    const double* eo_a = &PTR_D(p, P_FIS_E_OUT)[off_a];
-    const double* eo_b = &PTR_D(p, P_FIS_E_OUT)[off_b];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
     double el1_lo = eo_l[0];
     double el1_hi = (sz_l > 0) ? eo_l[sz_l-1] : el1_lo;
     double ea_lo  = eo_a[0];
@@ -770,23 +842,27 @@ __device__ double sample_inel91_energy(
     int fi_off = __ldg(&PTR_I(p, P_INEL91_NUC_OFF)[hit_nuc]);
     int fi_n   = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
     if (fi_n <= 0) return -1.0;  // caller must guard with NUC_NINC > 0
-    const double* inc_e = &PTR_D(p, P_INEL91_INC_E)[fi_off];
+    // Stage C step D — per-nuc base pointers.
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_PDF_PTRS)[hit_nuc]);
 
     if (E_inc <= inc_e[0]) {
-        int off = PTR_I(p, P_INEL91_DIST_OFF)[fi_off];
+        int off = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[fi_off];
         int sz  = PTR_I(p, P_INEL91_DIST_SZ)[fi_off];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_INEL91_E_OUT)[off],
-                                    &PTR_D(p, P_INEL91_CDF)[off],
-                                    &PTR_D(p, P_INEL91_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
     if (E_inc >= inc_e[fi_n - 1]) {
-        int off = PTR_I(p, P_INEL91_DIST_OFF)[fi_off + fi_n - 1];
+        int off = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[fi_off + fi_n - 1];
         int sz  = PTR_I(p, P_INEL91_DIST_SZ)[fi_off + fi_n - 1];
         return fmax(sample_eout_bin(pcg_uniform(rng),
-                                    &PTR_D(p, P_INEL91_E_OUT)[off],
-                                    &PTR_D(p, P_INEL91_CDF)[off],
-                                    &PTR_D(p, P_INEL91_PDF)[off], sz), 1e-5);
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
     }
 
     int ie;
@@ -804,19 +880,19 @@ __device__ double sample_inel91_energy(
     int chosen_lo = fi_off + ie;
     int chosen_hi = fi_off + ie + 1;
     int chosen = pick_hi ? chosen_hi : chosen_lo;
-    int off_l = PTR_I(p, P_INEL91_DIST_OFF)[chosen];
+    int off_l = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen];
     int sz_l  = PTR_I(p, P_INEL91_DIST_SZ)[chosen];
-    const double* eo_l = &PTR_D(p, P_INEL91_E_OUT)[off_l];
-    const double* cd_l = &PTR_D(p, P_INEL91_CDF)[off_l];
-    const double* pd_l = &PTR_D(p, P_INEL91_PDF)[off_l];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
     double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
 
-    int off_a = PTR_I(p, P_INEL91_DIST_OFF)[chosen_lo];
+    int off_a = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_lo];
     int sz_a  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_lo];
-    int off_b = PTR_I(p, P_INEL91_DIST_OFF)[chosen_hi];
+    int off_b = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_hi];
     int sz_b  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_hi];
-    const double* eo_a = &PTR_D(p, P_INEL91_E_OUT)[off_a];
-    const double* eo_b = &PTR_D(p, P_INEL91_E_OUT)[off_b];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
     double el1_lo = eo_l[0];
     double el1_hi = (sz_l > 0) ? eo_l[sz_l - 1] : el1_lo;
     double ea_lo  = eo_a[0];
@@ -871,10 +947,13 @@ __device__ __forceinline__ double sample_fission_emit_energy(
 {
     int dnb_sz = __ldg(&PTR_I(p, P_DNB_SIZES)[hit_nuc]);
     if (dnb_sz > 0 && nu_total > 0.0) {
-        int dnb_off = __ldg(&PTR_I(p, P_DNB_OFFSETS)[hit_nuc]);
-        double nu_d = nu_bar_lookup(
-            E_inc, PTR_D(p, P_DNB_ENERGIES), PTR_D(p, P_DNB_VALUES),
-            dnb_off, dnb_sz);
+        // Stage C step D — per-nuclide pointer load. Offset becomes
+        // 0 since the per-nuc slice starts at its own base.
+        const double* dnb_e =
+            (const double*) __ldg(&PTR_U64(p, P_DNB_E_PTRS)[hit_nuc]);
+        const double* dnb_v =
+            (const double*) __ldg(&PTR_U64(p, P_DNB_V_PTRS)[hit_nuc]);
+        double nu_d = nu_bar_lookup(E_inc, dnb_e, dnb_v, 0, dnb_sz);
         double beta = nu_d / nu_total;
         if (beta > 1.0) beta = 1.0;
         if (beta > 0.0 && pcg_uniform(rng) < beta) {
@@ -902,21 +981,29 @@ __device__ double sample_angular_dist(
     int a_off = __ldg(&PTR_I(p, P_ANG_NUC_OFF)[hit_nuc]);
     int a_ne = __ldg(&PTR_I(p, P_ANG_NUC_NE)[hit_nuc]);
     if (a_ne <= 0) return 2.0*pcg_uniform(rng)-1.0;
-    const double* ae = &PTR_D(p, P_ANG_ENERGIES)[a_off];
+    // Stage C step D — per-nuc base pointers. The kernel still
+    // uses the GLOBAL P_ANG_DIST_LOCAL_OFF / P_ANG_DIST_SZ arrays
+    // (indexed by global ang_energy idx `chosen`), but the VALUES
+    // are within-nuc ang_mu offsets so the per-nuc `nuc_mu` /
+    // `nuc_cdf` base pointers can be used directly.
+    const double* ae =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_E_PTRS)[hit_nuc]);
+    const double* nuc_mu =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_MU_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_CDF_PTRS)[hit_nuc]);
 
     // Edge: below grid
     if (E <= ae[0]) {
-        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_ANG_MU)[off],
-                             &PTR_D(p, P_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[a_off];
+        int sz  = PTR_I(p, P_ANG_DIST_SZ)[a_off];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
     // Edge: above grid
     if (E >= ae[a_ne-1]) {
-        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+a_ne-1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+a_ne-1];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_ANG_MU)[off],
-                             &PTR_D(p, P_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[a_off + a_ne - 1];
+        int sz  = PTR_I(p, P_ANG_DIST_SZ)[a_off + a_ne - 1];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
 
     // Binary search for energy bracket
@@ -929,11 +1016,9 @@ __device__ double sample_angular_dist(
     double r = (E - ae[ie]) / fmax(ae[ie+1] - ae[ie], 1e-30);
     bool pick_hi = pcg_uniform(rng) < r;
     int chosen = pick_hi ? (a_off + ie + 1) : (a_off + ie);
-    int off = PTR_I(p, P_ANG_DIST_OFF)[chosen];
+    int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[chosen];
     int sz  = PTR_I(p, P_ANG_DIST_SZ)[chosen];
-    return sample_mu_bin(pcg_uniform(rng),
-                         &PTR_D(p, P_ANG_MU)[off],
-                         &PTR_D(p, P_ANG_CDF)[off], sz);
+    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -945,28 +1030,38 @@ __device__ double sample_angular_dist(
 // matches the CPU isotropic fallback.
 // ═══════════════════════════════════════════════════════════════════════
 __device__ double sample_level_angular(
-    double E, PcgState* rng, Params p, int global_lev_idx)
+    double E, PcgState* rng, Params p, int global_lev_idx, int hit_nuc)
 {
     int n_e = __ldg(&PTR_I(p, P_LEV_ANG_LEV_NE)[global_lev_idx]);
     if (n_e <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
 
-    int e_off = __ldg(&PTR_I(p, P_LEV_ANG_LEV_OFF)[global_lev_idx]);
-    const double* ae = &PTR_D(p, P_LEV_ANG_ENERGIES)[e_off];
+    // Stage C step D — per-nuc bases for energies/mu/cdf. The
+    // within-nuc ang_energy offset for this level is supplied by
+    // P_LEV_ANG_LEV_LOCAL_OFF (global concat of per-nuc values).
+    // P_LEV_ANG_LEV_OFF still exists as the GLOBAL ang_energy
+    // offset and is used to index into P_LEV_ANG_DIST_LOCAL_OFF
+    // (which is also globally indexed but holds within-nuc ang_mu
+    // offsets so the per-nuc mu/cdf bases can be applied).
+    int e_off_local = __ldg(&PTR_I(p, P_LEV_ANG_LEV_LOCAL_OFF)[global_lev_idx]);
+    int e_off_global = __ldg(&PTR_I(p, P_LEV_ANG_LEV_OFF)[global_lev_idx]);
+    const double* nuc_ae =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_E_PTRS)[hit_nuc]);
+    const double* nuc_mu =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_MU_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_CDF_PTRS)[hit_nuc]);
+    const double* ae = &nuc_ae[e_off_local];
 
     // Below / above grid: pick the edge distribution directly.
     if (E <= ae[0]) {
-        int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[e_off];
-        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_LEV_ANG_MU)[off],
-                             &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[e_off_global];
+        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off_global];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
     if (E >= ae[n_e - 1]) {
-        int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[e_off + n_e - 1];
-        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off + n_e - 1];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_LEV_ANG_MU)[off],
-                             &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[e_off_global + n_e - 1];
+        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off_global + n_e - 1];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
 
     int ie; { int lo = 0, hi = n_e - 1;
@@ -975,12 +1070,10 @@ __device__ double sample_level_angular(
 
     double r = (E - ae[ie]) / fmax(ae[ie+1] - ae[ie], 1e-30);
     bool pick_hi = pcg_uniform(rng) < r;
-    int chosen = e_off + (pick_hi ? ie + 1 : ie);
-    int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[chosen];
+    int chosen = e_off_global + (pick_hi ? ie + 1 : ie);
+    int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[chosen];
     int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[chosen];
-    return sample_mu_bin(pcg_uniform(rng),
-                         &PTR_D(p, P_LEV_ANG_MU)[off],
-                         &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
+    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
 }
 
 // Per-slot accessor helpers. `slot` is the index returned by
@@ -1122,23 +1215,31 @@ __device__ void apply_urr(
 {
     int n_e = __ldg(&PTR_I(p, P_URR_N_ENERGIES)[nuc_idx]);
     if (n_e <= 0) return;
-    int off = __ldg(&PTR_I(p, P_URR_OFFSETS)[nuc_idx]);
     int n_b = __ldg(&PTR_I(p, P_URR_N_BANDS)[nuc_idx]);
-    const double* ue = &PTR_D(p, P_URR_ENERGIES)[off];
+    // Stage C step D — per-nuclide pointer load. Per-nuc URR tables
+    // start at their own base, so the legacy `off * n_b` term in
+    // `base` becomes zero.
+    const double* ue =
+        (const double*) __ldg(&PTR_U64(p, P_URR_E_PTRS)[nuc_idx]);
     if (E < ue[0] || E > ue[n_e-1]) return;
-    // Find energy index
     int ie=0; { int lo=0,hi=n_e-1;
         while(hi-lo>1){int mid=(lo+hi) >> 1;if(ue[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
-    // Sample band
-    int base = off*n_b + ie*n_b;
-    const double* cp = &PTR_D(p, P_URR_CUM_PROB)[base];
+    int base = ie * n_b;
+    const double* cp =
+        (const double*) __ldg(&PTR_U64(p, P_URR_CP_PTRS)[nuc_idx]);
     int band=0;
-    for (int b=0; b<n_b; b++) { if (xi < cp[b]) { band=b; break; } band=b; }
+    for (int b=0; b<n_b; b++) { if (xi < cp[base+b]) { band=b; break; } band=b; }
     // ft (total factor) not used — reaction-specific factors applied directly
-    (void)PTR_D(p, P_URR_TOTAL_F);
-    double fe=PTR_D(p, P_URR_ELASTIC_F)[base+band];
-    double ff=PTR_D(p, P_URR_FISSION_F)[base+band];
-    double fc=PTR_D(p, P_URR_CAPTURE_F)[base+band];
+    (void) PTR_U64(p, P_URR_TF_PTRS);
+    const double* fe_arr =
+        (const double*) __ldg(&PTR_U64(p, P_URR_EF_PTRS)[nuc_idx]);
+    const double* ff_arr =
+        (const double*) __ldg(&PTR_U64(p, P_URR_FF_PTRS)[nuc_idx]);
+    const double* fc_arr =
+        (const double*) __ldg(&PTR_U64(p, P_URR_CF_PTRS)[nuc_idx]);
+    double fe = fe_arr[base+band];
+    double ff = ff_arr[base+band];
+    double fc = fc_arr[base+band];
     int ms = __ldg(&PTR_I(p, P_URR_MULT_SM)[nuc_idx]);
     if (ms) { *sig_el*=fe; *sig_fis*=ff; *sig_cap*=fc; }
     else { *sig_el=fe; *sig_fis=ff; *sig_cap=fc; }
@@ -1295,9 +1396,13 @@ extern "C" __global__ void debug_xs_reconstruct(
         int key = nuc_idx * N_REACTIONS + r;
         double xs = 0.0;
         if (PTR_I(p, P_HAS_REACTION)[key]) {
+            // Stage C step D — direct per-nuclide pointer load.
+            // basis_ptrs[key] is the CUdeviceptr of
+            // PerNuclideGpu::basis[slot]; the kernel no longer
+            // indirects through the all_basis concatenation.
             xs = svd_reconstruct(
-                &PTR_D(p, P_BASIS)[PTR_I(p, P_BASIS_OFFSETS)[key]],
-                &PTR_D(p, P_COEFFS)[PTR_I(p, P_COEFFS_OFFSETS)[key]],
+                (const double*) PTR_U64(p, P_BASIS_PTRS)[key],
+                (const double*) PTR_U64(p, P_COEFFS_PTRS)[key],
                 e_idx, rank);
         }
         out_xs[tid * N_REACTIONS + r] = xs;
@@ -1402,9 +1507,13 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
     double s_el = 0, s_inel = 0, s_n2n = 0, s_n3n = 0, s_fis = 0, s_cap = 0, micro_t = 0;
 
     if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
-        int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
-        const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
-        const double* pw1 = (e_idx + 1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx + 1) * 7] : pw0;
+        // Stage C step D — direct per-nuclide pointer load. The
+        // bundle-level P_PW_XS / P_PW_OFF indirection is no longer
+        // needed; pw_ptrs[ni] is the device address of
+        // PerNuclideGpu::pointwise_xs.
+        const double* pw_base = (const double*) __ldg(&PTR_U64(p, P_PW_XS_PTRS)[ni]);
+        const double* pw0 = &pw_base[e_idx * 7];
+        const double* pw1 = (e_idx + 1 < n_e) ? &pw_base[(e_idx + 1) * 7] : pw0;
         double xs7[7];
         for (int ch = 0; ch < 7; ch++) {
             double lo = pw0[ch], hi = pw1[ch];
@@ -1420,9 +1529,10 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
         for (int r = 0; r < 6; r++) {
             int key = ni * N_REACTIONS + r;
             if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
+                // Stage C step D — direct per-nuclide pointer load.
                 double s = svd_reconstruct_interp(
-                    &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                    &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
+                    (const double*) __ldg(&PTR_U64(p, P_BASIS_PTRS)[key]),
+                    (const double*) __ldg(&PTR_U64(p, P_COEFFS_PTRS)[key]),
                     e_idx, n_e, rank, log_frac);
                 if (r == 0)      s_el = s;
                 else if (r == 1) { s_inel = s; has_inel_k = true; }
@@ -1436,21 +1546,30 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
             int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[ni]);
             int n_lev  = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[ni]);
             double lsum = 0.0;
+            // Stage C step D — per-nuclide level pointer base. Hoisted
+            // out of the per-level loop; each loop iter loads a u64
+            // (P_LEVEL_BLOCAL_OFF[gl]) instead of two i32s + one f64*
+            // indirection.
+            const double* nuc_lvl_basis =
+                (const double*) __ldg(&PTR_U64(p, P_LEVEL_BASIS_PTRS)[ni]);
+            const double* nuc_lvl_coeffs =
+                (const double*) __ldg(&PTR_U64(p, P_LEVEL_COEFFS_PTRS)[ni]);
             for (int l = 0; l < n_lev; l++) {
                 int gl = lv_off + l;
                 if (!__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) continue;
                 if (E < __ldg(&PTR_D(p, P_LEVEL_THR)[gl])) continue;
                 double lxs = svd_reconstruct_interp(
-                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                    &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                    &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                     e_idx, n_e, rank, log_frac);
                 if (lxs > 0.0) lsum += lxs;
             }
             s_inel = lsum;
         }
         if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-            int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
-            const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
+            // Stage C step D — per-nuclide pointer load.
+            const double* tot_grid =
+                (const double*) __ldg(&PTR_U64(p, P_TOTAL_XS_PTRS)[ni]);
             double tot_lo = tot_grid[e_idx];
             double tot_hi = (e_idx + 1 < n_e) ? tot_grid[e_idx + 1] : tot_lo;
             double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
@@ -1786,11 +1905,18 @@ transport_persistent(
             } else if ((cum_rxn+=hit_xs.s_fis), xi_rxn < cum_rxn) {
                 // ═══ Fission ═══
                 lcnt_fis++;
-                int nb_off=__ldg(&PTR_I(p, P_NB_OFFSETS)[hit_nuc]);
+                // Stage C step D — per-nuclide pointer load.
                 int nb_sz=__ldg(&PTR_I(p, P_NB_SIZES)[hit_nuc]);
-                double nu = (nb_sz>0) ?
-                    nu_bar_lookup(E,PTR_D(p, P_NB_ENERGIES),PTR_D(p, P_NB_VALUES),nb_off,nb_sz) :
-                    __ldg(&PTR_D(p, P_NU_BAR_CONST)[hit_nuc]);
+                double nu;
+                if (nb_sz > 0) {
+                    const double* nb_e =
+                        (const double*) __ldg(&PTR_U64(p, P_NB_E_PTRS)[hit_nuc]);
+                    const double* nb_v =
+                        (const double*) __ldg(&PTR_U64(p, P_NB_V_PTRS)[hit_nuc]);
+                    nu = nu_bar_lookup(E, nb_e, nb_v, 0, nb_sz);
+                } else {
+                    nu = __ldg(&PTR_D(p, P_NU_BAR_CONST)[hit_nuc]);
+                }
                 int ns=(int)nu; if(pcg_uniform(&rng)<(nu-(double)ns)) ns++;
                 for(int s=0;s<ns;s++){
                     int idx=atomicAdd(fis_count,1);
@@ -1832,7 +1958,9 @@ transport_persistent(
                     if (idx >= cdf_n_e - 1) idx = cdf_n_e - 2;
                     if (idx < 0) idx = 0;
                     double alpha = f_idx - (double)idx;
-                    const double* cdf_base = &PTR_D(p, P_INEL_CDF_DATA)[cdf_off];
+                    // Stage C step D — per-nuclide pointer load.
+                    const double* cdf_base =
+                        (const double*) __ldg(&PTR_U64(p, P_INEL_CDF_PTRS)[hit_nuc]);
                     double xi_l = pcg_uniform(&rng);
                     int sampled = cdf_n_lev - 1;
                     int row_lo = idx       * cdf_n_lev;
@@ -1865,14 +1993,19 @@ transport_persistent(
                     int n_e=__ldg(&PTR_I(p, P_N_ENERGIES)[hit_nuc]);
                     int e_idx=energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off],n_e,E);
                     int lev_cap = n_lev < LEGACY_LEV_CAP ? n_lev : LEGACY_LEV_CAP;
+                    // Stage C step D — per-nuc base pointers hoisted.
+                    const double* nuc_lvl_basis =
+                        (const double*) __ldg(&PTR_U64(p, P_LEVEL_BASIS_PTRS)[hit_nuc]);
+                    const double* nuc_lvl_coeffs =
+                        (const double*) __ldg(&PTR_U64(p, P_LEVEL_COEFFS_PTRS)[hit_nuc]);
                     #pragma unroll 1
                     for(int l=0;l<lev_cap;l++){
                         int gl=lv_off+l;
                         if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                            && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
                             lxs_sum += svd_reconstruct(
-                                &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                                &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                                 e_idx, rank);
                         }
                     }
@@ -1886,8 +2019,8 @@ transport_persistent(
                             if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                                && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
                                 lxs=svd_reconstruct(
-                                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                    &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                                    &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                                     e_idx, rank);
                             }
                             run += lxs;
@@ -1941,7 +2074,7 @@ transport_persistent(
                     // "no tabulated data" paths fall back to isotropic CM.
                     double mu_cm;
                     if (n_lev > 0 && sel_mt != 91) {
-                        mu_cm = sample_level_angular(E, &rng, p, lv_off + selected);
+                        mu_cm = sample_level_angular(E, &rng, p, lv_off + selected, hit_nuc);
                     } else {
                         mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
                     }
