@@ -42,6 +42,97 @@ impl NuBarSlicesGpu {
     }
 }
 
+/// Per-(inc_energy_idx) outgoing-energy CDF run — shared shape used
+/// by tabular fission χ (ENDF Law 4 / 61) and MT=91 continuum
+/// inelastic. Per-inc offset is nuclide-local; bundle assembly
+/// shifts.
+pub struct TabularEdistSlicesGpu {
+    pub n_inc: i32,
+    pub inc_energies: CudaSlice<f64>,
+    pub e_out: CudaSlice<f64>,
+    pub cdf: CudaSlice<f64>,
+    /// PDF samples aligned 1:1 with `e_out` / `cdf`; populated only
+    /// when the ENDF evaluation shipped them, zeros otherwise (the
+    /// device kernel falls back to linear-CDF interpolation when
+    /// every PDF sample is zero — see fis_pdf comment on
+    /// `GpuNuclideData`).
+    pub pdf: CudaSlice<f64>,
+    /// `[n_inc]` host-side — local offset into `e_out`/`cdf`/`pdf`
+    /// (starts at 0 per nuclide).
+    pub dist_local_off: Vec<i32>,
+    pub dist_sz: Vec<i32>,
+}
+
+impl TabularEdistSlicesGpu {
+    pub fn device_bytes(&self) -> usize {
+        self.inc_energies.num_bytes()
+            + self.e_out.num_bytes()
+            + self.cdf.num_bytes()
+            + self.pdf.num_bytes()
+            + (self.dist_local_off.len() + self.dist_sz.len())
+                * std::mem::size_of::<i32>()
+    }
+}
+
+/// Per-nuclide closed-form Watt fission χ parameters (ENDF Law 11).
+/// `a(E_in)` and `b(E_in)` are pre-resampled onto a shared inc-energy
+/// grid (union of the original a_energies + b_energies, sorted +
+/// deduped) so the device samples via one binary search per fission
+/// event. Mirrors upload_nuclide_data_uncached:1722-1751.
+pub struct WattSlicesGpu {
+    pub n_inc: i32,
+    pub u: f64,
+    pub inc_energies: CudaSlice<f64>,
+    pub a: CudaSlice<f64>,
+    pub b: CudaSlice<f64>,
+}
+
+impl WattSlicesGpu {
+    pub fn device_bytes(&self) -> usize {
+        self.inc_energies.num_bytes() + self.a.num_bytes() + self.b.num_bytes()
+    }
+}
+
+/// Per-nuclide closed-form Maxwell (Law 7) / Evaporation (Law 9)
+/// fission χ parameters. Both laws share a single θ(E_in) table; the
+/// device dispatches on `law ∈ {7, 9}` at collision time.
+pub struct MaxEvapSlicesGpu {
+    pub n_inc: i32,
+    pub u: f64,
+    /// 7 = Maxwell, 9 = Evaporation. 0 means "no maxevap data" — but
+    /// in practice the slice is None in that case.
+    pub law: i32,
+    pub inc_energies: CudaSlice<f64>,
+    pub theta: CudaSlice<f64>,
+}
+
+impl MaxEvapSlicesGpu {
+    pub fn device_bytes(&self) -> usize {
+        self.inc_energies.num_bytes() + self.theta.num_bytes()
+    }
+}
+
+/// Tagged union over the four ENDF fission-spectrum laws supported by
+/// the device. A nuclide can carry at most one variant; `None`
+/// falls through to the host emitter's default χ.
+pub enum FissionEdistGpu {
+    None,
+    Tabular(TabularEdistSlicesGpu),
+    Watt(WattSlicesGpu),
+    MaxEvap(MaxEvapSlicesGpu),
+}
+
+impl FissionEdistGpu {
+    pub fn device_bytes(&self) -> usize {
+        match self {
+            FissionEdistGpu::None => 0,
+            FissionEdistGpu::Tabular(s) => s.device_bytes(),
+            FissionEdistGpu::Watt(s) => s.device_bytes(),
+            FissionEdistGpu::MaxEvap(s) => s.device_bytes(),
+        }
+    }
+}
+
 /// Per-nuclide elastic angular distribution (category A.4) — also
 /// reused by the per-level angular slot of `LevelSlicesGpu` (same
 /// schema, different host source).
@@ -202,6 +293,12 @@ pub struct PerNuclideGpu {
 
     // ── Category A.4 — elastic angular distribution ──
     pub elastic_angle: Option<AngularSlicesGpu>,
+
+    // ── Category A.5 — fission outgoing-energy distribution ──
+    pub fission_edist: FissionEdistGpu,
+
+    // ── Category A.6 — MT=91 continuum inelastic outgoing-energy ──
+    pub inel91: Option<TabularEdistSlicesGpu>,
     // ── Future categories land here per `docs/stage-c-data-model.md` ──
 }
 
@@ -231,6 +328,10 @@ impl PerNuclideGpu {
         total += self.levels.device_bytes();
         if let Some(a) = &self.elastic_angle {
             total += a.device_bytes();
+        }
+        total += self.fission_edist.device_bytes();
+        if let Some(i) = &self.inel91 {
+            total += i.device_bytes();
         }
         total
     }
@@ -379,6 +480,17 @@ pub fn upload_one_nuclide(
         .map(|ad| build_angular_slices(stream, ad))
         .transpose()?;
 
+    // Category A.5 — fission outgoing-energy distribution.
+    let fission_edist = build_fission_edist(stream, nuc.fission_energy_dist.as_ref())?;
+
+    // Category A.6 — MT=91 continuum inelastic outgoing-energy.
+    let inel91 = match nuc.inelastic_continuum_edist.as_ref() {
+        Some(edist) if !edist.energies.is_empty() && !edist.distributions.is_empty() => {
+            Some(build_tabular_edist(stream, &edist.energies, &edist.distributions)?)
+        }
+        _ => None,
+    };
+
     Ok(PerNuclideGpu {
         rank: rank as i32,
         n_energy,
@@ -392,7 +504,133 @@ pub fn upload_one_nuclide(
         coeffs,
         levels,
         elastic_angle,
+        fission_edist,
+        inel91,
     })
+}
+
+/// Pack a tabular `EnergyDistribution`-style payload (1:1 per-inc
+/// outgoing-energy CDF) into per-nuclide layout. Used for both
+/// fission χ (Tabular branch) and MT=91 continuum inelastic. Per-inc
+/// `dist_local_off` is nuclide-local; bundle assembly shifts.
+fn build_tabular_edist(
+    stream: &Arc<CudaStream>,
+    inc_energies: &[f64],
+    distributions: &[crate::hdf5_reader::TabularEnergyDist],
+) -> Result<TabularEdistSlicesGpu, Box<dyn std::error::Error>> {
+    let mut e_out_buf: Vec<f64> = Vec::new();
+    let mut cdf_buf: Vec<f64> = Vec::new();
+    let mut pdf_buf: Vec<f64> = Vec::new();
+    let mut dist_local_off: Vec<i32> = Vec::with_capacity(inc_energies.len());
+    let mut dist_sz: Vec<i32> = Vec::with_capacity(inc_energies.len());
+    for dist in distributions {
+        dist_local_off.push(e_out_buf.len() as i32);
+        dist_sz.push(dist.e_out.len() as i32);
+        e_out_buf.extend_from_slice(&dist.e_out);
+        cdf_buf.extend_from_slice(&dist.cdf);
+        // PDF aligned 1:1 with e_out when ENDF ships it; otherwise
+        // zero-fill so the device's quadratic lin-lin sampler falls
+        // back to linear-CDF — matches upload_nuclide_data_uncached
+        // slot 1715-1719.
+        if dist.pdf.len() == dist.e_out.len() {
+            pdf_buf.extend_from_slice(&dist.pdf);
+        } else {
+            pdf_buf.extend(std::iter::repeat_n(0.0_f64, dist.e_out.len()));
+        }
+    }
+    if e_out_buf.is_empty() {
+        e_out_buf.push(0.0);
+        cdf_buf.push(0.0);
+        pdf_buf.push(0.0);
+    }
+    if dist_local_off.is_empty() {
+        dist_local_off.push(0);
+        dist_sz.push(0);
+    }
+    Ok(TabularEdistSlicesGpu {
+        n_inc: inc_energies.len() as i32,
+        inc_energies: stream.clone_htod(inc_energies)?,
+        e_out: stream.clone_htod(&e_out_buf)?,
+        cdf: stream.clone_htod(&cdf_buf)?,
+        pdf: stream.clone_htod(&pdf_buf)?,
+        dist_local_off,
+        dist_sz,
+    })
+}
+
+/// Per-nuclide fission χ extraction — dispatches on the four ENDF
+/// laws (tabular Law 4/61, closed-form Watt Law 11, Maxwell Law 7,
+/// Evaporation Law 9). Mirrors the bundle path at
+/// upload_nuclide_data_uncached:1693-1779.
+fn build_fission_edist(
+    stream: &Arc<CudaStream>,
+    edist: Option<&crate::hdf5_reader::EnergyDistribution>,
+) -> Result<FissionEdistGpu, Box<dyn std::error::Error>> {
+    use crate::hdf5_reader::FissionEnergyLaw;
+    let Some(edist) = edist else {
+        return Ok(FissionEdistGpu::None);
+    };
+    match &edist.closed_form {
+        None => {
+            if edist.energies.is_empty() || edist.distributions.is_empty() {
+                return Ok(FissionEdistGpu::None);
+            }
+            Ok(FissionEdistGpu::Tabular(build_tabular_edist(
+                stream,
+                &edist.energies,
+                &edist.distributions,
+            )?))
+        }
+        Some(FissionEnergyLaw::Watt(w)) => {
+            // Resample a(E_in) and b(E_in) onto a shared inc-energy
+            // grid (union sorted+deduped) so the device runs ONE
+            // binary search per fission event. Mirrors the bundle's
+            // slot 1727-1751.
+            let mut shared: Vec<f64> = w
+                .a_energies
+                .iter()
+                .chain(w.b_energies.iter())
+                .copied()
+                .collect();
+            shared.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            shared.dedup_by(|a, b| (*a - *b).abs() < 1e-30 * a.abs().max(1.0));
+            let mut a_vec = Vec::with_capacity(shared.len());
+            let mut b_vec = Vec::with_capacity(shared.len());
+            for e in &shared {
+                a_vec.push(crate::hdf5_reader::WattLaw::lookup_lin_lin_pub(
+                    &w.a_energies,
+                    &w.a_values,
+                    *e,
+                ));
+                b_vec.push(crate::hdf5_reader::WattLaw::lookup_lin_lin_pub(
+                    &w.b_energies,
+                    &w.b_values,
+                    *e,
+                ));
+            }
+            Ok(FissionEdistGpu::Watt(WattSlicesGpu {
+                n_inc: shared.len() as i32,
+                u: w.u,
+                inc_energies: stream.clone_htod(&shared)?,
+                a: stream.clone_htod(&a_vec)?,
+                b: stream.clone_htod(&b_vec)?,
+            }))
+        }
+        Some(FissionEnergyLaw::Maxwell(m)) | Some(FissionEnergyLaw::Evaporation(m)) => {
+            let law = match edist.closed_form {
+                Some(FissionEnergyLaw::Maxwell(_)) => 7,
+                Some(FissionEnergyLaw::Evaporation(_)) => 9,
+                _ => 0,
+            };
+            Ok(FissionEdistGpu::MaxEvap(MaxEvapSlicesGpu {
+                n_inc: m.theta_energies.len() as i32,
+                u: m.u,
+                law,
+                inc_energies: stream.clone_htod(&m.theta_energies)?,
+                theta: stream.clone_htod(&m.theta_values)?,
+            }))
+        }
+    }
 }
 
 /// Pack an `AngularDistribution` into per-nuclide GPU layout. Mirrors
@@ -656,6 +894,45 @@ mod tests {
         assert!(per_nuc.delayed_nu_bar.is_none());
         // device_bytes ≥ what we uploaded.
         assert!(per_nuc.device_bytes() >= (3 + 3 + 21) * 8);
+    }
+
+    #[test]
+    fn fission_edist_watt_resamples_to_shared_grid() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::hdf5_reader::{EnergyDistribution, FissionEnergyLaw, WattLaw};
+
+        let mut nuc = NuclideKernels::empty(235.0, 2.5);
+        nuc.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![],
+            distributions: vec![],
+            closed_form: Some(FissionEnergyLaw::Watt(WattLaw {
+                a_energies: vec![1.0e3, 1.0e6],
+                a_values: vec![1.0e6, 1.5e6],
+                b_energies: vec![1.0e4, 1.0e7],
+                b_values: vec![2.0, 3.0],
+                u: 0.0,
+            })),
+        });
+
+        let per_nuc =
+            upload_one_nuclide(&stream, &nuc, 5).expect("upload_one_nuclide failed");
+
+        let watt = match &per_nuc.fission_edist {
+            FissionEdistGpu::Watt(w) => w,
+            _ => panic!("expected Watt edist"),
+        };
+        // Shared grid = sorted union {1e3, 1e4, 1e6, 1e7} → 4 points.
+        assert_eq!(watt.n_inc, 4);
+        let mut grid = vec![0.0_f64; 4];
+        stream.memcpy_dtoh(&watt.inc_energies, &mut grid).unwrap();
+        assert_eq!(grid, vec![1.0e3, 1.0e4, 1.0e6, 1.0e7]);
     }
 
     #[test]
