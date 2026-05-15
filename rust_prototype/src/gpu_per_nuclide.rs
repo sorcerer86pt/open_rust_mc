@@ -767,6 +767,83 @@ pub fn assemble_a_cat(
     })
 }
 
+/// Assembled cat-B (per-reaction SVD) bundle slices.
+pub struct AssembledBundleBCat {
+    pub all_basis: CudaSlice<f64>,
+    pub all_coeffs: CudaSlice<f64>,
+    /// `[n_nuc × N_RXN_SLOTS]` row-major. Slot 6 (total) is `0` since
+    /// `has_reaction[*, 6]` is always 0.
+    pub basis_offsets_vec: Vec<i32>,
+    pub coeffs_offsets_vec: Vec<i32>,
+    pub has_reaction_vec: Vec<i32>,
+}
+
+/// Concatenate per-(nuclide × reaction) basis / coeffs from
+/// `[Arc<PerNuclideGpu>]` into the bundle's flat layout. Slot order
+/// (elastic, inelastic, n2n, n3n, fission, capture, total) matches
+/// `gpu_transport::upload_nuclide_data_uncached` slot 1274-1325.
+pub fn assemble_b_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleBCat, Box<dyn std::error::Error>> {
+    let n_nuc = per_nucs.len();
+    let n_rxn = N_RXN_SLOTS;
+
+    let total_basis: usize = per_nucs
+        .iter()
+        .flat_map(|p| p.basis.iter().filter_map(|b| b.as_ref()))
+        .map(|s| s.len())
+        .sum();
+    let total_coeffs: usize = per_nucs
+        .iter()
+        .flat_map(|p| p.coeffs.iter().filter_map(|c| c.as_ref()))
+        .map(|s| s.len())
+        .sum();
+
+    let mut all_basis = unsafe { stream.alloc::<f64>(total_basis.max(1))? };
+    let mut all_coeffs = unsafe { stream.alloc::<f64>(total_coeffs.max(1))? };
+    if total_basis == 0 {
+        stream.memset_zeros(&mut all_basis)?;
+    }
+    if total_coeffs == 0 {
+        stream.memset_zeros(&mut all_coeffs)?;
+    }
+
+    let mut basis_offsets_vec = vec![0_i32; n_nuc * n_rxn];
+    let mut coeffs_offsets_vec = vec![0_i32; n_nuc * n_rxn];
+    let mut has_reaction_vec = vec![0_i32; n_nuc * n_rxn];
+    let mut running_basis = 0_usize;
+    let mut running_coeffs = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        for slot in 0..n_rxn {
+            let key = nuc_idx * n_rxn + slot;
+            has_reaction_vec[key] = p.has_reaction[slot];
+            if let Some(b) = &p.basis[slot] {
+                basis_offsets_vec[key] = running_basis as i32;
+                let len = b.len();
+                let mut view = all_basis.slice_mut(running_basis..running_basis + len);
+                stream.memcpy_dtod(b, &mut view)?;
+                running_basis += len;
+            }
+            if let Some(c) = &p.coeffs[slot] {
+                coeffs_offsets_vec[key] = running_coeffs as i32;
+                let len = c.len();
+                let mut view = all_coeffs.slice_mut(running_coeffs..running_coeffs + len);
+                stream.memcpy_dtod(c, &mut view)?;
+                running_coeffs += len;
+            }
+        }
+    }
+
+    Ok(AssembledBundleBCat {
+        all_basis,
+        all_coeffs,
+        basis_offsets_vec,
+        coeffs_offsets_vec,
+        has_reaction_vec,
+    })
+}
+
 /// Flatten URR per-band 2D rows into the bundle's row-major layout.
 /// Mirrors upload_nuclide_data_uncached:1883-1905.
 fn build_urr_slices(
@@ -1426,6 +1503,91 @@ mod tests {
             assembled.has_pw_vec,
             dtoh_i32(&bundle_legacy.has_pw),
             "has_pw",
+        );
+    }
+
+    #[test]
+    fn assemble_b_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+
+        // Two nuclides exercising different reaction subsets:
+        // nuc_a has elastic + fission (Table variants, padded to rank).
+        // nuc_b has elastic + capture.
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.fission = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![0.0, 0.0, 1.5],
+        ));
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+        nuc_b.capture = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![1e-4, 1e-5, 1e-6],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx
+            .upload_nuclide_data_uncached(&nuclides, rank)
+            .expect("legacy upload");
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_b_cat(&stream, &per_nucs).expect("assemble_b_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+
+        assert_eq!(
+            dtoh_f64(&assembled.all_basis),
+            dtoh_f64(&bundle_legacy.all_basis),
+            "all_basis",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.all_coeffs),
+            dtoh_f64(&bundle_legacy.all_coeffs),
+            "all_coeffs",
+        );
+        assert_eq!(
+            assembled.basis_offsets_vec,
+            dtoh_i32(&bundle_legacy.basis_offsets),
+            "basis_offsets",
+        );
+        assert_eq!(
+            assembled.coeffs_offsets_vec,
+            dtoh_i32(&bundle_legacy.coeffs_offsets),
+            "coeffs_offsets",
+        );
+        assert_eq!(
+            assembled.has_reaction_vec,
+            dtoh_i32(&bundle_legacy.has_reaction),
+            "has_reaction",
         );
     }
 
