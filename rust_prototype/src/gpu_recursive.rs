@@ -1409,31 +1409,13 @@ pub struct RecursiveTransportBatch {
 }
 
 /// Persistent device-side buffer pool for one (n_particles, fis_cap,
-/// n_materials, n_lattices) tuple.
-///
-/// Per NVIDIA CUDA C++ Best Practices §9.2: "memory allocation and
-/// deallocation are expensive; allocate buffers at the start of the
-/// application and reuse them." `transport_recursive` used to
-/// `clone_htod` ~25 device buffers per batch (1.5–4 ms / batch
-/// overhead on the A1000, more under contention). With this pool the
-/// caller allocates once per case, then each batch only does
-/// in-place `memcpy_htod` / `memset_zeros` — no driver-side alloc.
-///
-/// Lifetime: tied to one (n, fis_cap) tuple. If the caller's batch
-/// size changes, build a new pool (or rebuild with
-/// `TransportBuffers::new`). Within an ICSBEP case all batches share
-/// the same `n` and `fis_cap`, so one pool per `CudaRunner` instance
-/// is the natural granularity.
-///
-/// Drop releases every buffer; the driver returns the device memory
-/// to the async mempool (or directly to the OS in the sync-alloc
-/// path).
+/// n_materials, n_lattices) tuple. Per NVIDIA Best Practices §9.2:
+/// allocate once, reuse across batches. Replaces ~25 `clone_htod` per
+/// batch with in-place `memcpy_htod` + `memset_zeros`.
 #[allow(non_snake_case)]
 pub struct TransportBuffers {
     n: usize,
     fis_cap: usize,
-    /// Particle SoA — sized `n`. Mutable so kernel launches can take
-    /// `&mut`. State is overwritten each batch by `reset_for_batch`.
     pub d_xs: CudaSlice<f64>,
     pub d_ys: CudaSlice<f64>,
     pub d_zs: CudaSlice<f64>,
@@ -1444,29 +1426,18 @@ pub struct TransportBuffers {
     pub d_alive: CudaSlice<i32>,
     pub d_rng_state: CudaSlice<u64>,
     pub d_rng_inc: CudaSlice<u64>,
-    /// Per-material kT [eV], sized `n_materials`. Refreshed by
-    /// `reset_for_batch` so a CudaRunner that switches scenes doesn't
-    /// have to rebuild the pool.
     pub d_mat_kt: CudaSlice<f64>,
-    /// Lattice override scratch — currently always dummy filler for
-    /// the recursive demo path; sized `n_lattices + 1` (offset, count)
-    /// or `1` (idx, cell, mat). See `transport_recursive_with_buffers`.
     pub d_lat_override_off: CudaSlice<i32>,
     pub d_lat_override_count: CudaSlice<i32>,
     pub d_override_lat_idx: CudaSlice<i32>,
     pub d_override_cell_idx: CudaSlice<i32>,
     pub d_override_mat: CudaSlice<i32>,
-    /// Fission bank, sized `fis_cap`. The atomic counter `d_fis_count`
-    /// is zeroed each batch by `reset_for_batch`; the data slots are
-    /// overwritten by the kernel only up to `d_fis_count`, but a
-    /// memset would cost more than the unused trailing bytes.
     pub d_fis_x: CudaSlice<f64>,
     pub d_fis_y: CudaSlice<f64>,
     pub d_fis_z: CudaSlice<f64>,
     pub d_fis_e: CudaSlice<f64>,
     pub d_fis_w: CudaSlice<f64>,
     pub d_fis_count: CudaSlice<i32>,
-    /// Single-slot atomic counters. Zeroed each batch.
     pub d_cnt_coll: CudaSlice<i32>,
     pub d_cnt_fis: CudaSlice<i32>,
     pub d_cnt_leak: CudaSlice<i32>,
@@ -1474,8 +1445,6 @@ pub struct TransportBuffers {
     pub d_cnt_el: CudaSlice<i32>,
     pub d_cnt_inel: CudaSlice<i32>,
     pub d_cnt_cap: CudaSlice<i32>,
-    /// Single-slot f64 accumulators for the spectrum-hardening
-    /// diagnostic tallies. Zeroed each batch.
     pub d_e_fis_in: CudaSlice<f64>,
     pub d_e_el_in: CudaSlice<f64>,
     pub d_e_inel_in: CudaSlice<f64>,
@@ -1484,30 +1453,16 @@ pub struct TransportBuffers {
     pub d_e_el_in_sq: CudaSlice<f64>,
     pub d_e_inel_in_sq: CudaSlice<f64>,
     pub d_q_inel: CudaSlice<f64>,
-    /// `TransportParams` packed buffer (size = `N_PARAMS`). The
-    /// contents depend on the current nuc/mat/sab/wmp device pointers,
-    /// so the host repacks per batch — but the allocation is reused.
+    /// `TransportParams` packed buffer. Host repacks per batch
+    /// (pointers depend on the current nuc/mat/sab/wmp uploads).
     pub d_params: CudaSlice<u64>,
-    /// Host-side scratch — `vec![1_i32; n]` for the initial-alive
-    /// upload. Lifted out of the per-batch path so the Vec allocation
-    /// doesn't churn the system allocator on every batch.
+    /// `vec![1_i32; n]` lifted out of the per-batch path.
     alive_host_ones: Vec<i32>,
 }
 
 impl TransportBuffers {
-    /// Allocate every device buffer the recursive transport kernel
-    /// reads or writes. Caller-supplied sizes:
-    ///   * `n`               — particle count per batch.
-    ///   * `fis_cap`         — fission-bank capacity (typ. `4 × n`).
-    ///   * `n_materials`     — number of distinct materials in the
-    ///                         scene (sizes `d_mat_kt`).
-    ///   * `n_lattices`      — number of rect lattices (sizes the
-    ///                         override-offset arrays; harmless if 0).
-    ///   * `params_len`      — size of the packed `TransportParams`
-    ///                         buffer (currently `N_PARAMS = 130`;
-    ///                         queried from `GpuTransportContext` so
-    ///                         this struct doesn't have to track the
-    ///                         constant).
+    /// `params_len` is queried from `GpuTransportContext` so this
+    /// struct doesn't have to track `N_PARAMS`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         stream: &Arc<CudaStream>,
@@ -1517,9 +1472,6 @@ impl TransportBuffers {
         n_lattices: usize,
         params_len: usize,
     ) -> Result<Self, String> {
-        // alloc_zeros is fine for every buffer — particle SoA gets
-        // overwritten by reset_for_batch, counters start at zero, and
-        // unused trailing entries in the fission bank stay zero.
         let mk_d = |len: usize| stream.alloc_zeros::<f64>(len).map_err(|e| e.to_string());
         let mk_i = |len: usize| stream.alloc_zeros::<i32>(len).map_err(|e| e.to_string());
         let mk_u = |len: usize| stream.alloc_zeros::<u64>(len).map_err(|e| e.to_string());
@@ -1697,9 +1649,6 @@ impl GpuRecursiveContext {
             ));
         }
 
-        // Particle SoA host packing — same shape as the old path, but
-        // these Vecs feed `memcpy_htod` into the persistent buffers
-        // (no new device allocation).
         let xs: Vec<f64> = source_bank.iter().map(|p| p.0).collect();
         let ys: Vec<f64> = source_bank.iter().map(|p| p.1).collect();
         let zs: Vec<f64> = source_bank.iter().map(|p| p.2).collect();
@@ -1742,19 +1691,13 @@ impl GpuRecursiveContext {
         htod_d(mat_kT, &mut buffers.d_mat_kt)?;
         let n_materials = mat_kT.len() as i32;
 
-        // Lattice override scratch (dummy fillers for the recursive
-        // demo path). Sized at TransportBuffers::new; reset values
-        // each batch in case a caller has reused buffers across cases
-        // with differing lattice counts.
+        // Dummy lattice-override fillers (recursive demo path).
         let n_lat_owned = self.lat_origin.len() / 3;
         let dummy_off: Vec<i32> = vec![-1; n_lat_owned + 1];
         let dummy_count: Vec<i32> = vec![0; n_lat_owned + 1];
         htod_i(&dummy_off, &mut buffers.d_lat_override_off)?;
         htod_i(&dummy_count, &mut buffers.d_lat_override_count)?;
-        // d_override_lat_idx / cell_idx / mat stay at the zeros they
-        // were allocated with — no need to re-memset.
 
-        // Zero counters + fission count for this batch.
         let zero_i = |dst: &mut CudaSlice<i32>| -> Result<(), String> {
             stream.memset_zeros(dst).map_err(|e| e.to_string())
         };
@@ -1778,8 +1721,8 @@ impl GpuRecursiveContext {
         zero_f(&mut buffers.d_e_inel_in_sq)?;
         zero_f(&mut buffers.d_q_inel)?;
 
-        // Rebuild + upload TransportParams — pointers inside the
-        // packed buffer depend on the current nuc/mat/sab/wmp uploads.
+        // Packed params hold device pointers that change every time
+        // nuc/mat/sab/wmp uploads change; can't cache between batches.
         let params_vec =
             gpu_t.build_transport_params_vec(nuc_data, mat_data, sab_data, wmp_data, 0);
         stream

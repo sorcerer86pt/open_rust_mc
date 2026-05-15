@@ -134,11 +134,8 @@ pub struct CudaRunner<'a> {
     pub max_events_per_history: i32,
     pub fis_capacity: usize,
     pub initial_source: Box<dyn Fn(usize, u64) -> Vec<(f64, f64, f64, f64)> + 'a>,
-    /// Persistent device-side buffer pool, lazily built on first
-    /// batch and reused across all batches in one case. `RefCell`
-    /// because `EigenvalueRunner::run` takes `&self`; CudaRunner is
-    /// !Sync anyway (`Box<dyn Fn>` non-Send closure), so the
-    /// runtime borrow check is sound.
+    /// Lazily built on first batch, reused across batches. `RefCell`
+    /// for `&self`-on-run; CudaRunner is !Sync anyway.
     pub buffers: std::cell::RefCell<Option<crate::gpu_recursive::TransportBuffers>>,
 }
 
@@ -187,9 +184,6 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 })
                 .collect();
 
-            // Lazy-init the pool on the first batch — we need
-            // params_len from the transport context, which only the
-            // GpuTransportContext can size.
             let mut buffers_guard = self.buffers.borrow_mut();
             if buffers_guard.is_none() {
                 let params_len = self

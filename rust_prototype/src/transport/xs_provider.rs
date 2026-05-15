@@ -366,22 +366,9 @@ impl NuclideKernels {
         }
     }
 
-    /// Approximate host-side byte cost of this nuclide's data.
-    ///
-    /// Counts the dominant Vec<f64> / Vec<i32> contents (basis,
-    /// coeffs, energy grids, pointwise XS, discrete-level kernels) —
-    /// these account for >90 % of the real cost. Skipped fields:
-    /// angular distributions, URR tables, photon products,
-    /// `NuBarTable`s — each is < 100 KB and the cumulative estimation
-    /// error stays under 10 %, which is fine for budget purposes
-    /// where the question is "evict, or not" rather than
-    /// "exactly how big".
-    ///
-    /// Used by the bounded `nuclide_cache::l1_memory::L1MemoryStore`
-    /// to keep host RAM growth in check on long sweeps; each unique
-    /// nuclide is ~10-50 MB host-side, and 376-case sweeps with
-    /// distinct nuclide sets would accumulate ~5-10 GB without
-    /// eviction.
+    /// Approximate host-side byte cost; counts the dominant basis /
+    /// coeffs / pointwise / discrete-level Vecs (>90 % of real cost).
+    /// Used by `L1MemoryStore` for byte-budgeted eviction.
     pub fn approx_host_bytes(&self) -> usize {
         fn rkn_bytes(rk: &ReactionKernel) -> usize {
             match rk {

@@ -39,61 +39,20 @@ fn transport_kernel_options() -> nvrtc::CompileOptions {
 /// SVD basis data is passed via global memory, coefficients via shared memory.
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 
-// ── Rust-side GPU transport context ──────────────────────────────
-
-/// Cache key for `upload_nuclide_data` — `Arc::as_ptr()` of each
-/// `NuclideKernels` (cast to `usize` because raw pointers aren't
-/// `Send`) plus the SVD rank. Two uploads collide iff every Arc
-/// matches by-pointer in the same order *and* the rank matches.
-///
-/// Pointer-identity is the right key because cached `Arc<NuclideKernels>`
-/// instances are pulled from the process-wide `nuclide_cache::TieredStore`
-/// — the same parsed kernel is referenced by every successive
-/// `material_resolve` pass within one ICSBEP sweep. Different content
-/// at the same address can't happen: `Arc::as_ptr` returns the
-/// allocation address, and dropping the last reference frees the
-/// allocation, which would mean the upload site lost its reference
-/// too (no possible aliasing).
-///
-/// Callers that bypass `nuclide_cache::TieredStore` and produce fresh
-/// Arcs on every load will see this key miss every time. That's fine
-/// for correctness — content is correctly re-uploaded — but it
-/// degrades the cache to a no-op for those callers. The bounded LRU
-/// below caps the cost of that miss pattern at `BUNDLE_CACHE_CAP`
-/// entries instead of letting it leak VRAM across a sweep.
+/// Pointer-identity key. Works because `nuclide_cache::TieredStore`
+/// returns the same `Arc<NuclideKernels>` for the same
+/// `(file_hash, policy_hash, temp_idx)` tuple — Arc address therefore
+/// implies byte-identical content. Callers that bypass the upstream
+/// cache will always miss; correctness is preserved via re-upload.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct GpuUploadKey {
     rank: usize,
     nuc_ptrs: Vec<usize>,
 }
 
-/// Default fraction of total device memory reserved as the bundle
-/// cache budget. The remaining fraction has to fit: the live bundle's
-/// transient upload (1×), per-batch SoA buffers, the recursive
-/// geometry context, and any concurrent kernel allocations. 0.75
-/// leaves a quarter of the card for the live transport pipeline,
-/// which empirically fits the assembly-XS upload + per-batch SoA on
-/// both the A1000 (4 GB → 3 GB budget, ~0.5 GB for transient + 0.5 GB
-/// for batch+context) and the 3080 (12 GB → 9 GB budget). On bigger
-/// cards (24 GB+) it scales linearly.
-///
-/// Override at runtime via env: `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION=0.6`
-/// for a fractional override, or `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES=N`
-/// for an explicit byte budget (wins if both are set). Numbers outside
-/// [0.05, 0.95] are clamped to the range.
-///
-/// Each entry pins ~1.4 GB of `CudaSlice` on a typical fast-metal
-/// ICSBEP case (≈ 184 MB SVD basis + 1.2 GB discrete-level basis +
-/// 42 MB pointwise). At a 3 GB budget that's two bundles; at 9 GB
-/// roughly six. Thermal cases with fewer discrete levels are smaller
-/// and pack more tightly. Eviction is *byte*-budgeted, not
-/// count-budgeted, so the cache adapts to the actual bundle footprint
-/// rather than a coarse "1 vs 2" decision.
-///
-/// Floor at 1 entry: a budget too small to fit even one bundle still
-/// caches that bundle (otherwise we'd re-upload it twice for the
-/// same case — strictly worse than letting it slightly exceed
-/// budget).
+/// Bundle cache budget = `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
+/// Overridable via `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION` or
+/// `_BYTES`. Floor: at least one bundle fits even if oversized.
 const BUNDLE_CACHE_DEFAULT_FRACTION: f64 = 0.75;
 const BUNDLE_CACHE_FRACTION_MIN: f64 = 0.05;
 const BUNDLE_CACHE_FRACTION_MAX: f64 = 0.95;
@@ -109,38 +68,16 @@ pub struct GpuTransportContext {
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
     k_transport_persistent: CudaFunction,
-    /// Byte-budgeted LRU of recently-uploaded bundles.
-    /// Insertion-ordered; most-recently-used moves to the back, the
-    /// front evicts when `total_bytes + last_bundle_bytes` would
-    /// exceed `bundle_cache_budget_bytes()`.
-    ///
-    /// Entry layout: `(key, arc, device_bytes)`. `device_bytes` is
-    /// summed from every `CudaSlice::num_bytes()` the bundle owns;
-    /// pre-eviction can compute "is there room for another bundle of
-    /// size N" without re-walking each Arc.
-    ///
-    /// Re-uploading the same kernels (same pointers, same rank) finds
-    /// the cached entry, promotes it, and skips the entire
-    /// `clone_htod` pass — ~50 MB per actinide-heavy material avoided
-    /// on every repeat call. Linear scan over the deque is fine; the
-    /// total entry count caps somewhere around `total_mem / 0.5 GB`
-    /// = O(10–50) on production cards.
-    ///
-    /// `Mutex` not `RwLock`: the put path is rare (once per unique
-    /// key) and the get path is cheap once we hold the lock.
+    /// Byte-budgeted LRU. `(key, arc, device_bytes)` triples; front =
+    /// oldest. Eviction is byte-budgeted (see
+    /// `bundle_cache_budget_bytes`), not count-budgeted, so the cache
+    /// adapts to actual bundle footprint.
     nuclide_buffer_cache: std::sync::Mutex<
         std::collections::VecDeque<(GpuUploadKey, Arc<GpuNuclideData>, usize)>,
     >,
-    /// Memoised cache budget in bytes. Lazily resolved on first use:
-    /// `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES` env → explicit byte
-    /// override, else `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION` × total
-    /// device memory, else `BUNDLE_CACHE_DEFAULT_FRACTION` × total.
-    /// See `bundle_cache_budget_bytes()`.
     cached_bundle_budget: std::sync::OnceLock<usize>,
-    /// Tracks the size of the most-recently-uploaded bundle. Used as
-    /// the predictor for "how much room do we need to free before the
-    /// next upload" during pre-eviction. Zero before the first upload,
-    /// updated atomically after each successful insert.
+    /// Predictor for next-upload size; drives pre-eviction in
+    /// `upload_nuclide_data` so peak VRAM stays at one bundle.
     last_bundle_bytes: std::sync::atomic::AtomicUsize,
 }
 
@@ -1087,25 +1024,12 @@ impl GpuTransportContext {
         v
     }
 
-    /// Upload SVD nuclide data to GPU, with a per-context buffer cache.
-    ///
-    /// Takes `&[Arc<NuclideKernels>]` so the GPU upload path shares the
-    /// same handle the CPU `SvdXsProvider` holds — and the same handle
-    /// the process-wide `nuclide_cache` returns. Re-uploads of the
-    /// **same Arcs** (same pointers, same order, same rank) skip the
-    /// entire `clone_htod` pass and return a previously built
-    /// `Arc<GpuNuclideData>` from the per-context cache. ICSBEP sweeps
-    /// that previously paid ~50 MB of host→device copy per case now
-    /// pay ~150 ns of hashmap lookup on the second+ case in a single
-    /// `GpuTransportContext` lifetime.
-    ///
-    /// Pointer-identity is the right key here: the upstream
-    /// `nuclide_cache` returns the same `Arc<NuclideKernels>` for the
-    /// same `(path, blake3, policy, temp)` tuple across cases in one
-    /// sweep, so `Arc::as_ptr()` collides exactly when the underlying
-    /// kernel is byte-identical. Different content at the same
-    /// address can't happen — dropping the last reference would have
-    /// freed the allocation before the upload site could observe it.
+    /// Upload SVD nuclide data through the bounded LRU. Re-uploads
+    /// with the same Arc set + rank hit the cache (`Arc::as_ptr`
+    /// implies byte-identical content via the upstream
+    /// `nuclide_cache` Arc-de-dup). Misses pre-evict to make room
+    /// for the new bundle *before* allocating — lazy eviction would
+    /// double peak VRAM and OOM a 4 GB card.
     pub fn upload_nuclide_data(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
@@ -1119,24 +1043,6 @@ impl GpuTransportContext {
         let predicted = self
             .last_bundle_bytes
             .load(std::sync::atomic::Ordering::Relaxed);
-        // Cache hit: promote to MRU and return.
-        //
-        // On miss: byte-budgeted eviction *before* upload. The
-        // predictor `last_bundle_bytes` is the size of the most-recent
-        // bundle; if 0 (first call), we fall back to the simpler "evict
-        // nothing yet" rule and let the post-upload pass do the cap.
-        //
-        // Eager eviction keeps peak VRAM at one bundle, not two: a
-        // lazy eviction (insert-then-pop) forces the GPU to hold the
-        // old + new bundle simultaneously for the duration of
-        // `upload_nuclide_data_uncached`, which OOMs a 4 GB A1000.
-        // Each popped `Arc<GpuNuclideData>` drops here iff no caller
-        // still holds it; for the ICSBEP sweep's strictly-sequential
-        // single-threaded case pattern that's always true.
-        //
-        // Always leaves at least one cached entry untouched if the
-        // budget is too small to hold even a single bundle plus the
-        // incoming — the alternative is thrashing.
         let evicted_any = {
             let mut guard = self
                 .nuclide_buffer_cache
@@ -1164,27 +1070,15 @@ impl GpuTransportContext {
             }
             evicted > 0
         };
-        // Drop'd Arcs above released their CudaSlices, but on CUDA
-        // 11.2+ async allocator that memory sits in the stream pool
-        // (cuMemFreeAsync doesn't trim) until cuMemPoolTrimTo is
-        // called. Without this trim the new upload below allocates
-        // FRESH device memory while the pool retains the evicted
-        // bytes. Trim returns the freed bytes to the driver so the
-        // next allocation reuses them.
+        // cuMemFreeAsync (CUDA 11.2+) leaves freed bytes in the
+        // stream pool; trim returns them to the driver so the next
+        // allocation reuses them rather than growing peak VRAM.
         if evicted_any {
             self.trim_async_mempool();
         }
-        // Cache miss: upload outside the lock so concurrent uploads
-        // don't serialise on the hot path. The duplicate-upload window
-        // (two callers both miss, both upload, last writer wins) is
-        // benign — the loser's Arc just isn't reachable from the cache
-        // and frees normally.
         let fresh = self.upload_nuclide_data_uncached(nuclides, rank)?;
         let bytes = fresh.device_bytes();
         let arc = Arc::new(fresh);
-        // Update the predictor now that we know the actual size — the
-        // next call's pre-eviction uses this value to decide how much
-        // to free.
         self.last_bundle_bytes
             .store(bytes, std::sync::atomic::Ordering::Relaxed);
         {
@@ -1192,21 +1086,16 @@ impl GpuTransportContext {
                 .nuclide_buffer_cache
                 .lock()
                 .expect("nuclide_buffer_cache poisoned");
-            // Recheck — another thread may have populated the same key
-            // while we were uploading. Returning their entry is fine
-            // since both uploads are content-equivalent for the same key.
+            // Concurrent uploader may have populated the same key.
             if let Some(pos) = guard.iter().position(|(k, _, _)| k == &key) {
                 let entry = guard.remove(pos).expect("position just located");
                 let existing = Arc::clone(&entry.1);
                 guard.push_back(entry);
                 return Ok(existing);
             }
-            // Post-upload byte-budget trim. The first call (predicted
-            // = 0) skipped pre-eviction, so the budget may now be
-            // exceeded; the second-and-later calls had pre-eviction
-            // sized by the previous bundle, which may have been smaller
-            // than this one. Either way, trim from the front until
-            // adding `bytes` fits — but always leave at least one
+            // Post-upload trim: pre-eviction used the previous bundle's
+            // size, so a larger new bundle can still exceed budget.
+            // Always leave at least one
             // entry (the one we're about to insert) when the bundle
             // exceeds budget on its own.
             let total_bytes = |q: &std::collections::VecDeque<(
@@ -1224,11 +1113,9 @@ impl GpuTransportContext {
         Ok(arc)
     }
 
-    /// Drop the per-context GPU buffer cache. Frees every cached
-    /// `Arc<GpuNuclideData>` (whose underlying `CudaSlice`s release
-    /// device memory when the last reference goes away). Callers that
-    /// want to free GPU memory between long sweeps without dropping
-    /// the whole context should call this.
+    /// Drop the per-context GPU buffer cache and trim the async
+    /// mempool. Callers that need to free GPU memory between long
+    /// sweeps without dropping the whole context should call this.
     pub fn clear_nuclide_buffer_cache(&self) {
         self.nuclide_buffer_cache
             .lock()
@@ -1237,41 +1124,9 @@ impl GpuTransportContext {
         self.trim_async_mempool();
     }
 
-    /// Release unused memory from the device's default async mempool
-    /// back to the OS / driver-visible free pool.
-    ///
-    /// CUDA 11.2+'s async allocator (`cuMemAllocAsync` /
-    /// `cuMemFreeAsync`) keeps freed allocations in a stream-private
-    /// pool by default — `cuMemFreeAsync` does *not* return memory to
-    /// the driver until either the pool's release threshold is set or
-    /// `cuMemPoolTrimTo` is called explicitly. Without this call,
-    /// dropping a cached `Arc<GpuNuclideData>` shrinks the engine's
-    /// view of "live" memory but `nvidia-smi memory.used` keeps
-    /// showing the previous high-water mark, and the next big
-    /// allocation hits the per-context cap instead of reusing the
-    /// pool-retained bytes.
-    ///
-    /// `trim_to(0)` releases the entire unused pool back to the
-    /// driver; the next allocation just pulls fresh memory. This is
-    /// fine because the engine has only one consumer of the pool
-    /// (the transport stream).
-    ///
-    /// Quietly swallows errors — trim is best-effort, and the only
-    /// real failure mode is "no async allocator on this device"
-    /// (pre-CUDA-11.2 or specific GPU SKUs), where freeing is
-    /// already synchronous and there's nothing to trim.
-    /// Effective bundle-cache byte budget for this device. Resolved
-    /// once per context (memoised in `cached_bundle_budget`) from:
-    ///   1. `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES=N` env (explicit
-    ///      byte count, wins if set).
-    ///   2. `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION=F` × total device
-    ///      memory (F clamped to [0.05, 0.95]).
-    ///   3. `BUNDLE_CACHE_DEFAULT_FRACTION` × total device memory
-    ///      (currently 0.75).
-    ///
-    /// Falls back to a 1 GiB hard floor if `cuDeviceTotalMem` returns
-    /// zero (unlikely; the device handle is already initialised) —
-    /// better to cache one bundle than to thrash.
+    /// Resolution order: `_BYTES` env (explicit) → `_FRACTION` env ×
+    /// `total_mem` → `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
+    /// Fallback floor 1 GiB when `cuDeviceTotalMem` returns zero.
     pub fn bundle_cache_budget_bytes(&self) -> usize {
         *self.cached_bundle_budget.get_or_init(|| {
             const HARD_FLOOR: usize = 1 << 30; // 1 GiB
@@ -1293,16 +1148,16 @@ impl GpuTransportContext {
         })
     }
 
+    /// `cuMemPoolTrimTo(default_pool, 0)`. `cuMemFreeAsync` parks
+    /// freed bytes in the stream pool until trimmed; without this
+    /// call nvidia-smi keeps showing the high-water mark and the
+    /// next allocation grows VRAM rather than reusing pool bytes.
+    /// No-op on pre-CUDA-11.2 / no-async-alloc devices.
     pub fn trim_async_mempool(&self) {
         if !self._ctx.has_async_alloc() {
             return;
         }
-        // SAFETY: `self._ctx` is a live `Arc<CudaContext>` (so its
-        // CUDA device handle is valid for the duration of this call);
-        // we only call into cudarc's checked driver helpers with that
-        // device handle and trim the pool to 0 unused bytes, which is
-        // the documented zero-side-effect operation on the default
-        // mempool.
+        // SAFETY: live Arc<CudaContext> → valid device handle.
         unsafe {
             let dev = self._ctx.cu_device();
             if let Ok(pool) = cudarc::driver::result::device::get_default_mem_pool(dev) {
