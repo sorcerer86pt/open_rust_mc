@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 136;
+const N_PARAMS: usize = 138;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -1093,6 +1093,12 @@ impl GpuTransportContext {
             dptr!(&nuc_data.maxevap_law),
             dptr!(&nuc_data.maxevap_nuc_offsets),
             dptr!(&nuc_data.maxevap_nuc_n),
+            // Stage C step D — per-nuclide pointer arrays. Slots
+            // 136-137. Kernel reads `((double*)PTR_U64(p, P_BASIS_PTRS)
+            // [key])[e*rank + r]` instead of indirecting through
+            // all_basis[basis_offsets[key]+...].
+            dptr!(&nuc_data.basis_ptrs),
+            dptr!(&nuc_data.coeffs_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v

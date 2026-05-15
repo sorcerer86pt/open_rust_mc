@@ -254,7 +254,18 @@
 #define P_MAXEVAP_NUC_OFF       134
 #define P_MAXEVAP_NUC_N         135
 
-#define N_PARAMS            136
+// Stage C step D — per-nuclide pointer arrays. Each slot stores a
+// flat `u64` table sized `[n_nuc × N_REACTIONS]` containing the
+// `CUdeviceptr` of the corresponding per-nuclide basis / coeffs
+// CudaSlice. Accessed via `(const double*) PTR_U64(p, P_*)[key]`
+// — replaces the indirected `&PTR_D(p, P_BASIS)[basis_offsets[key]]`
+// path so the kernel reads directly from per-nuclide allocations.
+// Absent reactions store `0`; `P_HAS_REACTION[key]` gates the
+// dereference so the kernel never loads through a null pointer.
+#define P_BASIS_PTRS            136
+#define P_COEFFS_PTRS           137
+
+#define N_PARAMS            138
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -273,6 +284,7 @@
 #define PTR_I(p, idx)   ((const int*)    (p)[(idx)])
 #define PTR_B(p, idx)   ((const signed char*) (p)[(idx)])
 #define PTR_D2(p, idx)  ((const double2*) (p)[(idx)])
+#define PTR_U64(p, idx) ((const unsigned long long*) (p)[(idx)])
 #define SCALAR_I(p, idx) ((int)(p)[(idx)])
 #define SCALAR_D(p, idx) __longlong_as_double((long long)(p)[(idx)])
 
@@ -1295,9 +1307,13 @@ extern "C" __global__ void debug_xs_reconstruct(
         int key = nuc_idx * N_REACTIONS + r;
         double xs = 0.0;
         if (PTR_I(p, P_HAS_REACTION)[key]) {
+            // Stage C step D — direct per-nuclide pointer load.
+            // basis_ptrs[key] is the CUdeviceptr of
+            // PerNuclideGpu::basis[slot]; the kernel no longer
+            // indirects through the all_basis concatenation.
             xs = svd_reconstruct(
-                &PTR_D(p, P_BASIS)[PTR_I(p, P_BASIS_OFFSETS)[key]],
-                &PTR_D(p, P_COEFFS)[PTR_I(p, P_COEFFS_OFFSETS)[key]],
+                (const double*) PTR_U64(p, P_BASIS_PTRS)[key],
+                (const double*) PTR_U64(p, P_COEFFS_PTRS)[key],
                 e_idx, rank);
         }
         out_xs[tid * N_REACTIONS + r] = xs;
@@ -1420,9 +1436,10 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
         for (int r = 0; r < 6; r++) {
             int key = ni * N_REACTIONS + r;
             if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
+                // Stage C step D — direct per-nuclide pointer load.
                 double s = svd_reconstruct_interp(
-                    &PTR_D(p, P_BASIS)[__ldg(&PTR_I(p, P_BASIS_OFFSETS)[key])],
-                    &PTR_D(p, P_COEFFS)[__ldg(&PTR_I(p, P_COEFFS_OFFSETS)[key])],
+                    (const double*) __ldg(&PTR_U64(p, P_BASIS_PTRS)[key]),
+                    (const double*) __ldg(&PTR_U64(p, P_COEFFS_PTRS)[key]),
                     e_idx, n_e, rank, log_frac);
                 if (r == 0)      s_el = s;
                 else if (r == 1) { s_inel = s; has_inel_k = true; }
