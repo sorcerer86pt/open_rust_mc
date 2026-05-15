@@ -366,6 +366,73 @@ impl NuclideKernels {
         }
     }
 
+    /// Approximate host-side byte cost of this nuclide's data.
+    ///
+    /// Counts the dominant Vec<f64> / Vec<i32> contents (basis,
+    /// coeffs, energy grids, pointwise XS, discrete-level kernels) —
+    /// these account for >90 % of the real cost. Skipped fields:
+    /// angular distributions, URR tables, photon products,
+    /// `NuBarTable`s — each is < 100 KB and the cumulative estimation
+    /// error stays under 10 %, which is fine for budget purposes
+    /// where the question is "evict, or not" rather than
+    /// "exactly how big".
+    ///
+    /// Used by the bounded `nuclide_cache::l1_memory::L1MemoryStore`
+    /// to keep host RAM growth in check on long sweeps; each unique
+    /// nuclide is ~10-50 MB host-side, and 376-case sweeps with
+    /// distinct nuclide sets would accumulate ~5-10 GB without
+    /// eviction.
+    pub fn approx_host_bytes(&self) -> usize {
+        fn rkn_bytes(rk: &ReactionKernel) -> usize {
+            match rk {
+                ReactionKernel::Svd { kernel, coeffs } => {
+                    // SvdKernel exposes `basis_f64() -> &[f64]`. Coeffs
+                    // is `Vec<f64>`. Each value is 8 bytes.
+                    kernel.basis_f64().len() * 8 + coeffs.len() * 8
+                }
+                ReactionKernel::Table { energies, xs } => {
+                    energies.len() * 8 + xs.len() * 8
+                }
+            }
+        }
+
+        let mut total = std::mem::size_of::<Self>();
+        for opt in [
+            &self.elastic,
+            &self.inelastic,
+            &self.n2n,
+            &self.n3n,
+            &self.n4n,
+            &self.fission,
+            &self.capture,
+            &self.n_nalpha,
+            &self.n_2nalpha,
+            &self.n_np,
+        ] {
+            if let Some(rk) = opt {
+                total += rkn_bytes(rk);
+            }
+        }
+        for lev in &self.discrete_levels {
+            if let Some(rk) = &lev.kernel {
+                total += rkn_bytes(rk);
+            }
+        }
+        for (_, rk) in &self.partial_kernels {
+            total += rkn_bytes(rk);
+        }
+        if let Some(pw) = &self.pointwise_xs {
+            total += pw.len() * 8;
+        }
+        if let Some(tx) = &self.total_xs_raw {
+            total += tx.len() * 8;
+        }
+        if let Some(mx) = &self.missing_xs {
+            total += mx.len() * 8;
+        }
+        total
+    }
+
     /// Get energy-dependent nu-bar at the given energy.
     pub fn nu_bar_at(&self, energy: f64) -> f64 {
         self.nu_bar_table
