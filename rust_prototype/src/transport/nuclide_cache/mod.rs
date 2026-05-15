@@ -112,6 +112,21 @@ fn cache() -> &'static TieredStore {
     CACHE.get_or_init(TieredStore::default)
 }
 
+/// Seed `preload_weight` on the process-wide L1 cache. Each entry
+/// maps `NuclideKey → expected hit count`. Hits + preload are
+/// summed in the LFU score (see `eviction`), so a sweep harness
+/// can pre-scan its case manifest, count `(file_hash, policy_hash,
+/// temp_idx)` appearances across every case, and hand the result
+/// here before the first transport call. Pre-marked nuclides
+/// (U-235 / O-16 / Fe-56 / U-238 in any HEU sweep) then survive
+/// the inevitable rare-nuclide eviction pressure.
+///
+/// Idempotent — calling again with new weights replaces the old.
+/// Keys not yet inserted are stashed for first-insert pickup.
+pub fn set_preload_weights(weights: &std::collections::HashMap<NuclideKey, u64>) {
+    cache().l1.set_preload_weights(weights);
+}
+
 /// Call instead of `xs_provider::load_nuclide_with_policy` to
 /// participate in the cache. `path` is canonicalised (Windows `\`
 /// vs `/` resolve to the same key). `load_fn` runs only on full miss.

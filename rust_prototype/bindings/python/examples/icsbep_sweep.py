@@ -69,7 +69,42 @@ import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
-from open_rust_mc import Runner, Settings, run_icsbep_case
+from collections import Counter
+
+from open_rust_mc import (
+    Runner,
+    Settings,
+    preload_nuclide_cache_weights,
+    run_icsbep_case,
+)
+
+
+def _walk_nuclide_weights(case_paths):
+    """Walk every case JSON and tally `(zaid, temperature_k)` →
+    appearance count across the corpus. Pre-warms the L1 nuclide
+    cache so actinides + structurals stay resident even when a
+    rare-nuclide case lands mid-sweep.
+
+    Cases without a `scene` block (CLI-runner manifests) are
+    silently skipped — they don't drive `run_icsbep_case` anyway.
+    """
+    counts = Counter()
+    for case_path in case_paths:
+        try:
+            with open(case_path, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        scene = doc.get("scene")
+        if not scene:
+            continue
+        for mat in scene.get("materials", []):
+            temp_k = float(mat.get("temperature", 294.0))
+            for nuc in mat.get("nuclides", []):
+                zaid = nuc.get("zaid")
+                if isinstance(zaid, int):
+                    counts[(zaid, temp_k)] += 1
+    return counts
 
 
 @dataclass
@@ -381,6 +416,29 @@ def main() -> int:
         f"rank={args.rank}"
     )
     print("  per-case settings: JSON `benchmark.recommended_settings` overrides CLI defaults")
+
+    # ── L1 nuclide-cache warm-start ────────────────────────────────
+    # Walk the manifest once, count nuclide appearances, hand the
+    # histogram to the engine. U-235 / O-16 / Fe-56 / U-238 land with
+    # high preload weight; rare dosimetry nuclides start cold but
+    # gain hits as cases visit them. Eviction picks losers by
+    # (hits + preload) score under the LFU-with-recency policy.
+    pre_t0 = time.time()
+    nuc_counts = _walk_nuclide_weights(cases)
+    if nuc_counts:
+        weights = [
+            (zaid, temp_k, count)
+            for (zaid, temp_k), count in nuc_counts.items()
+        ]
+        n_loaded = preload_nuclide_cache_weights(
+            data_dir=data_dir, weights=weights, rank=args.rank
+        )
+        top = sorted(nuc_counts.items(), key=lambda kv: -kv[1])[:5]
+        print(
+            f"  preload: {n_loaded}/{len(weights)} nuclide weights resolved "
+            f"({time.time() - pre_t0:.1f}s). Top 5: "
+            + ", ".join(f"Z={z}@{t:.0f}K*{c}" for (z, t), c in top)
+        )
     if args.csv:
         print(f"  CSV (append, flushed per case): {args.csv}")
     if stop_file:

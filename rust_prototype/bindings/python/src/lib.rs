@@ -3145,6 +3145,58 @@ fn run_gpu_icsbep(
     Ok((outcome.batches, outcome.k_eff))
 }
 
+/// Pre-warm the L1 nuclide cache with frequency hints from a sweep
+/// manifest pre-scan.
+///
+/// `weights` is a list of `(zaid, temperature_k, count)` triples —
+/// typically built by walking every case JSON in the sweep,
+/// counting how often each `(zaid, temperature)` pair appears
+/// across the whole corpus. `rank` is the SVD rank the sweep runs
+/// with (the rank participates in the cache key, so the weights
+/// only apply to runs at that rank).
+///
+/// Each ZAID is resolved to an HDF5 path via `NuclideLibrary` (same
+/// catalog `run_icsbep_case` uses) and the temperature is mapped to
+/// the nearest library column via `pick_temperature`. First call
+/// hashes every referenced HDF5 file (~30-60 s for ~50 actinide
+/// files on SSD); subsequent `run_icsbep_case` lookups promote
+/// pre-marked nuclides under the LFU-with-recency policy.
+///
+/// Returns the number of weights successfully resolved. ZAIDs not
+/// in the catalog or files that can't be hashed are silently
+/// skipped — the cache still works, just without the warm-start
+/// hint for that nuclide.
+#[pyfunction]
+fn preload_nuclide_cache_weights(
+    data_dir: PathBuf,
+    weights: Vec<(u32, f64, u64)>,
+    rank: usize,
+) -> PyResult<usize> {
+    use open_rust_mc::transport::nuclide_cache;
+    use open_rust_mc::transport::nuclide_cache::NuclideKey;
+    use open_rust_mc::transport::nuclides::NuclideLibrary;
+    use open_rust_mc::transport::xs_provider::RankPolicy;
+
+    let lib = NuclideLibrary::from_data_dir(&data_dir);
+    let policy = RankPolicy::new(rank);
+    let mut map: HashMap<NuclideKey, u64> = HashMap::new();
+    for (zaid, temp_k, w) in &weights {
+        let resolved = match lib.resolve(*zaid, *temp_k) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        match NuclideKey::from_inputs(&resolved.path, &policy, resolved.temp_idx) {
+            Ok(key) => {
+                map.insert(key, *w);
+            }
+            Err(_) => continue,
+        }
+    }
+    let n = map.len();
+    nuclide_cache::set_preload_weights(&map);
+    Ok(n)
+}
+
 // ── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -3184,6 +3236,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cram, m)?)?;
     m.add_function(wrap_pyfunction!(deplete_constant_flux, m)?)?;
     m.add_function(wrap_pyfunction!(deplete_with_flux_callback, m)?)?;
+    m.add_function(wrap_pyfunction!(preload_nuclide_cache_weights, m)?)?;
 
     Ok(())
 }

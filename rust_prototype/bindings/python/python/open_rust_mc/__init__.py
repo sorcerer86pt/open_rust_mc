@@ -50,6 +50,8 @@ from ._core import (
     cram,
     deplete_constant_flux,
     deplete_with_flux_callback,
+    # Cache pre-warm
+    preload_nuclide_cache_weights,
 )
 
 # Avogadro's number, exact SI-2019 value.
@@ -242,6 +244,7 @@ __all__ = [
     "cram",
     "deplete_constant_flux",
     "deplete_with_flux_callback",
+    "preload_nuclide_cache_weights",
     # Helpers
     "NUCLIDE_DATA",
     "atom_density_from_mass_density",
