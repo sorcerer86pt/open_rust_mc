@@ -85,6 +85,11 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 # of 48 MB. Pure-Rust, only deflate / miniz_oxide as transitive
 # deps — no native code.
 png = "0.17"
+# Hardware introspection — system RAM, CPU cache hierarchy, AVX
+# feature flags, GPU vendor / VRAM. Used at engine init to size
+# caches (l1_memory + gpu bundle) and tune rayon pool defaults.
+# One query at startup; runtime cost is negligible.
+hardware-query = "0.2.1"
 
 [features]
 default = []

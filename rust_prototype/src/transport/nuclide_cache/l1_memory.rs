@@ -1,17 +1,10 @@
-//! L1 in-process bounded byte-budget LRU. Host-side mirror of
-//! `gpu_transport::nuclide_buffer_cache` (commit 097c282) — same
-//! eviction shape, different memory pool.
+//! L1 in-process byte-budgeted LRU. Host-side mirror of
+//! `gpu_transport::nuclide_buffer_cache`.
 //!
-//! Budget knobs: `OPEN_RUST_MC_NUCLIDE_CACHE_BYTES` (explicit) or
-//! `OPEN_RUST_MC_NUCLIDE_CACHE_FRACTION` × 16 GiB stand-in.
-//! Default 4 GiB (no `sysinfo` dep — set the env var on bigger boxes).
-//!
-//! Eviction: hit promotes to MRU; insert pre-evicts while
-//! `total_bytes + new_bytes > budget`; oversized single entries still
-//! cache (re-uploading every call would be strictly worse).
-//!
-//! Replaces the prior `DashMap<NuclideKey, Vec<Arc<NuclideKernels>>>`
-//! (unbounded; the Vec slot's "future bulk-dump API" was never used).
+//! Budget: `OPEN_RUST_MC_NUCLIDE_CACHE_BYTES` → explicit byte
+//! override → `OPEN_RUST_MC_NUCLIDE_CACHE_FRACTION` × detected
+//! system RAM (via `hardware_profile`) → 75 % of RAM default.
+//! Falls back to 4 GiB if RAM detection fails.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -19,7 +12,10 @@ use std::sync::{Arc, Mutex};
 use super::{NuclideKey, NuclideStore};
 use crate::transport::xs_provider::NuclideKernels;
 
-const DEFAULT_BUDGET_BYTES: usize = 4 * 1024 * 1024 * 1024;
+/// Fallback when `hardware_profile` returns zero (CI / containers
+/// without /proc/meminfo). 4 GiB fits a 16 GB-RAM box conservatively.
+const HARDWARE_QUERY_FALLBACK_BYTES: usize = 4 * crate::hardware_profile::GIB;
+const DEFAULT_FRACTION: f64 = 0.75;
 const FRACTION_MIN: f64 = 0.05;
 const FRACTION_MAX: f64 = 0.95;
 
@@ -106,22 +102,25 @@ impl NuclideStore for L1MemoryStore {
     }
 }
 
-/// Env vars are read once at construction; later setenv has no effect.
+/// Resolution: `_BYTES` env (explicit) → `_FRACTION` × detected
+/// total RAM → `DEFAULT_FRACTION` × detected total RAM →
+/// `HARDWARE_QUERY_FALLBACK_BYTES` if `hardware_profile` reports 0.
 fn resolve_budget() -> usize {
     if let Some(v) = std::env::var_os("OPEN_RUST_MC_NUCLIDE_CACHE_BYTES") {
         if let Ok(n) = v.to_string_lossy().parse::<usize>() {
             return n.max(1);
         }
     }
-    if let Some(v) = std::env::var_os("OPEN_RUST_MC_NUCLIDE_CACHE_FRACTION") {
-        if let Ok(f) = v.to_string_lossy().parse::<f64>() {
-            // 16 GiB stand-in for total RAM (no sysinfo dep).
-            const STAND_IN_RAM_BYTES: usize = 16 * 1024 * 1024 * 1024;
-            let f = f.clamp(FRACTION_MIN, FRACTION_MAX);
-            return ((STAND_IN_RAM_BYTES as f64) * f) as usize;
-        }
+    let total_ram = crate::hardware_profile::hardware_profile().total_ram_bytes as usize;
+    if total_ram == 0 {
+        return HARDWARE_QUERY_FALLBACK_BYTES;
     }
-    DEFAULT_BUDGET_BYTES
+    let fraction = std::env::var("OPEN_RUST_MC_NUCLIDE_CACHE_FRACTION")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(DEFAULT_FRACTION)
+        .clamp(FRACTION_MIN, FRACTION_MAX);
+    ((total_ram as f64) * fraction) as usize
 }
 
 #[cfg(test)]

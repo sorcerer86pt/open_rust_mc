@@ -1129,7 +1129,7 @@ impl GpuTransportContext {
     /// Fallback floor 1 GiB when `cuDeviceTotalMem` returns zero.
     pub fn bundle_cache_budget_bytes(&self) -> usize {
         *self.cached_bundle_budget.get_or_init(|| {
-            const HARD_FLOOR: usize = 1 << 30; // 1 GiB
+            const HARD_FLOOR: usize = crate::hardware_profile::GIB;
             if let Some(v) = std::env::var_os("OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES") {
                 if let Ok(n) = v.to_string_lossy().parse::<usize>() {
                     return n.max(1);

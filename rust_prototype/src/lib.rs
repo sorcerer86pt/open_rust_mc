@@ -17,6 +17,7 @@ pub mod error;
 pub const MAX_NUCLIDES_PER_MATERIAL: usize = 128;
 
 pub mod geometry;
+pub mod hardware_profile;
 #[cfg(feature = "cuda")]
 pub mod gpu;
 #[cfg(feature = "cuda")]
