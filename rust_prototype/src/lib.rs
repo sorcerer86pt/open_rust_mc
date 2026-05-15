@@ -1,33 +1,19 @@
-//! open_rust_mc — Monte Carlo neutron transport engine.
-//!
-//! A pure-Rust Monte Carlo Engine with:
-//!   - SVD-compressed cross-sections (cache-resident reconstruction)
-//!   - BVH-accelerated CSG geometry (enum dispatch, no vtables)
-//!   - SoA particle layout for SIMD vectorization
-//!   - Event-based transport with rayon parallelism
+//! open_rust_mc — pure-Rust MC neutron transport. SVD-compressed XS,
+//! BVH+enum-dispatch CSG, SoA particles, rayon event-based transport.
 
 pub mod compare;
 pub mod cp_decompose;
 pub mod decompose;
 pub mod depletion;
 pub mod error;
-/// Per-material nuclide cap. The CPU transport hot path uses this to
-/// size fixed-length micro-XS arrays (`simulate.rs::MAX_NUCLIDES`),
-/// the GPU kernel receives the same number through an NVRTC
-/// `-DMAX_NUC_PER_MAT=N` compile flag (`gpu_recursive.rs` and
-/// `gpu_transport.rs`), and `Material::add_nuclide` callers must keep
-/// each material below this threshold or transport will panic at the
-/// first collision. Bumping requires a full rebuild — the constant
-/// flows through `MicroXs`, `GpuMaterialData`, the device-side
-/// `nuc_t[MAX_NUC_PER_MAT]` register array, and every downstream
-/// fixed-size loop.
+/// Per-material nuclide cap. Single source of truth — flows through
+/// `MicroXs`, `simulate::MAX_NUCLIDES`, `GpuMaterialData`, and the
+/// GPU NVRTC `-DMAX_NUC_PER_MAT` define. Bumping requires full
+/// rebuild and re-checking sm_86 register pressure
+/// (`nuc_t[128]` is ~128 32-bit regs out of 255 / thread).
 ///
-/// Bumped 32 → 128 to cover HMF-069 ("HEU part 2732", 69 nuclides) and
-/// Pu solution benchmarks ("Plutonium nitrate solution", 67 nuclides)
-/// with headroom for spent-fuel cask compositions (often 50-80 per
-/// material). GPU register pressure: `nuc_t[128]` is 1024 bytes/thread
-/// = ~128 32-bit registers, fitting inside sm_86's 255-register
-/// per-thread budget. If kernel occupancy regresses, dial back to ~80.
+/// Bumped 32 → 128 for HMF-069 (69 nuclides), Pu-soln (67), spent-
+/// fuel casks (50-80).
 pub const MAX_NUCLIDES_PER_MATERIAL: usize = 128;
 
 pub mod geometry;

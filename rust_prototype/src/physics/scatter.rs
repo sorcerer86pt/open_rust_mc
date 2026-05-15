@@ -1,45 +1,28 @@
-//! Scattering kinematics — elastic and inelastic.
-//!
-//! Elastic: free-gas model, isotropic in center-of-mass frame.
-//! Inelastic: level excitation model — neutron loses excitation energy Q
-//! to the nucleus, then scatters isotropically in CM frame.
-//! Q-value is now passed in from the caller (read from nuclear data).
+//! Scattering kinematics. Elastic: free-gas, isotropic CM.
+//! Inelastic: level excitation (Q-value from caller / nuclear data),
+//! isotropic CM.
 
 use crate::geometry::Vec3;
 use crate::hdf5_reader::AngularDistribution;
 use crate::transport::rng::Rng;
 
-/// Elastic scattering: compute new energy and direction.
-///
-/// `awr` is the atomic weight ratio (A / neutron mass).
-/// Scattering is isotropic in the center-of-mass frame.
+/// Isotropic CM, free-target. `awr = A / m_n`. Hydrogen branch is
+/// the `A → 1` special case for `μ_lab`.
 pub fn elastic_scatter(energy: f64, dir: Vec3, awr: f64, rng: &mut Rng) -> (f64, Vec3) {
-    // Sample cosine of scattering angle in center-of-mass frame
     let mu_cm = 2.0 * rng.uniform() - 1.0;
-
-    // Convert to lab frame energy
     let alpha = ((awr - 1.0) / (awr + 1.0)).powi(2);
     let new_energy = energy * 0.5 * ((1.0 + alpha) + (1.0 - alpha) * mu_cm);
-
-    // Lab-frame scattering cosine
     let mu_lab = if awr > 1.0 + 1e-10 {
         (1.0 + awr * mu_cm) / (1.0 + 2.0 * awr * mu_cm + awr * awr).sqrt()
     } else {
-        // Hydrogen special case (A~1): mu_lab = sqrt((1+mu_cm)/2)
         ((1.0 + mu_cm) * 0.5).max(0.0).sqrt()
     };
-
     let new_dir = rotate_direction(dir, mu_lab, rng);
-    (new_energy.max(1e-11), new_dir) // floor at ~0 eV
+    (new_energy.max(1e-11), new_dir)
 }
 
-/// Elastic scattering with optional anisotropic angular distribution
-/// and free gas thermal scattering correction.
-///
-/// If `angle_dist` is provided, samples mu from the tabulated distribution.
-/// If `temperature > 0`, applies the free gas thermal model: sample target
-/// velocity from Maxwell-Boltzmann, scatter in relative frame.
-/// For fast neutrons (E >> kT), the cold target approximation is used.
+/// Anisotropic + free-gas thermal. Threshold `E < 400·kT` follows
+/// OpenMC.
 pub fn elastic_scatter_aniso(
     energy: f64,
     dir: Vec3,
@@ -48,12 +31,8 @@ pub fn elastic_scatter_aniso(
     temperature: f64,
     rng: &mut Rng,
 ) -> (f64, Vec3) {
-    // Boltzmann constant in eV/K
     const K_BOLTZMANN: f64 = 8.617_333e-5;
     let kt = K_BOLTZMANN * temperature;
-
-    // Use free gas model when neutron energy is comparable to thermal energy
-    // Threshold: E < 400 * kT (OpenMC uses a similar cutoff)
     if temperature > 0.0 && energy < 400.0 * kt {
         return free_gas_scatter(energy, dir, awr, kt, angle_dist, rng);
     }
