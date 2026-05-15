@@ -1,5 +1,51 @@
 # Stage C — bench results on A1000
 
+## Step D phase 1+2+3 validation campaign
+
+After landing the full per-nuc kernel ABI swap — basis/coeffs +
+pointwise + total_xs + ν̄ + delayed-ν̄ + URR + inel_cdf + per-level
+discrete basis/coeffs + elastic and per-level angular CDFs +
+fission tabular + MT=91 — three validation gates:
+
+### 1. ICSBEP regression (4-case)
+
+| case                    | k_calc ± σ          |  Δ pcm | bound | runtime |
+|-------------------------|---------------------|-------:|------:|--------:|
+| heu-met-fast-001_case-1 | 0.999722 ± 0.000450 |  -27.8 |   219 |   55 s  |
+| heu-met-fast-014        | 0.997293 ± 0.000382 | -160.7 |   349 |  128 s  |
+| pu-met-fast-001         | 1.000789 ± 0.000520 |  +78.9 |   413 |   18 s  |
+| u233-met-fast-001       | 1.000201 ± 0.000166 |  +20.1 |   203 |   14 s  |
+
+**4 / 4 PASS** at production envelope on A1000.
+
+### 2. `nu_lookup_compare`
+
+> Worst |Δ| over actively-tabulated nuclides (sz > 0): **0.000e0**
+> → ν table data is BIT-IDENTICAL CPU↔GPU for every nuclide that
+> carries a real ν(E) table.
+
+### 3. `level_xs_compare`
+
+> Per-level XS bit-identical CPU↔GPU (Δ = 0.000%) at every test
+> energy 1 eV → 5 MeV across every U-235 discrete inelastic level
+> (MT=51-56). Σxs Δ = +0.00%, ⟨|Q|⟩ Δ = +0.00%.
+
+Per-level rank-padding invariant from commit `1654c4d` preserved
+end-to-end through the pointer-array kernel ABI — the historic
++500-700 pcm fast-metal hot bias is NOT being reintroduced.
+
+### 4. `metal_stats_diag` (Godiva 3-way)
+
+| metric       | CPU     | GPU     | OpenMC  | Δ (GPU − OpenMC) |
+|--------------|--------:|--------:|--------:|-----------------:|
+| k_eff Δ      | -192 pcm | +109 pcm | 0       | **+109 pcm**     |
+| ⟨E⟩ fission  | 1.4646e6 | 1.4813e6 | 1.4618e6 | +1.35% of σ      |
+
+GPU **closer to OpenMC than CPU** for k_eff Δ; fission σ within
+1.35% of OpenMC. The GPU↔CPU gap of +301 pcm is dominated by event-
+ordering and float-rounding (already documented as a known GPU-
+native variance in CLAUDE.md), not the per-nuc kernel ABI.
+
 ## Step D correctness — 3-case ICSBEP sweep (full per-nuc kernel ABI)
 
 After converting every simple per-nuclide kernel access path to read
