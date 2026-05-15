@@ -9,7 +9,7 @@
 //! See `docs/stage-c-data-model.md` for the full schema + landing
 //! order. This module is added empty-handed: subsequent commits
 //! extend `PerNuclideGpu` field coverage and wire `assemble_bundle`
-//! into `gpu_transport.rs::upload_nuclide_data_uncached`. The kernel
+//! into `gpu_transport.rs::upload_nuclide_data`. The kernel
 //! ABI stays unchanged until Stage 4 (separate commit, gated on
 //! `metal_stats_diag` 3-way passing).
 
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::transport::xs_provider::{NuclideKernels, ReactionKernel};
 
 /// Fixed reaction-slot count, matching the bundle layout in
-/// `gpu_transport::upload_nuclide_data_uncached`: elastic, inelastic,
+/// `gpu_transport::upload_nuclide_data`: elastic, inelastic,
 /// n2n, n3n, fission, capture, total. Slot 6 (`RXN_TOTAL`) is always
 /// `None` on the per-reaction arrays — the total XS lives on the
 /// pointwise tables instead.
@@ -78,7 +78,7 @@ impl TabularEdistSlicesGpu {
 /// `a(E_in)` and `b(E_in)` are pre-resampled onto a shared inc-energy
 /// grid (union of the original a_energies + b_energies, sorted +
 /// deduped) so the device samples via one binary search per fission
-/// event. Mirrors upload_nuclide_data_uncached:1722-1751.
+/// event. Mirrors upload_nuclide_data:1722-1751.
 pub struct WattSlicesGpu {
     pub n_inc: i32,
     pub u: f64,
@@ -306,7 +306,7 @@ impl LevelSlicesGpu {
 /// commit converts one category and keeps `cargo test --features
 /// cuda --lib` green. Fields not yet ported are `None` and the
 /// bundle assembly stage falls through to the legacy
-/// `upload_nuclide_data_uncached` packing path for that category.
+/// `upload_nuclide_data` packing path for that category.
 pub struct PerNuclideGpu {
     /// Global SVD rank this nuclide was rank-padded for. Bundle
     /// assembly must verify `bundle_rank == per_nuc.rank` for every
@@ -415,7 +415,7 @@ impl PerNuclideGpu {
 /// variant passes through unchanged; Table variants get
 /// `basis_row = [log10(xs), 0, 0, …]` and `coeffs = [1.0, 0.0, …]`
 /// — same convention as the legacy whole-bundle packer at
-/// `gpu_transport.rs::upload_nuclide_data_uncached`, slot 1278-1318.
+/// `gpu_transport.rs::upload_nuclide_data`, slot 1278-1318.
 fn pack_reaction_to_rank(rxn: &ReactionKernel, rank: usize) -> (Vec<f64>, Vec<f64>) {
     match rxn {
         ReactionKernel::Svd { kernel, coeffs } => {
@@ -458,7 +458,7 @@ pub fn upload_one_nuclide(
 ) -> Result<PerNuclideGpu, Box<dyn std::error::Error>> {
     // Energy grid — shared across all reactions on this nuclide.
     // Pull from whichever kernel exists; matches the priority order
-    // used by `gpu_transport::upload_nuclide_data_uncached`.
+    // used by `gpu_transport::upload_nuclide_data`.
     let any_kernel = nuc
         .elastic
         .as_ref()
@@ -516,7 +516,7 @@ pub fn upload_one_nuclide(
         .transpose()?;
 
     // Category B — per-reaction SVD basis / coeffs. Slot order must
-    // match `gpu_transport::upload_nuclide_data_uncached` (slot 6 =
+    // match `gpu_transport::upload_nuclide_data` (slot 6 =
     // total is intentionally None).
     let reactions: [Option<&ReactionKernel>; N_RXN_SLOTS] = [
         nuc.elastic.as_ref(),
@@ -679,7 +679,7 @@ fn concat_dtod_required(
 ///
 /// The returned shape is byte-identical to the corresponding fields
 /// in `GpuNuclideData` as built by
-/// `gpu_transport.rs::upload_nuclide_data_uncached`. Sentinels match:
+/// `gpu_transport.rs::upload_nuclide_data`. Sentinels match:
 /// when no nuclide contributes data the result is a 1-element
 /// zero slice (legacy path's `if vec.is_empty() { vec.push(0.0); }`
 /// convention).
@@ -799,7 +799,7 @@ pub struct AssembledBundleBCat {
 /// Concatenate per-(nuclide × reaction) basis / coeffs from
 /// `[Arc<PerNuclideGpu>]` into the bundle's flat layout. Slot order
 /// (elastic, inelastic, n2n, n3n, fission, capture, total) matches
-/// `gpu_transport::upload_nuclide_data_uncached` slot 1274-1325.
+/// `gpu_transport::upload_nuclide_data` slot 1274-1325.
 pub fn assemble_b_cat(
     stream: &Arc<CudaStream>,
     per_nucs: &[Arc<PerNuclideGpu>],
@@ -895,7 +895,7 @@ pub struct AssembledBundleCCat {
 
 /// Assemble cat-C discrete inelastic level data from per-nuclide
 /// slices via DtoD copy plus host-side offset shifting. Mirrors
-/// `gpu_transport::upload_nuclide_data_uncached` slots 1399-1571 and
+/// `gpu_transport::upload_nuclide_data` slots 1399-1571 and
 /// the sentinel rules at 1543-1569.
 ///
 /// Tricky points:
@@ -1370,7 +1370,7 @@ pub fn assemble_a6_cat(
 /// most one of `fis_*` (Tabular), `watt_*` (Law 11), or `maxevap_*`
 /// (Law 7 / Law 9). When a branch has zero contributing nuclides
 /// the bundle still emits a 1-element sentinel slice so the device
-/// pointer is non-null — matches upload_nuclide_data_uncached
+/// pointer is non-null — matches upload_nuclide_data
 /// slot 1780-1869.
 pub struct AssembledBundleA5Cat {
     // Tabular (Law 4 / 61).
@@ -1601,7 +1601,7 @@ pub struct AssembledBundleA4Cat {
 }
 
 /// Bundle assembly for category A.4 (elastic angular distribution).
-/// Mirrors upload_nuclide_data_uncached:1578-1613. Per-nuclide
+/// Mirrors upload_nuclide_data:1578-1613. Per-nuclide
 /// elastic_angle is optional; when absent the per-nuclide offset /
 /// n_energies / is_cm slots stay zero.
 pub fn assemble_a4_cat(
@@ -1814,7 +1814,7 @@ where
 }
 
 /// Flatten URR per-band 2D rows into the bundle's row-major layout.
-/// Mirrors upload_nuclide_data_uncached:1883-1905.
+/// Mirrors upload_nuclide_data:1883-1905.
 fn build_urr_slices(
     stream: &Arc<CudaStream>,
     urr: &crate::hdf5_reader::UrrProbabilityTables,
@@ -1865,7 +1865,7 @@ fn build_tabular_edist(
         cdf_buf.extend_from_slice(&dist.cdf);
         // PDF aligned 1:1 with e_out when ENDF ships it; otherwise
         // zero-fill so the device's quadratic lin-lin sampler falls
-        // back to linear-CDF — matches upload_nuclide_data_uncached
+        // back to linear-CDF — matches upload_nuclide_data
         // slot 1715-1719.
         if dist.pdf.len() == dist.e_out.len() {
             pdf_buf.extend_from_slice(&dist.pdf);
@@ -1896,7 +1896,7 @@ fn build_tabular_edist(
 /// Per-nuclide fission χ extraction — dispatches on the four ENDF
 /// laws (tabular Law 4/61, closed-form Watt Law 11, Maxwell Law 7,
 /// Evaporation Law 9). Mirrors the bundle path at
-/// upload_nuclide_data_uncached:1693-1779.
+/// upload_nuclide_data:1693-1779.
 fn build_fission_edist(
     stream: &Arc<CudaStream>,
     edist: Option<&crate::hdf5_reader::EnergyDistribution>,
@@ -1970,7 +1970,7 @@ fn build_fission_edist(
 
 /// Pack an `AngularDistribution` into per-nuclide GPU layout. Mirrors
 /// the legacy bundle's elastic-angular packing at
-/// `gpu_transport.rs::upload_nuclide_data_uncached` slot 1588-1602.
+/// `gpu_transport.rs::upload_nuclide_data` slot 1588-1602.
 /// Per-energy `dist_local_off` is nuclide-local; bundle assembly
 /// shifts it.
 fn build_angular_slices(
@@ -2016,7 +2016,7 @@ fn build_angular_slices(
 /// bytes. Pad each level's basis with zero columns up to global rank,
 /// and pad coeffs to length rank with zeros — the dot product is
 /// unchanged (extra × 0 = 0). Mirrors
-/// `gpu_transport.rs::upload_nuclide_data_uncached` slot 1457-1518.
+/// `gpu_transport.rs::upload_nuclide_data` slot 1457-1518.
 fn build_level_slices(
     stream: &Arc<CudaStream>,
     nuc: &NuclideKernels,
@@ -2355,592 +2355,9 @@ mod tests {
         assert_eq!(per_nuc.levels.ang_lev_ne, vec![0]);
     }
 
-    #[test]
-    fn assemble_a_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
 
-        // Two synthetic nuclides — one with ν̄ + total_xs, one bare.
-        // Distinct energy grids force a non-trivial running offset on
-        // the bundle so the prefix-sum logic is exercised.
-        let energies_a = vec![1.0e-5, 1.0, 2.0e7];
-        let energies_b = vec![1.0e-5, 100.0, 1.0e3, 2.0e7];
-        let nuc_a = {
-            let mut n = NuclideKernels::empty(235.0, 2.5);
-            n.elastic = Some(ReactionKernel::from_table(
-                energies_a.clone(),
-                vec![10.0, 5.0, 1.0],
-            ));
-            n.total_xs_raw = Some(vec![20.0, 10.0, 2.0]);
-            n.nu_bar_table = Some(crate::hdf5_reader::NuBarTable {
-                energies: vec![1.0, 1.0e6],
-                values: vec![2.43, 2.95],
-            });
-            n
-        };
-        let nuc_b = {
-            let mut n = NuclideKernels::empty(16.0, 0.0);
-            n.elastic = Some(ReactionKernel::from_table(
-                energies_b.clone(),
-                vec![3.0, 4.0, 5.0, 6.0],
-            ));
-            n
-        };
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
 
-        let bundle_legacy = ctx
-            .upload_nuclide_data_uncached(&nuclides, rank)
-            .expect("legacy upload failed");
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| {
-                upload_one_nuclide(&stream, n, rank)
-                    .map(Arc::new)
-                    .expect("upload_one_nuclide")
-            })
-            .collect();
-        let assembled = assemble_a_cat(&stream, &per_nucs).expect("assemble_a_cat");
 
-        // ── Compare every A-cat field byte-for-byte. ──
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-
-        assert_eq!(
-            dtoh_f64(&assembled.all_energy_grids),
-            dtoh_f64(&bundle_legacy.all_energy_grids),
-            "all_energy_grids",
-        );
-        assert_eq!(
-            assembled.grid_offsets_vec,
-            dtoh_i32(&bundle_legacy.grid_offsets),
-            "grid_offsets",
-        );
-        assert_eq!(
-            assembled.n_energies_vec,
-            dtoh_i32(&bundle_legacy.n_energies),
-            "n_energies",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.total_xs),
-            dtoh_f64(&bundle_legacy.total_xs),
-            "total_xs",
-        );
-        assert_eq!(
-            assembled.total_xs_off_vec,
-            dtoh_i32(&bundle_legacy.total_xs_offsets),
-            "total_xs_offsets",
-        );
-        assert_eq!(
-            assembled.has_total_xs_vec,
-            dtoh_i32(&bundle_legacy.has_total_xs),
-            "has_total_xs",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.nu_bar_energies),
-            dtoh_f64(&bundle_legacy.nu_bar_energies),
-            "nu_bar_energies",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.nu_bar_values),
-            dtoh_f64(&bundle_legacy.nu_bar_values),
-            "nu_bar_values",
-        );
-        assert_eq!(
-            assembled.nu_bar_offsets_vec,
-            dtoh_i32(&bundle_legacy.nu_bar_offsets),
-            "nu_bar_offsets",
-        );
-        assert_eq!(
-            assembled.nu_bar_sizes_vec,
-            dtoh_i32(&bundle_legacy.nu_bar_sizes),
-            "nu_bar_sizes",
-        );
-        assert_eq!(
-            assembled.delayed_nu_bar_sizes_vec,
-            dtoh_i32(&bundle_legacy.delayed_nu_bar_sizes),
-            "delayed_nu_bar_sizes",
-        );
-        // Pointwise: nuc_a + nuc_b carry no pointwise_xs in this
-        // synthetic, so both paths should produce the [0.0] sentinel.
-        assert_eq!(
-            dtoh_f64(&assembled.pointwise_xs),
-            dtoh_f64(&bundle_legacy.pointwise_xs),
-            "pointwise_xs",
-        );
-        assert_eq!(
-            assembled.has_pw_vec,
-            dtoh_i32(&bundle_legacy.has_pw),
-            "has_pw",
-        );
-    }
-
-    #[test]
-    fn assemble_c_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::hdf5_reader::DiscreteLevelInfo;
-        use crate::transport::xs_provider::DiscreteLevel;
-
-        // nuc_a: two levels with Table kernels at different n_e.
-        // nuc_b: no discrete levels.
-        // This exercises both the populated and empty branches plus
-        // the running offset shift across nuclides.
-        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        nuc_a.discrete_levels.push(DiscreteLevel {
-            info: DiscreteLevelInfo { mt: 51, q_value: -1.0e5, threshold: 1.0e5 },
-            kernel: Some(ReactionKernel::from_table(
-                vec![1.0e4, 1.0e6],
-                vec![2.0, 4.0],
-            )),
-        });
-        nuc_a.discrete_level_angles.push(None);
-        nuc_a.discrete_levels.push(DiscreteLevel {
-            info: DiscreteLevelInfo { mt: 52, q_value: -2.0e5, threshold: 2.0e5 },
-            kernel: Some(ReactionKernel::from_table(
-                vec![1.0e5, 5.0e6, 1.0e7],
-                vec![1.5, 3.0, 2.5],
-            )),
-        });
-        nuc_a.discrete_level_angles.push(None);
-
-        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
-
-        let bundle_legacy = ctx
-            .upload_nuclide_data_uncached(&nuclides, rank)
-            .expect("legacy upload");
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_c_cat(&stream, &per_nucs).expect("assemble_c_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-
-        assert_eq!(
-            dtoh_f64(&assembled.level_q_values),
-            dtoh_f64(&bundle_legacy.level_q_values),
-            "level_q_values",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.level_thresholds),
-            dtoh_f64(&bundle_legacy.level_thresholds),
-            "level_thresholds",
-        );
-        assert_eq!(
-            dtoh_i32(&assembled.level_mt),
-            dtoh_i32(&bundle_legacy.level_mt),
-            "level_mt",
-        );
-        assert_eq!(
-            dtoh_i32(&assembled.level_has_kernel),
-            dtoh_i32(&bundle_legacy.level_has_kernel),
-            "level_has_kernel",
-        );
-        assert_eq!(
-            assembled.level_offsets_vec,
-            dtoh_i32(&bundle_legacy.level_offsets),
-            "level_offsets",
-        );
-        assert_eq!(
-            assembled.level_counts_vec,
-            dtoh_i32(&bundle_legacy.level_counts),
-            "level_counts",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.level_basis),
-            dtoh_f64(&bundle_legacy.level_basis),
-            "level_basis",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.level_coeffs),
-            dtoh_f64(&bundle_legacy.level_coeffs),
-            "level_coeffs",
-        );
-        assert_eq!(
-            assembled.level_basis_offsets_vec,
-            dtoh_i32(&bundle_legacy.level_basis_offsets),
-            "level_basis_offsets",
-        );
-        assert_eq!(
-            assembled.level_coeffs_offsets_vec,
-            dtoh_i32(&bundle_legacy.level_coeffs_offsets),
-            "level_coeffs_offsets",
-        );
-        assert_eq!(
-            assembled.lev_ang_lev_off_vec,
-            dtoh_i32(&bundle_legacy.lev_ang_lev_off),
-            "lev_ang_lev_off",
-        );
-        assert_eq!(
-            assembled.lev_ang_lev_ne_vec,
-            dtoh_i32(&bundle_legacy.lev_ang_lev_ne),
-            "lev_ang_lev_ne",
-        );
-    }
-
-    #[test]
-    fn assemble_a5_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::hdf5_reader::{
-            EnergyDistribution, FissionEnergyLaw, MaxwellLaw, TabularEnergyDist, WattLaw,
-        };
-
-        // Three nuclides exercising all three branches:
-        // nuc_a: Tabular (Law 4)
-        // nuc_b: Watt (Law 11)
-        // nuc_c: Maxwell (Law 7)
-        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        nuc_a.fission_energy_dist = Some(EnergyDistribution {
-            energies: vec![1.0e3, 1.0e6],
-            distributions: vec![
-                TabularEnergyDist {
-                    e_out: vec![1.0e4, 1.0e6, 1.0e7],
-                    pdf: vec![1.0e-7, 1.0e-7, 1.0e-7],
-                    cdf: vec![0.0, 0.5, 1.0],
-                },
-                TabularEnergyDist {
-                    e_out: vec![1.0e4, 1.0e7],
-                    pdf: vec![1.0e-7, 1.0e-7],
-                    cdf: vec![0.0, 1.0],
-                },
-            ],
-            closed_form: None,
-        });
-
-        let mut nuc_b = NuclideKernels::empty(233.0, 2.49);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![9.0, 4.5, 0.9],
-        ));
-        nuc_b.fission_energy_dist = Some(EnergyDistribution {
-            energies: vec![],
-            distributions: vec![],
-            closed_form: Some(FissionEnergyLaw::Watt(WattLaw {
-                a_energies: vec![1.0e3, 1.0e6],
-                a_values: vec![1.0e6, 1.5e6],
-                b_energies: vec![1.0e3, 1.0e6],
-                b_values: vec![2.0, 3.0],
-                u: 0.0,
-            })),
-        });
-
-        let mut nuc_c = NuclideKernels::empty(234.0, 2.4);
-        nuc_c.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![9.5, 4.8, 0.95],
-        ));
-        nuc_c.fission_energy_dist = Some(EnergyDistribution {
-            energies: vec![],
-            distributions: vec![],
-            closed_form: Some(FissionEnergyLaw::Maxwell(MaxwellLaw {
-                theta_energies: vec![1.0e3, 1.0e7],
-                theta_values: vec![1.0e6, 1.4e6],
-                u: 1.0e3,
-            })),
-        });
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b), Arc::new(nuc_c)];
-        let rank = 5;
-
-        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_a5_cat(&stream, &per_nucs).expect("assemble_a5_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-
-        // Tabular fields.
-        assert_eq!(
-            dtoh_f64(&assembled.fis_inc_energies),
-            dtoh_f64(&bundle_legacy.fis_inc_energies),
-            "fis_inc_energies"
-        );
-        assert_eq!(
-            assembled.fis_dist_offsets_vec,
-            dtoh_i32(&bundle_legacy.fis_dist_offsets),
-            "fis_dist_offsets"
-        );
-        assert_eq!(
-            assembled.fis_dist_sizes_vec,
-            dtoh_i32(&bundle_legacy.fis_dist_sizes),
-            "fis_dist_sizes"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.fis_e_out),
-            dtoh_f64(&bundle_legacy.fis_e_out),
-            "fis_e_out"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.fis_cdf),
-            dtoh_f64(&bundle_legacy.fis_cdf),
-            "fis_cdf"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.fis_pdf),
-            dtoh_f64(&bundle_legacy.fis_pdf),
-            "fis_pdf"
-        );
-        assert_eq!(
-            assembled.fis_nuc_offsets_vec,
-            dtoh_i32(&bundle_legacy.fis_nuc_offsets),
-            "fis_nuc_offsets"
-        );
-        assert_eq!(
-            assembled.fis_nuc_n_inc_vec,
-            dtoh_i32(&bundle_legacy.fis_nuc_n_inc),
-            "fis_nuc_n_inc"
-        );
-        // Watt fields.
-        assert_eq!(
-            dtoh_f64(&assembled.watt_inc_energies),
-            dtoh_f64(&bundle_legacy.watt_inc_energies),
-            "watt_inc_energies"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.watt_a),
-            dtoh_f64(&bundle_legacy.watt_a),
-            "watt_a"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.watt_b),
-            dtoh_f64(&bundle_legacy.watt_b),
-            "watt_b"
-        );
-        assert_eq!(
-            assembled.watt_u_vec,
-            {
-                let mut v = vec![0.0; bundle_legacy.watt_u.len()];
-                stream.memcpy_dtoh(&bundle_legacy.watt_u, &mut v).unwrap();
-                v
-            },
-            "watt_u"
-        );
-        assert_eq!(
-            assembled.watt_nuc_offsets_vec,
-            dtoh_i32(&bundle_legacy.watt_nuc_offsets),
-            "watt_nuc_offsets"
-        );
-        assert_eq!(
-            assembled.watt_nuc_n_vec,
-            dtoh_i32(&bundle_legacy.watt_nuc_n),
-            "watt_nuc_n"
-        );
-        // MaxEvap fields.
-        assert_eq!(
-            dtoh_f64(&assembled.maxevap_inc_energies),
-            dtoh_f64(&bundle_legacy.maxevap_inc_energies),
-            "maxevap_inc_energies"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.maxevap_theta),
-            dtoh_f64(&bundle_legacy.maxevap_theta),
-            "maxevap_theta"
-        );
-        assert_eq!(
-            assembled.maxevap_u_vec,
-            {
-                let mut v = vec![0.0; bundle_legacy.maxevap_u.len()];
-                stream
-                    .memcpy_dtoh(&bundle_legacy.maxevap_u, &mut v)
-                    .unwrap();
-                v
-            },
-            "maxevap_u"
-        );
-        assert_eq!(
-            assembled.maxevap_law_vec,
-            dtoh_i32(&bundle_legacy.maxevap_law),
-            "maxevap_law"
-        );
-        assert_eq!(
-            assembled.maxevap_nuc_offsets_vec,
-            dtoh_i32(&bundle_legacy.maxevap_nuc_offsets),
-            "maxevap_nuc_offsets"
-        );
-        assert_eq!(
-            assembled.maxevap_nuc_n_vec,
-            dtoh_i32(&bundle_legacy.maxevap_nuc_n),
-            "maxevap_nuc_n"
-        );
-    }
-
-    #[test]
-    fn assemble_a7_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::hdf5_reader::UrrProbabilityTables;
-
-        let mut nuc_a = NuclideKernels::empty(238.0, 0.0);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        // 2 energies × 3 bands.
-        nuc_a.urr_tables = Some(UrrProbabilityTables {
-            energies: vec![1.0e4, 1.0e5],
-            n_bands: 3,
-            cum_prob: vec![vec![0.33, 0.66, 1.0], vec![0.25, 0.5, 1.0]],
-            total_factor: vec![vec![1.0, 2.0, 3.0], vec![1.1, 2.1, 3.1]],
-            elastic_factor: vec![vec![0.5, 1.0, 1.5], vec![0.55, 1.05, 1.55]],
-            fission_factor: vec![vec![0.0, 0.5, 1.0], vec![0.0, 0.55, 1.05]],
-            capture_factor: vec![vec![0.5, 0.5, 0.5], vec![0.4, 0.45, 0.5]],
-            multiply_smooth: true,
-            interpolation: 2,
-        });
-        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
-
-        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_a7_cat(&stream, &per_nucs).expect("assemble_a7_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        assert_eq!(
-            dtoh_f64(&assembled.urr_energies),
-            dtoh_f64(&bundle_legacy.urr_energies),
-            "urr_energies"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.urr_cum_prob),
-            dtoh_f64(&bundle_legacy.urr_cum_prob),
-            "urr_cum_prob"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.urr_total_f),
-            dtoh_f64(&bundle_legacy.urr_total_f),
-            "urr_total_f"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.urr_elastic_f),
-            dtoh_f64(&bundle_legacy.urr_elastic_f),
-            "urr_elastic_f"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.urr_fission_f),
-            dtoh_f64(&bundle_legacy.urr_fission_f),
-            "urr_fission_f"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.urr_capture_f),
-            dtoh_f64(&bundle_legacy.urr_capture_f),
-            "urr_capture_f"
-        );
-        assert_eq!(
-            assembled.urr_offsets_vec,
-            dtoh_i32(&bundle_legacy.urr_offsets),
-            "urr_offsets"
-        );
-        assert_eq!(
-            assembled.urr_n_energies_vec,
-            dtoh_i32(&bundle_legacy.urr_n_energies),
-            "urr_n_energies"
-        );
-        assert_eq!(
-            assembled.urr_n_bands_vec,
-            dtoh_i32(&bundle_legacy.urr_n_bands),
-            "urr_n_bands"
-        );
-        assert_eq!(
-            assembled.urr_multiply_smooth_vec,
-            dtoh_i32(&bundle_legacy.urr_multiply_smooth),
-            "urr_multiply_smooth"
-        );
-    }
 
     #[test]
     fn ptr_arrays_match_per_nuclide_device_addresses() {
@@ -3020,616 +2437,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn full_bundle_wire_in_matches_legacy_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::hdf5_reader::{
-            DiscreteLevelInfo, EnergyDistribution, FissionEnergyLaw, MaxwellLaw,
-            NuBarTable, TabularEnergyDist, UrrProbabilityTables, WattLaw,
-        };
-        use crate::transport::xs_provider::DiscreteLevel;
 
-        // A bundle with ALL field categories non-trivially populated
-        // across multiple nuclides — the strongest end-to-end check
-        // that the new per-nuclide wire-in produces the same flat
-        // GpuNuclideData as the legacy inline-packing path.
-        let mut nuc_a = NuclideKernels::empty(235.0, 2.43);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        nuc_a.fission = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![0.0, 0.0, 1.5],
-        ));
-        nuc_a.total_xs_raw = Some(vec![20.0, 10.0, 2.5]);
-        nuc_a.nu_bar_table = Some(NuBarTable {
-            energies: vec![1.0, 1.0e6],
-            values: vec![2.43, 2.95],
-        });
-        nuc_a.discrete_levels.push(DiscreteLevel {
-            info: DiscreteLevelInfo { mt: 51, q_value: -1.0e5, threshold: 1.0e5 },
-            kernel: Some(ReactionKernel::from_table(
-                vec![1.0e4, 1.0e6],
-                vec![2.0, 4.0],
-            )),
-        });
-        nuc_a.discrete_level_angles.push(None);
-        nuc_a.fission_energy_dist = Some(EnergyDistribution {
-            energies: vec![1.0e3, 1.0e6],
-            distributions: vec![
-                TabularEnergyDist {
-                    e_out: vec![1.0e4, 1.0e7],
-                    pdf: vec![1.0e-7, 1.0e-7],
-                    cdf: vec![0.0, 1.0],
-                },
-                TabularEnergyDist {
-                    e_out: vec![1.0e4, 1.0e6, 1.0e7],
-                    pdf: vec![1.0e-7, 1.0e-7, 1.0e-7],
-                    cdf: vec![0.0, 0.5, 1.0],
-                },
-            ],
-            closed_form: None,
-        });
-        nuc_a.urr_tables = Some(UrrProbabilityTables {
-            energies: vec![1.0e4, 1.0e5],
-            n_bands: 2,
-            cum_prob: vec![vec![0.5, 1.0], vec![0.5, 1.0]],
-            total_factor: vec![vec![1.0, 2.0], vec![1.1, 2.1]],
-            elastic_factor: vec![vec![0.5, 1.0], vec![0.55, 1.05]],
-            fission_factor: vec![vec![0.0, 1.0], vec![0.0, 1.05]],
-            capture_factor: vec![vec![0.5, 0.5], vec![0.4, 0.45]],
-            multiply_smooth: true,
-            interpolation: 2,
-        });
 
-        let mut nuc_b = NuclideKernels::empty(233.0, 2.49);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![9.0, 4.5, 0.9],
-        ));
-        nuc_b.fission_energy_dist = Some(EnergyDistribution {
-            energies: vec![],
-            distributions: vec![],
-            closed_form: Some(FissionEnergyLaw::Watt(WattLaw {
-                a_energies: vec![1.0e3, 1.0e6],
-                a_values: vec![1.0e6, 1.5e6],
-                b_energies: vec![1.0e3, 1.0e6],
-                b_values: vec![2.0, 3.0],
-                u: 0.0,
-            })),
-        });
 
-        let mut nuc_c = NuclideKernels::empty(16.0, 0.0);
-        nuc_c.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-        nuc_c.fission_energy_dist = Some(EnergyDistribution {
-            energies: vec![],
-            distributions: vec![],
-            closed_form: Some(FissionEnergyLaw::Maxwell(MaxwellLaw {
-                theta_energies: vec![1.0e3, 1.0e7],
-                theta_values: vec![1.0e6, 1.4e6],
-                u: 1.0e3,
-            })),
-        });
 
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b), Arc::new(nuc_c)];
-        let rank = 5;
-
-        let legacy = ctx
-            .upload_nuclide_data_uncached_legacy(&nuclides, rank)
-            .unwrap();
-        let new = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
-
-        let cmp_f64 = |label: &str, a: &CudaSlice<f64>, b: &CudaSlice<f64>| {
-            let mut va = vec![0.0_f64; a.len()];
-            let mut vb = vec![0.0_f64; b.len()];
-            stream.memcpy_dtoh(a, &mut va).unwrap();
-            stream.memcpy_dtoh(b, &mut vb).unwrap();
-            assert_eq!(va, vb, "{label}");
-        };
-        let cmp_i32 = |label: &str, a: &CudaSlice<i32>, b: &CudaSlice<i32>| {
-            let mut va = vec![0_i32; a.len()];
-            let mut vb = vec![0_i32; b.len()];
-            stream.memcpy_dtoh(a, &mut va).unwrap();
-            stream.memcpy_dtoh(b, &mut vb).unwrap();
-            assert_eq!(va, vb, "{label}");
-        };
-
-        cmp_f64("all_basis", &new.all_basis, &legacy.all_basis);
-        cmp_f64("all_coeffs", &new.all_coeffs, &legacy.all_coeffs);
-        cmp_f64(
-            "all_energy_grids",
-            &new.all_energy_grids,
-            &legacy.all_energy_grids,
-        );
-        cmp_i32("basis_offsets", &new.basis_offsets, &legacy.basis_offsets);
-        cmp_i32("grid_offsets", &new.grid_offsets, &legacy.grid_offsets);
-        cmp_i32("n_energies", &new.n_energies, &legacy.n_energies);
-        cmp_i32("has_reaction", &new.has_reaction, &legacy.has_reaction);
-        cmp_i32("coeffs_offsets", &new.coeffs_offsets, &legacy.coeffs_offsets);
-        assert_eq!(new.rank, legacy.rank, "rank");
-        cmp_f64("total_xs", &new.total_xs, &legacy.total_xs);
-        cmp_i32(
-            "total_xs_offsets",
-            &new.total_xs_offsets,
-            &legacy.total_xs_offsets,
-        );
-        cmp_i32("has_total_xs", &new.has_total_xs, &legacy.has_total_xs);
-        cmp_f64("pointwise_xs", &new.pointwise_xs, &legacy.pointwise_xs);
-        cmp_i32("pw_offsets", &new.pw_offsets, &legacy.pw_offsets);
-        cmp_i32("has_pw", &new.has_pw, &legacy.has_pw);
-        cmp_f64("nu_bar_energies", &new.nu_bar_energies, &legacy.nu_bar_energies);
-        cmp_f64("nu_bar_values", &new.nu_bar_values, &legacy.nu_bar_values);
-        cmp_i32("nu_bar_offsets", &new.nu_bar_offsets, &legacy.nu_bar_offsets);
-        cmp_i32("nu_bar_sizes", &new.nu_bar_sizes, &legacy.nu_bar_sizes);
-        cmp_f64("level_q_values", &new.level_q_values, &legacy.level_q_values);
-        cmp_f64("level_thresholds", &new.level_thresholds, &legacy.level_thresholds);
-        cmp_i32("level_offsets", &new.level_offsets, &legacy.level_offsets);
-        cmp_i32("level_counts", &new.level_counts, &legacy.level_counts);
-        cmp_f64("level_basis", &new.level_basis, &legacy.level_basis);
-        cmp_f64("level_coeffs", &new.level_coeffs, &legacy.level_coeffs);
-        cmp_i32(
-            "level_basis_offsets",
-            &new.level_basis_offsets,
-            &legacy.level_basis_offsets,
-        );
-        cmp_i32(
-            "level_coeffs_offsets",
-            &new.level_coeffs_offsets,
-            &legacy.level_coeffs_offsets,
-        );
-        cmp_i32(
-            "level_has_kernel",
-            &new.level_has_kernel,
-            &legacy.level_has_kernel,
-        );
-        cmp_i32("level_mt", &new.level_mt, &legacy.level_mt);
-        cmp_f64("ang_energies", &new.ang_energies, &legacy.ang_energies);
-        cmp_f64("ang_mu", &new.ang_mu, &legacy.ang_mu);
-        cmp_f64("ang_cdf", &new.ang_cdf, &legacy.ang_cdf);
-        cmp_i32("ang_nuc_offsets", &new.ang_nuc_offsets, &legacy.ang_nuc_offsets);
-        cmp_i32(
-            "ang_nuc_n_energies",
-            &new.ang_nuc_n_energies,
-            &legacy.ang_nuc_n_energies,
-        );
-        cmp_i32("ang_is_cm", &new.ang_is_cm, &legacy.ang_is_cm);
-        cmp_f64("fis_inc_energies", &new.fis_inc_energies, &legacy.fis_inc_energies);
-        cmp_f64("fis_e_out", &new.fis_e_out, &legacy.fis_e_out);
-        cmp_f64("fis_cdf", &new.fis_cdf, &legacy.fis_cdf);
-        cmp_f64("fis_pdf", &new.fis_pdf, &legacy.fis_pdf);
-        cmp_i32("fis_nuc_offsets", &new.fis_nuc_offsets, &legacy.fis_nuc_offsets);
-        cmp_i32("fis_nuc_n_inc", &new.fis_nuc_n_inc, &legacy.fis_nuc_n_inc);
-        cmp_f64(
-            "watt_inc_energies",
-            &new.watt_inc_energies,
-            &legacy.watt_inc_energies,
-        );
-        cmp_f64("watt_a", &new.watt_a, &legacy.watt_a);
-        cmp_f64("watt_b", &new.watt_b, &legacy.watt_b);
-        cmp_f64("watt_u", &new.watt_u, &legacy.watt_u);
-        cmp_i32(
-            "watt_nuc_offsets",
-            &new.watt_nuc_offsets,
-            &legacy.watt_nuc_offsets,
-        );
-        cmp_i32("watt_nuc_n", &new.watt_nuc_n, &legacy.watt_nuc_n);
-        cmp_f64(
-            "maxevap_inc_energies",
-            &new.maxevap_inc_energies,
-            &legacy.maxevap_inc_energies,
-        );
-        cmp_f64("maxevap_theta", &new.maxevap_theta, &legacy.maxevap_theta);
-        cmp_i32("maxevap_law", &new.maxevap_law, &legacy.maxevap_law);
-        cmp_f64("urr_energies", &new.urr_energies, &legacy.urr_energies);
-        cmp_f64("urr_cum_prob", &new.urr_cum_prob, &legacy.urr_cum_prob);
-        cmp_f64("urr_total_f", &new.urr_total_f, &legacy.urr_total_f);
-        cmp_i32("urr_offsets", &new.urr_offsets, &legacy.urr_offsets);
-        cmp_f64("inel_cdf_data", &new.inel_cdf_data, &legacy.inel_cdf_data);
-        cmp_i32("inel_cdf_off", &new.inel_cdf_off, &legacy.inel_cdf_off);
-    }
-
-    #[test]
-    fn assemble_a8_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::transport::xs_provider::InelasticCdf;
-
-        let mut nuc_a = NuclideKernels::empty(238.0, 0.0);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        // 3-energy × 2-temp × 4-level synthetic CDF tensor.
-        nuc_a.inelastic_cdf = Some(InelasticCdf {
-            n_levels: 4,
-            n_temp: 2,
-            n_energy: 3,
-            log_e_min: 4.0,
-            log_e_max: 7.0,
-            cdf_flat: (0..3 * 2 * 4).map(|i| i as f64 * 0.1).collect(),
-            level_mts: vec![51, 52, 53, 91],
-        });
-        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
-
-        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_a8_cat(&stream, &per_nucs).expect("assemble_a8_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        assert_eq!(
-            dtoh_f64(&assembled.inel_cdf_data),
-            dtoh_f64(&bundle_legacy.inel_cdf_data),
-            "inel_cdf_data"
-        );
-        assert_eq!(
-            assembled.inel_cdf_off_vec,
-            dtoh_i32(&bundle_legacy.inel_cdf_off),
-            "inel_cdf_off"
-        );
-        assert_eq!(
-            assembled.inel_cdf_n_e_vec,
-            dtoh_i32(&bundle_legacy.inel_cdf_n_e),
-            "inel_cdf_n_e"
-        );
-        assert_eq!(
-            assembled.inel_cdf_n_t_vec,
-            dtoh_i32(&bundle_legacy.inel_cdf_n_t),
-            "inel_cdf_n_t"
-        );
-        assert_eq!(
-            assembled.inel_cdf_n_lev_vec,
-            dtoh_i32(&bundle_legacy.inel_cdf_n_lev),
-            "inel_cdf_n_lev"
-        );
-        assert_eq!(
-            assembled.inel_cdf_log_e_min_vec,
-            dtoh_f64(&bundle_legacy.inel_cdf_log_e_min),
-            "inel_cdf_log_e_min"
-        );
-        assert_eq!(
-            assembled.inel_cdf_log_e_max_vec,
-            dtoh_f64(&bundle_legacy.inel_cdf_log_e_max),
-            "inel_cdf_log_e_max"
-        );
-    }
-
-    #[test]
-    fn assemble_a6_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::hdf5_reader::{EnergyDistribution, TabularEnergyDist};
-
-        // nuc_a has MT=91; nuc_b doesn't. Forces non-trivial nuc_offsets.
-        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        nuc_a.inelastic_continuum_edist = Some(EnergyDistribution {
-            energies: vec![1.0e5, 1.0e7],
-            distributions: vec![
-                TabularEnergyDist {
-                    e_out: vec![1.0e4, 1.0e5],
-                    pdf: vec![1.0e-5, 1.0e-5],
-                    cdf: vec![0.0, 1.0],
-                },
-                TabularEnergyDist {
-                    e_out: vec![1.0e4, 1.0e6, 1.0e7],
-                    pdf: vec![1.0e-7, 1.0e-7, 1.0e-7],
-                    cdf: vec![0.0, 0.5, 1.0],
-                },
-            ],
-            closed_form: None,
-        });
-        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
-
-        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_a6_cat(&stream, &per_nucs).expect("assemble_a6_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        assert_eq!(
-            dtoh_f64(&assembled.inel91_inc_energies),
-            dtoh_f64(&bundle_legacy.inel91_inc_energies),
-            "inel91_inc_energies"
-        );
-        assert_eq!(
-            assembled.inel91_dist_offsets_vec,
-            dtoh_i32(&bundle_legacy.inel91_dist_offsets),
-            "inel91_dist_offsets"
-        );
-        assert_eq!(
-            assembled.inel91_dist_sizes_vec,
-            dtoh_i32(&bundle_legacy.inel91_dist_sizes),
-            "inel91_dist_sizes"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.inel91_e_out),
-            dtoh_f64(&bundle_legacy.inel91_e_out),
-            "inel91_e_out"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.inel91_cdf),
-            dtoh_f64(&bundle_legacy.inel91_cdf),
-            "inel91_cdf"
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.inel91_pdf),
-            dtoh_f64(&bundle_legacy.inel91_pdf),
-            "inel91_pdf"
-        );
-        assert_eq!(
-            assembled.inel91_nuc_offsets_vec,
-            dtoh_i32(&bundle_legacy.inel91_nuc_offsets),
-            "inel91_nuc_offsets"
-        );
-        assert_eq!(
-            assembled.inel91_nuc_n_inc_vec,
-            dtoh_i32(&bundle_legacy.inel91_nuc_n_inc),
-            "inel91_nuc_n_inc"
-        );
-    }
-
-    #[test]
-    fn assemble_a4_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-        use crate::hdf5_reader::{AngularDistribution, TabularMuDist};
-
-        // nuc_a: 2 incident-energy bins, each with a mu/cdf dist.
-        // nuc_b: no elastic angle data.
-        // Forces non-zero `ang_nuc_offsets[1]` shifting in the bundle.
-        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        nuc_a.elastic_angle = Some(AngularDistribution {
-            energies: vec![1.0e3, 1.0e6],
-            distributions: vec![
-                TabularMuDist {
-                    mu: vec![-1.0, 0.0, 1.0],
-                    pdf: vec![0.5, 0.5, 0.5],
-                    cdf: vec![0.0, 0.5, 1.0],
-                    histogram: false,
-                },
-                TabularMuDist {
-                    mu: vec![-1.0, 1.0],
-                    pdf: vec![0.5, 0.5],
-                    cdf: vec![0.0, 1.0],
-                    histogram: false,
-                },
-            ],
-            center_of_mass: true,
-        });
-        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
-
-        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_a4_cat(&stream, &per_nucs).expect("assemble_a4_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-
-        assert_eq!(
-            dtoh_f64(&assembled.ang_energies),
-            dtoh_f64(&bundle_legacy.ang_energies),
-            "ang_energies",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.ang_mu),
-            dtoh_f64(&bundle_legacy.ang_mu),
-            "ang_mu",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.ang_cdf),
-            dtoh_f64(&bundle_legacy.ang_cdf),
-            "ang_cdf",
-        );
-        assert_eq!(
-            assembled.ang_dist_offsets_vec,
-            dtoh_i32(&bundle_legacy.ang_dist_offsets),
-            "ang_dist_offsets",
-        );
-        assert_eq!(
-            assembled.ang_dist_sizes_vec,
-            dtoh_i32(&bundle_legacy.ang_dist_sizes),
-            "ang_dist_sizes",
-        );
-        assert_eq!(
-            assembled.ang_nuc_offsets_vec,
-            dtoh_i32(&bundle_legacy.ang_nuc_offsets),
-            "ang_nuc_offsets",
-        );
-        assert_eq!(
-            assembled.ang_nuc_n_energies_vec,
-            dtoh_i32(&bundle_legacy.ang_nuc_n_energies),
-            "ang_nuc_n_energies",
-        );
-        assert_eq!(
-            assembled.ang_is_cm_vec,
-            dtoh_i32(&bundle_legacy.ang_is_cm),
-            "ang_is_cm",
-        );
-    }
-
-    #[test]
-    fn assemble_b_cat_matches_legacy_bundle_byte_for_byte() {
-        let Some(stream) = try_cuda_stream() else {
-            eprintln!("skipping: no CUDA device");
-            return;
-        };
-        use crate::gpu_transport::GpuTransportContext;
-        let Ok(ctx) = GpuTransportContext::new() else {
-            eprintln!("skipping: cannot construct GpuTransportContext");
-            return;
-        };
-
-        // Two nuclides exercising different reaction subsets:
-        // nuc_a has elastic + fission (Table variants, padded to rank).
-        // nuc_b has elastic + capture.
-        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
-        nuc_a.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![10.0, 5.0, 1.0],
-        ));
-        nuc_a.fission = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 1.0, 2.0e7],
-            vec![0.0, 0.0, 1.5],
-        ));
-        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
-        nuc_b.elastic = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![3.5, 3.6, 3.0],
-        ));
-        nuc_b.capture = Some(ReactionKernel::from_table(
-            vec![1.0e-5, 100.0, 2.0e7],
-            vec![1e-4, 1e-5, 1e-6],
-        ));
-
-        let nuclides: Vec<Arc<NuclideKernels>> =
-            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
-        let rank = 5;
-
-        let bundle_legacy = ctx
-            .upload_nuclide_data_uncached(&nuclides, rank)
-            .expect("legacy upload");
-        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
-            .iter()
-            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
-            .collect();
-        let assembled = assemble_b_cat(&stream, &per_nucs).expect("assemble_b_cat");
-
-        let dtoh_f64 = |s: &CudaSlice<f64>| {
-            let mut v = vec![0.0_f64; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-        let dtoh_i32 = |s: &CudaSlice<i32>| {
-            let mut v = vec![0_i32; s.len()];
-            stream.memcpy_dtoh(s, &mut v).unwrap();
-            v
-        };
-
-        assert_eq!(
-            dtoh_f64(&assembled.all_basis),
-            dtoh_f64(&bundle_legacy.all_basis),
-            "all_basis",
-        );
-        assert_eq!(
-            dtoh_f64(&assembled.all_coeffs),
-            dtoh_f64(&bundle_legacy.all_coeffs),
-            "all_coeffs",
-        );
-        assert_eq!(
-            assembled.basis_offsets_vec,
-            dtoh_i32(&bundle_legacy.basis_offsets),
-            "basis_offsets",
-        );
-        assert_eq!(
-            assembled.coeffs_offsets_vec,
-            dtoh_i32(&bundle_legacy.coeffs_offsets),
-            "coeffs_offsets",
-        );
-        assert_eq!(
-            assembled.has_reaction_vec,
-            dtoh_i32(&bundle_legacy.has_reaction),
-            "has_reaction",
-        );
-    }
 
     #[test]
     fn upload_one_nuclide_packs_table_reaction_to_rank() {
