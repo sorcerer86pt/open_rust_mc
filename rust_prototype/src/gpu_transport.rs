@@ -67,26 +67,36 @@ struct GpuUploadKey {
     nuc_ptrs: Vec<usize>,
 }
 
-/// Default upper bound on `Arc<GpuNuclideData>` bundles retained by
-/// the per-context cache. Each entry pins ~1.4 GB of `CudaSlice` on
-/// a typical fast-metal ICSBEP case (≈ 184 MB SVD basis + 1.2 GB
-/// discrete-level basis + 42 MB pointwise). An unbounded `HashMap`
-/// (the prior implementation) accumulated one entry per distinct
-/// case bundle and OOM'd the GPU around the 7-8th case on a 12 GB
-/// 3080 — looking like a hang as the driver started backing
-/// allocations with mapped host memory, which slowed every XS read
-/// to a PCIe round-trip.
+/// Default fraction of total device memory reserved as the bundle
+/// cache budget. The remaining fraction has to fit: the live bundle's
+/// transient upload (1×), per-batch SoA buffers, the recursive
+/// geometry context, and any concurrent kernel allocations. 0.75
+/// leaves a quarter of the card for the live transport pipeline,
+/// which empirically fits the assembly-XS upload + per-batch SoA on
+/// both the A1000 (4 GB → 3 GB budget, ~0.5 GB for transient + 0.5 GB
+/// for batch+context) and the 3080 (12 GB → 9 GB budget). On bigger
+/// cards (24 GB+) it scales linearly.
 ///
-/// The actual runtime cap is set by `bundle_cache_cap()` based on
-/// device total memory: 4 GB cards (A1000 laptop) use cap=1 because
-/// holding two bundles + a transient upload (~ 3 × 1.5 GB) exceeds
-/// device capacity, 12 GB+ cards (3080) use cap=2 so back-to-back
-/// runs of the same case still hit cache.
+/// Override at runtime via env: `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION=0.6`
+/// for a fractional override, or `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES=N`
+/// for an explicit byte budget (wins if both are set). Numbers outside
+/// [0.05, 0.95] are clamped to the range.
 ///
-/// Override with `OPEN_RUST_MC_GPU_BUNDLE_CAP=N` for benchmarking.
-const BUNDLE_CACHE_CAP_DEFAULT_LOW_VRAM: usize = 1;
-const BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM: usize = 2;
-const LOW_VRAM_THRESHOLD_BYTES: usize = 6 * 1024 * 1024 * 1024;
+/// Each entry pins ~1.4 GB of `CudaSlice` on a typical fast-metal
+/// ICSBEP case (≈ 184 MB SVD basis + 1.2 GB discrete-level basis +
+/// 42 MB pointwise). At a 3 GB budget that's two bundles; at 9 GB
+/// roughly six. Thermal cases with fewer discrete levels are smaller
+/// and pack more tightly. Eviction is *byte*-budgeted, not
+/// count-budgeted, so the cache adapts to the actual bundle footprint
+/// rather than a coarse "1 vs 2" decision.
+///
+/// Floor at 1 entry: a budget too small to fit even one bundle still
+/// caches that bundle (otherwise we'd re-upload it twice for the
+/// same case — strictly worse than letting it slightly exceed
+/// budget).
+const BUNDLE_CACHE_DEFAULT_FRACTION: f64 = 0.75;
+const BUNDLE_CACHE_FRACTION_MIN: f64 = 0.05;
+const BUNDLE_CACHE_FRACTION_MAX: f64 = 0.95;
 
 /// Compiled CUDA kernels for event-based transport.
 pub struct GpuTransportContext {
@@ -99,27 +109,39 @@ pub struct GpuTransportContext {
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
     k_transport_persistent: CudaFunction,
-    /// Bounded LRU of recently-uploaded bundles. Insertion-ordered;
-    /// most-recently-used moves to the back, the front evicts when
-    /// `len() == BUNDLE_CACHE_CAP` and a new bundle inserts.
+    /// Byte-budgeted LRU of recently-uploaded bundles.
+    /// Insertion-ordered; most-recently-used moves to the back, the
+    /// front evicts when `total_bytes + last_bundle_bytes` would
+    /// exceed `bundle_cache_budget_bytes()`.
+    ///
+    /// Entry layout: `(key, arc, device_bytes)`. `device_bytes` is
+    /// summed from every `CudaSlice::num_bytes()` the bundle owns;
+    /// pre-eviction can compute "is there room for another bundle of
+    /// size N" without re-walking each Arc.
     ///
     /// Re-uploading the same kernels (same pointers, same rank) finds
     /// the cached entry, promotes it, and skips the entire
     /// `clone_htod` pass — ~50 MB per actinide-heavy material avoided
-    /// on every repeat call. Linear scan is fine at cap=2; switching
-    /// to a real LRU (linked-hash-map or `lru` crate) is only
-    /// worthwhile if the cap grows past ~16.
+    /// on every repeat call. Linear scan over the deque is fine; the
+    /// total entry count caps somewhere around `total_mem / 0.5 GB`
+    /// = O(10–50) on production cards.
     ///
     /// `Mutex` not `RwLock`: the put path is rare (once per unique
     /// key) and the get path is cheap once we hold the lock.
     nuclide_buffer_cache: std::sync::Mutex<
-        std::collections::VecDeque<(GpuUploadKey, Arc<GpuNuclideData>)>,
+        std::collections::VecDeque<(GpuUploadKey, Arc<GpuNuclideData>, usize)>,
     >,
-    /// Memoised effective cap for `nuclide_buffer_cache`. Computed
-    /// lazily on first use from the device's total memory + an
-    /// optional `OPEN_RUST_MC_GPU_BUNDLE_CAP` env override. See
-    /// `bundle_cache_cap()`.
-    cached_bundle_cap: std::sync::OnceLock<usize>,
+    /// Memoised cache budget in bytes. Lazily resolved on first use:
+    /// `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES` env → explicit byte
+    /// override, else `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION` × total
+    /// device memory, else `BUNDLE_CACHE_DEFAULT_FRACTION` × total.
+    /// See `bundle_cache_budget_bytes()`.
+    cached_bundle_budget: std::sync::OnceLock<usize>,
+    /// Tracks the size of the most-recently-uploaded bundle. Used as
+    /// the predictor for "how much room do we need to free before the
+    /// next upload" during pre-eviction. Zero before the first upload,
+    /// updated atomically after each successful insert.
+    last_bundle_bytes: std::sync::atomic::AtomicUsize,
 }
 
 /// SVD data + physics tables uploaded to GPU for all nuclides.
@@ -284,6 +306,135 @@ pub struct GpuNuclideData {
     pub inel_cdf_log_e_max: CudaSlice<f64>,
 }
 
+impl GpuNuclideData {
+    /// Total on-device byte footprint of every `CudaSlice` this
+    /// bundle owns. Used by the byte-budgeted bundle LRU to decide
+    /// when to evict before the next upload.
+    ///
+    /// Sums every field; dominated by `level_basis` (~1.2 GB on a
+    /// fast-metal case) + `all_basis` (~180 MB) + `pointwise_xs`
+    /// (~40 MB). Cheap (one virtual call per field, no device
+    /// traffic).
+    pub fn device_bytes(&self) -> usize {
+        let s = self;
+        // f64 slices.
+        let f64_slices: [&CudaSlice<f64>; 41] = [
+            &s.all_basis,
+            &s.all_coeffs,
+            &s.all_energy_grids,
+            &s.total_xs,
+            &s.pointwise_xs,
+            &s.nu_bar_energies,
+            &s.nu_bar_values,
+            &s.delayed_nu_bar_energies,
+            &s.delayed_nu_bar_values,
+            &s.level_q_values,
+            &s.level_thresholds,
+            &s.level_basis,
+            &s.level_coeffs,
+            &s.lev_ang_energies,
+            &s.lev_ang_mu,
+            &s.lev_ang_cdf,
+            &s.ang_energies,
+            &s.ang_mu,
+            &s.ang_cdf,
+            &s.fis_inc_energies,
+            &s.fis_e_out,
+            &s.fis_cdf,
+            &s.fis_pdf,
+            &s.inel91_inc_energies,
+            &s.inel91_e_out,
+            &s.inel91_cdf,
+            &s.inel91_pdf,
+            &s.watt_inc_energies,
+            &s.watt_a,
+            &s.watt_b,
+            &s.watt_u,
+            &s.maxevap_inc_energies,
+            &s.maxevap_theta,
+            &s.maxevap_u,
+            &s.urr_energies,
+            &s.urr_cum_prob,
+            &s.urr_total_f,
+            &s.urr_elastic_f,
+            &s.urr_fission_f,
+            &s.urr_capture_f,
+            &s.inel_cdf_data,
+        ];
+        // i32 slices.
+        let i32_slices: [&CudaSlice<i32>; 39] = [
+            &s.basis_offsets,
+            &s.grid_offsets,
+            &s.n_energies,
+            &s.has_reaction,
+            &s.coeffs_offsets,
+            &s.total_xs_offsets,
+            &s.has_total_xs,
+            &s.pw_offsets,
+            &s.has_pw,
+            &s.nu_bar_offsets,
+            &s.nu_bar_sizes,
+            &s.delayed_nu_bar_offsets,
+            &s.delayed_nu_bar_sizes,
+            &s.level_offsets,
+            &s.level_counts,
+            &s.level_basis_offsets,
+            &s.level_coeffs_offsets,
+            &s.level_has_kernel,
+            &s.level_mt,
+            &s.lev_ang_dist_off,
+            &s.lev_ang_dist_sz,
+            &s.lev_ang_lev_off,
+            &s.lev_ang_lev_ne,
+            &s.ang_dist_offsets,
+            &s.ang_dist_sizes,
+            &s.ang_nuc_offsets,
+            &s.ang_nuc_n_energies,
+            &s.ang_is_cm,
+            &s.fis_dist_offsets,
+            &s.fis_dist_sizes,
+            &s.fis_nuc_offsets,
+            &s.fis_nuc_n_inc,
+            &s.inel91_dist_offsets,
+            &s.inel91_dist_sizes,
+            &s.inel91_nuc_offsets,
+            &s.inel91_nuc_n_inc,
+            &s.watt_nuc_offsets,
+            &s.watt_nuc_n,
+            &s.maxevap_law,
+        ];
+        // f64 fields we missed in the array above. Two more i32
+        // groups appear after `inel_cdf_data` on the inel-cdf path.
+        let i32_extra: [&CudaSlice<i32>; 9] = [
+            &s.maxevap_nuc_offsets,
+            &s.maxevap_nuc_n,
+            &s.urr_offsets,
+            &s.urr_n_energies,
+            &s.urr_n_bands,
+            &s.urr_multiply_smooth,
+            &s.inel_cdf_off,
+            &s.inel_cdf_n_e,
+            &s.inel_cdf_n_t,
+        ];
+        let f64_extra: [&CudaSlice<f64>; 2] =
+            [&s.inel_cdf_log_e_min, &s.inel_cdf_log_e_max];
+        let i32_extra2: [&CudaSlice<i32>; 1] = [&s.inel_cdf_n_lev];
+
+        let f64_total: usize = f64_slices
+            .iter()
+            .chain(f64_extra.iter())
+            .map(|x| x.num_bytes())
+            .sum();
+        let i32_total: usize = i32_slices
+            .iter()
+            .chain(i32_extra.iter())
+            .chain(i32_extra2.iter())
+            .map(|x| x.num_bytes())
+            .sum();
+        f64_total + i32_total
+    }
+}
+
 /// S(α,β) thermal scattering data on GPU.
 ///
 /// Multiple TSLs (e.g. H-in-H₂O + D-in-D₂O + C-in-graphite) are packed
@@ -435,11 +586,10 @@ impl GpuTransportContext {
             k_energy_bin_scatter,
             k_transport_persistent,
             nuclide_buffer_cache: std::sync::Mutex::new(
-                std::collections::VecDeque::with_capacity(
-                    BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM,
-                ),
+                std::collections::VecDeque::new(),
             ),
-            cached_bundle_cap: std::sync::OnceLock::new(),
+            cached_bundle_budget: std::sync::OnceLock::new(),
+            last_bundle_bytes: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -965,36 +1115,52 @@ impl GpuTransportContext {
             rank,
             nuc_ptrs: nuclides.iter().map(|a| Arc::as_ptr(a) as usize).collect(),
         };
-        let cap = self.bundle_cache_cap();
-        // Cache hit: promote the entry to MRU (back of the deque) and
-        // return its Arc. Linear scan is fine at BUNDLE_CACHE_CAP=2;
-        // becomes O(n) if cap grows large.
+        let budget = self.bundle_cache_budget_bytes();
+        let predicted = self
+            .last_bundle_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        // Cache hit: promote to MRU and return.
         //
-        // Also eagerly evict any entries we're about to push past the
-        // cap *before* the upload below. Eager eviction keeps peak VRAM
-        // at one bundle, not two: a lazy eviction (insert-then-pop)
-        // forces the GPU to hold the old + new bundle simultaneously
-        // for the duration of `upload_nuclide_data_uncached`, which
-        // OOMs on a 4 GB A1000 (and tightens pressure on a 12 GB 3080
-        // mid-sweep). The freed entry's `Arc<GpuNuclideData>` drops
-        // here iff no caller still holds it; for the ICSBEP sweep's
-        // strictly-sequential single-threaded case pattern that's
-        // always true.
+        // On miss: byte-budgeted eviction *before* upload. The
+        // predictor `last_bundle_bytes` is the size of the most-recent
+        // bundle; if 0 (first call), we fall back to the simpler "evict
+        // nothing yet" rule and let the post-upload pass do the cap.
+        //
+        // Eager eviction keeps peak VRAM at one bundle, not two: a
+        // lazy eviction (insert-then-pop) forces the GPU to hold the
+        // old + new bundle simultaneously for the duration of
+        // `upload_nuclide_data_uncached`, which OOMs a 4 GB A1000.
+        // Each popped `Arc<GpuNuclideData>` drops here iff no caller
+        // still holds it; for the ICSBEP sweep's strictly-sequential
+        // single-threaded case pattern that's always true.
+        //
+        // Always leaves at least one cached entry untouched if the
+        // budget is too small to hold even a single bundle plus the
+        // incoming — the alternative is thrashing.
         let evicted_any = {
             let mut guard = self
                 .nuclide_buffer_cache
                 .lock()
                 .expect("nuclide_buffer_cache poisoned");
-            if let Some(pos) = guard.iter().position(|(k, _)| k == &key) {
+            if let Some(pos) = guard.iter().position(|(k, _, _)| k == &key) {
                 let entry = guard.remove(pos).expect("position just located");
                 let arc = Arc::clone(&entry.1);
                 guard.push_back(entry);
                 return Ok(arc);
             }
             let mut evicted = 0;
-            while guard.len() >= cap {
-                guard.pop_front();
-                evicted += 1;
+            if predicted > 0 {
+                let total_bytes = |q: &std::collections::VecDeque<(
+                    GpuUploadKey,
+                    Arc<GpuNuclideData>,
+                    usize,
+                )>| -> usize { q.iter().map(|(_, _, b)| *b).sum() };
+                while !guard.is_empty()
+                    && total_bytes(&guard).saturating_add(predicted) > budget
+                {
+                    guard.pop_front();
+                    evicted += 1;
+                }
             }
             evicted > 0
         };
@@ -1003,9 +1169,8 @@ impl GpuTransportContext {
         // (cuMemFreeAsync doesn't trim) until cuMemPoolTrimTo is
         // called. Without this trim the new upload below allocates
         // FRESH device memory while the pool retains the evicted
-        // bytes — peak VRAM = (cap + 1) × bundle_size, which OOMs a 4
-        // GB A1000 even at cap=2. Trim returns the freed bytes to the
-        // driver so the next allocation reuses them.
+        // bytes. Trim returns the freed bytes to the driver so the
+        // next allocation reuses them.
         if evicted_any {
             self.trim_async_mempool();
         }
@@ -1015,7 +1180,13 @@ impl GpuTransportContext {
         // benign — the loser's Arc just isn't reachable from the cache
         // and frees normally.
         let fresh = self.upload_nuclide_data_uncached(nuclides, rank)?;
+        let bytes = fresh.device_bytes();
         let arc = Arc::new(fresh);
+        // Update the predictor now that we know the actual size — the
+        // next call's pre-eviction uses this value to decide how much
+        // to free.
+        self.last_bundle_bytes
+            .store(bytes, std::sync::atomic::Ordering::Relaxed);
         {
             let mut guard = self
                 .nuclide_buffer_cache
@@ -1024,18 +1195,31 @@ impl GpuTransportContext {
             // Recheck — another thread may have populated the same key
             // while we were uploading. Returning their entry is fine
             // since both uploads are content-equivalent for the same key.
-            if let Some(pos) = guard.iter().position(|(k, _)| k == &key) {
+            if let Some(pos) = guard.iter().position(|(k, _, _)| k == &key) {
                 let entry = guard.remove(pos).expect("position just located");
                 let existing = Arc::clone(&entry.1);
                 guard.push_back(entry);
                 return Ok(existing);
             }
-            // Cap may have grown again under concurrent inserts
-            // between the eager-evict above and now. Trim once more.
-            while guard.len() >= cap {
+            // Post-upload byte-budget trim. The first call (predicted
+            // = 0) skipped pre-eviction, so the budget may now be
+            // exceeded; the second-and-later calls had pre-eviction
+            // sized by the previous bundle, which may have been smaller
+            // than this one. Either way, trim from the front until
+            // adding `bytes` fits — but always leave at least one
+            // entry (the one we're about to insert) when the bundle
+            // exceeds budget on its own.
+            let total_bytes = |q: &std::collections::VecDeque<(
+                GpuUploadKey,
+                Arc<GpuNuclideData>,
+                usize,
+            )>| -> usize { q.iter().map(|(_, _, b)| *b).sum() };
+            while !guard.is_empty()
+                && total_bytes(&guard).saturating_add(bytes) > budget
+            {
                 guard.pop_front();
             }
-            guard.push_back((key, Arc::clone(&arc)));
+            guard.push_back((key, Arc::clone(&arc), bytes));
         }
         Ok(arc)
     }
@@ -1076,24 +1260,36 @@ impl GpuTransportContext {
     /// real failure mode is "no async allocator on this device"
     /// (pre-CUDA-11.2 or specific GPU SKUs), where freeing is
     /// already synchronous and there's nothing to trim.
-    /// Effective bundle-cache cap for this device. Reads
-    /// `OPEN_RUST_MC_GPU_BUNDLE_CAP` if set; otherwise picks the
-    /// low-VRAM (cap=1) or high-VRAM (cap=2) default by device total
-    /// memory. Cached in `self.cached_bundle_cap` so the env-var
-    /// parse + driver query happen once per context.
-    fn bundle_cache_cap(&self) -> usize {
-        *self.cached_bundle_cap.get_or_init(|| {
-            if let Some(v) = std::env::var_os("OPEN_RUST_MC_GPU_BUNDLE_CAP") {
+    /// Effective bundle-cache byte budget for this device. Resolved
+    /// once per context (memoised in `cached_bundle_budget`) from:
+    ///   1. `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES=N` env (explicit
+    ///      byte count, wins if set).
+    ///   2. `OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION=F` × total device
+    ///      memory (F clamped to [0.05, 0.95]).
+    ///   3. `BUNDLE_CACHE_DEFAULT_FRACTION` × total device memory
+    ///      (currently 0.75).
+    ///
+    /// Falls back to a 1 GiB hard floor if `cuDeviceTotalMem` returns
+    /// zero (unlikely; the device handle is already initialised) —
+    /// better to cache one bundle than to thrash.
+    pub fn bundle_cache_budget_bytes(&self) -> usize {
+        *self.cached_bundle_budget.get_or_init(|| {
+            const HARD_FLOOR: usize = 1 << 30; // 1 GiB
+            if let Some(v) = std::env::var_os("OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES") {
                 if let Ok(n) = v.to_string_lossy().parse::<usize>() {
                     return n.max(1);
                 }
             }
+            let frac = std::env::var("OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION")
+                .ok()
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(BUNDLE_CACHE_DEFAULT_FRACTION)
+                .clamp(BUNDLE_CACHE_FRACTION_MIN, BUNDLE_CACHE_FRACTION_MAX);
             let total = self._ctx.total_mem().unwrap_or(0);
-            if total > 0 && total < LOW_VRAM_THRESHOLD_BYTES {
-                BUNDLE_CACHE_CAP_DEFAULT_LOW_VRAM
-            } else {
-                BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM
+            if total == 0 {
+                return HARD_FLOOR;
             }
+            ((total as f64) * frac) as usize
         })
     }
 
@@ -3018,44 +3214,50 @@ mod tests {
         assert_ne!(k1, k_other);
     }
 
-    /// LRU cap behaviour: inserting more than `cap` distinct keys
-    /// must evict the oldest. This is the test that guards the
+    /// Byte-budgeted LRU: inserting bundles whose cumulative bytes
+    /// exceed the budget must evict from the front until the new
+    /// bundle fits. Always leaves at least one entry. Guards the
     /// 376-case ICSBEP sweep from re-introducing the monotonic VRAM
     /// growth that stalled the GPU run.
-    ///
-    /// Operates on a plain `VecDeque` rather than a `GpuTransportContext`
-    /// to avoid requiring a CUDA device on the test box. The eviction
-    /// logic in `upload_nuclide_data` is a 4-line block; this test
-    /// covers the same shape parameterised on `cap`.
     #[test]
-    fn bundle_cache_evicts_oldest_at_cap() {
+    fn bundle_cache_byte_budget_eviction() {
         use std::collections::VecDeque;
-        for cap in [1usize, 2, BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM] {
-            let mut cache: VecDeque<(GpuUploadKey, usize)> = VecDeque::new();
-            let mk = |i: usize| GpuUploadKey {
-                rank: 5,
-                nuc_ptrs: vec![i],
+        let mk = |i: usize| GpuUploadKey {
+            rank: 5,
+            nuc_ptrs: vec![i],
+        };
+        let push = |cache: &mut VecDeque<(GpuUploadKey, usize, usize)>,
+                    key: GpuUploadKey,
+                    val: usize,
+                    bytes: usize,
+                    budget: usize| {
+            let total_bytes = |q: &VecDeque<(GpuUploadKey, usize, usize)>| -> usize {
+                q.iter().map(|(_, _, b)| *b).sum()
             };
-            let push = |cache: &mut VecDeque<(GpuUploadKey, usize)>,
-                        key: GpuUploadKey,
-                        val: usize| {
-                while cache.len() >= cap {
-                    cache.pop_front();
-                }
-                cache.push_back((key, val));
-            };
+            while !cache.is_empty() && total_bytes(cache).saturating_add(bytes) > budget {
+                cache.pop_front();
+            }
+            cache.push_back((key, val, bytes));
+        };
 
-            for i in 0..cap + 2 {
-                push(&mut cache, mk(i), i * 100);
-            }
-            assert_eq!(cache.len(), cap, "cap={cap} should bound len");
-            // The two oldest entries (0 and 1) should have been evicted.
-            assert!(cache.iter().all(|(k, _)| k != &mk(0)));
-            if cap < 2 {
-                assert!(cache.iter().all(|(k, _)| k != &mk(1)));
-            }
-            // The newest entry must be present.
-            assert_eq!(cache.back().map(|(_, v)| *v), Some((cap + 1) * 100));
+        // Budget = 2 GiB, each bundle = 0.6 GiB → 3 fit, 4th evicts oldest.
+        let budget = 2usize * 1024 * 1024 * 1024;
+        let bundle_bytes = 600usize * 1024 * 1024;
+        let mut cache: VecDeque<(GpuUploadKey, usize, usize)> = VecDeque::new();
+        for i in 0..3 {
+            push(&mut cache, mk(i), i * 100, bundle_bytes, budget);
         }
+        assert_eq!(cache.len(), 3);
+        push(&mut cache, mk(3), 400, bundle_bytes, budget);
+        assert_eq!(cache.len(), 3, "4th insert should evict oldest");
+        assert!(cache.iter().all(|(k, _, _)| k != &mk(0)));
+        assert_eq!(cache.back().map(|(_, v, _)| *v), Some(400));
+
+        // Bundle exceeds budget alone — must still cache it (better
+        // than re-uploading on every call) and evict all others.
+        let huge = budget + 1;
+        push(&mut cache, mk(99), 9999, huge, budget);
+        assert_eq!(cache.len(), 1, "single bundle larger than budget must still cache");
+        assert_eq!(cache.back().map(|(_, v, _)| *v), Some(9999));
     }
 }
