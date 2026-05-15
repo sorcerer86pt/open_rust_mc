@@ -1,54 +1,27 @@
-//! Coordinate stack for nested-universe geometry traversal.
+//! Coordinate stack for nested-universe geometry.
 //!
-//! A particle in a recursive geometry doesn't live in a single
-//! "current cell" — it lives in a stack of frames, where each frame
-//! identifies a universe, the cell within that universe, optionally a
-//! lattice element, and the translation from the parent frame's local
-//! coordinates into this frame's local coordinates.
-//!
-//! For v1 lattices are axis-aligned and rotation-free, so `local =
-//! parent_local - offset`. The `_dir` helpers exist so callers don't
-//! bake that assumption in — when rotations land in task #15 the body
-//! changes but the call sites don't.
+//! `this_local = rotation * (parent_local - offset)`; when
+//! `rotation = None` it reduces to pure translation.
 
 use super::cell::CellFill;
 use super::{Cell, HexLatticeId, LatticeId, Mat3, UniverseId, Vec3};
 use smallvec::SmallVec;
 
-/// One frame in a particle's coordinate stack.
-///
-/// A frame names which universe and which cell of that universe the
-/// particle is in, optionally records the lattice element that hosted
-/// the universe, and stores the translation + rotation from the
-/// parent frame's local coordinates to this frame's local coordinates:
-///
-///   `this_local = rotation * (parent_local - offset)`
-///   `this_local_dir = rotation * parent_local_dir`
-///
-/// When `rotation` is `None` (the common case) the math reduces to the
-/// pure-translation form `this_local = parent_local - offset`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Coord {
     pub universe: UniverseId,
-    /// Index into the global `Geometry::cells` array.
+    /// Index into `Geometry::cells`.
     pub cell_idx: u32,
-    /// `Some((lattice_id, [ix, iy, iz]))` if this frame is inside a
-    /// rectangular lattice element. Mutually exclusive with `hex_lattice`.
+    /// `(lattice_id, [ix, iy, iz])`. Mutually exclusive with `hex_lattice`.
     pub lattice: Option<(LatticeId, [i32; 3])>,
-    /// `Some((hex_lattice_id, [q, r, z]))` if this frame is inside a
-    /// hex-grid lattice element. Mutually exclusive with `lattice`.
-    /// `q, r` are axial coords (cube `s = -q-r`); `z` is the axial
-    /// layer index (0-based).
+    /// `[q, r, z]`; axial coords (cube `s = -q-r`), `z` = axial layer.
     pub hex_lattice: Option<(HexLatticeId, [i32; 3])>,
-    /// Translation from parent local frame: applied *before* `rotation`.
     pub offset: Vec3,
-    /// Rotation from parent local frame to this frame. `None` is
-    /// equivalent to `Some(Mat3::IDENTITY)` but cheaper.
+    /// `None` ≡ identity, cheaper.
     pub rotation: Option<Mat3>,
 }
 
 impl Coord {
-    /// Build a root-universe frame with no offset, no rotation, and no lattice.
     pub fn root(universe: UniverseId, cell_idx: u32) -> Self {
         Self {
             universe,
@@ -61,28 +34,17 @@ impl Coord {
     }
 }
 
-/// A stack of coordinate frames, deepest last.
-///
-/// Inline-allocated up to depth 4 (root → assembly lattice → pin
-/// lattice → cell). Deeper geometries spill to the heap silently.
+/// Deepest last. Inline up to depth 4 (root → assembly → pin → cell);
+/// spills to heap silently for deeper.
 pub type CoordStack = SmallVec<[Coord; 4]>;
 
-/// Helpers for reading information off the deepest frame.
 pub trait CoordStackExt {
     fn deepest(&self) -> &Coord;
     fn deepest_cell_idx(&self) -> usize;
-
-    /// Index into `materials` for the deepest cell, or `None` if the
-    /// deepest cell is `Void` or a non-material fill (Universe/Lattice
-    /// — which would mean the descent stopped early, a bug).
+    /// `None` on Void or non-Material fill (the latter is a descent bug).
     fn material_idx(&self, cells: &[Cell]) -> Option<u32>;
-
-    /// Transform a world-frame position into the local frame of the
-    /// deepest coordinate.
     fn local_pos(&self, world_pos: Vec3) -> Vec3;
-
-    /// Transform a world-frame direction into the local frame of the
-    /// deepest coordinate. Identity for v1 (no rotations).
+    /// Identity in v1 (no rotations).
     fn local_dir(&self, world_dir: Vec3) -> Vec3;
 }
 

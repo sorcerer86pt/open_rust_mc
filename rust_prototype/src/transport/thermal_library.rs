@@ -1,39 +1,11 @@
-//! S(α,β) thermal-scattering library.
-//!
-//! Mirrors `NuclideLibrary` for the thermal-scattering side: instead of
-//! per-binary `data_dir.join("c_H_in_H2O.h5")` calls, ask the
-//! `ThermalLibrary` for a named binding (e.g. `H_IN_H2O`,
-//! `D_IN_D2O`) and get back the absolute path. Loading the actual
-//! `ThermalScatteringData` is still done by
-//! `hdf5_reader::load_thermal_scattering`; this is purely a name →
-//! path table.
-//!
-//! # Available bindings
-//!
-//! Every entry maps to one ENDF/B `c_<name>.h5` file shipped under
-//! `data/endfb-vii.1-hdf5/neutron`. The catalog covers the common
-//! reactor moderators / structural compounds:
-//!
-//! - light water (`H_IN_H2O`)
-//! - heavy water (`D_IN_D2O`) — for CANDU / research reactors
-//! - graphite (`GRAPHITE`) — for VHTR / pebble-bed
-//! - zirconium hydride (`H_IN_ZRH`, `ZR_IN_ZRH`) — TRIGA
-//! - beryllium / beryllium oxide (`BE`, `BE_IN_BEO`, `O_IN_BEO`)
-//! - polyethylene (`H_IN_CH2`)
-//! - benzene (`C6H6`) — calibration source
-//! - silica (`SIO2_ALPHA`) — borated glass
-//! - bound O / U in fuel (`O_IN_UO2`, `U_IN_UO2`)
-//! - liquid / solid methane (`H_IN_CH4_LIQUID`, `H_IN_CH4_SOLID`)
-//! - ortho / para H₂ and D₂ (`ORTHO_H`, `PARA_H`, `ORTHO_D`,
-//!   `PARA_D`) — cold neutron sources
-//! - aluminium / iron metals (`AL27`, `FE56`)
+//! Name → ENDF/B `c_*.h5` path table for S(α,β) data. Loading still
+//! goes through `hdf5_reader::load_thermal_scattering`.
 
 use std::path::{Path, PathBuf};
 
 use crate::hdf5_reader;
 use crate::thermal::ThermalScatteringData;
 
-/// Named entry in the static `c_*.h5` catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThermalBinding {
     HInH2O,
@@ -60,7 +32,6 @@ pub enum ThermalBinding {
 }
 
 impl ThermalBinding {
-    /// Filename component under `data_dir/neutron/`.
     pub const fn filename(self) -> &'static str {
         match self {
             ThermalBinding::HInH2O => "c_H_in_H2O.h5",
@@ -87,7 +58,6 @@ impl ThermalBinding {
         }
     }
 
-    /// Diagnostic short name — what the binding represents physically.
     pub const fn description(self) -> &'static str {
         match self {
             ThermalBinding::HInH2O => "H in light water",
@@ -115,7 +85,6 @@ impl ThermalBinding {
     }
 }
 
-/// S(α,β) data-file resolver.
 pub struct ThermalLibrary {
     data_dir: PathBuf,
 }
@@ -127,22 +96,15 @@ impl ThermalLibrary {
         }
     }
 
-    /// Path to the HDF5 file for `binding`. The file may not exist —
-    /// caller checks with `Path::exists` before passing to
-    /// `load_thermal_scattering`. Use `try_load` to do both in one
-    /// call.
     pub fn path(&self, binding: ThermalBinding) -> PathBuf {
         self.data_dir.join(binding.filename())
     }
 
-    /// Path-exists check — no I/O beyond stat.
     pub fn has(&self, binding: ThermalBinding) -> bool {
         self.path(binding).exists()
     }
 
-    /// Resolve and load `binding`. Returns `Ok(None)` when the file
-    /// doesn't exist on disk (callers can fall back to free-atom
-    /// elastic), `Err(_)` when the file exists but fails to parse.
+    /// `Ok(None)` → fall back to free-atom elastic. `Err` → parse failure.
     pub fn try_load(
         &self,
         binding: ThermalBinding,
@@ -161,8 +123,7 @@ impl ThermalLibrary {
         }
     }
 
-    /// Load `binding` or die with a panic. Used by tests / demos
-    /// that own the geometry and know which thermal data must exist.
+    /// Panics on missing data; for tests/demos that own the geometry.
     pub fn load_required(&self, binding: ThermalBinding) -> ThermalScatteringData {
         let path = self.path(binding);
         hdf5_reader::load_thermal_scattering(&path).unwrap_or_else(|e| {
@@ -183,8 +144,7 @@ impl ThermalLibrary {
 mod tests {
     use super::*;
 
-    /// `filename` is non-empty and ends in `.h5` for every binding.
-    /// Catches typos in the const table at compile-test time.
+    /// Catches typos in the const filename / description tables.
     #[test]
     fn every_binding_has_h5_filename() {
         let bindings: &[ThermalBinding] = &[
@@ -218,7 +178,6 @@ mod tests {
         }
     }
 
-    /// `path` joins data_dir with the binding filename. No I/O.
     #[test]
     fn path_joins_data_dir_with_filename() {
         let lib = ThermalLibrary::from_data_dir("/data/foo");

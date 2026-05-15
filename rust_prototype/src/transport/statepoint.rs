@@ -1,20 +1,10 @@
-//! HDF5 statepoint — per-batch results + final source bank.
+//! HDF5 statepoint = analysis + restart snapshot. Datasets:
+//! `/header` scalars, `/k_eff`, `/k_track`,
+//! `/source_bank/{positions,energies,weights}`,
+//! `/tallies/{surface_current_pos|neg, mesh_flux}`.
 //!
-//! The statepoint is an end-of-run snapshot capturing everything an
-//! analysis or restart pass needs:
-//!
-//! - `/header`: scalar metadata (n_batches, n_active, particles, seed, …)
-//! - `/k_eff`: per-batch collision-estimator k, plus the active-batch mean
-//! - `/k_track`: per-batch track-length-estimator k
-//! - `/source_bank/{positions,energies,weights}`: the post-normalize
-//!   fission source for the *next* batch — feed it back into `run_eigenvalue`
-//!   to continue the calculation
-//! - `/tallies/surface_current_pos|neg` (`[n_batches, n_bins]`),
-//!   `/tallies/mesh_flux` (`[n_batches, n_voxels]`): flattened tally
-//!   arrays
-//!
-//! Roundtrip is tested with `hdf5_pure::File::from_bytes`. The file is
-//! a standard HDF5 — readable by h5py, OpenMC's tools, etc.
+//! Standard HDF5; readable by h5py / OpenMC tools. Round-trip via
+//! `hdf5_pure::File::from_bytes`.
 
 use std::path::Path;
 
@@ -24,8 +14,6 @@ use crate::geometry::Vec3;
 use crate::transport::particle::FissionSite;
 use crate::transport::simulate::BatchResult;
 
-/// Inputs to `write_statepoint`. The caller passes an immutable view
-/// of the run results plus the final source bank.
 pub struct StatepointInputs<'a> {
     pub batches: &'a [BatchResult],
     pub source_bank: &'a [FissionSite],
@@ -33,22 +21,19 @@ pub struct StatepointInputs<'a> {
     pub particles_per_batch: u32,
     pub seed: u64,
     pub k_eff_mean: f64,
-    /// Surface tally bin count (0 if disabled). Determines the second
-    /// dimension of the surface-current arrays.
+    /// 0 = disabled.
     pub n_surface_bins: usize,
-    /// Mesh tally voxel count (0 if disabled).
+    /// 0 = disabled.
     pub n_mesh_voxels: usize,
 }
 
-/// Write an HDF5 statepoint to `path`. Overwrites any existing file.
+/// Overwrites existing file.
 pub fn write_statepoint(path: &Path, sp: &StatepointInputs<'_>) -> std::io::Result<()> {
     let bytes = build_statepoint(sp)
         .map_err(|e| std::io::Error::other(format!("hdf5 build failed: {e:?}")))?;
     std::fs::write(path, bytes)
 }
 
-/// Header metadata read back from a statepoint, alongside the source
-/// bank that's the actual restart payload.
 #[derive(Debug, Clone)]
 pub struct StatepointHeader {
     pub n_batches: u64,
@@ -60,8 +45,7 @@ pub struct StatepointHeader {
     pub n_mesh_voxels: u64,
 }
 
-/// Read just the source bank from a statepoint file. Cheaper than
-/// `read_statepoint` when only the restart payload is needed.
+/// Restart-payload-only reader; cheaper than `read_statepoint`.
 pub fn read_source_bank(path: &Path) -> std::io::Result<Vec<FissionSite>> {
     let file = open_statepoint(path)?;
     let pos = read_dataset_f64(&file, "source_bank_positions")?;
@@ -89,8 +73,7 @@ pub fn read_source_bank(path: &Path) -> std::io::Result<Vec<FissionSite>> {
     Ok(bank)
 }
 
-/// Read a statepoint header (scalar metadata only). Pair with
-/// `read_source_bank` when you only need the restart payload.
+/// Scalar metadata only.
 pub fn read_header(path: &Path) -> std::io::Result<StatepointHeader> {
     let file = open_statepoint(path)?;
     let attrs = file.root().attrs().map_err(io_err)?;
@@ -140,12 +123,10 @@ fn io_err<E: std::fmt::Debug>(e: E) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, format!("hdf5: {e:?}"))
 }
 
-/// Build the HDF5 byte stream for a statepoint without touching disk.
-/// Useful for tests and in-memory consumers.
+/// In-memory variant of `write_statepoint`; used by tests + FFI.
 pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure::Error> {
     let mut fb = FileBuilder::new();
 
-    // Header attributes
     fb.set_attr("n_batches", AttrValue::U64(sp.batches.len() as u64));
     fb.set_attr("n_active", AttrValue::U64(sp.n_active as u64));
     fb.set_attr(
@@ -159,7 +140,6 @@ pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure:
 
     let n_b = sp.batches.len();
 
-    // Per-batch scalars
     let k_collision: Vec<f64> = sp.batches.iter().map(|b| b.k_eff).collect();
     let k_track: Vec<f64> = sp.batches.iter().map(|b| b.k_track).collect();
     let entropy: Vec<f64> = sp.batches.iter().map(|b| b.shannon_entropy).collect();
@@ -182,7 +162,6 @@ pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure:
         .with_i64_data(&active_flag)
         .with_shape(&[n_b as u64]);
 
-    // Source bank
     let n_src = sp.source_bank.len();
     let mut positions: Vec<f64> = Vec::with_capacity(3 * n_src);
     let mut energies: Vec<f64> = Vec::with_capacity(n_src);
@@ -204,14 +183,12 @@ pub fn build_statepoint(sp: &StatepointInputs<'_>) -> Result<Vec<u8>, hdf5_pure:
         .with_f64_data(&weights)
         .with_shape(&[n_src as u64]);
 
-    // Surface current tallies (only if enabled)
     if sp.n_surface_bins > 0 {
         let total = n_b * sp.n_surface_bins;
         let mut pos_flat = Vec::with_capacity(total);
         let mut neg_flat = Vec::with_capacity(total);
+        // Pad-zero on short rows (defensive; well-formed runs match).
         for b in sp.batches {
-            // Pad short rows with zeros (defensive; well-formed runs
-            // always emit the right length).
             for i in 0..sp.n_surface_bins {
                 pos_flat.push(*b.tallies.surface_current_pos.get(i).unwrap_or(&0.0));
                 neg_flat.push(*b.tallies.surface_current_neg.get(i).unwrap_or(&0.0));
