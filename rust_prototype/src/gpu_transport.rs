@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 139;
+const N_PARAMS: usize = 144;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -160,6 +160,19 @@ pub struct GpuNuclideData {
     /// when the nuclide carries no pointwise table. The kernel
     /// gates on `has_pw[ni]` before dereferencing.
     pub pw_xs_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of `PerNuclideGpu::total_xs`, or
+    /// `0`. Kernel gates on `has_total_xs[ni]`.
+    pub total_xs_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's
+    /// `PerNuclideGpu::nu_bar.energies` / `.values`, or `0` when
+    /// no ν̄ table. Paired arrays; kernel gates on
+    /// `nu_bar_sizes[ni] > 0`.
+    pub nb_e_ptrs: CudaSlice<u64>,
+    pub nb_v_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — same shape as `nb_*_ptrs` but for the delayed-
+    /// only ν̄ table. Kernel gates on `delayed_nu_bar_sizes[ni] > 0`.
+    pub dnb_e_ptrs: CudaSlice<u64>,
+    pub dnb_v_ptrs: CudaSlice<u64>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -451,7 +464,12 @@ impl GpuNuclideData {
         // nuclide cache and are accounted for there.
         let ptr_total = self.basis_ptrs.num_bytes()
             + self.coeffs_ptrs.num_bytes()
-            + self.pw_xs_ptrs.num_bytes();
+            + self.pw_xs_ptrs.num_bytes()
+            + self.total_xs_ptrs.num_bytes()
+            + self.nb_e_ptrs.num_bytes()
+            + self.nb_v_ptrs.num_bytes()
+            + self.dnb_e_ptrs.num_bytes()
+            + self.dnb_v_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1109,6 +1127,11 @@ impl GpuTransportContext {
             dptr!(&nuc_data.basis_ptrs),
             dptr!(&nuc_data.coeffs_ptrs),
             dptr!(&nuc_data.pw_xs_ptrs),
+            dptr!(&nuc_data.total_xs_ptrs),
+            dptr!(&nuc_data.nb_e_ptrs),
+            dptr!(&nuc_data.nb_v_ptrs),
+            dptr!(&nuc_data.dnb_e_ptrs),
+            dptr!(&nuc_data.dnb_v_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1254,12 +1277,42 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.pointwise_xs.as_ref(),
         )?;
+        let total_xs_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.total_xs.as_ref(),
+        )?;
+        let nb_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.nu_bar.as_ref().map(|nb| &nb.energies),
+        )?;
+        let nb_v_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.nu_bar.as_ref().map(|nb| &nb.values),
+        )?;
+        let dnb_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.energies),
+        )?;
+        let dnb_v_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.values),
+        )?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
             basis_ptrs,
             coeffs_ptrs,
             pw_xs_ptrs,
+            total_xs_ptrs,
+            nb_e_ptrs,
+            nb_v_ptrs,
+            dnb_e_ptrs,
+            dnb_v_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1460,12 +1513,42 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.pointwise_xs.as_ref(),
         )?;
+        let total_xs_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.total_xs.as_ref(),
+        )?;
+        let nb_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.nu_bar.as_ref().map(|nb| &nb.energies),
+        )?;
+        let nb_v_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.nu_bar.as_ref().map(|nb| &nb.values),
+        )?;
+        let dnb_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.energies),
+        )?;
+        let dnb_v_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.values),
+        )?;
 
         Ok(GpuNuclideData {
             per_nucs,
             basis_ptrs,
             coeffs_ptrs,
             pw_xs_ptrs,
+            total_xs_ptrs,
+            nb_e_ptrs,
+            nb_v_ptrs,
+            dnb_e_ptrs,
+            dnb_v_ptrs,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2300,6 +2383,11 @@ impl GpuTransportContext {
             basis_ptrs: self.stream.clone_htod(&[0_u64])?,
             coeffs_ptrs: self.stream.clone_htod(&[0_u64])?,
             pw_xs_ptrs: self.stream.clone_htod(&[0_u64])?,
+            total_xs_ptrs: self.stream.clone_htod(&[0_u64])?,
+            nb_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            nb_v_ptrs: self.stream.clone_htod(&[0_u64])?,
+            dnb_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            dnb_v_ptrs: self.stream.clone_htod(&[0_u64])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,

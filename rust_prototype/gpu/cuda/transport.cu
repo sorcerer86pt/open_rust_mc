@@ -264,8 +264,13 @@
 #define P_BASIS_PTRS            136
 #define P_COEFFS_PTRS           137
 #define P_PW_XS_PTRS            138
+#define P_TOTAL_XS_PTRS         139
+#define P_NB_E_PTRS             140
+#define P_NB_V_PTRS             141
+#define P_DNB_E_PTRS            142
+#define P_DNB_V_PTRS            143
 
-#define N_PARAMS            139
+#define N_PARAMS            144
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -883,10 +888,13 @@ __device__ __forceinline__ double sample_fission_emit_energy(
 {
     int dnb_sz = __ldg(&PTR_I(p, P_DNB_SIZES)[hit_nuc]);
     if (dnb_sz > 0 && nu_total > 0.0) {
-        int dnb_off = __ldg(&PTR_I(p, P_DNB_OFFSETS)[hit_nuc]);
-        double nu_d = nu_bar_lookup(
-            E_inc, PTR_D(p, P_DNB_ENERGIES), PTR_D(p, P_DNB_VALUES),
-            dnb_off, dnb_sz);
+        // Stage C step D — per-nuclide pointer load. Offset becomes
+        // 0 since the per-nuc slice starts at its own base.
+        const double* dnb_e =
+            (const double*) __ldg(&PTR_U64(p, P_DNB_E_PTRS)[hit_nuc]);
+        const double* dnb_v =
+            (const double*) __ldg(&PTR_U64(p, P_DNB_V_PTRS)[hit_nuc]);
+        double nu_d = nu_bar_lookup(E_inc, dnb_e, dnb_v, 0, dnb_sz);
         double beta = nu_d / nu_total;
         if (beta > 1.0) beta = 1.0;
         if (beta > 0.0 && pcg_uniform(rng) < beta) {
@@ -1470,8 +1478,9 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
             s_inel = lsum;
         }
         if (__ldg(&PTR_I(p, P_HAS_TOTAL_XS)[ni])) {
-            int t_off = __ldg(&PTR_I(p, P_TOTAL_XS_OFF)[ni]);
-            const double* tot_grid = &PTR_D(p, P_TOTAL_XS)[t_off];
+            // Stage C step D — per-nuclide pointer load.
+            const double* tot_grid =
+                (const double*) __ldg(&PTR_U64(p, P_TOTAL_XS_PTRS)[ni]);
             double tot_lo = tot_grid[e_idx];
             double tot_hi = (e_idx + 1 < n_e) ? tot_grid[e_idx + 1] : tot_lo;
             double tot = (tot_lo > 1e-30 && tot_hi > 1e-30 && log_frac > 0.0)
@@ -1807,11 +1816,18 @@ transport_persistent(
             } else if ((cum_rxn+=hit_xs.s_fis), xi_rxn < cum_rxn) {
                 // ═══ Fission ═══
                 lcnt_fis++;
-                int nb_off=__ldg(&PTR_I(p, P_NB_OFFSETS)[hit_nuc]);
+                // Stage C step D — per-nuclide pointer load.
                 int nb_sz=__ldg(&PTR_I(p, P_NB_SIZES)[hit_nuc]);
-                double nu = (nb_sz>0) ?
-                    nu_bar_lookup(E,PTR_D(p, P_NB_ENERGIES),PTR_D(p, P_NB_VALUES),nb_off,nb_sz) :
-                    __ldg(&PTR_D(p, P_NU_BAR_CONST)[hit_nuc]);
+                double nu;
+                if (nb_sz > 0) {
+                    const double* nb_e =
+                        (const double*) __ldg(&PTR_U64(p, P_NB_E_PTRS)[hit_nuc]);
+                    const double* nb_v =
+                        (const double*) __ldg(&PTR_U64(p, P_NB_V_PTRS)[hit_nuc]);
+                    nu = nu_bar_lookup(E, nb_e, nb_v, 0, nb_sz);
+                } else {
+                    nu = __ldg(&PTR_D(p, P_NU_BAR_CONST)[hit_nuc]);
+                }
                 int ns=(int)nu; if(pcg_uniform(&rng)<(nu-(double)ns)) ns++;
                 for(int s=0;s<ns;s++){
                     int idx=atomicAdd(fis_count,1);
