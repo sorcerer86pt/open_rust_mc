@@ -591,6 +591,182 @@ pub fn upload_one_nuclide(
     })
 }
 
+/// Concatenate a per-nuclide sequence of optional device slices into
+/// a single flat bundle slice. Returns `(bundle, per_nuc_offsets,
+/// per_nuc_lengths, has_flags)`:
+///   - `bundle[off..off+len]` is `src[i]` for each populated entry
+///   - `per_nuc_offsets[i] = 0` and `has_flags[i] = 0` when `src[i] = None`
+///   - sentinel `alloc_zeros(1)` returned when no nuclide contributes
+///
+/// All copies are direct device-to-device — the per-nuclide slices
+/// stay on the device and are never round-tripped through host
+/// memory.
+fn concat_dtod_optional(
+    stream: &Arc<CudaStream>,
+    src: &[Option<&CudaSlice<f64>>],
+) -> Result<(CudaSlice<f64>, Vec<i32>, Vec<i32>), Box<dyn std::error::Error>> {
+    let total_len: usize = src.iter().filter_map(|o| o.map(|s| s.len())).sum();
+    let alloc_len = total_len.max(1);
+    let mut bundle = unsafe { stream.alloc::<f64>(alloc_len)? };
+    if total_len == 0 {
+        stream.memset_zeros(&mut bundle)?;
+    }
+    let mut offsets = vec![0_i32; src.len()];
+    let mut has = vec![0_i32; src.len()];
+    let mut running = 0_usize;
+    for (i, slot) in src.iter().enumerate() {
+        if let Some(s) = slot {
+            offsets[i] = running as i32;
+            has[i] = 1;
+            let len = s.len();
+            let mut view = bundle.slice_mut(running..running + len);
+            stream.memcpy_dtod(*s, &mut view)?;
+            running += len;
+        }
+    }
+    Ok((bundle, offsets, has))
+}
+
+/// Concatenate a per-nuclide sequence of *always-present* device
+/// slices (e.g. energy grids — every nuclide carries one). Same shape
+/// as `concat_dtod_optional` minus the `has` flag.
+fn concat_dtod_required(
+    stream: &Arc<CudaStream>,
+    src: &[&CudaSlice<f64>],
+) -> Result<(CudaSlice<f64>, Vec<i32>), Box<dyn std::error::Error>> {
+    let total_len: usize = src.iter().map(|s| s.len()).sum();
+    let alloc_len = total_len.max(1);
+    let mut bundle = unsafe { stream.alloc::<f64>(alloc_len)? };
+    if total_len == 0 {
+        stream.memset_zeros(&mut bundle)?;
+    }
+    let mut offsets = Vec::with_capacity(src.len());
+    let mut running = 0_usize;
+    for s in src {
+        offsets.push(running as i32);
+        let len = s.len();
+        if len > 0 {
+            let mut view = bundle.slice_mut(running..running + len);
+            stream.memcpy_dtod(*s, &mut view)?;
+        }
+        running += len;
+    }
+    Ok((bundle, offsets))
+}
+
+/// Assemble simple A-cat bundle fields directly from per-nuclide
+/// device slices via `cuMemcpyDtoD`. Returns the four GPU buffers
+/// for category A.1 (energy grids + indexing) plus categories A.2
+/// (total_xs / pointwise) and A.3 (ν̄ / delayed-ν̄).
+///
+/// The returned shape is byte-identical to the corresponding fields
+/// in `GpuNuclideData` as built by
+/// `gpu_transport.rs::upload_nuclide_data_uncached`. Sentinels match:
+/// when no nuclide contributes data the result is a 1-element
+/// zero slice (legacy path's `if vec.is_empty() { vec.push(0.0); }`
+/// convention).
+pub struct AssembledBundleACat {
+    pub all_energy_grids: CudaSlice<f64>,
+    pub grid_offsets_vec: Vec<i32>,
+    pub n_energies_vec: Vec<i32>,
+
+    pub total_xs: CudaSlice<f64>,
+    pub total_xs_off_vec: Vec<i32>,
+    pub has_total_xs_vec: Vec<i32>,
+
+    pub pointwise_xs: CudaSlice<f64>,
+    pub pw_off_vec: Vec<i32>,
+    pub has_pw_vec: Vec<i32>,
+
+    pub nu_bar_energies: CudaSlice<f64>,
+    pub nu_bar_values: CudaSlice<f64>,
+    pub nu_bar_offsets_vec: Vec<i32>,
+    pub nu_bar_sizes_vec: Vec<i32>,
+
+    pub delayed_nu_bar_energies: CudaSlice<f64>,
+    pub delayed_nu_bar_values: CudaSlice<f64>,
+    pub delayed_nu_bar_offsets_vec: Vec<i32>,
+    pub delayed_nu_bar_sizes_vec: Vec<i32>,
+}
+
+pub fn assemble_a_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleACat, Box<dyn std::error::Error>> {
+    // A.1 — energy grids (always populated; 1-point sentinel when the
+    // nuclide carries no kernels at all, which mirrors the legacy
+    // path's `None` branch).
+    let grid_refs: Vec<&CudaSlice<f64>> =
+        per_nucs.iter().map(|p| &p.energy_grid).collect();
+    let (all_energy_grids, grid_offsets_vec) = concat_dtod_required(stream, &grid_refs)?;
+    let n_energies_vec: Vec<i32> = per_nucs.iter().map(|p| p.n_energy).collect();
+
+    // A.2 — total_xs + pointwise.
+    let total_refs: Vec<Option<&CudaSlice<f64>>> =
+        per_nucs.iter().map(|p| p.total_xs.as_ref()).collect();
+    let (total_xs, total_xs_off_vec, has_total_xs_vec) =
+        concat_dtod_optional(stream, &total_refs)?;
+
+    let pw_refs: Vec<Option<&CudaSlice<f64>>> =
+        per_nucs.iter().map(|p| p.pointwise_xs.as_ref()).collect();
+    let (pointwise_xs, pw_off_vec, has_pw_vec) =
+        concat_dtod_optional(stream, &pw_refs)?;
+
+    // A.3 — ν̄ + delayed-ν̄. Encoded as (offset, size) pairs in legacy
+    // path; `has` flag isn't materialised separately.
+    let nb_e_refs: Vec<Option<&CudaSlice<f64>>> = per_nucs
+        .iter()
+        .map(|p| p.nu_bar.as_ref().map(|nb| &nb.energies))
+        .collect();
+    let nb_v_refs: Vec<Option<&CudaSlice<f64>>> = per_nucs
+        .iter()
+        .map(|p| p.nu_bar.as_ref().map(|nb| &nb.values))
+        .collect();
+    let (nu_bar_energies, nu_bar_offsets_vec, _) =
+        concat_dtod_optional(stream, &nb_e_refs)?;
+    let (nu_bar_values, _, _) = concat_dtod_optional(stream, &nb_v_refs)?;
+    let nu_bar_sizes_vec: Vec<i32> = per_nucs
+        .iter()
+        .map(|p| p.nu_bar.as_ref().map(|nb| nb.n_points).unwrap_or(0))
+        .collect();
+
+    let dnb_e_refs: Vec<Option<&CudaSlice<f64>>> = per_nucs
+        .iter()
+        .map(|p| p.delayed_nu_bar.as_ref().map(|nb| &nb.energies))
+        .collect();
+    let dnb_v_refs: Vec<Option<&CudaSlice<f64>>> = per_nucs
+        .iter()
+        .map(|p| p.delayed_nu_bar.as_ref().map(|nb| &nb.values))
+        .collect();
+    let (delayed_nu_bar_energies, delayed_nu_bar_offsets_vec, _) =
+        concat_dtod_optional(stream, &dnb_e_refs)?;
+    let (delayed_nu_bar_values, _, _) = concat_dtod_optional(stream, &dnb_v_refs)?;
+    let delayed_nu_bar_sizes_vec: Vec<i32> = per_nucs
+        .iter()
+        .map(|p| p.delayed_nu_bar.as_ref().map(|nb| nb.n_points).unwrap_or(0))
+        .collect();
+
+    Ok(AssembledBundleACat {
+        all_energy_grids,
+        grid_offsets_vec,
+        n_energies_vec,
+        total_xs,
+        total_xs_off_vec,
+        has_total_xs_vec,
+        pointwise_xs,
+        pw_off_vec,
+        has_pw_vec,
+        nu_bar_energies,
+        nu_bar_values,
+        nu_bar_offsets_vec,
+        nu_bar_sizes_vec,
+        delayed_nu_bar_energies,
+        delayed_nu_bar_values,
+        delayed_nu_bar_offsets_vec,
+        delayed_nu_bar_sizes_vec,
+    })
+}
+
 /// Flatten URR per-band 2D rows into the bundle's row-major layout.
 /// Mirrors upload_nuclide_data_uncached:1883-1905.
 fn build_urr_slices(
@@ -1115,6 +1291,142 @@ mod tests {
         // Angular dist absent → sentinels in the host-side offsets.
         assert_eq!(per_nuc.levels.ang_lev_local_off, vec![0]);
         assert_eq!(per_nuc.levels.ang_lev_ne, vec![0]);
+    }
+
+    #[test]
+    fn assemble_a_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+
+        // Two synthetic nuclides — one with ν̄ + total_xs, one bare.
+        // Distinct energy grids force a non-trivial running offset on
+        // the bundle so the prefix-sum logic is exercised.
+        let energies_a = vec![1.0e-5, 1.0, 2.0e7];
+        let energies_b = vec![1.0e-5, 100.0, 1.0e3, 2.0e7];
+        let nuc_a = {
+            let mut n = NuclideKernels::empty(235.0, 2.5);
+            n.elastic = Some(ReactionKernel::from_table(
+                energies_a.clone(),
+                vec![10.0, 5.0, 1.0],
+            ));
+            n.total_xs_raw = Some(vec![20.0, 10.0, 2.0]);
+            n.nu_bar_table = Some(crate::hdf5_reader::NuBarTable {
+                energies: vec![1.0, 1.0e6],
+                values: vec![2.43, 2.95],
+            });
+            n
+        };
+        let nuc_b = {
+            let mut n = NuclideKernels::empty(16.0, 0.0);
+            n.elastic = Some(ReactionKernel::from_table(
+                energies_b.clone(),
+                vec![3.0, 4.0, 5.0, 6.0],
+            ));
+            n
+        };
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx
+            .upload_nuclide_data_uncached(&nuclides, rank)
+            .expect("legacy upload failed");
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| {
+                upload_one_nuclide(&stream, n, rank)
+                    .map(Arc::new)
+                    .expect("upload_one_nuclide")
+            })
+            .collect();
+        let assembled = assemble_a_cat(&stream, &per_nucs).expect("assemble_a_cat");
+
+        // ── Compare every A-cat field byte-for-byte. ──
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+
+        assert_eq!(
+            dtoh_f64(&assembled.all_energy_grids),
+            dtoh_f64(&bundle_legacy.all_energy_grids),
+            "all_energy_grids",
+        );
+        assert_eq!(
+            assembled.grid_offsets_vec,
+            dtoh_i32(&bundle_legacy.grid_offsets),
+            "grid_offsets",
+        );
+        assert_eq!(
+            assembled.n_energies_vec,
+            dtoh_i32(&bundle_legacy.n_energies),
+            "n_energies",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.total_xs),
+            dtoh_f64(&bundle_legacy.total_xs),
+            "total_xs",
+        );
+        assert_eq!(
+            assembled.total_xs_off_vec,
+            dtoh_i32(&bundle_legacy.total_xs_offsets),
+            "total_xs_offsets",
+        );
+        assert_eq!(
+            assembled.has_total_xs_vec,
+            dtoh_i32(&bundle_legacy.has_total_xs),
+            "has_total_xs",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.nu_bar_energies),
+            dtoh_f64(&bundle_legacy.nu_bar_energies),
+            "nu_bar_energies",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.nu_bar_values),
+            dtoh_f64(&bundle_legacy.nu_bar_values),
+            "nu_bar_values",
+        );
+        assert_eq!(
+            assembled.nu_bar_offsets_vec,
+            dtoh_i32(&bundle_legacy.nu_bar_offsets),
+            "nu_bar_offsets",
+        );
+        assert_eq!(
+            assembled.nu_bar_sizes_vec,
+            dtoh_i32(&bundle_legacy.nu_bar_sizes),
+            "nu_bar_sizes",
+        );
+        assert_eq!(
+            assembled.delayed_nu_bar_sizes_vec,
+            dtoh_i32(&bundle_legacy.delayed_nu_bar_sizes),
+            "delayed_nu_bar_sizes",
+        );
+        // Pointwise: nuc_a + nuc_b carry no pointwise_xs in this
+        // synthetic, so both paths should produce the [0.0] sentinel.
+        assert_eq!(
+            dtoh_f64(&assembled.pointwise_xs),
+            dtoh_f64(&bundle_legacy.pointwise_xs),
+            "pointwise_xs",
+        );
+        assert_eq!(
+            assembled.has_pw_vec,
+            dtoh_i32(&bundle_legacy.has_pw),
+            "has_pw",
+        );
     }
 
     #[test]

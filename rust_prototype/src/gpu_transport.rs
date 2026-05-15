@@ -1222,7 +1222,7 @@ impl GpuTransportContext {
     /// Hot path is unchanged from before: build every `Vec<f64>` /
     /// `Vec<i32>` packing block, then `clone_htod` each into a
     /// `CudaSlice`.
-    fn upload_nuclide_data_uncached(
+    pub(crate) fn upload_nuclide_data_uncached(
         &self,
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
         rank: usize,
