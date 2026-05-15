@@ -1,14 +1,6 @@
-//! Hybrid SVD + Windowed-Multipole cross-section provider.
-//!
-//! Wraps an existing `SvdXsProvider` and, for nuclides that have WMP data
-//! loaded, intercepts lookups inside `[E_min^WMP, E_max^WMP]` and replaces
-//! the SVD-reconstructed (elastic, fission, capture) with the WMP
-//! evaluation at the nuclide's target temperature.
-//!
-//! Non-WMP channels (inelastic, n2n, n3n) always come from the underlying
-//! SVD provider; outside the WMP window the SVD path is used unchanged.
-//! URR handling is delegated to the SVD provider — URR data stays
-//! applicable in the region above `E_max^WMP`.
+//! SVD + WMP hybrid: WMP overrides elastic / fission / capture
+//! inside `[E_min^WMP, E_max^WMP]`. Inelastic / (n,2n) / (n,3n) stay
+//! on SVD. URR delegated to SVD (applies above `E_max^WMP`).
 
 use std::sync::Arc;
 
@@ -19,17 +11,14 @@ use crate::transport::simulate::XsProvider;
 use crate::transport::xs_provider::{SvdXsProvider, TableXsProvider};
 use crate::wmp::WindowedMultipole;
 
-/// Hybrid provider: SVD everywhere, overridden by WMP inside the resolved
-/// resonance window for nuclides that carry WMP data.
 pub struct HybridSvdWmpXsProvider {
     inner: SvdXsProvider,
-    /// One entry per nuclide; `Some(wmp, T_kelvin)` if WMP applies.
+    /// Per-nuclide; `Some((wmp, T_kelvin))` when WMP applies.
     wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>>,
 }
 
 impl HybridSvdWmpXsProvider {
-    /// Wrap an `SvdXsProvider`. `wmps` length must equal the number of
-    /// nuclides in the inner provider; `None` entries keep the SVD path.
+    /// `wmps.len()` must equal `inner.nuclides.len()`.
     pub fn new(inner: SvdXsProvider, wmps: Vec<Option<(Arc<WindowedMultipole>, f64)>>) -> Self {
         assert_eq!(
             inner.nuclides.len(),
@@ -39,24 +28,13 @@ impl HybridSvdWmpXsProvider {
         Self { inner, wmps }
     }
 
-    /// Count how many nuclides actually have WMP coverage — useful for logs.
     pub fn covered_nuclides(&self) -> usize {
         self.wmps.iter().filter(|w| w.is_some()).count()
     }
 
-    /// Rebuild every WMP-covered nuclide's elastic/fission/capture SVD
-    /// kernels on a smooth-only energy grid (points outside the WMP
-    /// window). After this call, queries inside `[e_min^WMP, e_max^WMP]`
-    /// are answered exclusively by the multipole evaluator (which the
-    /// `lookup` impl was already routing) and the SVD basis matrices for
-    /// those three reactions shrink by `kernel_smooth_fraction`.
-    ///
-    /// The non-WMP reactions (inelastic, (n,2n), (n,3n), discrete levels,
-    /// total) are untouched — they need full-grid coverage. Idempotent;
-    /// the smooth grid is already a subset of the original.
-    ///
-    /// Returns the byte-count delta `(before, after)` summed across all
-    /// rebuilt kernels for diagnostic logging.
+    /// Drops SVD basis rows inside `[e_min^WMP, e_max^WMP]` for
+    /// elastic / fission / capture (WMP answers there). Non-WMP MTs
+    /// stay full-grid. Idempotent. Returns `(before, after)` bytes.
     pub fn rebuild_smooth_only(&mut self) -> (usize, usize) {
         let mut before = 0_usize;
         let mut after = 0_usize;

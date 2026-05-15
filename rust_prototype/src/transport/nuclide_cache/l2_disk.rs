@@ -1,30 +1,10 @@
-//! L2 disk store — content-addressed files under a cross-platform cache dir.
+//! L2 disk cache. Path: `$OPEN_RUST_MC_CACHE_DIR` (`off` to disable)
+//! → `std::env::temp_dir()/open_rust_mc_cache`. Atomic writes via
+//! `.tmp` + rename. Content-addressed → process races are
+//! last-writer-wins with identical bytes.
 //!
-//! Path resolution (in order of precedence):
-//!
-//! 1. `OPEN_RUST_MC_CACHE_DIR` environment variable. If set to `off`
-//!    (case-insensitive), the L2 store is disabled — useful for
-//!    benchmarks that need a cold start every run, and for
-//!    debugging the HDF5 parse path.
-//! 2. `std::env::temp_dir().join("open_rust_mc_cache")` on every
-//!    platform. Resolves to e.g. `C:\Users\<user>\AppData\Local\Temp\
-//!    open_rust_mc_cache` on Windows, `/tmp/open_rust_mc_cache` on
-//!    Linux, `$TMPDIR/open_rust_mc_cache` on macOS. Same API on every
-//!    OS, no `#[cfg(target_os)]` gymnastics, no XDG vs LOCALAPPDATA
-//!    branching. The trade-off: on systems that wipe `/tmp` at boot
-//!    (some Linux distros, most container runtimes) the cache is
-//!    lost across reboots — set `OPEN_RUST_MC_CACHE_DIR` explicitly
-//!    to a persistent path when that matters.
-//!
-//! Filenames are derived from the `NuclideKey` via [`NuclideKey::disk_filename`]
-//! — a hex-encoded blake3 file hash + policy hash + temp idx +
-//! format version. Files are content-addressed, so two processes that
-//! cache the same nuclide can race on the write without harm (last
-//! writer wins, both contain identical bytes).
-//!
-//! Writes are atomic: encode to `<filename>.tmp`, then `rename` over
-//! the final path. A torn-write from a crash leaves a stray `.tmp`
-//! file but never a corrupt cache entry.
+//! `/tmp` on some Linux distros / containers is wiped at boot; set
+//! `OPEN_RUST_MC_CACHE_DIR` explicitly for persistent caching.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,9 +21,7 @@ pub struct L2DiskStore {
 }
 
 impl L2DiskStore {
-    /// Build an L2 store rooted at `dir`. Creates the directory if it
-    /// doesn't exist. Returns `None` if creation fails — L1-only is a
-    /// valid runtime state.
+    /// `None` on mkdir failure — L1-only is a valid runtime state.
     pub fn at(dir: PathBuf) -> Option<Self> {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             eprintln!(
@@ -56,14 +34,7 @@ impl L2DiskStore {
         Some(Self { dir, name })
     }
 
-    /// Resolve a default cache dir from `OPEN_RUST_MC_CACHE_DIR` →
-    /// `std::env::temp_dir() / open_rust_mc_cache`. Returns `None` when
-    /// the env override is set to `off` (case-insensitive).
-    ///
-    /// `std::env::temp_dir()` is documented to never panic and to
-    /// always return *some* path, so this method effectively never
-    /// returns `None` for the default branch. Set
-    /// `OPEN_RUST_MC_CACHE_DIR=off` to disable the L2 store.
+    /// `None` only when `OPEN_RUST_MC_CACHE_DIR=off`.
     pub fn from_env() -> Option<Self> {
         if let Ok(env) = std::env::var("OPEN_RUST_MC_CACHE_DIR") {
             if env.eq_ignore_ascii_case("off") {
