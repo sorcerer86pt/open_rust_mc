@@ -16,7 +16,14 @@
 use cudarc::driver::{CudaSlice, CudaStream};
 use std::sync::Arc;
 
-use crate::transport::xs_provider::NuclideKernels;
+use crate::transport::xs_provider::{NuclideKernels, ReactionKernel};
+
+/// Fixed reaction-slot count, matching the bundle layout in
+/// `gpu_transport::upload_nuclide_data_uncached`: elastic, inelastic,
+/// n2n, n3n, fission, capture, total. Slot 6 (`RXN_TOTAL`) is always
+/// `None` on the per-reaction arrays — the total XS lives on the
+/// pointwise tables instead.
+pub const N_RXN_SLOTS: usize = 7;
 
 /// Optional per-nuclide ν̄(E) table. Holds either prompt-total
 /// (`nu_bar_table`) or delayed-only (`delayed_nu_bar_table`); both
@@ -73,6 +80,21 @@ pub struct PerNuclideGpu {
     // ── Category A.3 — ν̄ tables ──
     pub nu_bar: Option<NuBarSlicesGpu>,
     pub delayed_nu_bar: Option<NuBarSlicesGpu>,
+
+    // ── Category B — per-reaction SVD basis / coeffs ──
+    /// 0 / 1 flag per reaction slot (elastic .. capture .. total). Slot
+    /// `RXN_TOTAL = 6` is always `0` — the total XS is handled via
+    /// `pointwise_xs` / `total_xs`.
+    pub has_reaction: [i32; N_RXN_SLOTS],
+    /// `[n_e × rank]` per slot. `None` when `has_reaction[slot] == 0`.
+    /// Table-variant reactions are pre-padded to rank stride here
+    /// (basis row = `[log10(xs), 0, 0, …]`) so the device kernel sees
+    /// the uniform layout.
+    pub basis: [Option<CudaSlice<f64>>; N_RXN_SLOTS],
+    /// `[rank]` per slot, paired with `basis`. Table-variant slots
+    /// carry `[1.0, 0.0, 0.0, …]` so the dot product reconstructs the
+    /// pointwise value.
+    pub coeffs: [Option<CudaSlice<f64>>; N_RXN_SLOTS],
     // ── Future categories land here per `docs/stage-c-data-model.md` ──
 }
 
@@ -93,7 +115,46 @@ impl PerNuclideGpu {
         if let Some(n) = &self.delayed_nu_bar {
             total += n.device_bytes();
         }
+        for s in self.basis.iter().flatten() {
+            total += s.num_bytes();
+        }
+        for s in self.coeffs.iter().flatten() {
+            total += s.num_bytes();
+        }
         total
+    }
+}
+
+/// Pack a `ReactionKernel` into the uniform rank-padded
+/// `(basis, coeffs)` layout the device kernel expects. The Svd
+/// variant passes through unchanged; Table variants get
+/// `basis_row = [log10(xs), 0, 0, …]` and `coeffs = [1.0, 0.0, …]`
+/// — same convention as the legacy whole-bundle packer at
+/// `gpu_transport.rs::upload_nuclide_data_uncached`, slot 1278-1318.
+fn pack_reaction_to_rank(rxn: &ReactionKernel, rank: usize) -> (Vec<f64>, Vec<f64>) {
+    match rxn {
+        ReactionKernel::Svd { kernel, coeffs } => {
+            (kernel.basis_f64().to_vec(), coeffs.clone())
+        }
+        ReactionKernel::Table { xs, .. } => {
+            // Synthesize a rank-`rank` SVD layout from the pointwise
+            // table. Mirrors the bundle path; if you change one,
+            // change the other.
+            let mut basis = Vec::with_capacity(xs.len() * rank);
+            for &v in xs {
+                let log10_v = if v > 0.0 { v.log10() } else { -300.0 };
+                basis.push(log10_v);
+                for _ in 1..rank {
+                    basis.push(0.0);
+                }
+            }
+            let mut coeffs = Vec::with_capacity(rank);
+            coeffs.push(1.0);
+            for _ in 1..rank {
+                coeffs.push(0.0);
+            }
+            (basis, coeffs)
+        }
     }
 }
 
@@ -169,6 +230,32 @@ pub fn upload_one_nuclide(
         })
         .transpose()?;
 
+    // Category B — per-reaction SVD basis / coeffs. Slot order must
+    // match `gpu_transport::upload_nuclide_data_uncached` (slot 6 =
+    // total is intentionally None).
+    let reactions: [Option<&ReactionKernel>; N_RXN_SLOTS] = [
+        nuc.elastic.as_ref(),
+        nuc.inelastic.as_ref(),
+        nuc.n2n.as_ref(),
+        nuc.n3n.as_ref(),
+        nuc.fission.as_ref(),
+        nuc.capture.as_ref(),
+        None,
+    ];
+    let mut has_reaction = [0_i32; N_RXN_SLOTS];
+    let mut basis: [Option<CudaSlice<f64>>; N_RXN_SLOTS] =
+        std::array::from_fn(|_| None);
+    let mut coeffs: [Option<CudaSlice<f64>>; N_RXN_SLOTS] =
+        std::array::from_fn(|_| None);
+    for (slot, rxn_opt) in reactions.iter().enumerate() {
+        if let Some(rxn) = rxn_opt {
+            has_reaction[slot] = 1;
+            let (basis_vec, coeffs_vec) = pack_reaction_to_rank(rxn, rank);
+            basis[slot] = Some(stream.clone_htod(&basis_vec)?);
+            coeffs[slot] = Some(stream.clone_htod(&coeffs_vec)?);
+        }
+    }
+
     Ok(PerNuclideGpu {
         rank: rank as i32,
         n_energy,
@@ -177,6 +264,9 @@ pub fn upload_one_nuclide(
         pointwise_xs,
         nu_bar,
         delayed_nu_bar,
+        has_reaction,
+        basis,
+        coeffs,
     })
 }
 
@@ -242,5 +332,44 @@ mod tests {
         assert!(per_nuc.delayed_nu_bar.is_none());
         // device_bytes ≥ what we uploaded.
         assert!(per_nuc.device_bytes() >= (3 + 3 + 21) * 8);
+    }
+
+    #[test]
+    fn upload_one_nuclide_packs_table_reaction_to_rank() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        let nuc = minimal_nuclide();
+        let rank = 5;
+        let per_nuc =
+            upload_one_nuclide(&stream, &nuc, rank).expect("upload_one_nuclide failed");
+
+        // Slot 0 = elastic (Table). Others = None / not loaded.
+        assert_eq!(per_nuc.has_reaction[0], 1);
+        for slot in 1..N_RXN_SLOTS {
+            assert_eq!(per_nuc.has_reaction[slot], 0, "slot {slot}");
+            assert!(per_nuc.basis[slot].is_none(), "slot {slot}");
+            assert!(per_nuc.coeffs[slot].is_none(), "slot {slot}");
+        }
+
+        // Basis = [log10(10), 0,0,0,0, log10(5), 0,0,0,0, log10(1), 0,0,0,0].
+        let basis = per_nuc.basis[0].as_ref().expect("elastic basis missing");
+        let mut host_basis = vec![0.0_f64; 3 * rank];
+        stream.memcpy_dtoh(basis, &mut host_basis).unwrap();
+        let expected = vec![
+            10.0_f64.log10(), 0.0, 0.0, 0.0, 0.0,
+            5.0_f64.log10(),  0.0, 0.0, 0.0, 0.0,
+            1.0_f64.log10(),  0.0, 0.0, 0.0, 0.0,
+        ];
+        for (i, (h, e)) in host_basis.iter().zip(expected.iter()).enumerate() {
+            assert!((h - e).abs() < 1e-12, "basis[{i}]: got {h}, want {e}");
+        }
+
+        // Coeffs = [1, 0, 0, 0, 0].
+        let coeffs = per_nuc.coeffs[0].as_ref().expect("elastic coeffs missing");
+        let mut host_coeffs = vec![0.0_f64; rank];
+        stream.memcpy_dtoh(coeffs, &mut host_coeffs).unwrap();
+        assert_eq!(host_coeffs, vec![1.0, 0.0, 0.0, 0.0, 0.0]);
     }
 }
