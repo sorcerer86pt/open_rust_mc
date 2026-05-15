@@ -1,16 +1,8 @@
-// The Pusa-2016 CRAM coefficients are transcendental constants that
-// genuinely need every digit of f64 precision — clippy's
-// "excessive precision" lint flags them as if they were typos. The
-// canonical values come from the OpenMC reference implementation
-// and are part of the algorithm's numerical correctness contract;
-// truncating them changes the matrix exponential. The blanket
-// allow at module scope is the standard remedy for that situation.
+// Pusa 2016 CRAM coefficients: full f64 precision is the algorithm's
+// correctness contract.
 #![allow(clippy::excessive_precision)]
-//! CRAM matrix exponential evaluator (IPF form), orders 16 and 48.
-//!
-//! Approximates `exp(A) · n` via the **Incomplete Partial
-//! Factorization** (IPF) variant of Pusa 2016 — the form OpenMC
-//! ships in `openmc/deplete/cram.py`:
+//! CRAM `exp(A)·n` evaluator, IPF form (Pusa 2016, OpenMC
+//! `openmc/deplete/cram.py`):
 //!
 //! ```text
 //! y = n
@@ -20,53 +12,28 @@
 //! y *= α₀
 //! ```
 //!
-//! Each iteration uses the running `y`, not the original `n` — IPF
-//! is multiplicative, not additive (the additive PF form has
-//! different α_k values; don't mix the two).
-//!
-//! `K = 16` runs 8 complex linear solves per call; `K = 48` runs
-//! 24. Order 16 is sufficient for PWR-typical Δt (hours to weeks)
-//! at < 1e-10 precision. Order 48 is what you reach for when the
-//! chain has very short-lived nuclides (decay heat after shutdown,
-//! activation calcs, single-step 1-million-year decay) where order
-//! 16 starts losing precision — Pusa 2016 reports order 48 stays
-//! at machine epsilon over Δt ranges spanning ~30 decades.
-//!
-//! For `N`-nuclide chains with `N ≲ 200` the dense complex LU
-//! below is sufficient; swap in a sparse complex solver for
-//! stiffer / larger problems.
+//! IPF is multiplicative, NOT additive — don't substitute the
+//! additive PF α_k. Order 16 (8 solves) is sufficient at PWR Δt
+//! < 1e-10; order 48 (24 solves) for extreme stiffness or geologic
+//! Δt. Dense complex LU below; swap to sparse for `N ≳ 200`.
 
 use num_complex::Complex64;
 
-/// CRAM order — number of poles in the rational approximant. The
-/// IPF solve runs `k / 2` complex linear systems per call.
+/// `k/2` complex solves per call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CramOrder {
-    /// Order-16 IPF CRAM (8 conjugate pairs). Default; sufficient
-    /// for PWR-typical Δt at < 1e-10 precision.
     #[default]
     Cram16,
-    /// Order-48 IPF CRAM (24 conjugate pairs). Required when the
-    /// chain spans extreme stiffness (very short-lived nuclides)
-    /// or for time steps approaching geologic scale (decay heat,
-    /// activation, 1-Ma single-step solves).
     Cram48,
 }
 
-/// IPF normalization scale applied once at the end of the loop. Far
-/// from "limit at infinity" — in IPF this is the multiplicative
-/// constant that pulls the running `y` back into the right scale
-/// after the iterative pole updates.
+/// IPF multiplicative end-of-loop scale (NOT the "limit at infinity").
 pub const CRAM16_ALPHA0: f64 = 2.124_853_710_495_223_7e-16;
 pub const CRAM48_ALPHA0: f64 = 2.258_038_182_743_983e-47;
 
-/// Eight (folded) complex poles of the CRAM-16 partial-fraction
-/// expansion. The full approximant has 16 poles in 8 conjugate
-/// pairs; each entry below stands for a pair, contributing
-/// `2 · Re(α_k · (A − θ_k I)⁻¹ · n)` to the result.
-///
-/// Values verbatim from OpenMC's `openmc/deplete/cram.py` (Pusa
-/// 2016, Table 1, IRA-coefficient form).
+/// 8 conjugate-pair folded poles. Each contributes
+/// `2·Re(α_k·(A−θ_k I)⁻¹·n)`. From OpenMC `cram.py`, Pusa 2016
+/// Table 1 IRA form.
 pub const CRAM16_THETA: [Complex64; 8] = [
     Complex64::new(3.509_103_608_414_918, 8.436_198_985_884_374),
     Complex64::new(5.948_152_268_951_177, 3.587_457_362_018_322),

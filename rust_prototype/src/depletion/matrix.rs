@@ -1,53 +1,37 @@
-//! Build the transmutation matrix `A` from a `DepletionChain` plus a
-//! flux magnitude (n / cm² / s) plus per-nuclide one-group reaction
-//! cross-sections (already on the chain).
+//! Builds `A·Δt` for `cram::cram16`. Row-major `n×n`.
 //!
-//! For nuclide `i`:
-//!   A[i, i]  = − λ_i  − Σ_r σ_{i,r} · φ
-//!   A[j, i]  += λ_i · b_{i→j}   (decay branches)
-//!              + σ_{i,r} · φ · y_{r, i→j}   (reaction yields)
-//!
-//! Multiply by `Δt` before passing to `cram::cram16` (CRAM expects
-//! `exp(M)` for `M = A·Δt`).
+//! ```text
+//! A[i,i] = −λ_i − Σ_r σ_{i,r}·φ
+//! A[j,i] += λ_i·b_{i→j} + σ_{i,r}·φ·y_{r,i→j}
+//! ```
 
 use crate::depletion::chain::DepletionChain;
 
-/// Inputs to the transmutation matrix: the chain plus the
-/// one-group flux magnitude in `n / (cm² · s)`. Reaction
-/// cross-sections live on `chain.reactions`.
 pub struct TransmutationInputs<'a> {
     pub chain: &'a DepletionChain,
-    /// Flux in n/(cm² s). For multi-group, the caller must collapse
-    /// to one group ahead of time.
+    /// n / (cm² · s); caller collapses multi-group ahead of time.
     pub flux: f64,
 }
 
-/// Build `A · Δt` for use with `cram::cram16`. Row-major `n × n`
-/// where `n = chain.len()`. Pure decay terms scale with `dt`;
-/// reaction-rate terms scale with `flux · dt`.
 pub fn build_transmutation_matrix(inputs: &TransmutationInputs<'_>, dt_seconds: f64) -> Vec<f64> {
     let n = inputs.chain.len();
     let mut a = vec![0.0_f64; n * n];
 
-    // Decay terms.
     for (i, entry) in inputs.chain.nuclides.iter().enumerate() {
         if entry.decay_constant == 0.0 {
             continue;
         }
         let lambda_dt = entry.decay_constant * dt_seconds;
         a[i * n + i] -= lambda_dt;
+        // Daughters not in chain: parent leaves at full rate, daughter
+        // untracked. Standard short-chain simplification.
         for branch in &entry.decay_branches {
             if let Some(j) = inputs.chain.index_of_zaid(branch.daughter_zaid) {
                 a[j * n + i] += lambda_dt * branch.branch_ratio;
             }
-            // Daughter not in chain: silently dropped — the parent
-            // still leaves at full rate, but the daughter is
-            // untracked. Standard simplification for short-chain
-            // benchmarks.
         }
     }
 
-    // Reaction terms (barns × flux × dt). 1 barn = 1e-24 cm².
     const BARN_CM2: f64 = 1.0e-24;
     let phi_dt = inputs.flux * dt_seconds;
     for ((parent_zaid, _mt), rxn) in &inputs.chain.reactions {

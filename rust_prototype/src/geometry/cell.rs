@@ -1,53 +1,31 @@
-//! Cells — regions of space defined by boolean combinations of surface half-spaces.
-//!
-//! A cell region is represented as a boolean expression:
-//!   - `HalfSpace(surface_id, positive)` — one side of a surface
-//!   - `Intersection(a, b)` — a AND b
-//!   - `Union(a, b)` — a OR b
-//!   - `Complement(a)` — NOT a
-//!
-//! This is stored as an algebraic data type (enum), not a class hierarchy.
+//! CSG cells: half-space ∧/∨/¬ combinations.
 
 use super::{Aabb, Mat3};
 
-/// Unique identifier for a cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CellId(pub u32);
 
-/// Material filling a cell — either a material index, another universe, or a lattice.
 #[derive(Debug, Clone, Copy)]
 pub enum CellFill {
-    /// Index into the materials array.
     Material(u32),
-    /// Index into the universes array (for nested geometry).
     Universe(u32),
-    /// Index into the (rectangular) lattices array.
     Lattice(u32),
-    /// Index into the hex-grid lattices array. Same role as `Lattice`
-    /// but for hex tessellations (VVER cores, FBR assemblies).
+    /// For VVER / FBR hex tessellations.
     HexLattice(u32),
-    /// Void (no material).
     Void,
 }
 
-/// Boolean region expression — CSG in algebraic data type form.
 #[derive(Debug, Clone)]
 pub enum Region {
-    /// One side of a surface: (surface_index, true = positive half-space).
     HalfSpace { surface_idx: usize, positive: bool },
-    /// Intersection: both regions must contain the point.
     Intersection(Box<Region>, Box<Region>),
-    /// Union: either region must contain the point.
     Union(Box<Region>, Box<Region>),
-    /// Complement: point must NOT be in the region.
     Complement(Box<Region>),
 }
 
 impl Region {
-    /// Test if a point is inside this region.
-    ///
-    /// `surface_evals` is a pre-computed array of surface evaluations at the point.
-    /// This avoids redundant surface evaluations when multiple cells share surfaces.
+    /// `surface_evals` is pre-computed once per point, reused across
+    /// cells that share surfaces.
     #[inline]
     pub fn contains(&self, surface_evals: &[f64]) -> bool {
         match self {
@@ -67,7 +45,6 @@ impl Region {
         }
     }
 
-    /// Collect all surface indices referenced by this region.
     pub fn surface_indices(&self, out: &mut Vec<usize>) {
         match self {
             Self::HalfSpace { surface_idx, .. } => out.push(*surface_idx),
@@ -79,26 +56,11 @@ impl Region {
         }
     }
 
-    /// Conservative bounding box of this region in world coordinates.
-    ///
-    /// Follows the standard CSG / ray-tracing recursive rule (Roth 1982;
-    /// see also OpenCSG, OpenMC's `bounding_box.py`):
-    ///   - `HalfSpace { positive: false }` over a closed surface →
-    ///     surface AABB (the inside).
-    ///   - `HalfSpace { positive: true }` over a closed surface →
-    ///     infinite (exterior of a sphere/cylinder is unbounded).
-    ///   - Plane half-spaces produce one finite face on the gated axis
-    ///     and infinite faces on the other five.
-    ///   - `Intersection(a, b)` → per-axis tighter bound (saturating min
-    ///     /max so `inf - inf` never produces `NaN`).
-    ///   - `Union(a, b)` → per-axis hull.
-    ///   - `Complement(_)` → infinite (the complement of a bounded
-    ///     region is unbounded; the caller falls back to the parent
-    ///     universe's AABB).
-    ///
-    /// Used by `simulate::try_initial_source` to size the per-cell
-    /// rejection-sampling box without depending on cell-level AABB
-    /// metadata (the JSON loader sets `cell.aabb = Aabb::INFINITE`).
+    /// Conservative world-AABB via Roth 1982 / OpenCSG recursion.
+    /// `Complement(_) → INF`. Plane HalfSpaces produce a slab on the
+    /// gated axis. Used by `simulate::try_initial_source` to size
+    /// per-cell rejection-sampling boxes (JSON loader sets
+    /// `cell.aabb = Aabb::INFINITE`).
     pub fn world_aabb(&self, surfaces: &[crate::geometry::Surface]) -> crate::geometry::Aabb {
         use crate::geometry::{Aabb, Surface, Vec3};
         const INF: Aabb = Aabb {
