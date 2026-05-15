@@ -1083,6 +1083,215 @@ pub fn assemble_c_cat(
     })
 }
 
+/// Assembled cat-A.5 (fission outgoing-energy distribution) bundle
+/// slices. Three exclusive branches: a nuclide contributes to at
+/// most one of `fis_*` (Tabular), `watt_*` (Law 11), or `maxevap_*`
+/// (Law 7 / Law 9). When a branch has zero contributing nuclides
+/// the bundle still emits a 1-element sentinel slice so the device
+/// pointer is non-null — matches upload_nuclide_data_uncached
+/// slot 1780-1869.
+pub struct AssembledBundleA5Cat {
+    // Tabular (Law 4 / 61).
+    pub fis_inc_energies: CudaSlice<f64>,
+    pub fis_dist_offsets_vec: Vec<i32>,
+    pub fis_dist_sizes_vec: Vec<i32>,
+    pub fis_e_out: CudaSlice<f64>,
+    pub fis_cdf: CudaSlice<f64>,
+    pub fis_pdf: CudaSlice<f64>,
+    pub fis_nuc_offsets_vec: Vec<i32>,
+    pub fis_nuc_n_inc_vec: Vec<i32>,
+    // Watt (Law 11).
+    pub watt_inc_energies: CudaSlice<f64>,
+    pub watt_a: CudaSlice<f64>,
+    pub watt_b: CudaSlice<f64>,
+    pub watt_u_vec: Vec<f64>,
+    pub watt_nuc_offsets_vec: Vec<i32>,
+    pub watt_nuc_n_vec: Vec<i32>,
+    // Maxwell (Law 7) / Evaporation (Law 9).
+    pub maxevap_inc_energies: CudaSlice<f64>,
+    pub maxevap_theta: CudaSlice<f64>,
+    pub maxevap_u_vec: Vec<f64>,
+    pub maxevap_law_vec: Vec<i32>,
+    pub maxevap_nuc_offsets_vec: Vec<i32>,
+    pub maxevap_nuc_n_vec: Vec<i32>,
+}
+
+pub fn assemble_a5_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleA5Cat, Box<dyn std::error::Error>> {
+    let n_nuc = per_nucs.len();
+
+    // ── Tabular branch ──
+    let total_inc_tab: usize = per_nucs
+        .iter()
+        .filter_map(|p| match &p.fission_edist {
+            FissionEdistGpu::Tabular(t) => Some(t.n_inc as usize),
+            _ => None,
+        })
+        .sum();
+    let total_eout_tab: usize = per_nucs
+        .iter()
+        .filter_map(|p| match &p.fission_edist {
+            FissionEdistGpu::Tabular(t) => Some(t.e_out.len()),
+            _ => None,
+        })
+        .sum();
+
+    let mut fis_inc_energies = unsafe { stream.alloc::<f64>(total_inc_tab.max(1))? };
+    let mut fis_e_out = unsafe { stream.alloc::<f64>(total_eout_tab.max(1))? };
+    let mut fis_cdf = unsafe { stream.alloc::<f64>(total_eout_tab.max(1))? };
+    let mut fis_pdf = unsafe { stream.alloc::<f64>(total_eout_tab.max(1))? };
+    if total_inc_tab == 0 {
+        stream.memset_zeros(&mut fis_inc_energies)?;
+    }
+    if total_eout_tab == 0 {
+        stream.memset_zeros(&mut fis_e_out)?;
+        stream.memset_zeros(&mut fis_cdf)?;
+        stream.memset_zeros(&mut fis_pdf)?;
+    }
+
+    let mut fis_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_inc_tab);
+    let mut fis_dist_sizes_vec: Vec<i32> = Vec::with_capacity(total_inc_tab);
+    let mut fis_nuc_offsets_vec = vec![0_i32; n_nuc];
+    let mut fis_nuc_n_inc_vec = vec![0_i32; n_nuc];
+
+    // ── Watt branch ──
+    let total_inc_watt: usize = per_nucs
+        .iter()
+        .filter_map(|p| match &p.fission_edist {
+            FissionEdistGpu::Watt(w) => Some(w.n_inc as usize),
+            _ => None,
+        })
+        .sum();
+    let mut watt_inc_energies = unsafe { stream.alloc::<f64>(total_inc_watt.max(1))? };
+    let mut watt_a = unsafe { stream.alloc::<f64>(total_inc_watt.max(1))? };
+    let mut watt_b = unsafe { stream.alloc::<f64>(total_inc_watt.max(1))? };
+    if total_inc_watt == 0 {
+        stream.memset_zeros(&mut watt_inc_energies)?;
+        stream.memset_zeros(&mut watt_a)?;
+        stream.memset_zeros(&mut watt_b)?;
+    }
+    let mut watt_u_vec = vec![0.0_f64; n_nuc];
+    let mut watt_nuc_offsets_vec = vec![0_i32; n_nuc];
+    let mut watt_nuc_n_vec = vec![0_i32; n_nuc];
+
+    // ── Maxwell / Evaporation branch ──
+    let total_inc_me: usize = per_nucs
+        .iter()
+        .filter_map(|p| match &p.fission_edist {
+            FissionEdistGpu::MaxEvap(m) => Some(m.n_inc as usize),
+            _ => None,
+        })
+        .sum();
+    let mut maxevap_inc_energies = unsafe { stream.alloc::<f64>(total_inc_me.max(1))? };
+    let mut maxevap_theta = unsafe { stream.alloc::<f64>(total_inc_me.max(1))? };
+    if total_inc_me == 0 {
+        stream.memset_zeros(&mut maxevap_inc_energies)?;
+        stream.memset_zeros(&mut maxevap_theta)?;
+    }
+    let mut maxevap_u_vec = vec![0.0_f64; n_nuc];
+    let mut maxevap_law_vec = vec![0_i32; n_nuc];
+    let mut maxevap_nuc_offsets_vec = vec![0_i32; n_nuc];
+    let mut maxevap_nuc_n_vec = vec![0_i32; n_nuc];
+
+    // ── Walk per_nucs and dispatch to the appropriate branch ──
+    let mut run_tab_inc = 0_usize;
+    let mut run_tab_eout = 0_usize;
+    let mut run_watt = 0_usize;
+    let mut run_me = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        match &p.fission_edist {
+            FissionEdistGpu::None => {}
+            FissionEdistGpu::Tabular(t) => {
+                let ni = t.n_inc as usize;
+                fis_nuc_offsets_vec[nuc_idx] = run_tab_inc as i32;
+                fis_nuc_n_inc_vec[nuc_idx] = t.n_inc;
+                if ni > 0 {
+                    let mut dst = fis_inc_energies.slice_mut(run_tab_inc..run_tab_inc + ni);
+                    stream.memcpy_dtod(&t.inc_energies.slice(0..ni), &mut dst)?;
+                }
+                let elen = t.e_out.len();
+                if elen > 0 {
+                    let mut dst_e = fis_e_out.slice_mut(run_tab_eout..run_tab_eout + elen);
+                    stream.memcpy_dtod(&t.e_out, &mut dst_e)?;
+                    let mut dst_c = fis_cdf.slice_mut(run_tab_eout..run_tab_eout + elen);
+                    stream.memcpy_dtod(&t.cdf, &mut dst_c)?;
+                    let mut dst_p = fis_pdf.slice_mut(run_tab_eout..run_tab_eout + elen);
+                    stream.memcpy_dtod(&t.pdf, &mut dst_p)?;
+                }
+                for di in 0..ni {
+                    fis_dist_offsets_vec.push(t.dist_local_off[di] + run_tab_eout as i32);
+                    fis_dist_sizes_vec.push(t.dist_sz[di]);
+                }
+                run_tab_inc += ni;
+                run_tab_eout += elen;
+            }
+            FissionEdistGpu::Watt(w) => {
+                let ni = w.n_inc as usize;
+                watt_nuc_offsets_vec[nuc_idx] = run_watt as i32;
+                watt_nuc_n_vec[nuc_idx] = w.n_inc;
+                watt_u_vec[nuc_idx] = w.u;
+                if ni > 0 {
+                    let mut dst_e = watt_inc_energies.slice_mut(run_watt..run_watt + ni);
+                    stream.memcpy_dtod(&w.inc_energies, &mut dst_e)?;
+                    let mut dst_a = watt_a.slice_mut(run_watt..run_watt + ni);
+                    stream.memcpy_dtod(&w.a, &mut dst_a)?;
+                    let mut dst_b = watt_b.slice_mut(run_watt..run_watt + ni);
+                    stream.memcpy_dtod(&w.b, &mut dst_b)?;
+                }
+                run_watt += ni;
+            }
+            FissionEdistGpu::MaxEvap(m) => {
+                let ni = m.n_inc as usize;
+                maxevap_nuc_offsets_vec[nuc_idx] = run_me as i32;
+                maxevap_nuc_n_vec[nuc_idx] = m.n_inc;
+                maxevap_u_vec[nuc_idx] = m.u;
+                maxevap_law_vec[nuc_idx] = m.law;
+                if ni > 0 {
+                    let mut dst_e = maxevap_inc_energies.slice_mut(run_me..run_me + ni);
+                    stream.memcpy_dtod(&m.inc_energies, &mut dst_e)?;
+                    let mut dst_t = maxevap_theta.slice_mut(run_me..run_me + ni);
+                    stream.memcpy_dtod(&m.theta, &mut dst_t)?;
+                }
+                run_me += ni;
+            }
+        }
+    }
+
+    // ── Bundle-level sentinels. Legacy paths (1788-1791, 1839-1842)
+    //    push [0]/[0.0] for empty dist_off / dist_sz / fis_eout
+    //    families. fis_inc_energies and fis_e_out / cdf / pdf are
+    //    already allocated to size 1 above when totals were 0. ──
+    if fis_dist_offsets_vec.is_empty() {
+        fis_dist_offsets_vec.push(0);
+        fis_dist_sizes_vec.push(0);
+    }
+
+    Ok(AssembledBundleA5Cat {
+        fis_inc_energies,
+        fis_dist_offsets_vec,
+        fis_dist_sizes_vec,
+        fis_e_out,
+        fis_cdf,
+        fis_pdf,
+        fis_nuc_offsets_vec,
+        fis_nuc_n_inc_vec,
+        watt_inc_energies,
+        watt_a,
+        watt_b,
+        watt_u_vec,
+        watt_nuc_offsets_vec,
+        watt_nuc_n_vec,
+        maxevap_inc_energies,
+        maxevap_theta,
+        maxevap_u_vec,
+        maxevap_law_vec,
+        maxevap_nuc_offsets_vec,
+        maxevap_nuc_n_vec,
+    })
+}
+
 /// Assembled cat-A.4 (elastic angular) bundle slices.
 pub struct AssembledBundleA4Cat {
     pub ang_energies: CudaSlice<f64>,
@@ -1986,6 +2195,216 @@ mod tests {
             assembled.lev_ang_lev_ne_vec,
             dtoh_i32(&bundle_legacy.lev_ang_lev_ne),
             "lev_ang_lev_ne",
+        );
+    }
+
+    #[test]
+    fn assemble_a5_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::hdf5_reader::{
+            EnergyDistribution, FissionEnergyLaw, MaxwellLaw, TabularEnergyDist, WattLaw,
+        };
+
+        // Three nuclides exercising all three branches:
+        // nuc_a: Tabular (Law 4)
+        // nuc_b: Watt (Law 11)
+        // nuc_c: Maxwell (Law 7)
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![1.0e3, 1.0e6],
+            distributions: vec![
+                TabularEnergyDist {
+                    e_out: vec![1.0e4, 1.0e6, 1.0e7],
+                    pdf: vec![1.0e-7, 1.0e-7, 1.0e-7],
+                    cdf: vec![0.0, 0.5, 1.0],
+                },
+                TabularEnergyDist {
+                    e_out: vec![1.0e4, 1.0e7],
+                    pdf: vec![1.0e-7, 1.0e-7],
+                    cdf: vec![0.0, 1.0],
+                },
+            ],
+            closed_form: None,
+        });
+
+        let mut nuc_b = NuclideKernels::empty(233.0, 2.49);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![9.0, 4.5, 0.9],
+        ));
+        nuc_b.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![],
+            distributions: vec![],
+            closed_form: Some(FissionEnergyLaw::Watt(WattLaw {
+                a_energies: vec![1.0e3, 1.0e6],
+                a_values: vec![1.0e6, 1.5e6],
+                b_energies: vec![1.0e3, 1.0e6],
+                b_values: vec![2.0, 3.0],
+                u: 0.0,
+            })),
+        });
+
+        let mut nuc_c = NuclideKernels::empty(234.0, 2.4);
+        nuc_c.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![9.5, 4.8, 0.95],
+        ));
+        nuc_c.fission_energy_dist = Some(EnergyDistribution {
+            energies: vec![],
+            distributions: vec![],
+            closed_form: Some(FissionEnergyLaw::Maxwell(MaxwellLaw {
+                theta_energies: vec![1.0e3, 1.0e7],
+                theta_values: vec![1.0e6, 1.4e6],
+                u: 1.0e3,
+            })),
+        });
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b), Arc::new(nuc_c)];
+        let rank = 5;
+
+        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_a5_cat(&stream, &per_nucs).expect("assemble_a5_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+
+        // Tabular fields.
+        assert_eq!(
+            dtoh_f64(&assembled.fis_inc_energies),
+            dtoh_f64(&bundle_legacy.fis_inc_energies),
+            "fis_inc_energies"
+        );
+        assert_eq!(
+            assembled.fis_dist_offsets_vec,
+            dtoh_i32(&bundle_legacy.fis_dist_offsets),
+            "fis_dist_offsets"
+        );
+        assert_eq!(
+            assembled.fis_dist_sizes_vec,
+            dtoh_i32(&bundle_legacy.fis_dist_sizes),
+            "fis_dist_sizes"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.fis_e_out),
+            dtoh_f64(&bundle_legacy.fis_e_out),
+            "fis_e_out"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.fis_cdf),
+            dtoh_f64(&bundle_legacy.fis_cdf),
+            "fis_cdf"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.fis_pdf),
+            dtoh_f64(&bundle_legacy.fis_pdf),
+            "fis_pdf"
+        );
+        assert_eq!(
+            assembled.fis_nuc_offsets_vec,
+            dtoh_i32(&bundle_legacy.fis_nuc_offsets),
+            "fis_nuc_offsets"
+        );
+        assert_eq!(
+            assembled.fis_nuc_n_inc_vec,
+            dtoh_i32(&bundle_legacy.fis_nuc_n_inc),
+            "fis_nuc_n_inc"
+        );
+        // Watt fields.
+        assert_eq!(
+            dtoh_f64(&assembled.watt_inc_energies),
+            dtoh_f64(&bundle_legacy.watt_inc_energies),
+            "watt_inc_energies"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.watt_a),
+            dtoh_f64(&bundle_legacy.watt_a),
+            "watt_a"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.watt_b),
+            dtoh_f64(&bundle_legacy.watt_b),
+            "watt_b"
+        );
+        assert_eq!(
+            assembled.watt_u_vec,
+            {
+                let mut v = vec![0.0; bundle_legacy.watt_u.len()];
+                stream.memcpy_dtoh(&bundle_legacy.watt_u, &mut v).unwrap();
+                v
+            },
+            "watt_u"
+        );
+        assert_eq!(
+            assembled.watt_nuc_offsets_vec,
+            dtoh_i32(&bundle_legacy.watt_nuc_offsets),
+            "watt_nuc_offsets"
+        );
+        assert_eq!(
+            assembled.watt_nuc_n_vec,
+            dtoh_i32(&bundle_legacy.watt_nuc_n),
+            "watt_nuc_n"
+        );
+        // MaxEvap fields.
+        assert_eq!(
+            dtoh_f64(&assembled.maxevap_inc_energies),
+            dtoh_f64(&bundle_legacy.maxevap_inc_energies),
+            "maxevap_inc_energies"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.maxevap_theta),
+            dtoh_f64(&bundle_legacy.maxevap_theta),
+            "maxevap_theta"
+        );
+        assert_eq!(
+            assembled.maxevap_u_vec,
+            {
+                let mut v = vec![0.0; bundle_legacy.maxevap_u.len()];
+                stream
+                    .memcpy_dtoh(&bundle_legacy.maxevap_u, &mut v)
+                    .unwrap();
+                v
+            },
+            "maxevap_u"
+        );
+        assert_eq!(
+            assembled.maxevap_law_vec,
+            dtoh_i32(&bundle_legacy.maxevap_law),
+            "maxevap_law"
+        );
+        assert_eq!(
+            assembled.maxevap_nuc_offsets_vec,
+            dtoh_i32(&bundle_legacy.maxevap_nuc_offsets),
+            "maxevap_nuc_offsets"
+        );
+        assert_eq!(
+            assembled.maxevap_nuc_n_vec,
+            dtoh_i32(&bundle_legacy.maxevap_nuc_n),
+            "maxevap_nuc_n"
         );
     }
 
