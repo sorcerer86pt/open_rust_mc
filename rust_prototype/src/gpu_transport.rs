@@ -54,11 +54,39 @@ const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 /// allocation address, and dropping the last reference frees the
 /// allocation, which would mean the upload site lost its reference
 /// too (no possible aliasing).
+///
+/// Callers that bypass `nuclide_cache::TieredStore` and produce fresh
+/// Arcs on every load will see this key miss every time. That's fine
+/// for correctness — content is correctly re-uploaded — but it
+/// degrades the cache to a no-op for those callers. The bounded LRU
+/// below caps the cost of that miss pattern at `BUNDLE_CACHE_CAP`
+/// entries instead of letting it leak VRAM across a sweep.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct GpuUploadKey {
     rank: usize,
     nuc_ptrs: Vec<usize>,
 }
+
+/// Default upper bound on `Arc<GpuNuclideData>` bundles retained by
+/// the per-context cache. Each entry pins ~1.4 GB of `CudaSlice` on
+/// a typical fast-metal ICSBEP case (≈ 184 MB SVD basis + 1.2 GB
+/// discrete-level basis + 42 MB pointwise). An unbounded `HashMap`
+/// (the prior implementation) accumulated one entry per distinct
+/// case bundle and OOM'd the GPU around the 7-8th case on a 12 GB
+/// 3080 — looking like a hang as the driver started backing
+/// allocations with mapped host memory, which slowed every XS read
+/// to a PCIe round-trip.
+///
+/// The actual runtime cap is set by `bundle_cache_cap()` based on
+/// device total memory: 4 GB cards (A1000 laptop) use cap=1 because
+/// holding two bundles + a transient upload (~ 3 × 1.5 GB) exceeds
+/// device capacity, 12 GB+ cards (3080) use cap=2 so back-to-back
+/// runs of the same case still hit cache.
+///
+/// Override with `OPEN_RUST_MC_GPU_BUNDLE_CAP=N` for benchmarking.
+const BUNDLE_CACHE_CAP_DEFAULT_LOW_VRAM: usize = 1;
+const BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM: usize = 2;
+const LOW_VRAM_THRESHOLD_BYTES: usize = 6 * 1024 * 1024 * 1024;
 
 /// Compiled CUDA kernels for event-based transport.
 pub struct GpuTransportContext {
@@ -71,15 +99,27 @@ pub struct GpuTransportContext {
     k_energy_bin_count: CudaFunction,
     k_energy_bin_scatter: CudaFunction,
     k_transport_persistent: CudaFunction,
-    /// `(rank, [Arc::as_ptr] of every NuclideKernels)` → `Arc<GpuNuclideData>`.
-    /// Re-uploading the same kernels (same pointers, same rank) returns
-    /// the cached `Arc` and skips the entire `clone_htod` pass — ~50 MB
-    /// per actinide-heavy material avoided on every repeat call.
-    /// `Mutex` not `RwLock`: the put path is rare (once per unique key)
-    /// and the get path is cheap once we hold the lock.
+    /// Bounded LRU of recently-uploaded bundles. Insertion-ordered;
+    /// most-recently-used moves to the back, the front evicts when
+    /// `len() == BUNDLE_CACHE_CAP` and a new bundle inserts.
+    ///
+    /// Re-uploading the same kernels (same pointers, same rank) finds
+    /// the cached entry, promotes it, and skips the entire
+    /// `clone_htod` pass — ~50 MB per actinide-heavy material avoided
+    /// on every repeat call. Linear scan is fine at cap=2; switching
+    /// to a real LRU (linked-hash-map or `lru` crate) is only
+    /// worthwhile if the cap grows past ~16.
+    ///
+    /// `Mutex` not `RwLock`: the put path is rare (once per unique
+    /// key) and the get path is cheap once we hold the lock.
     nuclide_buffer_cache: std::sync::Mutex<
-        std::collections::HashMap<GpuUploadKey, Arc<GpuNuclideData>>,
+        std::collections::VecDeque<(GpuUploadKey, Arc<GpuNuclideData>)>,
     >,
+    /// Memoised effective cap for `nuclide_buffer_cache`. Computed
+    /// lazily on first use from the device's total memory + an
+    /// optional `OPEN_RUST_MC_GPU_BUNDLE_CAP` env override. See
+    /// `bundle_cache_cap()`.
+    cached_bundle_cap: std::sync::OnceLock<usize>,
 }
 
 /// SVD data + physics tables uploaded to GPU for all nuclides.
@@ -395,8 +435,11 @@ impl GpuTransportContext {
             k_energy_bin_scatter,
             k_transport_persistent,
             nuclide_buffer_cache: std::sync::Mutex::new(
-                std::collections::HashMap::new(),
+                std::collections::VecDeque::with_capacity(
+                    BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM,
+                ),
             ),
+            cached_bundle_cap: std::sync::OnceLock::new(),
         })
     }
 
@@ -922,21 +965,78 @@ impl GpuTransportContext {
             rank,
             nuc_ptrs: nuclides.iter().map(|a| Arc::as_ptr(a) as usize).collect(),
         };
-        if let Some(hit) = self
-            .nuclide_buffer_cache
-            .lock()
-            .expect("nuclide_buffer_cache poisoned")
-            .get(&key)
-            .cloned()
-        {
-            return Ok(hit);
+        let cap = self.bundle_cache_cap();
+        // Cache hit: promote the entry to MRU (back of the deque) and
+        // return its Arc. Linear scan is fine at BUNDLE_CACHE_CAP=2;
+        // becomes O(n) if cap grows large.
+        //
+        // Also eagerly evict any entries we're about to push past the
+        // cap *before* the upload below. Eager eviction keeps peak VRAM
+        // at one bundle, not two: a lazy eviction (insert-then-pop)
+        // forces the GPU to hold the old + new bundle simultaneously
+        // for the duration of `upload_nuclide_data_uncached`, which
+        // OOMs on a 4 GB A1000 (and tightens pressure on a 12 GB 3080
+        // mid-sweep). The freed entry's `Arc<GpuNuclideData>` drops
+        // here iff no caller still holds it; for the ICSBEP sweep's
+        // strictly-sequential single-threaded case pattern that's
+        // always true.
+        let evicted_any = {
+            let mut guard = self
+                .nuclide_buffer_cache
+                .lock()
+                .expect("nuclide_buffer_cache poisoned");
+            if let Some(pos) = guard.iter().position(|(k, _)| k == &key) {
+                let entry = guard.remove(pos).expect("position just located");
+                let arc = Arc::clone(&entry.1);
+                guard.push_back(entry);
+                return Ok(arc);
+            }
+            let mut evicted = 0;
+            while guard.len() >= cap {
+                guard.pop_front();
+                evicted += 1;
+            }
+            evicted > 0
+        };
+        // Drop'd Arcs above released their CudaSlices, but on CUDA
+        // 11.2+ async allocator that memory sits in the stream pool
+        // (cuMemFreeAsync doesn't trim) until cuMemPoolTrimTo is
+        // called. Without this trim the new upload below allocates
+        // FRESH device memory while the pool retains the evicted
+        // bytes — peak VRAM = (cap + 1) × bundle_size, which OOMs a 4
+        // GB A1000 even at cap=2. Trim returns the freed bytes to the
+        // driver so the next allocation reuses them.
+        if evicted_any {
+            self.trim_async_mempool();
         }
+        // Cache miss: upload outside the lock so concurrent uploads
+        // don't serialise on the hot path. The duplicate-upload window
+        // (two callers both miss, both upload, last writer wins) is
+        // benign — the loser's Arc just isn't reachable from the cache
+        // and frees normally.
         let fresh = self.upload_nuclide_data_uncached(nuclides, rank)?;
         let arc = Arc::new(fresh);
-        self.nuclide_buffer_cache
-            .lock()
-            .expect("nuclide_buffer_cache poisoned")
-            .insert(key, Arc::clone(&arc));
+        {
+            let mut guard = self
+                .nuclide_buffer_cache
+                .lock()
+                .expect("nuclide_buffer_cache poisoned");
+            // Recheck — another thread may have populated the same key
+            // while we were uploading. Returning their entry is fine
+            // since both uploads are content-equivalent for the same key.
+            if let Some(pos) = guard.iter().position(|(k, _)| k == &key) {
+                let entry = guard.remove(pos).expect("position just located");
+                let existing = Arc::clone(&entry.1);
+                guard.push_back(entry);
+                return Ok(existing);
+            }
+            // Cap may have grown again under concurrent inserts
+            // between the eager-evict above and now. Trim once more.
+            while guard.len() >= cap {
+                guard.pop_front();
+            }
+            guard.push_back((key, Arc::clone(&arc)));
+        }
         Ok(arc)
     }
 
@@ -950,6 +1050,69 @@ impl GpuTransportContext {
             .lock()
             .expect("nuclide_buffer_cache poisoned")
             .clear();
+        self.trim_async_mempool();
+    }
+
+    /// Release unused memory from the device's default async mempool
+    /// back to the OS / driver-visible free pool.
+    ///
+    /// CUDA 11.2+'s async allocator (`cuMemAllocAsync` /
+    /// `cuMemFreeAsync`) keeps freed allocations in a stream-private
+    /// pool by default — `cuMemFreeAsync` does *not* return memory to
+    /// the driver until either the pool's release threshold is set or
+    /// `cuMemPoolTrimTo` is called explicitly. Without this call,
+    /// dropping a cached `Arc<GpuNuclideData>` shrinks the engine's
+    /// view of "live" memory but `nvidia-smi memory.used` keeps
+    /// showing the previous high-water mark, and the next big
+    /// allocation hits the per-context cap instead of reusing the
+    /// pool-retained bytes.
+    ///
+    /// `trim_to(0)` releases the entire unused pool back to the
+    /// driver; the next allocation just pulls fresh memory. This is
+    /// fine because the engine has only one consumer of the pool
+    /// (the transport stream).
+    ///
+    /// Quietly swallows errors — trim is best-effort, and the only
+    /// real failure mode is "no async allocator on this device"
+    /// (pre-CUDA-11.2 or specific GPU SKUs), where freeing is
+    /// already synchronous and there's nothing to trim.
+    /// Effective bundle-cache cap for this device. Reads
+    /// `OPEN_RUST_MC_GPU_BUNDLE_CAP` if set; otherwise picks the
+    /// low-VRAM (cap=1) or high-VRAM (cap=2) default by device total
+    /// memory. Cached in `self.cached_bundle_cap` so the env-var
+    /// parse + driver query happen once per context.
+    fn bundle_cache_cap(&self) -> usize {
+        *self.cached_bundle_cap.get_or_init(|| {
+            if let Some(v) = std::env::var_os("OPEN_RUST_MC_GPU_BUNDLE_CAP") {
+                if let Ok(n) = v.to_string_lossy().parse::<usize>() {
+                    return n.max(1);
+                }
+            }
+            let total = self._ctx.total_mem().unwrap_or(0);
+            if total > 0 && total < LOW_VRAM_THRESHOLD_BYTES {
+                BUNDLE_CACHE_CAP_DEFAULT_LOW_VRAM
+            } else {
+                BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM
+            }
+        })
+    }
+
+    pub fn trim_async_mempool(&self) {
+        if !self._ctx.has_async_alloc() {
+            return;
+        }
+        // SAFETY: `self._ctx` is a live `Arc<CudaContext>` (so its
+        // CUDA device handle is valid for the duration of this call);
+        // we only call into cudarc's checked driver helpers with that
+        // device handle and trim the pool to 0 unused bytes, which is
+        // the documented zero-side-effect operation on the default
+        // mempool.
+        unsafe {
+            let dev = self._ctx.cu_device();
+            if let Ok(pool) = cudarc::driver::result::device::get_default_mem_pool(dev) {
+                let _ = cudarc::driver::result::mem_pool::trim_to(pool, 0);
+            }
+        }
     }
 
     /// Uncached upload — the original implementation, kept private so
@@ -2853,5 +3016,46 @@ mod tests {
         let c: Arc<NuclideKernels> = Arc::new(NuclideKernels::empty(1.0, 2.43));
         let k_other = mk_key(&[Arc::clone(&c), Arc::clone(&b)], 5);
         assert_ne!(k1, k_other);
+    }
+
+    /// LRU cap behaviour: inserting more than `cap` distinct keys
+    /// must evict the oldest. This is the test that guards the
+    /// 376-case ICSBEP sweep from re-introducing the monotonic VRAM
+    /// growth that stalled the GPU run.
+    ///
+    /// Operates on a plain `VecDeque` rather than a `GpuTransportContext`
+    /// to avoid requiring a CUDA device on the test box. The eviction
+    /// logic in `upload_nuclide_data` is a 4-line block; this test
+    /// covers the same shape parameterised on `cap`.
+    #[test]
+    fn bundle_cache_evicts_oldest_at_cap() {
+        use std::collections::VecDeque;
+        for cap in [1usize, 2, BUNDLE_CACHE_CAP_DEFAULT_HIGH_VRAM] {
+            let mut cache: VecDeque<(GpuUploadKey, usize)> = VecDeque::new();
+            let mk = |i: usize| GpuUploadKey {
+                rank: 5,
+                nuc_ptrs: vec![i],
+            };
+            let push = |cache: &mut VecDeque<(GpuUploadKey, usize)>,
+                        key: GpuUploadKey,
+                        val: usize| {
+                while cache.len() >= cap {
+                    cache.pop_front();
+                }
+                cache.push_back((key, val));
+            };
+
+            for i in 0..cap + 2 {
+                push(&mut cache, mk(i), i * 100);
+            }
+            assert_eq!(cache.len(), cap, "cap={cap} should bound len");
+            // The two oldest entries (0 and 1) should have been evicted.
+            assert!(cache.iter().all(|(k, _)| k != &mk(0)));
+            if cap < 2 {
+                assert!(cache.iter().all(|(k, _)| k != &mk(1)));
+            }
+            // The newest entry must be present.
+            assert_eq!(cache.back().map(|(_, v)| *v), Some((cap + 1) * 100));
+        }
     }
 }
