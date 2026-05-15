@@ -1083,6 +1083,102 @@ pub fn assemble_c_cat(
     })
 }
 
+/// Assembled cat-A.7 (URR probability tables) bundle slices.
+pub struct AssembledBundleA7Cat {
+    pub urr_energies: CudaSlice<f64>,
+    pub urr_cum_prob: CudaSlice<f64>,
+    pub urr_total_f: CudaSlice<f64>,
+    pub urr_elastic_f: CudaSlice<f64>,
+    pub urr_fission_f: CudaSlice<f64>,
+    pub urr_capture_f: CudaSlice<f64>,
+    pub urr_offsets_vec: Vec<i32>,
+    pub urr_n_energies_vec: Vec<i32>,
+    pub urr_n_bands_vec: Vec<i32>,
+    pub urr_multiply_smooth_vec: Vec<i32>,
+}
+
+pub fn assemble_a7_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleA7Cat, Box<dyn std::error::Error>> {
+    let n_nuc = per_nucs.len();
+    let total_e: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.urr.as_ref().map(|u| u.n_energies as usize))
+        .sum();
+    let total_fac: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.urr.as_ref())
+        .map(|u| (u.n_energies as usize) * (u.n_bands as usize))
+        .sum();
+
+    let mut urr_energies = unsafe { stream.alloc::<f64>(total_e.max(1))? };
+    let mut urr_cum_prob = unsafe { stream.alloc::<f64>(total_fac.max(1))? };
+    let mut urr_total_f = unsafe { stream.alloc::<f64>(total_fac.max(1))? };
+    let mut urr_elastic_f = unsafe { stream.alloc::<f64>(total_fac.max(1))? };
+    let mut urr_fission_f = unsafe { stream.alloc::<f64>(total_fac.max(1))? };
+    let mut urr_capture_f = unsafe { stream.alloc::<f64>(total_fac.max(1))? };
+    if total_e == 0 {
+        stream.memset_zeros(&mut urr_energies)?;
+    }
+    if total_fac == 0 {
+        stream.memset_zeros(&mut urr_cum_prob)?;
+        stream.memset_zeros(&mut urr_total_f)?;
+        stream.memset_zeros(&mut urr_elastic_f)?;
+        stream.memset_zeros(&mut urr_fission_f)?;
+        stream.memset_zeros(&mut urr_capture_f)?;
+    }
+
+    let mut urr_offsets_vec = vec![0_i32; n_nuc];
+    let mut urr_n_energies_vec = vec![0_i32; n_nuc];
+    let mut urr_n_bands_vec = vec![0_i32; n_nuc];
+    let mut urr_multiply_smooth_vec = vec![0_i32; n_nuc];
+
+    let mut run_e = 0_usize;
+    let mut run_fac = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        let Some(u) = p.urr.as_ref() else { continue };
+        let ne = u.n_energies as usize;
+        let nb = u.n_bands as usize;
+        let fac_len = ne * nb;
+        urr_offsets_vec[nuc_idx] = run_e as i32;
+        urr_n_energies_vec[nuc_idx] = u.n_energies;
+        urr_n_bands_vec[nuc_idx] = u.n_bands;
+        urr_multiply_smooth_vec[nuc_idx] = u.multiply_smooth;
+        if ne > 0 {
+            let mut dst = urr_energies.slice_mut(run_e..run_e + ne);
+            stream.memcpy_dtod(&u.energies, &mut dst)?;
+        }
+        if fac_len > 0 {
+            let mut v = urr_cum_prob.slice_mut(run_fac..run_fac + fac_len);
+            stream.memcpy_dtod(&u.cum_prob, &mut v)?;
+            let mut v = urr_total_f.slice_mut(run_fac..run_fac + fac_len);
+            stream.memcpy_dtod(&u.total_factor, &mut v)?;
+            let mut v = urr_elastic_f.slice_mut(run_fac..run_fac + fac_len);
+            stream.memcpy_dtod(&u.elastic_factor, &mut v)?;
+            let mut v = urr_fission_f.slice_mut(run_fac..run_fac + fac_len);
+            stream.memcpy_dtod(&u.fission_factor, &mut v)?;
+            let mut v = urr_capture_f.slice_mut(run_fac..run_fac + fac_len);
+            stream.memcpy_dtod(&u.capture_factor, &mut v)?;
+        }
+        run_e += ne;
+        run_fac += fac_len;
+    }
+
+    Ok(AssembledBundleA7Cat {
+        urr_energies,
+        urr_cum_prob,
+        urr_total_f,
+        urr_elastic_f,
+        urr_fission_f,
+        urr_capture_f,
+        urr_offsets_vec,
+        urr_n_energies_vec,
+        urr_n_bands_vec,
+        urr_multiply_smooth_vec,
+    })
+}
+
 /// Assembled cat-A.6 (MT=91 continuum inelastic outgoing-energy)
 /// bundle slices. Tabular layout, identical to the fission Tabular
 /// branch but indexed against `inel91_*` fields. When no nuclide
@@ -2498,6 +2594,115 @@ mod tests {
             assembled.maxevap_nuc_n_vec,
             dtoh_i32(&bundle_legacy.maxevap_nuc_n),
             "maxevap_nuc_n"
+        );
+    }
+
+    #[test]
+    fn assemble_a7_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::hdf5_reader::UrrProbabilityTables;
+
+        let mut nuc_a = NuclideKernels::empty(238.0, 0.0);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        // 2 energies × 3 bands.
+        nuc_a.urr_tables = Some(UrrProbabilityTables {
+            energies: vec![1.0e4, 1.0e5],
+            n_bands: 3,
+            cum_prob: vec![vec![0.33, 0.66, 1.0], vec![0.25, 0.5, 1.0]],
+            total_factor: vec![vec![1.0, 2.0, 3.0], vec![1.1, 2.1, 3.1]],
+            elastic_factor: vec![vec![0.5, 1.0, 1.5], vec![0.55, 1.05, 1.55]],
+            fission_factor: vec![vec![0.0, 0.5, 1.0], vec![0.0, 0.55, 1.05]],
+            capture_factor: vec![vec![0.5, 0.5, 0.5], vec![0.4, 0.45, 0.5]],
+            multiply_smooth: true,
+            interpolation: 2,
+        });
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_a7_cat(&stream, &per_nucs).expect("assemble_a7_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        assert_eq!(
+            dtoh_f64(&assembled.urr_energies),
+            dtoh_f64(&bundle_legacy.urr_energies),
+            "urr_energies"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.urr_cum_prob),
+            dtoh_f64(&bundle_legacy.urr_cum_prob),
+            "urr_cum_prob"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.urr_total_f),
+            dtoh_f64(&bundle_legacy.urr_total_f),
+            "urr_total_f"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.urr_elastic_f),
+            dtoh_f64(&bundle_legacy.urr_elastic_f),
+            "urr_elastic_f"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.urr_fission_f),
+            dtoh_f64(&bundle_legacy.urr_fission_f),
+            "urr_fission_f"
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.urr_capture_f),
+            dtoh_f64(&bundle_legacy.urr_capture_f),
+            "urr_capture_f"
+        );
+        assert_eq!(
+            assembled.urr_offsets_vec,
+            dtoh_i32(&bundle_legacy.urr_offsets),
+            "urr_offsets"
+        );
+        assert_eq!(
+            assembled.urr_n_energies_vec,
+            dtoh_i32(&bundle_legacy.urr_n_energies),
+            "urr_n_energies"
+        );
+        assert_eq!(
+            assembled.urr_n_bands_vec,
+            dtoh_i32(&bundle_legacy.urr_n_bands),
+            "urr_n_bands"
+        );
+        assert_eq!(
+            assembled.urr_multiply_smooth_vec,
+            dtoh_i32(&bundle_legacy.urr_multiply_smooth),
+            "urr_multiply_smooth"
         );
     }
 
