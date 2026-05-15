@@ -135,6 +135,27 @@ impl LfuEntriesMut for PerNuclideCacheAdapter<'_> {
 
 /// SVD data + physics tables uploaded to GPU for all nuclides.
 pub struct GpuNuclideData {
+    // ── Per-nuclide ownership pin (Stage C step D groundwork) ──
+    /// Keeps per-nuclide CudaSlices alive for the bundle's lifetime.
+    /// The pointer-array fields below (`basis_ptrs` etc.) point into
+    /// these per-nuclide allocations; dropping them would invalidate
+    /// the device pointers the kernel will eventually load through.
+    pub per_nucs: Vec<Arc<crate::gpu_per_nuclide::PerNuclideGpu>>,
+
+    // ── Pointer-array fields (Step D scaffold) ──
+    /// `[n_nuc × N_RXN_SLOTS]` flat — each slot is the `CUdeviceptr`
+    /// (as `u64`) of the corresponding per-nuclide
+    /// `PerNuclideGpu::basis[slot]` CudaSlice, or `0` when
+    /// `has_reaction[slot] == 0`. The kernel will eventually read
+    /// these via `(double*)basis_ptrs[i]` instead of dereferencing
+    /// `all_basis[basis_offsets[i] + ...]` (Stage C step D); this
+    /// commit only populates the slice so the wiring is provable
+    /// before the kernel ABI is touched.
+    pub basis_ptrs: CudaSlice<u64>,
+    /// `[n_nuc × N_RXN_SLOTS]` — paired with `basis_ptrs`. Same
+    /// semantics; `0` when `has_reaction[slot] == 0`.
+    pub coeffs_ptrs: CudaSlice<u64>,
+
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
     pub all_coeffs: CudaSlice<f64>,
@@ -420,7 +441,11 @@ impl GpuNuclideData {
             .chain(i32_extra2.iter())
             .map(|x| x.num_bytes())
             .sum();
-        f64_total + i32_total
+        // Step-D pointer-array buffers (u64 each). The per-nuclide
+        // Arcs themselves are not counted — they live in the per-
+        // nuclide cache and are accounted for there.
+        let ptr_total = self.basis_ptrs.num_bytes() + self.coeffs_ptrs.num_bytes();
+        f64_total + i32_total + ptr_total
     }
 }
 
@@ -1206,7 +1231,13 @@ impl GpuTransportContext {
         let a7 = assemble_a7_cat(&self.stream, &per_nucs)?;
         let a8 = assemble_a8_cat(&self.stream, &per_nucs)?;
 
+        let (basis_ptrs, coeffs_ptrs) =
+            crate::gpu_per_nuclide::build_per_nuclide_ptr_arrays(&self.stream, &per_nucs)?;
+
         Ok(Arc::new(GpuNuclideData {
+            per_nucs: per_nucs.clone(),
+            basis_ptrs,
+            coeffs_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1400,8 +1431,13 @@ impl GpuTransportContext {
         let a6 = assemble_a6_cat(&self.stream, &per_nucs)?;
         let a7 = assemble_a7_cat(&self.stream, &per_nucs)?;
         let a8 = assemble_a8_cat(&self.stream, &per_nucs)?;
+        let (basis_ptrs, coeffs_ptrs) =
+            crate::gpu_per_nuclide::build_per_nuclide_ptr_arrays(&self.stream, &per_nucs)?;
 
         Ok(GpuNuclideData {
+            per_nucs,
+            basis_ptrs,
+            coeffs_ptrs,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2228,6 +2264,13 @@ impl GpuTransportContext {
         );
 
         Ok(GpuNuclideData {
+            // Step-D pointer-array fields are not populated by the
+            // legacy path; this function exists only as the byte-
+            // equality reference for the assembled-path tests, which
+            // don't compare per_nucs / basis_ptrs / coeffs_ptrs.
+            per_nucs: Vec::new(),
+            basis_ptrs: self.stream.clone_htod(&[0_u64])?,
+            coeffs_ptrs: self.stream.clone_htod(&[0_u64])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,

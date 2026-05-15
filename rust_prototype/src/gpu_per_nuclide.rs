@@ -13,7 +13,7 @@
 //! ABI stays unchanged until Stage 4 (separate commit, gated on
 //! `metal_stats_diag` 3-way passing).
 
-use cudarc::driver::{CudaSlice, CudaStream};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
 use std::sync::Arc;
 
 use crate::transport::xs_provider::{NuclideKernels, ReactionKernel};
@@ -1640,6 +1640,49 @@ pub fn assemble_a4_cat(
     })
 }
 
+/// Build per-nuclide pointer-array buffers for the basis / coeffs
+/// reaction slots. Each slot stores the `CUdeviceptr` of the
+/// corresponding `PerNuclideGpu::basis[slot]` / `coeffs[slot]`
+/// `CudaSlice` as a `u64`; absent reactions get `0` (the kernel will
+/// gate on `has_reaction[slot]` and never dereference a null
+/// pointer).
+///
+/// Stage C step D groundwork — populate the pointer arrays so the
+/// kernel can be migrated from `basis[basis_offsets[i] + …]` to
+/// `((double*)basis_ptrs[i])[…]` per access site. The per-nuclide
+/// CudaSlices that these pointers reference are pinned by
+/// `GpuNuclideData::per_nucs` for the bundle's lifetime.
+pub fn build_per_nuclide_ptr_arrays(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<(CudaSlice<u64>, CudaSlice<u64>), Box<dyn std::error::Error>> {
+    let n_nuc = per_nucs.len();
+    let mut basis_ptrs = vec![0_u64; n_nuc * N_RXN_SLOTS];
+    let mut coeffs_ptrs = vec![0_u64; n_nuc * N_RXN_SLOTS];
+    for (i, p) in per_nucs.iter().enumerate() {
+        for r in 0..N_RXN_SLOTS {
+            if let Some(b) = &p.basis[r] {
+                let (ptr, _sync) = b.device_ptr(stream);
+                basis_ptrs[i * N_RXN_SLOTS + r] = ptr;
+            }
+            if let Some(c) = &p.coeffs[r] {
+                let (ptr, _sync) = c.device_ptr(stream);
+                coeffs_ptrs[i * N_RXN_SLOTS + r] = ptr;
+            }
+        }
+    }
+    // Sentinel: clone_htod on `[0_u64; 0]` would null the pointer.
+    // n_nuc is always ≥ 1 in production but defend against it anyway.
+    if basis_ptrs.is_empty() {
+        basis_ptrs.push(0);
+        coeffs_ptrs.push(0);
+    }
+    Ok((
+        stream.clone_htod(&basis_ptrs)?,
+        stream.clone_htod(&coeffs_ptrs)?,
+    ))
+}
+
 /// Flatten URR per-band 2D rows into the bundle's row-major layout.
 /// Mirrors upload_nuclide_data_uncached:1883-1905.
 fn build_urr_slices(
@@ -2767,6 +2810,84 @@ mod tests {
             dtoh_i32(&bundle_legacy.urr_multiply_smooth),
             "urr_multiply_smooth"
         );
+    }
+
+    #[test]
+    fn ptr_arrays_match_per_nuclide_device_addresses() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+
+        // 2 nuclides with elastic + capture slots populated. Each
+        // populated slot's basis_ptrs entry must equal the device
+        // address of the corresponding PerNuclideGpu CudaSlice;
+        // absent slots must be zero.
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.fission = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![0.0, 0.0, 1.5],
+        ));
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let bundle = ctx.upload_nuclide_data(&nuclides, 5).unwrap();
+
+        assert_eq!(bundle.per_nucs.len(), 2, "per_nucs pin");
+
+        let mut basis_ptrs_host = vec![0_u64; 2 * N_RXN_SLOTS];
+        let mut coeffs_ptrs_host = vec![0_u64; 2 * N_RXN_SLOTS];
+        stream
+            .memcpy_dtoh(&bundle.basis_ptrs, &mut basis_ptrs_host)
+            .unwrap();
+        stream
+            .memcpy_dtoh(&bundle.coeffs_ptrs, &mut coeffs_ptrs_host)
+            .unwrap();
+
+        for (nuc_idx, p) in bundle.per_nucs.iter().enumerate() {
+            for slot in 0..N_RXN_SLOTS {
+                let key = nuc_idx * N_RXN_SLOTS + slot;
+                if let Some(b) = &p.basis[slot] {
+                    let (ptr, _sync) = b.device_ptr(&stream);
+                    assert_eq!(
+                        basis_ptrs_host[key], ptr,
+                        "basis_ptrs[{nuc_idx},{slot}] mismatch"
+                    );
+                    assert_eq!(p.has_reaction[slot], 1);
+                } else {
+                    assert_eq!(
+                        basis_ptrs_host[key], 0,
+                        "absent basis[{nuc_idx},{slot}] should be 0"
+                    );
+                }
+                if let Some(c) = &p.coeffs[slot] {
+                    let (ptr, _sync) = c.device_ptr(&stream);
+                    assert_eq!(
+                        coeffs_ptrs_host[key], ptr,
+                        "coeffs_ptrs[{nuc_idx},{slot}] mismatch"
+                    );
+                } else {
+                    assert_eq!(
+                        coeffs_ptrs_host[key], 0,
+                        "absent coeffs[{nuc_idx},{slot}] should be 0"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
