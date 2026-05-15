@@ -269,8 +269,14 @@
 #define P_NB_V_PTRS             141
 #define P_DNB_E_PTRS            142
 #define P_DNB_V_PTRS            143
+#define P_URR_E_PTRS            144
+#define P_URR_CP_PTRS           145
+#define P_URR_TF_PTRS           146
+#define P_URR_EF_PTRS           147
+#define P_URR_FF_PTRS           148
+#define P_URR_CF_PTRS           149
 
-#define N_PARAMS            144
+#define N_PARAMS            150
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1142,23 +1148,31 @@ __device__ void apply_urr(
 {
     int n_e = __ldg(&PTR_I(p, P_URR_N_ENERGIES)[nuc_idx]);
     if (n_e <= 0) return;
-    int off = __ldg(&PTR_I(p, P_URR_OFFSETS)[nuc_idx]);
     int n_b = __ldg(&PTR_I(p, P_URR_N_BANDS)[nuc_idx]);
-    const double* ue = &PTR_D(p, P_URR_ENERGIES)[off];
+    // Stage C step D — per-nuclide pointer load. Per-nuc URR tables
+    // start at their own base, so the legacy `off * n_b` term in
+    // `base` becomes zero.
+    const double* ue =
+        (const double*) __ldg(&PTR_U64(p, P_URR_E_PTRS)[nuc_idx]);
     if (E < ue[0] || E > ue[n_e-1]) return;
-    // Find energy index
     int ie=0; { int lo=0,hi=n_e-1;
         while(hi-lo>1){int mid=(lo+hi) >> 1;if(ue[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
-    // Sample band
-    int base = off*n_b + ie*n_b;
-    const double* cp = &PTR_D(p, P_URR_CUM_PROB)[base];
+    int base = ie * n_b;
+    const double* cp =
+        (const double*) __ldg(&PTR_U64(p, P_URR_CP_PTRS)[nuc_idx]);
     int band=0;
-    for (int b=0; b<n_b; b++) { if (xi < cp[b]) { band=b; break; } band=b; }
+    for (int b=0; b<n_b; b++) { if (xi < cp[base+b]) { band=b; break; } band=b; }
     // ft (total factor) not used — reaction-specific factors applied directly
-    (void)PTR_D(p, P_URR_TOTAL_F);
-    double fe=PTR_D(p, P_URR_ELASTIC_F)[base+band];
-    double ff=PTR_D(p, P_URR_FISSION_F)[base+band];
-    double fc=PTR_D(p, P_URR_CAPTURE_F)[base+band];
+    (void) PTR_U64(p, P_URR_TF_PTRS);
+    const double* fe_arr =
+        (const double*) __ldg(&PTR_U64(p, P_URR_EF_PTRS)[nuc_idx]);
+    const double* ff_arr =
+        (const double*) __ldg(&PTR_U64(p, P_URR_FF_PTRS)[nuc_idx]);
+    const double* fc_arr =
+        (const double*) __ldg(&PTR_U64(p, P_URR_CF_PTRS)[nuc_idx]);
+    double fe = fe_arr[base+band];
+    double ff = ff_arr[base+band];
+    double fc = fc_arr[base+band];
     int ms = __ldg(&PTR_I(p, P_URR_MULT_SM)[nuc_idx]);
     if (ms) { *sig_el*=fe; *sig_fis*=ff; *sig_cap*=fc; }
     else { *sig_el=fe; *sig_fis=ff; *sig_cap=fc; }

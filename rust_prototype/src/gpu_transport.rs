@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 144;
+const N_PARAMS: usize = 150;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -173,6 +173,16 @@ pub struct GpuNuclideData {
     /// only ν̄ table. Kernel gates on `delayed_nu_bar_sizes[ni] > 0`.
     pub dnb_e_ptrs: CudaSlice<u64>,
     pub dnb_v_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's URR sub-tables.
+    /// Six paired arrays: energies + cum_prob + total/elastic/
+    /// fission/capture factors. Kernel gates on
+    /// `urr_n_energies[ni] > 0`. Absent → `0`.
+    pub urr_e_ptrs: CudaSlice<u64>,
+    pub urr_cp_ptrs: CudaSlice<u64>,
+    pub urr_tf_ptrs: CudaSlice<u64>,
+    pub urr_ef_ptrs: CudaSlice<u64>,
+    pub urr_ff_ptrs: CudaSlice<u64>,
+    pub urr_cf_ptrs: CudaSlice<u64>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -469,7 +479,13 @@ impl GpuNuclideData {
             + self.nb_e_ptrs.num_bytes()
             + self.nb_v_ptrs.num_bytes()
             + self.dnb_e_ptrs.num_bytes()
-            + self.dnb_v_ptrs.num_bytes();
+            + self.dnb_v_ptrs.num_bytes()
+            + self.urr_e_ptrs.num_bytes()
+            + self.urr_cp_ptrs.num_bytes()
+            + self.urr_tf_ptrs.num_bytes()
+            + self.urr_ef_ptrs.num_bytes()
+            + self.urr_ff_ptrs.num_bytes()
+            + self.urr_cf_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1132,6 +1148,12 @@ impl GpuTransportContext {
             dptr!(&nuc_data.nb_v_ptrs),
             dptr!(&nuc_data.dnb_e_ptrs),
             dptr!(&nuc_data.dnb_v_ptrs),
+            dptr!(&nuc_data.urr_e_ptrs),
+            dptr!(&nuc_data.urr_cp_ptrs),
+            dptr!(&nuc_data.urr_tf_ptrs),
+            dptr!(&nuc_data.urr_ef_ptrs),
+            dptr!(&nuc_data.urr_ff_ptrs),
+            dptr!(&nuc_data.urr_cf_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1302,6 +1324,36 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.values),
         )?;
+        let urr_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.energies),
+        )?;
+        let urr_cp_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.cum_prob),
+        )?;
+        let urr_tf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.total_factor),
+        )?;
+        let urr_ef_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.elastic_factor),
+        )?;
+        let urr_ff_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.fission_factor),
+        )?;
+        let urr_cf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.capture_factor),
+        )?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -1313,6 +1365,12 @@ impl GpuTransportContext {
             nb_v_ptrs,
             dnb_e_ptrs,
             dnb_v_ptrs,
+            urr_e_ptrs,
+            urr_cp_ptrs,
+            urr_tf_ptrs,
+            urr_ef_ptrs,
+            urr_ff_ptrs,
+            urr_cf_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1538,6 +1596,36 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.values),
         )?;
+        let urr_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.energies),
+        )?;
+        let urr_cp_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.cum_prob),
+        )?;
+        let urr_tf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.total_factor),
+        )?;
+        let urr_ef_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.elastic_factor),
+        )?;
+        let urr_ff_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.fission_factor),
+        )?;
+        let urr_cf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.urr.as_ref().map(|u| &u.capture_factor),
+        )?;
 
         Ok(GpuNuclideData {
             per_nucs,
@@ -1549,6 +1637,12 @@ impl GpuTransportContext {
             nb_v_ptrs,
             dnb_e_ptrs,
             dnb_v_ptrs,
+            urr_e_ptrs,
+            urr_cp_ptrs,
+            urr_tf_ptrs,
+            urr_ef_ptrs,
+            urr_ff_ptrs,
+            urr_cf_ptrs,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2388,6 +2482,12 @@ impl GpuTransportContext {
             nb_v_ptrs: self.stream.clone_htod(&[0_u64])?,
             dnb_e_ptrs: self.stream.clone_htod(&[0_u64])?,
             dnb_v_ptrs: self.stream.clone_htod(&[0_u64])?,
+            urr_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            urr_cp_ptrs: self.stream.clone_htod(&[0_u64])?,
+            urr_tf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            urr_ef_ptrs: self.stream.clone_htod(&[0_u64])?,
+            urr_ff_ptrs: self.stream.clone_htod(&[0_u64])?,
+            urr_cf_ptrs: self.stream.clone_htod(&[0_u64])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,
