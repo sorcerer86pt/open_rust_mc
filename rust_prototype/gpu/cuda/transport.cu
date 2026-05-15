@@ -255,17 +255,17 @@
 #define P_MAXEVAP_NUC_N         135
 
 // Stage C step D — per-nuclide pointer arrays. Each slot stores a
-// flat `u64` table sized `[n_nuc × N_REACTIONS]` containing the
-// `CUdeviceptr` of the corresponding per-nuclide basis / coeffs
-// CudaSlice. Accessed via `(const double*) PTR_U64(p, P_*)[key]`
-// — replaces the indirected `&PTR_D(p, P_BASIS)[basis_offsets[key]]`
-// path so the kernel reads directly from per-nuclide allocations.
-// Absent reactions store `0`; `P_HAS_REACTION[key]` gates the
-// dereference so the kernel never loads through a null pointer.
+// flat `u64` table sized `[n_nuc × N_REACTIONS]` (P_BASIS_PTRS /
+// P_COEFFS_PTRS) or `[n_nuc]` (the rest) containing the
+// `CUdeviceptr` of the corresponding per-nuclide CudaSlice.
+// Accessed via `(const T*) PTR_U64(p, P_*)[key]`. Absent slots
+// store `0`; the kernel gates on has_* sentinels so it never loads
+// through a null pointer.
 #define P_BASIS_PTRS            136
 #define P_COEFFS_PTRS           137
+#define P_PW_XS_PTRS            138
 
-#define N_PARAMS            138
+#define N_PARAMS            139
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1418,9 +1418,13 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
     double s_el = 0, s_inel = 0, s_n2n = 0, s_n3n = 0, s_fis = 0, s_cap = 0, micro_t = 0;
 
     if (__ldg(&PTR_I(p, P_HAS_PW)[ni])) {
-        int pw_off = __ldg(&PTR_I(p, P_PW_OFF)[ni]);
-        const double* pw0 = &PTR_D(p, P_PW_XS)[pw_off + e_idx * 7];
-        const double* pw1 = (e_idx + 1 < n_e) ? &PTR_D(p, P_PW_XS)[pw_off + (e_idx + 1) * 7] : pw0;
+        // Stage C step D — direct per-nuclide pointer load. The
+        // bundle-level P_PW_XS / P_PW_OFF indirection is no longer
+        // needed; pw_ptrs[ni] is the device address of
+        // PerNuclideGpu::pointwise_xs.
+        const double* pw_base = (const double*) __ldg(&PTR_U64(p, P_PW_XS_PTRS)[ni]);
+        const double* pw0 = &pw_base[e_idx * 7];
+        const double* pw1 = (e_idx + 1 < n_e) ? &pw_base[(e_idx + 1) * 7] : pw0;
         double xs7[7];
         for (int ch = 0; ch < 7; ch++) {
             double lo = pw0[ch], hi = pw1[ch];

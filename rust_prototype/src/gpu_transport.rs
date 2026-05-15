@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 138;
+const N_PARAMS: usize = 139;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -155,6 +155,11 @@ pub struct GpuNuclideData {
     /// `[n_nuc × N_RXN_SLOTS]` — paired with `basis_ptrs`. Same
     /// semantics; `0` when `has_reaction[slot] == 0`.
     pub coeffs_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's
+    /// `PerNuclideGpu::pointwise_xs` (sized `[n_e × 7]`), or `0`
+    /// when the nuclide carries no pointwise table. The kernel
+    /// gates on `has_pw[ni]` before dereferencing.
+    pub pw_xs_ptrs: CudaSlice<u64>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -444,7 +449,9 @@ impl GpuNuclideData {
         // Step-D pointer-array buffers (u64 each). The per-nuclide
         // Arcs themselves are not counted — they live in the per-
         // nuclide cache and are accounted for there.
-        let ptr_total = self.basis_ptrs.num_bytes() + self.coeffs_ptrs.num_bytes();
+        let ptr_total = self.basis_ptrs.num_bytes()
+            + self.coeffs_ptrs.num_bytes()
+            + self.pw_xs_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1093,12 +1100,15 @@ impl GpuTransportContext {
             dptr!(&nuc_data.maxevap_law),
             dptr!(&nuc_data.maxevap_nuc_offsets),
             dptr!(&nuc_data.maxevap_nuc_n),
-            // Stage C step D — per-nuclide pointer arrays. Slots
-            // 136-137. Kernel reads `((double*)PTR_U64(p, P_BASIS_PTRS)
-            // [key])[e*rank + r]` instead of indirecting through
-            // all_basis[basis_offsets[key]+...].
+            // Stage C step D — per-nuclide pointer arrays. Slot
+            // 136-137 carry [n_nuc × N_RXN_SLOTS] basis / coeffs
+            // pointers; slot 138 carries the per-nuclide
+            // pointwise_xs base address [n_nuc]. Kernel reads
+            // `((double*)PTR_U64(p, P_*)[key])[…]` instead of
+            // indirecting through all_basis / pointwise_xs slabs.
             dptr!(&nuc_data.basis_ptrs),
             dptr!(&nuc_data.coeffs_ptrs),
+            dptr!(&nuc_data.pw_xs_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1239,11 +1249,17 @@ impl GpuTransportContext {
 
         let (basis_ptrs, coeffs_ptrs) =
             crate::gpu_per_nuclide::build_per_nuclide_ptr_arrays(&self.stream, &per_nucs)?;
+        let pw_xs_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.pointwise_xs.as_ref(),
+        )?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
             basis_ptrs,
             coeffs_ptrs,
+            pw_xs_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1439,11 +1455,17 @@ impl GpuTransportContext {
         let a8 = assemble_a8_cat(&self.stream, &per_nucs)?;
         let (basis_ptrs, coeffs_ptrs) =
             crate::gpu_per_nuclide::build_per_nuclide_ptr_arrays(&self.stream, &per_nucs)?;
+        let pw_xs_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.pointwise_xs.as_ref(),
+        )?;
 
         Ok(GpuNuclideData {
             per_nucs,
             basis_ptrs,
             coeffs_ptrs,
+            pw_xs_ptrs,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2277,6 +2299,7 @@ impl GpuTransportContext {
             per_nucs: Vec::new(),
             basis_ptrs: self.stream.clone_htod(&[0_u64])?,
             coeffs_ptrs: self.stream.clone_htod(&[0_u64])?,
+            pw_xs_ptrs: self.stream.clone_htod(&[0_u64])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,

@@ -1683,6 +1683,33 @@ pub fn build_per_nuclide_ptr_arrays(
     ))
 }
 
+/// Build a per-nuclide `[n_nuc]` pointer array selecting one
+/// `Option<CudaSlice<f64>>` field. Absent / empty per-nuclide slices
+/// store `0`; the caller's kernel must gate on the corresponding
+/// `has_*` flag before dereferencing.
+pub fn build_per_nuc_optional_ptr_array<F>(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+    pick: F,
+) -> Result<CudaSlice<u64>, Box<dyn std::error::Error>>
+where
+    F: Fn(&PerNuclideGpu) -> Option<&CudaSlice<f64>>,
+{
+    let mut ptrs: Vec<u64> = Vec::with_capacity(per_nucs.len().max(1));
+    for p in per_nucs {
+        if let Some(s) = pick(p) {
+            let (ptr, _sync) = s.device_ptr(stream);
+            ptrs.push(ptr);
+        } else {
+            ptrs.push(0);
+        }
+    }
+    if ptrs.is_empty() {
+        ptrs.push(0);
+    }
+    Ok(stream.clone_htod(&ptrs)?)
+}
+
 /// Flatten URR per-band 2D rows into the bundle's row-major layout.
 /// Mirrors upload_nuclide_data_uncached:1883-1905.
 fn build_urr_slices(
