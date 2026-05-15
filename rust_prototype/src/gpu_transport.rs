@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 155;
+const N_PARAMS: usize = 164;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -199,6 +199,26 @@ pub struct GpuNuclideData {
     /// `level_basis_ptrs[hit_nuc]` for the base.
     pub level_basis_local_off: CudaSlice<i32>,
     pub level_coeffs_local_off: CudaSlice<i32>,
+    /// Step D — per-nuc base pointers for elastic + per-level angular.
+    /// `[n_nuc]` each.
+    pub ang_e_ptrs: CudaSlice<u64>,
+    pub ang_mu_ptrs: CudaSlice<u64>,
+    pub ang_cdf_ptrs: CudaSlice<u64>,
+    pub lev_ang_e_ptrs: CudaSlice<u64>,
+    pub lev_ang_mu_ptrs: CudaSlice<u64>,
+    pub lev_ang_cdf_ptrs: CudaSlice<u64>,
+    /// `[total_e]` — un-shifted within-nuc ang_mu offsets for the
+    /// elastic angular path. Pairs with `ang_mu_ptrs[hit_nuc]`.
+    pub ang_dist_local_off: CudaSlice<i32>,
+    /// `[total_levels]` — un-shifted within-nuc ang_energy offsets
+    /// for the per-level angular path. Pairs with
+    /// `lev_ang_e_ptrs[hit_nuc]`.
+    pub lev_ang_lev_local_off: CudaSlice<i32>,
+    /// `[total_ang_dist]` — un-shifted within-nuc ang_mu offsets
+    /// for the per-level angular path. Indexed by global ang_energy
+    /// idx (same as `lev_ang_dist_off`); pairs with
+    /// `lev_ang_mu_ptrs[hit_nuc]`.
+    pub lev_ang_dist_local_off: CudaSlice<i32>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -506,7 +526,16 @@ impl GpuNuclideData {
             + self.level_basis_ptrs.num_bytes()
             + self.level_coeffs_ptrs.num_bytes()
             + self.level_basis_local_off.num_bytes()
-            + self.level_coeffs_local_off.num_bytes();
+            + self.level_coeffs_local_off.num_bytes()
+            + self.ang_e_ptrs.num_bytes()
+            + self.ang_mu_ptrs.num_bytes()
+            + self.ang_cdf_ptrs.num_bytes()
+            + self.lev_ang_e_ptrs.num_bytes()
+            + self.lev_ang_mu_ptrs.num_bytes()
+            + self.lev_ang_cdf_ptrs.num_bytes()
+            + self.ang_dist_local_off.num_bytes()
+            + self.lev_ang_lev_local_off.num_bytes()
+            + self.lev_ang_dist_local_off.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1180,6 +1209,15 @@ impl GpuTransportContext {
             dptr!(&nuc_data.level_coeffs_ptrs),
             dptr!(&nuc_data.level_basis_local_off),
             dptr!(&nuc_data.level_coeffs_local_off),
+            dptr!(&nuc_data.ang_e_ptrs),
+            dptr!(&nuc_data.ang_mu_ptrs),
+            dptr!(&nuc_data.ang_cdf_ptrs),
+            dptr!(&nuc_data.lev_ang_e_ptrs),
+            dptr!(&nuc_data.lev_ang_mu_ptrs),
+            dptr!(&nuc_data.lev_ang_cdf_ptrs),
+            dptr!(&nuc_data.ang_dist_local_off),
+            dptr!(&nuc_data.lev_ang_lev_local_off),
+            dptr!(&nuc_data.lev_ang_dist_local_off),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1394,6 +1432,59 @@ impl GpuTransportContext {
             &self.stream,
             &per_nucs,
         )?;
+        let ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.energies),
+        )?;
+        let ang_mu_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.mu),
+        )?;
+        let ang_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.cdf),
+        )?;
+        let lev_ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_energies)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let lev_ang_mu_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_mu)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let lev_ang_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_cdf)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let ang_dist_local_off = self.stream.clone_htod(&a4.ang_dist_local_off_vec)?;
+        let lev_ang_lev_local_off =
+            self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
+        let lev_ang_dist_local_off =
+            self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -1416,6 +1507,15 @@ impl GpuTransportContext {
             level_coeffs_ptrs,
             level_basis_local_off,
             level_coeffs_local_off,
+            ang_e_ptrs,
+            ang_mu_ptrs,
+            ang_cdf_ptrs,
+            lev_ang_e_ptrs,
+            lev_ang_mu_ptrs,
+            lev_ang_cdf_ptrs,
+            ang_dist_local_off,
+            lev_ang_lev_local_off,
+            lev_ang_dist_local_off,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1685,6 +1785,59 @@ impl GpuTransportContext {
             &self.stream,
             &per_nucs,
         )?;
+        let ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.energies),
+        )?;
+        let ang_mu_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.mu),
+        )?;
+        let ang_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.cdf),
+        )?;
+        let lev_ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_energies)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let lev_ang_mu_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_mu)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let lev_ang_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_cdf)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let ang_dist_local_off = self.stream.clone_htod(&a4.ang_dist_local_off_vec)?;
+        let lev_ang_lev_local_off =
+            self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
+        let lev_ang_dist_local_off =
+            self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
 
         Ok(GpuNuclideData {
             per_nucs,
@@ -1707,6 +1860,15 @@ impl GpuTransportContext {
             level_coeffs_ptrs,
             level_basis_local_off,
             level_coeffs_local_off,
+            ang_e_ptrs,
+            ang_mu_ptrs,
+            ang_cdf_ptrs,
+            lev_ang_e_ptrs,
+            lev_ang_mu_ptrs,
+            lev_ang_cdf_ptrs,
+            ang_dist_local_off,
+            lev_ang_lev_local_off,
+            lev_ang_dist_local_off,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2557,6 +2719,15 @@ impl GpuTransportContext {
             level_coeffs_ptrs: self.stream.clone_htod(&[0_u64])?,
             level_basis_local_off: self.stream.clone_htod(&[0_i32])?,
             level_coeffs_local_off: self.stream.clone_htod(&[0_i32])?,
+            ang_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            ang_mu_ptrs: self.stream.clone_htod(&[0_u64])?,
+            ang_cdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            lev_ang_e_ptrs: self.stream.clone_htod(&[0_u64])?,
+            lev_ang_mu_ptrs: self.stream.clone_htod(&[0_u64])?,
+            lev_ang_cdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            ang_dist_local_off: self.stream.clone_htod(&[0_i32])?,
+            lev_ang_lev_local_off: self.stream.clone_htod(&[0_i32])?,
+            lev_ang_dist_local_off: self.stream.clone_htod(&[0_i32])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,

@@ -604,7 +604,7 @@ transport_recursive_persistent(
             } else {
                 double mu_cm;
                 if (n_lev > 0 && sel_mt != 91) {
-                    mu_cm = sample_level_angular(E, &rng, p, lv_off + selected);
+                    mu_cm = sample_level_angular(E, &rng, p, lv_off + selected, hit_nuc);
                 } else {
                     mu_cm = 2.0 * pcg_uniform(&rng) - 1.0;
                 }

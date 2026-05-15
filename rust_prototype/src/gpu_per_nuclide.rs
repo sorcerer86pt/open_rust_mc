@@ -881,6 +881,16 @@ pub struct AssembledBundleCCat {
     pub lev_ang_dist_sz_vec: Vec<i32>,
     pub lev_ang_lev_off_vec: Vec<i32>,
     pub lev_ang_lev_ne_vec: Vec<i32>,
+    /// `[total_ang_dist]` — un-shifted within-nuc ang_mu offsets.
+    /// Indexed by global ang_energy idx (same indexing as
+    /// `lev_ang_dist_off_vec`); value is the per-nuclide-local
+    /// offset into `LevelSlicesGpu::ang_mu` / `.ang_cdf`. Step D
+    /// pairs with `P_LEV_ANG_MU_PTRS[hit_nuc]`.
+    pub lev_ang_dist_local_off_vec: Vec<i32>,
+    /// `[total_levels]` — un-shifted within-nuc ang_energy offsets.
+    /// Indexed by global level idx. Step D pairs with
+    /// `P_LEV_ANG_E_PTRS[hit_nuc]`.
+    pub lev_ang_lev_local_off_vec: Vec<i32>,
 }
 
 /// Assemble cat-C discrete inelastic level data from per-nuclide
@@ -960,8 +970,10 @@ pub fn assemble_c_cat(
     let mut level_basis_offsets_vec: Vec<i32> = Vec::with_capacity(total_levels);
     let mut level_coeffs_offsets_vec: Vec<i32> = Vec::with_capacity(total_levels);
     let mut lev_ang_dist_off_vec: Vec<i32> = Vec::with_capacity(total_ang_dist);
+    let mut lev_ang_dist_local_off_vec: Vec<i32> = Vec::with_capacity(total_ang_dist);
     let mut lev_ang_dist_sz_vec: Vec<i32> = Vec::with_capacity(total_ang_dist);
     let mut lev_ang_lev_off_vec: Vec<i32> = Vec::with_capacity(total_levels);
+    let mut lev_ang_lev_local_off_vec: Vec<i32> = Vec::with_capacity(total_levels);
     let mut lev_ang_lev_ne_vec: Vec<i32> = Vec::with_capacity(total_levels);
 
     let mut run_level = 0_usize;
@@ -1013,15 +1025,19 @@ pub fn assemble_c_cat(
         // running offset.
         for li in 0..nl {
             lev_ang_lev_off_vec.push(p.levels.ang_lev_local_off[li] + run_ang_e as i32);
+            lev_ang_lev_local_off_vec.push(p.levels.ang_lev_local_off[li]);
             lev_ang_lev_ne_vec.push(p.levels.ang_lev_ne[li]);
         }
 
         // Per-(level, e_inc) angular distribution locator — shift by
-        // global ang_mu running offset.
+        // global ang_mu running offset. The `_local_off` parallel
+        // version stores within-nuc offsets (un-shifted) so Step D
+        // can pair it with the per-nuc `lev_ang_mu` base pointer.
         let adlen = p.levels.ang_dist_real_len;
         for di in 0..adlen {
             lev_ang_dist_off_vec
                 .push(p.levels.ang_dist_local_off[di] + run_ang_mu as i32);
+            lev_ang_dist_local_off_vec.push(p.levels.ang_dist_local_off[di]);
             lev_ang_dist_sz_vec.push(p.levels.ang_dist_sz[di]);
         }
 
@@ -1055,10 +1071,12 @@ pub fn assemble_c_cat(
         level_basis_offsets_vec.push(0);
         level_coeffs_offsets_vec.push(0);
         lev_ang_lev_off_vec.push(0);
+        lev_ang_lev_local_off_vec.push(0);
         lev_ang_lev_ne_vec.push(0);
     }
     if lev_ang_dist_off_vec.is_empty() {
         lev_ang_dist_off_vec.push(0);
+        lev_ang_dist_local_off_vec.push(0);
         lev_ang_dist_sz_vec.push(0);
     }
 
@@ -1080,6 +1098,8 @@ pub fn assemble_c_cat(
         lev_ang_dist_sz_vec,
         lev_ang_lev_off_vec,
         lev_ang_lev_ne_vec,
+        lev_ang_dist_local_off_vec,
+        lev_ang_lev_local_off_vec,
     })
 }
 
@@ -1554,6 +1574,12 @@ pub struct AssembledBundleA4Cat {
     pub ang_nuc_offsets_vec: Vec<i32>,
     pub ang_nuc_n_energies_vec: Vec<i32>,
     pub ang_is_cm_vec: Vec<i32>,
+    /// `[total_e]` — same shape and indexing as `ang_dist_offsets_vec`
+    /// but un-shifted: each value is a **within-nuc** offset into
+    /// the per-nuclide `AngularSlicesGpu::mu` / `.cdf`. Step D pairs
+    /// this with `P_ANG_MU_PTRS[hit_nuc]` for per-nuclide pointer
+    /// loading.
+    pub ang_dist_local_off_vec: Vec<i32>,
 }
 
 /// Bundle assembly for category A.4 (elastic angular distribution).
@@ -1587,6 +1613,7 @@ pub fn assemble_a4_cat(
     }
 
     let mut ang_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_e);
+    let mut ang_dist_local_off_vec: Vec<i32> = Vec::with_capacity(total_e);
     let mut ang_dist_sizes_vec: Vec<i32> = Vec::with_capacity(total_e);
     let mut ang_nuc_offsets_vec = vec![0_i32; per_nucs.len()];
     let mut ang_nuc_n_energies_vec = vec![0_i32; per_nucs.len()];
@@ -1616,6 +1643,7 @@ pub fn assemble_a4_cat(
         }
         for ei in 0..ne {
             ang_dist_offsets_vec.push(ang.dist_local_off[ei] + run_mu as i32);
+            ang_dist_local_off_vec.push(ang.dist_local_off[ei]);
             ang_dist_sizes_vec.push(ang.dist_sz[ei]);
         }
         run_e += ne;
@@ -1625,6 +1653,7 @@ pub fn assemble_a4_cat(
     // Bundle-level sentinels (slot 1610-1613).
     if ang_dist_offsets_vec.is_empty() {
         ang_dist_offsets_vec.push(0);
+        ang_dist_local_off_vec.push(0);
         ang_dist_sizes_vec.push(0);
     }
 
@@ -1637,6 +1666,7 @@ pub fn assemble_a4_cat(
         ang_nuc_offsets_vec,
         ang_nuc_n_energies_vec,
         ang_is_cm_vec,
+        ang_dist_local_off_vec,
     })
 }
 

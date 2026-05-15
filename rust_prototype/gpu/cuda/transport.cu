@@ -291,8 +291,21 @@
 // to `[n_e × global_rank]` per LevelSlicesGpu::build_level_slices.
 #define P_LEVEL_BLOCAL_OFF      153
 #define P_LEVEL_CLOCAL_OFF      154
+// Per-nuc base pointers for elastic + per-level angular CDFs.
+// Slots 155-160 are u64 [n_nuc]; slots 161-162 are i32
+// arrays of within-nuc offsets (sized [total_ang_e] /
+// [total_lev_ang_dist] respectively).
+#define P_ANG_E_PTRS            155
+#define P_ANG_MU_PTRS           156
+#define P_ANG_CDF_PTRS          157
+#define P_LEV_ANG_E_PTRS        158
+#define P_LEV_ANG_MU_PTRS       159
+#define P_LEV_ANG_CDF_PTRS      160
+#define P_ANG_DIST_LOCAL_OFF    161
+#define P_LEV_ANG_LEV_LOCAL_OFF 162
+#define P_LEV_ANG_DIST_LOCAL_OFF 163
 
-#define N_PARAMS            155
+#define N_PARAMS            164
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -944,21 +957,29 @@ __device__ double sample_angular_dist(
     int a_off = __ldg(&PTR_I(p, P_ANG_NUC_OFF)[hit_nuc]);
     int a_ne = __ldg(&PTR_I(p, P_ANG_NUC_NE)[hit_nuc]);
     if (a_ne <= 0) return 2.0*pcg_uniform(rng)-1.0;
-    const double* ae = &PTR_D(p, P_ANG_ENERGIES)[a_off];
+    // Stage C step D — per-nuc base pointers. The kernel still
+    // uses the GLOBAL P_ANG_DIST_LOCAL_OFF / P_ANG_DIST_SZ arrays
+    // (indexed by global ang_energy idx `chosen`), but the VALUES
+    // are within-nuc ang_mu offsets so the per-nuc `nuc_mu` /
+    // `nuc_cdf` base pointers can be used directly.
+    const double* ae =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_E_PTRS)[hit_nuc]);
+    const double* nuc_mu =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_MU_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_CDF_PTRS)[hit_nuc]);
 
     // Edge: below grid
     if (E <= ae[0]) {
-        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_ANG_MU)[off],
-                             &PTR_D(p, P_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[a_off];
+        int sz  = PTR_I(p, P_ANG_DIST_SZ)[a_off];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
     // Edge: above grid
     if (E >= ae[a_ne-1]) {
-        int off=PTR_I(p, P_ANG_DIST_OFF)[a_off+a_ne-1], sz=PTR_I(p, P_ANG_DIST_SZ)[a_off+a_ne-1];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_ANG_MU)[off],
-                             &PTR_D(p, P_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[a_off + a_ne - 1];
+        int sz  = PTR_I(p, P_ANG_DIST_SZ)[a_off + a_ne - 1];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
 
     // Binary search for energy bracket
@@ -971,11 +992,9 @@ __device__ double sample_angular_dist(
     double r = (E - ae[ie]) / fmax(ae[ie+1] - ae[ie], 1e-30);
     bool pick_hi = pcg_uniform(rng) < r;
     int chosen = pick_hi ? (a_off + ie + 1) : (a_off + ie);
-    int off = PTR_I(p, P_ANG_DIST_OFF)[chosen];
+    int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[chosen];
     int sz  = PTR_I(p, P_ANG_DIST_SZ)[chosen];
-    return sample_mu_bin(pcg_uniform(rng),
-                         &PTR_D(p, P_ANG_MU)[off],
-                         &PTR_D(p, P_ANG_CDF)[off], sz);
+    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -987,28 +1006,38 @@ __device__ double sample_angular_dist(
 // matches the CPU isotropic fallback.
 // ═══════════════════════════════════════════════════════════════════════
 __device__ double sample_level_angular(
-    double E, PcgState* rng, Params p, int global_lev_idx)
+    double E, PcgState* rng, Params p, int global_lev_idx, int hit_nuc)
 {
     int n_e = __ldg(&PTR_I(p, P_LEV_ANG_LEV_NE)[global_lev_idx]);
     if (n_e <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
 
-    int e_off = __ldg(&PTR_I(p, P_LEV_ANG_LEV_OFF)[global_lev_idx]);
-    const double* ae = &PTR_D(p, P_LEV_ANG_ENERGIES)[e_off];
+    // Stage C step D — per-nuc bases for energies/mu/cdf. The
+    // within-nuc ang_energy offset for this level is supplied by
+    // P_LEV_ANG_LEV_LOCAL_OFF (global concat of per-nuc values).
+    // P_LEV_ANG_LEV_OFF still exists as the GLOBAL ang_energy
+    // offset and is used to index into P_LEV_ANG_DIST_LOCAL_OFF
+    // (which is also globally indexed but holds within-nuc ang_mu
+    // offsets so the per-nuc mu/cdf bases can be applied).
+    int e_off_local = __ldg(&PTR_I(p, P_LEV_ANG_LEV_LOCAL_OFF)[global_lev_idx]);
+    int e_off_global = __ldg(&PTR_I(p, P_LEV_ANG_LEV_OFF)[global_lev_idx]);
+    const double* nuc_ae =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_E_PTRS)[hit_nuc]);
+    const double* nuc_mu =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_MU_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_CDF_PTRS)[hit_nuc]);
+    const double* ae = &nuc_ae[e_off_local];
 
     // Below / above grid: pick the edge distribution directly.
     if (E <= ae[0]) {
-        int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[e_off];
-        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_LEV_ANG_MU)[off],
-                             &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[e_off_global];
+        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off_global];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
     if (E >= ae[n_e - 1]) {
-        int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[e_off + n_e - 1];
-        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off + n_e - 1];
-        return sample_mu_bin(pcg_uniform(rng),
-                             &PTR_D(p, P_LEV_ANG_MU)[off],
-                             &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
+        int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[e_off_global + n_e - 1];
+        int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off_global + n_e - 1];
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
     }
 
     int ie; { int lo = 0, hi = n_e - 1;
@@ -1017,12 +1046,10 @@ __device__ double sample_level_angular(
 
     double r = (E - ae[ie]) / fmax(ae[ie+1] - ae[ie], 1e-30);
     bool pick_hi = pcg_uniform(rng) < r;
-    int chosen = e_off + (pick_hi ? ie + 1 : ie);
-    int off = PTR_I(p, P_LEV_ANG_DIST_OFF)[chosen];
+    int chosen = e_off_global + (pick_hi ? ie + 1 : ie);
+    int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[chosen];
     int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[chosen];
-    return sample_mu_bin(pcg_uniform(rng),
-                         &PTR_D(p, P_LEV_ANG_MU)[off],
-                         &PTR_D(p, P_LEV_ANG_CDF)[off], sz);
+    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
 }
 
 // Per-slot accessor helpers. `slot` is the index returned by
@@ -2023,7 +2050,7 @@ transport_persistent(
                     // "no tabulated data" paths fall back to isotropic CM.
                     double mu_cm;
                     if (n_lev > 0 && sel_mt != 91) {
-                        mu_cm = sample_level_angular(E, &rng, p, lv_off + selected);
+                        mu_cm = sample_level_angular(E, &rng, p, lv_off + selected, hit_nuc);
                     } else {
                         mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
                     }
