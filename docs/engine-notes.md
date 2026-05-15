@@ -92,7 +92,7 @@ devices use the sync path; `has_async_alloc=false` → no-op trim.
 
 ### `build_transport_params_vec` slot layout
 
-`N_PARAMS = 130`. Layout is co-authored with `gpu/cuda/transport.cu`,
+`N_PARAMS = 136`. Layout is co-authored with `gpu/cuda/transport.cu`,
 `gpu/cuda/transport_recursive.cu`, `gpu/cuda/transport_recursive_const.cu`.
 Slot blocks (load-bearing for every kernel):
 
@@ -181,11 +181,11 @@ The hard contracts live in `CLAUDE.md § Invariants`. Key ones:
 
 - `RectLattice::local_position` is element-CENTRE-relative
   (OpenMC convention), not corner-relative.
-- `MAX_NUCLIDES_PER_MATERIAL = 32` — single source of truth at
-  `lib.rs`.
+- `MAX_NUCLIDES_PER_MATERIAL = 128` — single source of truth at
+  `lib.rs` (bumped 32 → 128 for HMF-069 / Pu-soln / spent-fuel casks).
 - `SimLimits` separates engine policy from per-run user intent.
 - Initial-source sampler is material-aware, not cell-order-aware
   (`try_initial_source_in_materials`).
-- `N_PARAMS = 130` on `transport.cu` / `gpu_transport.rs`.
+- `N_PARAMS = 136` on `transport.cu` / `gpu_transport.rs`.
 - GPU recursive kernel pinned to `sm_86`.
 - CPU transport uses `TransportCtx` + rayon `fold().reduce()`.

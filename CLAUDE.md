@@ -278,7 +278,7 @@ from the ICSBEP handbook k_eff.
   universe-local origin `(0, 0)`, NOT `(pitch/2, pitch/2)`. Same
   convention on the GPU (`gr_lattice_descent`'s `next_off_*`).
   Fixing this unblocked LCT-008.
-- **`MAX_NUCLIDES_PER_MATERIAL = 32`** at `src/lib.rs` is the single
+- **`MAX_NUCLIDES_PER_MATERIAL = 128`** at `src/lib.rs` is the single
   source of truth. The CPU hot path imports it as `MAX_NUCLIDES` for
   fixed-size MicroXs arrays (`simulate.rs`); the GPU receives the same
   value via an NVRTC `-DMAX_NUC_PER_MAT=N` flag wired in
@@ -320,18 +320,20 @@ from the ICSBEP handbook k_eff.
   schema, ray.rs `find_cell_recursive` / `trace_step` integration, and
   GPU port are scheduled as follow-up work. Not yet referenced by any
   binary or ICSBEP case.
-- **`N_PARAMS = 130`** on `transport.cu` / `gpu_transport.rs`. New
+- **`N_PARAMS = 136`** on `transport.cu` / `gpu_transport.rs`. New
   slots vs the 287-test era: per-nuclide Watt χ buffers
   (Law 11 fallback), delayed-ν̄ soft-Watt spectrum
   (`sample_delayed_energy`, a = 0.4 MeV), MT=91 continuum
   outgoing-energy distribution (`P_INEL91_INC_E` … `P_INEL91_NUC_NINC`),
   the OpenMC quadratic lin-lin fission-PDF inversion
-  (`P_FIS_PDF` slot), and the multi-slot S(α,β) lookup tables
+  (`P_FIS_PDF` slot), the multi-slot S(α,β) lookup tables
   (`P_SAB_N_SLOTS`, `P_SAB_SLOT_PER_NUC`, `P_SAB_SLOT_INC_E_OFF`,
   `P_SAB_SLOT_N_INC`, `P_SAB_SLOT_EOUT_TABLE_OFF`,
   `P_SAB_SLOT_MU_TABLE_OFF`, `P_SAB_SLOT_EMAX` — slots 123–129) that
   unlock simultaneous TSLs on multiple nuclides (H-in-H₂O +
-  D-in-D₂O + C-in-graphite in one run).
+  D-in-D₂O + C-in-graphite in one run), and the Maxwell/Evaporation
+  closed-form χ buffers (slots 130–135) that fixed U-233/U-234/Pu-240
+  fission outgoing-energy spectra.
 - **Per-level SVD basis must be uploaded at the global `P_RANK`
   stride.** Each discrete-inelastic level kernel has its own
   `level_rank = min(svd_rank, svd.rank)` which on sparse HDF5 grids
