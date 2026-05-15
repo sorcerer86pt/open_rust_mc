@@ -1270,8 +1270,8 @@ extern "C" __global__ void pair_bh_batch(
             assert_eq!(struck.len(), photoel_ke.len());
             let n = struck.len();
 
-            let d_struck = self.stream.memcpy_stod(struck)?;
-            let d_te = self.stream.memcpy_stod(photoel_ke)?;
+            let d_struck = self.stream.clone_htod(struck)?;
+            let d_te = self.stream.clone_htod(photoel_ke)?;
             let mut d_local: CudaSlice<f64> = self.stream.alloc_zeros(n)?;
             let mut d_n_fluor: CudaSlice<i32> = self.stream.alloc_zeros(n)?;
             let mut d_fluor: CudaSlice<f64> = self.stream.alloc_zeros(n * max_fluor_per_thread)?;

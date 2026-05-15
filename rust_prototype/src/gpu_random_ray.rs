@@ -66,6 +66,16 @@ const GR_COORD_FIELDS: usize = 3;
 /// Owns the compiled module + the per-FSR + per-ray state buffers.
 /// Build once per (geometry, mesh, library) triplet; reuse across
 /// power iterations.
+///
+/// The private `CudaSlice` fields below are RAII guards: the kernel
+/// reads / writes them via raw `CUdeviceptr` arguments at launch
+/// time, but the host side never touches them after upload. Dropping
+/// any of them would free the device allocation the kernel still
+/// expects to be live, so they must stay owned by the context.
+/// `#[allow(dead_code)]` quiets the "never read" lint without
+/// underscoring every field (which would also rename the
+/// initialiser sites).
+#[allow(dead_code)]
 pub struct GpuRandomRayContext {
     _ctx: Arc<CudaContext>,
     pub stream: Arc<CudaStream>,
@@ -165,10 +175,10 @@ impl GpuRandomRayContext {
             }
         }
         let fsr_material = stream
-            .memcpy_stod(&fsr_mat_host)
+            .clone_htod(&fsr_mat_host)
             .map_err(|e| format!("fsr_material upload: {e}"))?;
         let sigma_t_per_fsr = stream
-            .memcpy_stod(&sigma_t_host)
+            .clone_htod(&sigma_t_host)
             .map_err(|e| format!("sigma_t upload: {e}"))?;
 
         // Allocate per-ray state. Initial state is left zero; the
@@ -296,11 +306,11 @@ impl GpuRandomRayContext {
         let n_g = self.n_groups as usize;
         let track = self
             .stream
-            .memcpy_dtov(&self.track_psi)
+            .clone_dtoh(&self.track_psi)
             .map_err(|e| format!("track_psi download: {e}"))?;
         let vol = self
             .stream
-            .memcpy_dtov(&self.volume_track)
+            .clone_dtoh(&self.volume_track)
             .map_err(|e| format!("volume_track download: {e}"))?;
         let four_pi = 4.0 * std::f64::consts::PI;
         let mut phi = vec![0.0_f64; n_fsrs * n_g];
