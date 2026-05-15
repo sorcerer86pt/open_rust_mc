@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 151;
+const N_PARAMS: usize = 155;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -187,6 +187,18 @@ pub struct GpuNuclideData {
     /// inelastic CDF tensor, or `0`. Kernel gates on
     /// `inel_cdf_off[ni] >= 0`.
     pub inel_cdf_ptrs: CudaSlice<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's
+    /// `PerNuclideGpu::levels.basis` / `.coeffs`. Per-level basis
+    /// rank-padding from `1654c4d` lives inside each per-nuclide
+    /// slice (every level pre-padded to `[n_e × global_rank]`).
+    pub level_basis_ptrs: CudaSlice<u64>,
+    pub level_coeffs_ptrs: CudaSlice<u64>,
+    /// `[total_levels]` — within-nuc byte offsets, concat of every
+    /// nuclide's `levels.basis_local_off` / `.coeffs_local_off`.
+    /// Kernel indexes by global level idx `gl` and uses
+    /// `level_basis_ptrs[hit_nuc]` for the base.
+    pub level_basis_local_off: CudaSlice<i32>,
+    pub level_coeffs_local_off: CudaSlice<i32>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -490,7 +502,11 @@ impl GpuNuclideData {
             + self.urr_ef_ptrs.num_bytes()
             + self.urr_ff_ptrs.num_bytes()
             + self.urr_cf_ptrs.num_bytes()
-            + self.inel_cdf_ptrs.num_bytes();
+            + self.inel_cdf_ptrs.num_bytes()
+            + self.level_basis_ptrs.num_bytes()
+            + self.level_coeffs_ptrs.num_bytes()
+            + self.level_basis_local_off.num_bytes()
+            + self.level_coeffs_local_off.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1160,6 +1176,10 @@ impl GpuTransportContext {
             dptr!(&nuc_data.urr_ff_ptrs),
             dptr!(&nuc_data.urr_cf_ptrs),
             dptr!(&nuc_data.inel_cdf_ptrs),
+            dptr!(&nuc_data.level_basis_ptrs),
+            dptr!(&nuc_data.level_coeffs_ptrs),
+            dptr!(&nuc_data.level_basis_local_off),
+            dptr!(&nuc_data.level_coeffs_local_off),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1365,6 +1385,15 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.inel_cdf.as_ref().map(|c| &c.data),
         )?;
+        let (
+            level_basis_ptrs,
+            level_coeffs_ptrs,
+            level_basis_local_off,
+            level_coeffs_local_off,
+        ) = crate::gpu_per_nuclide::build_per_nuc_level_ptr_and_offsets(
+            &self.stream,
+            &per_nucs,
+        )?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -1383,6 +1412,10 @@ impl GpuTransportContext {
             urr_ff_ptrs,
             urr_cf_ptrs,
             inel_cdf_ptrs,
+            level_basis_ptrs,
+            level_coeffs_ptrs,
+            level_basis_local_off,
+            level_coeffs_local_off,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
@@ -1643,6 +1676,15 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.inel_cdf.as_ref().map(|c| &c.data),
         )?;
+        let (
+            level_basis_ptrs,
+            level_coeffs_ptrs,
+            level_basis_local_off,
+            level_coeffs_local_off,
+        ) = crate::gpu_per_nuclide::build_per_nuc_level_ptr_and_offsets(
+            &self.stream,
+            &per_nucs,
+        )?;
 
         Ok(GpuNuclideData {
             per_nucs,
@@ -1661,6 +1703,10 @@ impl GpuTransportContext {
             urr_ff_ptrs,
             urr_cf_ptrs,
             inel_cdf_ptrs,
+            level_basis_ptrs,
+            level_coeffs_ptrs,
+            level_basis_local_off,
+            level_coeffs_local_off,
             // Category A.1 + B
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
@@ -2507,6 +2553,10 @@ impl GpuTransportContext {
             urr_ff_ptrs: self.stream.clone_htod(&[0_u64])?,
             urr_cf_ptrs: self.stream.clone_htod(&[0_u64])?,
             inel_cdf_ptrs: self.stream.clone_htod(&[0_u64])?,
+            level_basis_ptrs: self.stream.clone_htod(&[0_u64])?,
+            level_coeffs_ptrs: self.stream.clone_htod(&[0_u64])?,
+            level_basis_local_off: self.stream.clone_htod(&[0_i32])?,
+            level_coeffs_local_off: self.stream.clone_htod(&[0_i32])?,
             all_basis: self.stream.clone_htod(&all_basis_vec)?,
             all_coeffs: self.stream.clone_htod(&all_coeffs_vec)?,
             all_energy_grids: self.stream.clone_htod(&all_grids_vec)?,

@@ -521,14 +521,19 @@ transport_recursive_persistent(
                 int n_e   = __ldg(&PTR_I(p, P_N_ENERGIES)[hit_nuc]);
                 int e_idx = energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off], n_e, E);
                 int lev_cap = n_lev < LEGACY_LEV_CAP ? n_lev : LEGACY_LEV_CAP;
+                // Stage C step D — per-nuc base pointers hoisted.
+                const double* nuc_lvl_basis =
+                    (const double*) __ldg(&PTR_U64(p, P_LEVEL_BASIS_PTRS)[hit_nuc]);
+                const double* nuc_lvl_coeffs =
+                    (const double*) __ldg(&PTR_U64(p, P_LEVEL_COEFFS_PTRS)[hit_nuc]);
                 #pragma unroll 1
                 for (int l = 0; l < lev_cap; l++) {
                     int gl = lv_off + l;
                     if (E >= __ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                         && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) {
                         lxs_sum += svd_reconstruct(
-                            &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                            &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                            &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                            &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                             e_idx, rank);
                     }
                 }
@@ -543,8 +548,8 @@ transport_recursive_persistent(
                         if (E >= __ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                             && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) {
                             lxs = svd_reconstruct(
-                                &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                                &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                                 e_idx, rank);
                         }
                         run += lxs;

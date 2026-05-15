@@ -1683,6 +1683,61 @@ pub fn build_per_nuclide_ptr_arrays(
     ))
 }
 
+/// Build the per-nuclide discrete-level base pointer arrays
+/// (`level_basis_ptrs[ni]` and `level_coeffs_ptrs[ni]`) plus
+/// concatenated within-nuc local offset arrays
+/// (`level_basis_local_off[gl]` and `level_coeffs_local_off[gl]`).
+///
+/// Pointer entries are `0` for nuclides with no discrete levels
+/// (`n_levels == 0`); the kernel gates on
+/// `P_LEVEL_COUNTS[ni] > 0` before dereferencing.
+///
+/// Local-offset arrays preserve the rank-padding invariant
+/// (`1654c4d`) by construction — each per-nuclide's `basis_local_off`
+/// is built against the rank-padded `[n_e × global_rank]` per-level
+/// basis layout in `build_level_slices`.
+pub fn build_per_nuc_level_ptr_and_offsets(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<
+    (CudaSlice<u64>, CudaSlice<u64>, CudaSlice<i32>, CudaSlice<i32>),
+    Box<dyn std::error::Error>,
+> {
+    let n_nuc = per_nucs.len();
+    let mut basis_ptrs: Vec<u64> = Vec::with_capacity(n_nuc.max(1));
+    let mut coeffs_ptrs: Vec<u64> = Vec::with_capacity(n_nuc.max(1));
+    let mut basis_local_off: Vec<i32> = Vec::new();
+    let mut coeffs_local_off: Vec<i32> = Vec::new();
+    for p in per_nucs {
+        if p.levels.n_levels > 0 && p.levels.basis_real_len > 0 {
+            let (bp, _sync) = p.levels.basis.device_ptr(stream);
+            basis_ptrs.push(bp);
+            let (cp, _sync) = p.levels.coeffs.device_ptr(stream);
+            coeffs_ptrs.push(cp);
+        } else {
+            basis_ptrs.push(0);
+            coeffs_ptrs.push(0);
+        }
+        basis_local_off.extend_from_slice(&p.levels.basis_local_off);
+        coeffs_local_off.extend_from_slice(&p.levels.coeffs_local_off);
+    }
+    // Sentinels.
+    if basis_ptrs.is_empty() {
+        basis_ptrs.push(0);
+        coeffs_ptrs.push(0);
+    }
+    if basis_local_off.is_empty() {
+        basis_local_off.push(0);
+        coeffs_local_off.push(0);
+    }
+    Ok((
+        stream.clone_htod(&basis_ptrs)?,
+        stream.clone_htod(&coeffs_ptrs)?,
+        stream.clone_htod(&basis_local_off)?,
+        stream.clone_htod(&coeffs_local_off)?,
+    ))
+}
+
 /// Build a per-nuclide `[n_nuc]` pointer array selecting one
 /// `Option<CudaSlice<f64>>` field. Absent / empty per-nuclide slices
 /// store `0`; the caller's kernel must gate on the corresponding

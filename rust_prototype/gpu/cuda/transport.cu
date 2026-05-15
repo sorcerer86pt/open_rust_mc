@@ -276,8 +276,23 @@
 #define P_URR_FF_PTRS           148
 #define P_URR_CF_PTRS           149
 #define P_INEL_CDF_PTRS         150
+// Per-nuc base pointers into the per-nuclide LevelSlicesGpu.basis /
+// .coeffs CudaSlices. `[n_nuc]` u64 entries; the kernel uses
+// `hit_nuc` (already in scope at every discrete-level access site)
+// to pick the right per-nuc base, then indexes by the per-level
+// within-nuc offset arrays below.
+#define P_LEVEL_BASIS_PTRS      151
+#define P_LEVEL_COEFFS_PTRS     152
+// Per-(global level) within-nuc byte offsets into the per-nuc
+// basis / coeffs buffers. `[total_levels]` i32 entries — same
+// indexing as the legacy `P_LEVEL_BOFF` / `P_LEVEL_COFF` slabs,
+// but un-shifted (no global running-offset added). Preserves the
+// `1654c4d` rank-padding invariant: every level's basis is padded
+// to `[n_e × global_rank]` per LevelSlicesGpu::build_level_slices.
+#define P_LEVEL_BLOCAL_OFF      153
+#define P_LEVEL_CLOCAL_OFF      154
 
-#define N_PARAMS            151
+#define N_PARAMS            155
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1480,13 +1495,21 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
             int lv_off = __ldg(&PTR_I(p, P_LEVEL_OFFSETS)[ni]);
             int n_lev  = __ldg(&PTR_I(p, P_LEVEL_COUNTS)[ni]);
             double lsum = 0.0;
+            // Stage C step D — per-nuclide level pointer base. Hoisted
+            // out of the per-level loop; each loop iter loads a u64
+            // (P_LEVEL_BLOCAL_OFF[gl]) instead of two i32s + one f64*
+            // indirection.
+            const double* nuc_lvl_basis =
+                (const double*) __ldg(&PTR_U64(p, P_LEVEL_BASIS_PTRS)[ni]);
+            const double* nuc_lvl_coeffs =
+                (const double*) __ldg(&PTR_U64(p, P_LEVEL_COEFFS_PTRS)[ni]);
             for (int l = 0; l < n_lev; l++) {
                 int gl = lv_off + l;
                 if (!__ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) continue;
                 if (E < __ldg(&PTR_D(p, P_LEVEL_THR)[gl])) continue;
                 double lxs = svd_reconstruct_interp(
-                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                    &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                    &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                     e_idx, n_e, rank, log_frac);
                 if (lxs > 0.0) lsum += lxs;
             }
@@ -1919,14 +1942,19 @@ transport_persistent(
                     int n_e=__ldg(&PTR_I(p, P_N_ENERGIES)[hit_nuc]);
                     int e_idx=energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off],n_e,E);
                     int lev_cap = n_lev < LEGACY_LEV_CAP ? n_lev : LEGACY_LEV_CAP;
+                    // Stage C step D — per-nuc base pointers hoisted.
+                    const double* nuc_lvl_basis =
+                        (const double*) __ldg(&PTR_U64(p, P_LEVEL_BASIS_PTRS)[hit_nuc]);
+                    const double* nuc_lvl_coeffs =
+                        (const double*) __ldg(&PTR_U64(p, P_LEVEL_COEFFS_PTRS)[hit_nuc]);
                     #pragma unroll 1
                     for(int l=0;l<lev_cap;l++){
                         int gl=lv_off+l;
                         if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                            && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
                             lxs_sum += svd_reconstruct(
-                                &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                                &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                                 e_idx, rank);
                         }
                     }
@@ -1940,8 +1968,8 @@ transport_persistent(
                             if(E>=__ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                                && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])){
                                 lxs=svd_reconstruct(
-                                    &PTR_D(p, P_LEVEL_BASIS)[__ldg(&PTR_I(p, P_LEVEL_BOFF)[gl])],
-                                    &PTR_D(p, P_LEVEL_COEFFS)[__ldg(&PTR_I(p, P_LEVEL_COFF)[gl])],
+                                    &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
+                                    &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
                                     e_idx, rank);
                             }
                             run += lxs;
