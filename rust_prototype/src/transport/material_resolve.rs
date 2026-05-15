@@ -1,26 +1,6 @@
-//! Resolve `scene_io::MaterialDto` entries into engine
-//! [`Material`]s + an [`SvdXsProvider`].
-//!
-//! Bridge between the schema-level material spec (HDF5 paths + atom
-//! densities) and the engine-internal representation (atom density +
-//! `xs_kernel_idx` into a global nuclide-kernels array).
-//!
-//! Two pieces of work happen here:
-//!
-//! 1. **ZAID resolution.** Each `NuclideEntryDto` either carries a
-//!    `zaid` (preferred, set by the import script) or an `hdf5_file`
-//!    path (per schema). Both forms are mapped through
-//!    [`NuclideLibrary`] to an absolute HDF5 path + AWR + temperature
-//!    index.
-//!
-//! 2. **Deduplication.** When multiple materials reference the same
-//!    nuclide at the same library temperature, the kernel is loaded
-//!    once and shared (a HashMap keys on `(zaid, temp_idx)`). Different
-//!    temperatures produce distinct kernels.
-//!
-//! Scope of this round: SVD provider only. The matching Table / Hybrid
-//! / WMP providers can layer in the same way once we need them for
-//! validation cases.
+//! `scene_io::MaterialDto` → `(Material, SvdXsProvider)`. Maps
+//! `(zaid | hdf5_file) → (path, AWR, temp_idx)` via `NuclideLibrary`
+//! and dedupes per `(zaid, temp_idx)`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -33,26 +13,17 @@ use crate::transport::material::Material;
 use crate::transport::nuclides::{NuclideLibrary, NuclideLibraryError, ResolvedNuclide};
 use crate::transport::xs_provider::{self, NuclideKernels, SvdXsProvider};
 
-/// Result of resolving a `Vec<MaterialDto>` into runnable engine
-/// material + XS provider.
 pub struct ResolvedMaterials {
     pub provider: SvdXsProvider,
     pub materials: Vec<Material>,
 }
 
 impl ResolvedMaterials {
-    /// Per-material fissionability flags indexed by material idx.
-    /// A material is fissionable iff at least one of its nuclides has
-    /// a positive constant ν̄ in the loaded XS data (the loader keeps
-    /// `nu_bar_const = 0.0` for non-fissionable nuclides). Mirrors
-    /// Serpent's `is_fissile` predicate (`src/findfismat.c`).
-    ///
-    /// Used by `simulate::try_initial_source` and the Python /
-    /// ICSBEP harness to decide which cells can host the first-batch
-    /// source — replaces the historical "first Material cell" /
-    /// "smallest-volume material" heuristics, which broke on
-    /// reflected-metal, multi-shell, BWR-cruciform, PWR-burnable-
-    /// poison, and HFIR-plate geometries.
+    /// `is_fissionable[i]` iff any nuclide has `nu_bar_const > 0`.
+    /// Mirrors Serpent's `findfismat.c`. Drives `try_initial_source`
+    /// — replaces the historical "first Material cell" heuristic that
+    /// broke on reflected-metal / multi-shell / BWR cruciform /
+    /// PWR burnable-poison / HFIR-plate geometries.
     pub fn fissionable_materials(&self) -> Vec<bool> {
         self.materials
             .iter()

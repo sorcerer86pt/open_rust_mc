@@ -1,25 +1,15 @@
-//! Optional MC tallies: surface currents and Cartesian mesh flux.
+//! Opt-in tallies (via `SimConfig.tallies`; unset → hot-path no-op).
 //!
-//! Both are opt-in via `SimConfig.tallies`. When unset, the transport
-//! loop skips every tally hook — zero cost on the hot path.
-//!
-//! - `SurfaceCurrentTally` accumulates J+ and J- (forward / backward
-//!   crossings, signed by `dir · normal`) for a user-supplied set of
-//!   surface indices. Net current is `J+ - J-`; total is `J+ + J-`.
-//! - `MeshFluxTally` is a Cartesian voxel mesh; each flight segment
-//!   contributes `w · d_voxel` (track length traversed within the voxel)
-//!   to the flux estimator. Per-batch sum-of-squares is accumulated so
-//!   the final mean and standard error can be derived over active
-//!   batches.
+//! `SurfaceCurrentTally`: J+/J- by `dir·normal` sign.
+//! `MeshFluxTally`: track-length `w·d_voxel` estimator + per-batch
+//! sum-of-squares for active-batch std-err.
 
 use crate::geometry::surface::{BoundaryCondition, Surface};
 use crate::geometry::{Aabb, Vec3};
 
-/// Surface current tally over a user-tagged set of surface indices.
 #[derive(Debug, Clone)]
 pub struct SurfaceCurrentTally {
-    /// Surface indices to tally. The position of each index in this
-    /// vec is the tally bin id used in the result arrays.
+    /// Vec position = tally bin id.
     pub surfaces: Vec<usize>,
 }
 
@@ -28,17 +18,11 @@ impl SurfaceCurrentTally {
         Self { surfaces }
     }
 
-    /// Build a tally over every reflective-BC surface in the slice.
-    /// Common case: outer pin / assembly box where the user wants
-    /// J+/J- on every face. Surfaces are tagged in slice order.
     pub fn for_reflective_surfaces(surfaces: &[Surface]) -> Self {
         Self::for_bc_matching(surfaces, |bc| bc == BoundaryCondition::Reflective)
     }
 
-    /// Build a tally over every non-Transmission surface — i.e. every
-    /// surface that bounds the physical problem (`Reflective` or
-    /// `Vacuum`). Use this for leakage / outflow currents on vacuum
-    /// boundaries (e.g. Godiva sphere) and reflective faces (pin cell).
+    /// `Reflective | Vacuum` — for leakage on vacuum and reflective faces.
     pub fn for_boundary_surfaces(surfaces: &[Surface]) -> Self {
         Self::for_bc_matching(surfaces, |bc| {
             bc == BoundaryCondition::Reflective || bc == BoundaryCondition::Vacuum
@@ -63,8 +47,6 @@ impl SurfaceCurrentTally {
         Self { surfaces: indices }
     }
 
-    /// Return the tally bin for a crossed surface, or `None` if that
-    /// surface isn't tagged.
     #[inline]
     pub fn bin_for(&self, surface_idx: usize) -> Option<usize> {
         self.surfaces.iter().position(|&s| s == surface_idx)
@@ -75,8 +57,7 @@ impl SurfaceCurrentTally {
     }
 }
 
-/// Cartesian voxel mesh for flux tallies. Origin is the lower corner;
-/// `n[i]` voxels along axis i with edge length `spacing[i]`.
+/// Origin = lower corner; `n[i]` voxels of edge `spacing[i]`.
 #[derive(Debug, Clone)]
 pub struct MeshFluxTally {
     pub origin: [f64; 3],
@@ -89,10 +70,7 @@ impl MeshFluxTally {
         Self { origin, spacing, n }
     }
 
-    /// Build a mesh that covers `aabb` exactly with `n[i]` voxels along
-    /// axis i. Spacing per axis is the AABB extent divided by `n[i]`.
-    /// Useful default for "tally flux throughout the geometry's
-    /// fissile box" — the typical pin / assembly use case.
+    /// Mesh covers `aabb`; spacing = extent / n.
     pub fn from_aabb(aabb: &Aabb, n: [usize; 3]) -> Self {
         let origin = [aabb.min.x, aabb.min.y, aabb.min.z];
         let spacing = [

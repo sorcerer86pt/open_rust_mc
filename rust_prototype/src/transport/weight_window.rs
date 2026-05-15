@@ -1,72 +1,35 @@
-//! Cartesian-mesh weight windows — forward application path.
+//! Cartesian weight-window forward path:
 //!
-//! Per-voxel `(w_lower, w_upper)` thresholds drive splitting and
-//! Russian roulette so particle weight stays in a controlled band as
-//! particles move through space:
+//! - `w > w_upper` → split into `ceil(w/w_survive)` (capped by
+//!   `max_split`) copies of `w/N`.
+//! - `w < w_lower` → roulette with `p = w/w_survive`; survivor → `w_survive`.
+//! - inside band → no-op.
 //!
-//! - `w > w_upper` → split into `N = ceil(w / w_survive)` copies of
-//!   weight `w / N`. The primary keeps `w / N`; the remaining `N-1`
-//!   are pushed onto the per-history `pending` stack.
-//! - `w < w_lower` → Russian roulette with survival probability
-//!   `w / w_survive`. On survival, weight is restored to `w_survive`.
-//! - `w_lower ≤ w ≤ w_upper` → no-op.
-//!
-//! `w_survive` per voxel is the geometric mean of the bounds —
-//! `sqrt(w_lower · w_upper)` — which keeps the unbiased mean weight
-//! consistent with the standard CADIS / FW-CADIS convention.
-//!
-//! This module ships the *forward application* only. Window
-//! generation (CADIS, FW-CADIS, manual tuning) is a much bigger
-//! piece of work that requires a deterministic adjoint solver and
-//! is not in scope here.
+//! `w_survive = sqrt(w_lower·w_upper)` (CADIS / FW-CADIS).
 
 use crate::geometry::{Aabb, Vec3};
 use crate::transport::particle::Particle;
 use crate::transport::rng::Rng;
 
-/// A Cartesian voxel mesh of weight-window bounds.
 #[derive(Debug, Clone)]
 pub struct WeightWindow {
     pub origin: [f64; 3],
     pub spacing: [f64; 3],
     pub n: [usize; 3],
-    /// Lower bound per voxel (flattened, x-major). `0.0` means
-    /// "voxel is outside the active window" — apply() short-circuits.
+    /// x-major flattened. `lower[i] == 0.0` → voxel inactive.
     pub lower: Vec<f64>,
-    /// Upper bound per voxel. Must satisfy `upper[i] > lower[i]`
-    /// when `lower[i] > 0`; otherwise that voxel is treated as
-    /// inactive.
     pub upper: Vec<f64>,
-    /// Maximum number of split copies emitted per application.
-    /// Caps runaway splits when a particle suddenly enters a
-    /// high-importance region with very small `w_upper`.
     pub max_split: u32,
 }
 
 impl WeightWindow {
-    /// Generate a weight window from a per-voxel flux estimate
-    /// (forward CADIS-lite / flux-bootstrap convention).
-    ///
-    /// `flux` is the active-batch mesh flux (Σ_active w·d per voxel)
-    /// in row-major `[ix][iy][iz]` order matching `MeshFluxTally`.
-    /// Voxels with low flux are under-sampled — there `w_target` is
-    /// high so analog-weight particles roulette out and surviving
-    /// particles carry more weight per visit. Voxels with high flux
-    /// get a low `w_target` so analog particles split and sampling
-    /// per particle goes up.
-    ///
-    /// Concretely:
+    /// Forward CADIS-lite / flux-bootstrap:
     /// ```text
-    ///   w_target_v = w_ref · φ_max / max(φ_v, φ_floor)
-    ///   w_lower_v  = w_target_v / sqrt(ratio)
-    ///   w_upper_v  = w_target_v * sqrt(ratio)
+    /// w_target = w_ref · φ_max / max(φ, φ_floor·φ_max)
+    /// w_lower  = w_target / sqrt(ratio)
+    /// w_upper  = w_target * sqrt(ratio)
     /// ```
-    /// `w_ref` is the analog reference weight (typically 1.0);
-    /// `ratio` is the upper/lower bound ratio (typically 5–10);
-    /// `phi_floor` is a relative floor on φ (e.g. 1e-3 of φ_max) to
-    /// avoid pathological splits where flux is essentially zero.
-    /// Voxels with `φ_v <= phi_floor·φ_max` are flagged inactive
-    /// (lower = 0) so the apply path leaves particles alone there.
+    /// `phi_floor` relative (e.g. 1e-3); below-floor voxels → `lower=0`.
     pub fn from_flux(
         aabb: &Aabb,
         n: [usize; 3],
