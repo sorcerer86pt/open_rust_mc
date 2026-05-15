@@ -112,6 +112,50 @@ impl MaxEvapSlicesGpu {
     }
 }
 
+/// Per-nuclide URR probability tables. Each cross-section factor
+/// row is `[n_energy × n_bands]` flat (row-major), matching the
+/// bundle's flat-pack layout.
+pub struct UrrSlicesGpu {
+    pub n_energies: i32,
+    pub n_bands: i32,
+    pub multiply_smooth: i32,
+    pub energies: CudaSlice<f64>,
+    pub cum_prob: CudaSlice<f64>,
+    pub total_factor: CudaSlice<f64>,
+    pub elastic_factor: CudaSlice<f64>,
+    pub fission_factor: CudaSlice<f64>,
+    pub capture_factor: CudaSlice<f64>,
+}
+
+impl UrrSlicesGpu {
+    pub fn device_bytes(&self) -> usize {
+        self.energies.num_bytes()
+            + self.cum_prob.num_bytes()
+            + self.total_factor.num_bytes()
+            + self.elastic_factor.num_bytes()
+            + self.fission_factor.num_bytes()
+            + self.capture_factor.num_bytes()
+    }
+}
+
+/// Per-nuclide synthesized MT=4 CDF (Zr-90..94, U-238). Flat tensor
+/// `cdf[e_dec * n_t * n_lev + t * n_lev + l]`. When None, the device
+/// falls back to the legacy per-level walk in `do_inelastic`.
+pub struct InelCdfSlicesGpu {
+    pub n_e: i32,
+    pub n_t: i32,
+    pub n_lev: i32,
+    pub log_e_min: f64,
+    pub log_e_max: f64,
+    pub data: CudaSlice<f64>,
+}
+
+impl InelCdfSlicesGpu {
+    pub fn device_bytes(&self) -> usize {
+        self.data.num_bytes()
+    }
+}
+
 /// Tagged union over the four ENDF fission-spectrum laws supported by
 /// the device. A nuclide can carry at most one variant; `None`
 /// falls through to the host emitter's default χ.
@@ -299,7 +343,12 @@ pub struct PerNuclideGpu {
 
     // ── Category A.6 — MT=91 continuum inelastic outgoing-energy ──
     pub inel91: Option<TabularEdistSlicesGpu>,
-    // ── Future categories land here per `docs/stage-c-data-model.md` ──
+
+    // ── Category A.7 — URR probability tables ──
+    pub urr: Option<UrrSlicesGpu>,
+
+    // ── Category A.8 — synthesized MT=4 CDF ──
+    pub inel_cdf: Option<InelCdfSlicesGpu>,
 }
 
 impl PerNuclideGpu {
@@ -332,6 +381,12 @@ impl PerNuclideGpu {
         total += self.fission_edist.device_bytes();
         if let Some(i) = &self.inel91 {
             total += i.device_bytes();
+        }
+        if let Some(u) = &self.urr {
+            total += u.device_bytes();
+        }
+        if let Some(c) = &self.inel_cdf {
+            total += c.device_bytes();
         }
         total
     }
@@ -491,6 +546,31 @@ pub fn upload_one_nuclide(
         _ => None,
     };
 
+    // Category A.7 — URR probability tables.
+    let urr = nuc
+        .urr_tables
+        .as_ref()
+        .filter(|u| !u.energies.is_empty())
+        .map(|u| build_urr_slices(stream, u))
+        .transpose()?;
+
+    // Category A.8 — synthesized MT=4 CDF (Zr-90..94, U-238).
+    let inel_cdf = nuc
+        .inelastic_cdf
+        .as_ref()
+        .filter(|c| !c.cdf_flat.is_empty())
+        .map(|c| -> Result<InelCdfSlicesGpu, Box<dyn std::error::Error>> {
+            Ok(InelCdfSlicesGpu {
+                n_e: c.n_energy as i32,
+                n_t: c.n_temp as i32,
+                n_lev: c.n_levels as i32,
+                log_e_min: c.log_e_min,
+                log_e_max: c.log_e_max,
+                data: stream.clone_htod(&c.cdf_flat)?,
+            })
+        })
+        .transpose()?;
+
     Ok(PerNuclideGpu {
         rank: rank as i32,
         n_energy,
@@ -506,6 +586,39 @@ pub fn upload_one_nuclide(
         elastic_angle,
         fission_edist,
         inel91,
+        urr,
+        inel_cdf,
+    })
+}
+
+/// Flatten URR per-band 2D rows into the bundle's row-major layout.
+/// Mirrors upload_nuclide_data_uncached:1883-1905.
+fn build_urr_slices(
+    stream: &Arc<CudaStream>,
+    urr: &crate::hdf5_reader::UrrProbabilityTables,
+) -> Result<UrrSlicesGpu, Box<dyn std::error::Error>> {
+    fn flatten(rows: &[Vec<f64>]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(rows.iter().map(|r| r.len()).sum());
+        for row in rows {
+            out.extend_from_slice(row);
+        }
+        out
+    }
+    let cp = flatten(&urr.cum_prob);
+    let tf = flatten(&urr.total_factor);
+    let ef = flatten(&urr.elastic_factor);
+    let ff = flatten(&urr.fission_factor);
+    let cf = flatten(&urr.capture_factor);
+    Ok(UrrSlicesGpu {
+        n_energies: urr.energies.len() as i32,
+        n_bands: urr.n_bands as i32,
+        multiply_smooth: if urr.multiply_smooth { 1 } else { 0 },
+        energies: stream.clone_htod(&urr.energies)?,
+        cum_prob: stream.clone_htod(&cp)?,
+        total_factor: stream.clone_htod(&tf)?,
+        elastic_factor: stream.clone_htod(&ef)?,
+        fission_factor: stream.clone_htod(&ff)?,
+        capture_factor: stream.clone_htod(&cf)?,
     })
 }
 
