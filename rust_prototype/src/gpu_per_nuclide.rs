@@ -1083,6 +1083,69 @@ pub fn assemble_c_cat(
     })
 }
 
+/// Assembled cat-A.8 (synthesized MT=4 inelastic CDF) bundle slices.
+/// Per-nuclide flat CDF tensors are concatenated; absent nuclides
+/// get `inel_cdf_off = -1` (the device's "no CDF, use legacy per-
+/// level walk" sentinel — matches legacy slot 1378's initial value).
+pub struct AssembledBundleA8Cat {
+    pub inel_cdf_data: CudaSlice<f64>,
+    pub inel_cdf_off_vec: Vec<i32>,
+    pub inel_cdf_n_e_vec: Vec<i32>,
+    pub inel_cdf_n_t_vec: Vec<i32>,
+    pub inel_cdf_n_lev_vec: Vec<i32>,
+    pub inel_cdf_log_e_min_vec: Vec<f64>,
+    pub inel_cdf_log_e_max_vec: Vec<f64>,
+}
+
+pub fn assemble_a8_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleA8Cat, Box<dyn std::error::Error>> {
+    let n_nuc = per_nucs.len();
+    let total: usize = per_nucs
+        .iter()
+        .filter_map(|p| p.inel_cdf.as_ref().map(|c| c.data.len()))
+        .sum();
+    let mut inel_cdf_data = unsafe { stream.alloc::<f64>(total.max(1))? };
+    if total == 0 {
+        stream.memset_zeros(&mut inel_cdf_data)?;
+    }
+
+    let mut inel_cdf_off_vec = vec![-1_i32; n_nuc];
+    let mut inel_cdf_n_e_vec = vec![0_i32; n_nuc];
+    let mut inel_cdf_n_t_vec = vec![0_i32; n_nuc];
+    let mut inel_cdf_n_lev_vec = vec![0_i32; n_nuc];
+    let mut inel_cdf_log_e_min_vec = vec![0.0_f64; n_nuc];
+    let mut inel_cdf_log_e_max_vec = vec![0.0_f64; n_nuc];
+
+    let mut run = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        let Some(c) = p.inel_cdf.as_ref() else { continue };
+        inel_cdf_off_vec[nuc_idx] = run as i32;
+        inel_cdf_n_e_vec[nuc_idx] = c.n_e;
+        inel_cdf_n_t_vec[nuc_idx] = c.n_t;
+        inel_cdf_n_lev_vec[nuc_idx] = c.n_lev;
+        inel_cdf_log_e_min_vec[nuc_idx] = c.log_e_min;
+        inel_cdf_log_e_max_vec[nuc_idx] = c.log_e_max;
+        let len = c.data.len();
+        if len > 0 {
+            let mut dst = inel_cdf_data.slice_mut(run..run + len);
+            stream.memcpy_dtod(&c.data, &mut dst)?;
+        }
+        run += len;
+    }
+
+    Ok(AssembledBundleA8Cat {
+        inel_cdf_data,
+        inel_cdf_off_vec,
+        inel_cdf_n_e_vec,
+        inel_cdf_n_t_vec,
+        inel_cdf_n_lev_vec,
+        inel_cdf_log_e_min_vec,
+        inel_cdf_log_e_max_vec,
+    })
+}
+
 /// Assembled cat-A.7 (URR probability tables) bundle slices.
 pub struct AssembledBundleA7Cat {
     pub urr_energies: CudaSlice<f64>,
@@ -2703,6 +2766,98 @@ mod tests {
             assembled.urr_multiply_smooth_vec,
             dtoh_i32(&bundle_legacy.urr_multiply_smooth),
             "urr_multiply_smooth"
+        );
+    }
+
+    #[test]
+    fn assemble_a8_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::transport::xs_provider::InelasticCdf;
+
+        let mut nuc_a = NuclideKernels::empty(238.0, 0.0);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        // 3-energy × 2-temp × 4-level synthetic CDF tensor.
+        nuc_a.inelastic_cdf = Some(InelasticCdf {
+            n_levels: 4,
+            n_temp: 2,
+            n_energy: 3,
+            log_e_min: 4.0,
+            log_e_max: 7.0,
+            cdf_flat: (0..3 * 2 * 4).map(|i| i as f64 * 0.1).collect(),
+            level_mts: vec![51, 52, 53, 91],
+        });
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx.upload_nuclide_data_uncached(&nuclides, rank).unwrap();
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_a8_cat(&stream, &per_nucs).expect("assemble_a8_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        assert_eq!(
+            dtoh_f64(&assembled.inel_cdf_data),
+            dtoh_f64(&bundle_legacy.inel_cdf_data),
+            "inel_cdf_data"
+        );
+        assert_eq!(
+            assembled.inel_cdf_off_vec,
+            dtoh_i32(&bundle_legacy.inel_cdf_off),
+            "inel_cdf_off"
+        );
+        assert_eq!(
+            assembled.inel_cdf_n_e_vec,
+            dtoh_i32(&bundle_legacy.inel_cdf_n_e),
+            "inel_cdf_n_e"
+        );
+        assert_eq!(
+            assembled.inel_cdf_n_t_vec,
+            dtoh_i32(&bundle_legacy.inel_cdf_n_t),
+            "inel_cdf_n_t"
+        );
+        assert_eq!(
+            assembled.inel_cdf_n_lev_vec,
+            dtoh_i32(&bundle_legacy.inel_cdf_n_lev),
+            "inel_cdf_n_lev"
+        );
+        assert_eq!(
+            assembled.inel_cdf_log_e_min_vec,
+            dtoh_f64(&bundle_legacy.inel_cdf_log_e_min),
+            "inel_cdf_log_e_min"
+        );
+        assert_eq!(
+            assembled.inel_cdf_log_e_max_vec,
+            dtoh_f64(&bundle_legacy.inel_cdf_log_e_max),
+            "inel_cdf_log_e_max"
         );
     }
 
