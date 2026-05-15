@@ -1,5 +1,26 @@
 # Stage C — bench results on A1000
 
+## Step D correctness — 3-case ICSBEP sweep (post-kernel-ABI swap)
+
+After landing the per-nuclide pointer-array kernel ABI
+(`transport.cu` reads `((double*)PTR_U64(p, P_BASIS_PTRS)[key])[…]`
+instead of indirecting through `all_basis[basis_offsets[…]+…]`).
+
+| case                    | k_calc      ± σ       |  Δ pcm | bound | runtime |
+|-------------------------|-----------------------|-------:|------:|--------:|
+| heu-met-fast-001_case-1 | 0.999387 ± 0.000416   |  -61.3 |   217 |   57 s  |
+| pu-met-fast-001         | 1.001389 ± 0.000612   | +138.9 |   418 |   15 s  |
+| u233-met-fast-001       | 1.000252 ± 0.000409   |  +25.2 |   216 |   14 s  |
+
+**3 / 3 PASS, 86 s wall on RTX A1000.** The kernel reading
+basis/coeffs directly from per-nuclide CudaSlices via pointer-array
+load produces physics within the ICSBEP envelope on a fast-metal
+benchmark mix.
+
+The k deltas vs Step C (below) are within 1σ of each other across
+the three cases — the difference is statistical (independent random
+seeds), not systematic.
+
 ## Step C correctness — 6-case ICSBEP sweep
 
 End-to-end validation that the per-nuclide LFU cache preserves
