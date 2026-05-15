@@ -387,6 +387,7 @@ mod cuda_main {
                 max_events_per_history: args.max_events,
                 fis_capacity: args.particles as usize * 4,
                 initial_source: make_initial_source_factory(args.rings, args.reflective_z),
+                buffers: std::cell::RefCell::new(None),
             };
 
             let t_seed = Instant::now();

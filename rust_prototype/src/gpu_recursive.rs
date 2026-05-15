@@ -1408,12 +1408,190 @@ pub struct RecursiveTransportBatch {
     pub q_inel_sum: f64,
 }
 
+/// Persistent device-side buffer pool for one (n_particles, fis_cap,
+/// n_materials, n_lattices) tuple.
+///
+/// Per NVIDIA CUDA C++ Best Practices §9.2: "memory allocation and
+/// deallocation are expensive; allocate buffers at the start of the
+/// application and reuse them." `transport_recursive` used to
+/// `clone_htod` ~25 device buffers per batch (1.5–4 ms / batch
+/// overhead on the A1000, more under contention). With this pool the
+/// caller allocates once per case, then each batch only does
+/// in-place `memcpy_htod` / `memset_zeros` — no driver-side alloc.
+///
+/// Lifetime: tied to one (n, fis_cap) tuple. If the caller's batch
+/// size changes, build a new pool (or rebuild with
+/// `TransportBuffers::new`). Within an ICSBEP case all batches share
+/// the same `n` and `fis_cap`, so one pool per `CudaRunner` instance
+/// is the natural granularity.
+///
+/// Drop releases every buffer; the driver returns the device memory
+/// to the async mempool (or directly to the OS in the sync-alloc
+/// path).
+#[allow(non_snake_case)]
+pub struct TransportBuffers {
+    n: usize,
+    fis_cap: usize,
+    /// Particle SoA — sized `n`. Mutable so kernel launches can take
+    /// `&mut`. State is overwritten each batch by `reset_for_batch`.
+    pub d_xs: CudaSlice<f64>,
+    pub d_ys: CudaSlice<f64>,
+    pub d_zs: CudaSlice<f64>,
+    pub d_dxs: CudaSlice<f64>,
+    pub d_dys: CudaSlice<f64>,
+    pub d_dzs: CudaSlice<f64>,
+    pub d_e: CudaSlice<f64>,
+    pub d_alive: CudaSlice<i32>,
+    pub d_rng_state: CudaSlice<u64>,
+    pub d_rng_inc: CudaSlice<u64>,
+    /// Per-material kT [eV], sized `n_materials`. Refreshed by
+    /// `reset_for_batch` so a CudaRunner that switches scenes doesn't
+    /// have to rebuild the pool.
+    pub d_mat_kt: CudaSlice<f64>,
+    /// Lattice override scratch — currently always dummy filler for
+    /// the recursive demo path; sized `n_lattices + 1` (offset, count)
+    /// or `1` (idx, cell, mat). See `transport_recursive_with_buffers`.
+    pub d_lat_override_off: CudaSlice<i32>,
+    pub d_lat_override_count: CudaSlice<i32>,
+    pub d_override_lat_idx: CudaSlice<i32>,
+    pub d_override_cell_idx: CudaSlice<i32>,
+    pub d_override_mat: CudaSlice<i32>,
+    /// Fission bank, sized `fis_cap`. The atomic counter `d_fis_count`
+    /// is zeroed each batch by `reset_for_batch`; the data slots are
+    /// overwritten by the kernel only up to `d_fis_count`, but a
+    /// memset would cost more than the unused trailing bytes.
+    pub d_fis_x: CudaSlice<f64>,
+    pub d_fis_y: CudaSlice<f64>,
+    pub d_fis_z: CudaSlice<f64>,
+    pub d_fis_e: CudaSlice<f64>,
+    pub d_fis_w: CudaSlice<f64>,
+    pub d_fis_count: CudaSlice<i32>,
+    /// Single-slot atomic counters. Zeroed each batch.
+    pub d_cnt_coll: CudaSlice<i32>,
+    pub d_cnt_fis: CudaSlice<i32>,
+    pub d_cnt_leak: CudaSlice<i32>,
+    pub d_cnt_surf: CudaSlice<i32>,
+    pub d_cnt_el: CudaSlice<i32>,
+    pub d_cnt_inel: CudaSlice<i32>,
+    pub d_cnt_cap: CudaSlice<i32>,
+    /// Single-slot f64 accumulators for the spectrum-hardening
+    /// diagnostic tallies. Zeroed each batch.
+    pub d_e_fis_in: CudaSlice<f64>,
+    pub d_e_el_in: CudaSlice<f64>,
+    pub d_e_inel_in: CudaSlice<f64>,
+    pub d_e_inel_out: CudaSlice<f64>,
+    pub d_e_fis_in_sq: CudaSlice<f64>,
+    pub d_e_el_in_sq: CudaSlice<f64>,
+    pub d_e_inel_in_sq: CudaSlice<f64>,
+    pub d_q_inel: CudaSlice<f64>,
+    /// `TransportParams` packed buffer (size = `N_PARAMS`). The
+    /// contents depend on the current nuc/mat/sab/wmp device pointers,
+    /// so the host repacks per batch — but the allocation is reused.
+    pub d_params: CudaSlice<u64>,
+    /// Host-side scratch — `vec![1_i32; n]` for the initial-alive
+    /// upload. Lifted out of the per-batch path so the Vec allocation
+    /// doesn't churn the system allocator on every batch.
+    alive_host_ones: Vec<i32>,
+}
+
+impl TransportBuffers {
+    /// Allocate every device buffer the recursive transport kernel
+    /// reads or writes. Caller-supplied sizes:
+    ///   * `n`               — particle count per batch.
+    ///   * `fis_cap`         — fission-bank capacity (typ. `4 × n`).
+    ///   * `n_materials`     — number of distinct materials in the
+    ///                         scene (sizes `d_mat_kt`).
+    ///   * `n_lattices`      — number of rect lattices (sizes the
+    ///                         override-offset arrays; harmless if 0).
+    ///   * `params_len`      — size of the packed `TransportParams`
+    ///                         buffer (currently `N_PARAMS = 130`;
+    ///                         queried from `GpuTransportContext` so
+    ///                         this struct doesn't have to track the
+    ///                         constant).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        stream: &Arc<CudaStream>,
+        n: usize,
+        fis_cap: usize,
+        n_materials: usize,
+        n_lattices: usize,
+        params_len: usize,
+    ) -> Result<Self, String> {
+        // alloc_zeros is fine for every buffer — particle SoA gets
+        // overwritten by reset_for_batch, counters start at zero, and
+        // unused trailing entries in the fission bank stay zero.
+        let mk_d = |len: usize| stream.alloc_zeros::<f64>(len).map_err(|e| e.to_string());
+        let mk_i = |len: usize| stream.alloc_zeros::<i32>(len).map_err(|e| e.to_string());
+        let mk_u = |len: usize| stream.alloc_zeros::<u64>(len).map_err(|e| e.to_string());
+        let fis = fis_cap.max(1);
+        Ok(Self {
+            n,
+            fis_cap: fis,
+            d_xs: mk_d(n)?,
+            d_ys: mk_d(n)?,
+            d_zs: mk_d(n)?,
+            d_dxs: mk_d(n)?,
+            d_dys: mk_d(n)?,
+            d_dzs: mk_d(n)?,
+            d_e: mk_d(n)?,
+            d_alive: mk_i(n)?,
+            d_rng_state: mk_u(n)?,
+            d_rng_inc: mk_u(n)?,
+            d_mat_kt: mk_d(n_materials.max(1))?,
+            d_lat_override_off: mk_i(n_lattices + 1)?,
+            d_lat_override_count: mk_i(n_lattices + 1)?,
+            d_override_lat_idx: mk_i(1)?,
+            d_override_cell_idx: mk_i(1)?,
+            d_override_mat: mk_i(1)?,
+            d_fis_x: mk_d(fis)?,
+            d_fis_y: mk_d(fis)?,
+            d_fis_z: mk_d(fis)?,
+            d_fis_e: mk_d(fis)?,
+            d_fis_w: mk_d(fis)?,
+            d_fis_count: mk_i(1)?,
+            d_cnt_coll: mk_i(1)?,
+            d_cnt_fis: mk_i(1)?,
+            d_cnt_leak: mk_i(1)?,
+            d_cnt_surf: mk_i(1)?,
+            d_cnt_el: mk_i(1)?,
+            d_cnt_inel: mk_i(1)?,
+            d_cnt_cap: mk_i(1)?,
+            d_e_fis_in: mk_d(1)?,
+            d_e_el_in: mk_d(1)?,
+            d_e_inel_in: mk_d(1)?,
+            d_e_inel_out: mk_d(1)?,
+            d_e_fis_in_sq: mk_d(1)?,
+            d_e_el_in_sq: mk_d(1)?,
+            d_e_inel_in_sq: mk_d(1)?,
+            d_q_inel: mk_d(1)?,
+            d_params: mk_u(params_len)?,
+            alive_host_ones: vec![1_i32; n],
+        })
+    }
+
+    #[inline]
+    pub fn n(&self) -> usize {
+        self.n
+    }
+    #[inline]
+    pub fn fis_capacity(&self) -> usize {
+        self.fis_cap
+    }
+}
+
 impl GpuRecursiveContext {
     /// Run one batch of full-physics neutron transport on the recursive
     /// geometry. Cross-section data is supplied via the
     /// `GpuTransportContext` upload-* paths (SVD / Pointwise / WMP / URR
     /// / discrete levels / S(α,β)). Each particle is transported to
     /// absorption / leakage / max-events.
+    ///
+    /// Convenience wrapper that builds a one-shot `TransportBuffers`
+    /// and delegates to [`transport_recursive_with_buffers`]. Pays the
+    /// driver-allocation cost on every call — fine for one-off
+    /// diagnostics; production callers (e.g. `CudaRunner`) should
+    /// pool their own buffers and call the pooled entry point
+    /// directly.
     ///
     /// Inputs:
     /// * `source_bank` — per-particle (x, y, z, energy) at birth.
@@ -1446,44 +1624,90 @@ impl GpuRecursiveContext {
     ) -> Result<RecursiveTransportBatch, String> {
         let n = source_bank.len();
         if n == 0 {
-            return Ok(RecursiveTransportBatch {
-                fission_bank: Vec::new(),
-                n_collisions: 0,
-                n_fissions: 0,
-                n_leakage: 0,
-                n_surf_xings: 0,
-                k_eff: 0.0,
-                n_elastic: 0,
-                n_inelastic: 0,
-                n_capture: 0,
-                e_fis_in_sum: 0.0,
-                e_el_in_sum: 0.0,
-                e_inel_in_sum: 0.0,
-                e_inel_out_sum: 0.0,
-                e_fis_in_sq_sum: 0.0,
-                e_el_in_sq_sum: 0.0,
-                e_inel_in_sq_sum: 0.0,
-                q_inel_sum: 0.0,
-            });
+            return Ok(empty_recursive_batch());
         }
         if rng_seeds.len() != n {
             return Err("source_bank / rng_seeds length mismatch".into());
         }
+        // Throw-away buffers — backwards-compatible path. Pool callers
+        // use `transport_recursive_with_buffers` instead.
+        let params_len = gpu_t
+            .build_transport_params_vec(nuc_data, mat_data, sab_data, wmp_data, 0)
+            .len();
+        let mut buffers = TransportBuffers::new(
+            &self.stream,
+            n,
+            fis_capacity,
+            mat_kT.len(),
+            self.lat_origin.len() / 3,
+            params_len,
+        )?;
+        self.transport_recursive_with_buffers(
+            &mut buffers,
+            gpu_t,
+            nuc_data,
+            mat_data,
+            sab_data,
+            wmp_data,
+            source_bank,
+            rng_seeds,
+            mat_kT,
+            sab_nuc_idx,
+            max_events_per_history,
+            fis_capacity,
+        )
+    }
 
-        // Particle SoA.
+    /// Pooled-buffer entry point. `buffers` must be sized for the same
+    /// `n = source_bank.len()` and `fis_capacity` as previous calls;
+    /// build a new pool if either changes mid-case.
+    #[allow(clippy::too_many_arguments, non_snake_case)]
+    pub fn transport_recursive_with_buffers(
+        &self,
+        buffers: &mut TransportBuffers,
+        gpu_t: &crate::gpu_transport::GpuTransportContext,
+        nuc_data: &crate::gpu_transport::GpuNuclideData,
+        mat_data: &crate::gpu_transport::GpuMaterialData,
+        sab_data: &crate::gpu_transport::GpuSabData,
+        wmp_data: &crate::gpu_transport::GpuWmpData,
+        source_bank: &[(f64, f64, f64, f64)],
+        rng_seeds: &[(u64, u64)],
+        mat_kT: &[f64],
+        sab_nuc_idx: i32,
+        max_events_per_history: i32,
+        fis_capacity: usize,
+    ) -> Result<RecursiveTransportBatch, String> {
+        let n = source_bank.len();
+        if n == 0 {
+            return Ok(empty_recursive_batch());
+        }
+        if rng_seeds.len() != n {
+            return Err("source_bank / rng_seeds length mismatch".into());
+        }
+        if buffers.n != n {
+            return Err(format!(
+                "TransportBuffers sized for n={} but batch has n={}",
+                buffers.n, n
+            ));
+        }
+        if buffers.fis_cap < fis_capacity {
+            return Err(format!(
+                "TransportBuffers fis_cap={} < requested {}",
+                buffers.fis_cap, fis_capacity
+            ));
+        }
+
+        // Particle SoA host packing — same shape as the old path, but
+        // these Vecs feed `memcpy_htod` into the persistent buffers
+        // (no new device allocation).
         let xs: Vec<f64> = source_bank.iter().map(|p| p.0).collect();
         let ys: Vec<f64> = source_bank.iter().map(|p| p.1).collect();
         let zs: Vec<f64> = source_bank.iter().map(|p| p.2).collect();
         let es: Vec<f64> = source_bank.iter().map(|p| p.3).collect();
-        // Initial directions: isotropic, same convention as init_source.
-        // We reuse the seed's first two draws to derive a direction,
-        // matching the const-XS path's CPU/GPU comparison style.
         let mut dxs = Vec::with_capacity(n);
         let mut dys = Vec::with_capacity(n);
         let mut dzs = Vec::with_capacity(n);
         for &(s, inc) in rng_seeds {
-            // Draw mu, phi from a private RNG so we don't perturb the
-            // seed the kernel actually uses.
             let mut rng = rust_mc_sim::Pcg64::from_state(s ^ 0xA5A5_A5A5_A5A5_A5A5, inc | 1);
             let mu = 2.0 * rng.uniform() - 1.0;
             let phi = 2.0 * std::f64::consts::PI * rng.uniform();
@@ -1492,79 +1716,75 @@ impl GpuRecursiveContext {
             dys.push(s_th * phi.sin());
             dzs.push(mu);
         }
-        let alive: Vec<i32> = vec![1; n];
         let rng_state: Vec<u64> = rng_seeds.iter().map(|s| s.0).collect();
         let rng_inc: Vec<u64> = rng_seeds.iter().map(|s| s.1).collect();
 
         let stream = &self.stream;
-        let mut d_xs = stream.clone_htod(&xs).map_err(|e| e.to_string())?;
-        let mut d_ys = stream.clone_htod(&ys).map_err(|e| e.to_string())?;
-        let mut d_zs = stream.clone_htod(&zs).map_err(|e| e.to_string())?;
-        let mut d_dxs = stream.clone_htod(&dxs).map_err(|e| e.to_string())?;
-        let mut d_dys = stream.clone_htod(&dys).map_err(|e| e.to_string())?;
-        let mut d_dzs = stream.clone_htod(&dzs).map_err(|e| e.to_string())?;
-        let mut d_e = stream.clone_htod(&es).map_err(|e| e.to_string())?;
-        let mut d_alive = stream.clone_htod(&alive).map_err(|e| e.to_string())?;
-        let mut d_rng_state = stream.clone_htod(&rng_state).map_err(|e| e.to_string())?;
-        let mut d_rng_inc = stream.clone_htod(&rng_inc).map_err(|e| e.to_string())?;
-
-        // Material-temperature table.
-        let d_mat_kt = stream.clone_htod(mat_kT).map_err(|e| e.to_string())?;
+        let htod_d = |src: &[f64], dst: &mut CudaSlice<f64>| -> Result<(), String> {
+            stream.memcpy_htod(src, dst).map_err(|e| e.to_string())
+        };
+        let htod_i = |src: &[i32], dst: &mut CudaSlice<i32>| -> Result<(), String> {
+            stream.memcpy_htod(src, dst).map_err(|e| e.to_string())
+        };
+        let htod_u = |src: &[u64], dst: &mut CudaSlice<u64>| -> Result<(), String> {
+            stream.memcpy_htod(src, dst).map_err(|e| e.to_string())
+        };
+        htod_d(&xs, &mut buffers.d_xs)?;
+        htod_d(&ys, &mut buffers.d_ys)?;
+        htod_d(&zs, &mut buffers.d_zs)?;
+        htod_d(&dxs, &mut buffers.d_dxs)?;
+        htod_d(&dys, &mut buffers.d_dys)?;
+        htod_d(&dzs, &mut buffers.d_dzs)?;
+        htod_d(&es, &mut buffers.d_e)?;
+        htod_i(&buffers.alive_host_ones.clone(), &mut buffers.d_alive)?;
+        htod_u(&rng_state, &mut buffers.d_rng_state)?;
+        htod_u(&rng_inc, &mut buffers.d_rng_inc)?;
+        htod_d(mat_kT, &mut buffers.d_mat_kt)?;
         let n_materials = mat_kT.len() as i32;
 
-        // Empty material-override tables (recursive demo doesn't use
-        // distributed materials yet — the const-XS kernel uses the
-        // same fallback).
-        let dummy_off: Vec<i32> = vec![-1; self.lat_origin.len() / 3 + 1];
-        let dummy_count: Vec<i32> = vec![0; self.lat_origin.len() / 3 + 1];
-        let d_lat_override_off = stream.clone_htod(&dummy_off).map_err(|e| e.to_string())?;
-        let d_lat_override_count = stream.clone_htod(&dummy_count).map_err(|e| e.to_string())?;
-        let d_override_lat_idx = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let d_override_cell_idx = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let d_override_mat = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        // Lattice override scratch (dummy fillers for the recursive
+        // demo path). Sized at TransportBuffers::new; reset values
+        // each batch in case a caller has reused buffers across cases
+        // with differing lattice counts.
+        let n_lat_owned = self.lat_origin.len() / 3;
+        let dummy_off: Vec<i32> = vec![-1; n_lat_owned + 1];
+        let dummy_count: Vec<i32> = vec![0; n_lat_owned + 1];
+        htod_i(&dummy_off, &mut buffers.d_lat_override_off)?;
+        htod_i(&dummy_count, &mut buffers.d_lat_override_count)?;
+        // d_override_lat_idx / cell_idx / mat stay at the zeros they
+        // were allocated with — no need to re-memset.
 
-        // Fission bank.
-        let mut d_fis_x = stream
-            .alloc_zeros::<f64>(fis_capacity.max(1))
-            .map_err(|e| e.to_string())?;
-        let mut d_fis_y = stream
-            .alloc_zeros::<f64>(fis_capacity.max(1))
-            .map_err(|e| e.to_string())?;
-        let mut d_fis_z = stream
-            .alloc_zeros::<f64>(fis_capacity.max(1))
-            .map_err(|e| e.to_string())?;
-        let mut d_fis_e = stream
-            .alloc_zeros::<f64>(fis_capacity.max(1))
-            .map_err(|e| e.to_string())?;
-        let mut d_fis_w = stream
-            .alloc_zeros::<f64>(fis_capacity.max(1))
-            .map_err(|e| e.to_string())?;
-        let mut d_fis_count = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
+        // Zero counters + fission count for this batch.
+        let zero_i = |dst: &mut CudaSlice<i32>| -> Result<(), String> {
+            stream.memset_zeros(dst).map_err(|e| e.to_string())
+        };
+        let zero_f = |dst: &mut CudaSlice<f64>| -> Result<(), String> {
+            stream.memset_zeros(dst).map_err(|e| e.to_string())
+        };
+        zero_i(&mut buffers.d_fis_count)?;
+        zero_i(&mut buffers.d_cnt_coll)?;
+        zero_i(&mut buffers.d_cnt_fis)?;
+        zero_i(&mut buffers.d_cnt_leak)?;
+        zero_i(&mut buffers.d_cnt_surf)?;
+        zero_i(&mut buffers.d_cnt_el)?;
+        zero_i(&mut buffers.d_cnt_inel)?;
+        zero_i(&mut buffers.d_cnt_cap)?;
+        zero_f(&mut buffers.d_e_fis_in)?;
+        zero_f(&mut buffers.d_e_el_in)?;
+        zero_f(&mut buffers.d_e_inel_in)?;
+        zero_f(&mut buffers.d_e_inel_out)?;
+        zero_f(&mut buffers.d_e_fis_in_sq)?;
+        zero_f(&mut buffers.d_e_el_in_sq)?;
+        zero_f(&mut buffers.d_e_inel_in_sq)?;
+        zero_f(&mut buffers.d_q_inel)?;
 
-        // Counter slots (i32 to match transport.cu's atomic style).
-        let mut d_cnt_coll = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let mut d_cnt_fis = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let mut d_cnt_leak = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let mut d_cnt_surf = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        // Spectrum-hardening diagnostic tallies — see `RecursiveTransportBatch`.
-        let mut d_cnt_el = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let mut d_cnt_inel = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let mut d_cnt_cap = stream.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?;
-        let mut d_e_fis_in = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_e_el_in = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_e_inel_in = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_e_inel_out = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_e_fis_in_sq = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_e_el_in_sq = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_e_inel_in_sq = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-        let mut d_q_inel = stream.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?;
-
-        // Build the packed TransportParams buffer using GpuTransportContext's
-        // helper. P_GEOM_TYPE is irrelevant here (the recursive kernel
-        // bypasses the find_cell switch) — we pass 0 for compactness.
+        // Rebuild + upload TransportParams — pointers inside the
+        // packed buffer depend on the current nuc/mat/sab/wmp uploads.
         let params_vec =
             gpu_t.build_transport_params_vec(nuc_data, mat_data, sab_data, wmp_data, 0);
-        let d_params = stream.clone_htod(&params_vec).map_err(|e| e.to_string())?;
+        stream
+            .memcpy_htod(&params_vec, &mut buffers.d_params)
+            .map_err(|e| e.to_string())?;
 
         let block = 128_u32;
         let grid = (n as u32).div_ceil(block);
@@ -1576,26 +1796,24 @@ impl GpuRecursiveContext {
         let n_i32 = n as i32;
         let n_surf = self.n_surfaces;
         let root = self.root_universe;
-        let n_lat = (self.lat_origin.len() / 3) as i32;
+        let n_lat = n_lat_owned as i32;
         let max_fis_i = fis_capacity as i32;
 
         let mut launch = stream.launch_builder(&self.k_transport_recursive);
         launch
-            .arg(&d_params)
-            // particle SoA
-            .arg(&mut d_xs)
-            .arg(&mut d_ys)
-            .arg(&mut d_zs)
-            .arg(&mut d_dxs)
-            .arg(&mut d_dys)
-            .arg(&mut d_dzs)
-            .arg(&mut d_e)
-            .arg(&mut d_alive)
-            .arg(&mut d_rng_state)
-            .arg(&mut d_rng_inc)
+            .arg(&buffers.d_params)
+            .arg(&mut buffers.d_xs)
+            .arg(&mut buffers.d_ys)
+            .arg(&mut buffers.d_zs)
+            .arg(&mut buffers.d_dxs)
+            .arg(&mut buffers.d_dys)
+            .arg(&mut buffers.d_dzs)
+            .arg(&mut buffers.d_e)
+            .arg(&mut buffers.d_alive)
+            .arg(&mut buffers.d_rng_state)
+            .arg(&mut buffers.d_rng_inc)
             .arg(&n_i32)
             .arg(&max_events_per_history)
-            // recursive geometry tables
             .arg(&self.surf_type)
             .arg(&self.surf_params)
             .arg(&self.surf_bc)
@@ -1630,40 +1848,37 @@ impl GpuRecursiveContext {
             .arg(&self.hex_universes_off)
             .arg(&self.hex_universes)
             .arg(&self.n_hex_lattices)
-            .arg(&d_lat_override_off)
-            .arg(&d_lat_override_count)
-            .arg(&d_override_lat_idx)
-            .arg(&d_override_cell_idx)
-            .arg(&d_override_mat)
-            .arg(&d_mat_kt)
+            .arg(&buffers.d_lat_override_off)
+            .arg(&buffers.d_lat_override_count)
+            .arg(&buffers.d_override_lat_idx)
+            .arg(&buffers.d_override_cell_idx)
+            .arg(&buffers.d_override_mat)
+            .arg(&buffers.d_mat_kt)
             .arg(&n_materials)
             .arg(&sab_nuc_idx)
             .arg(&self.evals_scratch)
-            // fission bank
-            .arg(&mut d_fis_x)
-            .arg(&mut d_fis_y)
-            .arg(&mut d_fis_z)
-            .arg(&mut d_fis_e)
-            .arg(&mut d_fis_w)
-            .arg(&mut d_fis_count)
+            .arg(&mut buffers.d_fis_x)
+            .arg(&mut buffers.d_fis_y)
+            .arg(&mut buffers.d_fis_z)
+            .arg(&mut buffers.d_fis_e)
+            .arg(&mut buffers.d_fis_w)
+            .arg(&mut buffers.d_fis_count)
             .arg(&max_fis_i)
-            // counters
-            .arg(&mut d_cnt_coll)
-            .arg(&mut d_cnt_fis)
-            .arg(&mut d_cnt_leak)
-            .arg(&mut d_cnt_surf)
-            // spectrum-hardening diagnostic tallies
-            .arg(&mut d_cnt_el)
-            .arg(&mut d_cnt_inel)
-            .arg(&mut d_cnt_cap)
-            .arg(&mut d_e_fis_in)
-            .arg(&mut d_e_el_in)
-            .arg(&mut d_e_inel_in)
-            .arg(&mut d_e_inel_out)
-            .arg(&mut d_e_fis_in_sq)
-            .arg(&mut d_e_el_in_sq)
-            .arg(&mut d_e_inel_in_sq)
-            .arg(&mut d_q_inel);
+            .arg(&mut buffers.d_cnt_coll)
+            .arg(&mut buffers.d_cnt_fis)
+            .arg(&mut buffers.d_cnt_leak)
+            .arg(&mut buffers.d_cnt_surf)
+            .arg(&mut buffers.d_cnt_el)
+            .arg(&mut buffers.d_cnt_inel)
+            .arg(&mut buffers.d_cnt_cap)
+            .arg(&mut buffers.d_e_fis_in)
+            .arg(&mut buffers.d_e_el_in)
+            .arg(&mut buffers.d_e_inel_in)
+            .arg(&mut buffers.d_e_inel_out)
+            .arg(&mut buffers.d_e_fis_in_sq)
+            .arg(&mut buffers.d_e_el_in_sq)
+            .arg(&mut buffers.d_e_inel_in_sq)
+            .arg(&mut buffers.d_q_inel);
         // SAFETY: kernel signature matches the argument list above
         // (transport_recursive_persistent in transport_recursive.cu).
         unsafe {
@@ -1671,53 +1886,31 @@ impl GpuRecursiveContext {
         }
 
         let fis_count =
-            stream.clone_dtoh(&d_fis_count).map_err(|e| e.to_string())?[0].max(0) as usize;
+            stream.clone_dtoh(&buffers.d_fis_count).map_err(|e| e.to_string())?[0].max(0) as usize;
         let n_banked = fis_count.min(fis_capacity);
-        let fx = stream.clone_dtoh(&d_fis_x).map_err(|e| e.to_string())?;
-        let fy = stream.clone_dtoh(&d_fis_y).map_err(|e| e.to_string())?;
-        let fz = stream.clone_dtoh(&d_fis_z).map_err(|e| e.to_string())?;
-        let fe = stream.clone_dtoh(&d_fis_e).map_err(|e| e.to_string())?;
+        let fx = stream.clone_dtoh(&buffers.d_fis_x).map_err(|e| e.to_string())?;
+        let fy = stream.clone_dtoh(&buffers.d_fis_y).map_err(|e| e.to_string())?;
+        let fz = stream.clone_dtoh(&buffers.d_fis_z).map_err(|e| e.to_string())?;
+        let fe = stream.clone_dtoh(&buffers.d_fis_e).map_err(|e| e.to_string())?;
         let fission_bank: Vec<(f64, f64, f64, f64)> = (0..n_banked)
             .map(|i| (fx[i], fy[i], fz[i], fe[i]))
             .collect();
 
-        let cnt_coll = stream.clone_dtoh(&d_cnt_coll).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_fis = stream.clone_dtoh(&d_cnt_fis).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_leak = stream.clone_dtoh(&d_cnt_leak).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_surf = stream.clone_dtoh(&d_cnt_surf).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_el = stream.clone_dtoh(&d_cnt_el).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_inel = stream.clone_dtoh(&d_cnt_inel).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_cap = stream.clone_dtoh(&d_cnt_cap).map_err(|e| e.to_string())?[0] as u64;
-        let e_fis_in = stream.clone_dtoh(&d_e_fis_in).map_err(|e| e.to_string())?[0];
-        let e_el_in = stream.clone_dtoh(&d_e_el_in).map_err(|e| e.to_string())?[0];
-        let e_inel_in = stream.clone_dtoh(&d_e_inel_in).map_err(|e| e.to_string())?[0];
-        let e_inel_out = stream.clone_dtoh(&d_e_inel_out).map_err(|e| e.to_string())?[0];
-        let e_fis_in_sq = stream.clone_dtoh(&d_e_fis_in_sq).map_err(|e| e.to_string())?[0];
-        let e_el_in_sq = stream.clone_dtoh(&d_e_el_in_sq).map_err(|e| e.to_string())?[0];
-        let e_inel_in_sq = stream.clone_dtoh(&d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
-        let q_inel = stream.clone_dtoh(&d_q_inel).map_err(|e| e.to_string())?[0];
-
-        // Suppress unused-warning on retained guards.
-        let _ = (
-            d_xs,
-            d_ys,
-            d_zs,
-            d_dxs,
-            d_dys,
-            d_dzs,
-            d_e,
-            d_alive,
-            d_rng_state,
-            d_rng_inc,
-            d_mat_kt,
-            d_lat_override_off,
-            d_lat_override_count,
-            d_override_lat_idx,
-            d_override_cell_idx,
-            d_override_mat,
-            d_params,
-            d_fis_w,
-        );
+        let cnt_coll = stream.clone_dtoh(&buffers.d_cnt_coll).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_fis = stream.clone_dtoh(&buffers.d_cnt_fis).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_leak = stream.clone_dtoh(&buffers.d_cnt_leak).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_surf = stream.clone_dtoh(&buffers.d_cnt_surf).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_el = stream.clone_dtoh(&buffers.d_cnt_el).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_inel = stream.clone_dtoh(&buffers.d_cnt_inel).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_cap = stream.clone_dtoh(&buffers.d_cnt_cap).map_err(|e| e.to_string())?[0] as u64;
+        let e_fis_in = stream.clone_dtoh(&buffers.d_e_fis_in).map_err(|e| e.to_string())?[0];
+        let e_el_in = stream.clone_dtoh(&buffers.d_e_el_in).map_err(|e| e.to_string())?[0];
+        let e_inel_in = stream.clone_dtoh(&buffers.d_e_inel_in).map_err(|e| e.to_string())?[0];
+        let e_inel_out = stream.clone_dtoh(&buffers.d_e_inel_out).map_err(|e| e.to_string())?[0];
+        let e_fis_in_sq = stream.clone_dtoh(&buffers.d_e_fis_in_sq).map_err(|e| e.to_string())?[0];
+        let e_el_in_sq = stream.clone_dtoh(&buffers.d_e_el_in_sq).map_err(|e| e.to_string())?[0];
+        let e_inel_in_sq = stream.clone_dtoh(&buffers.d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
+        let q_inel = stream.clone_dtoh(&buffers.d_q_inel).map_err(|e| e.to_string())?[0];
 
         let k_eff = fission_bank.len() as f64 / n as f64;
         Ok(RecursiveTransportBatch {
@@ -1739,6 +1932,39 @@ impl GpuRecursiveContext {
             e_inel_in_sq_sum: e_inel_in_sq,
             q_inel_sum: q_inel,
         })
+    }
+}
+
+/// Zero-batch sentinel — kept in one place so both entry points return
+/// the same shape on empty input.
+fn empty_recursive_batch() -> RecursiveTransportBatch {
+    RecursiveTransportBatch {
+        fission_bank: Vec::new(),
+        n_collisions: 0,
+        n_fissions: 0,
+        n_leakage: 0,
+        n_surf_xings: 0,
+        k_eff: 0.0,
+        n_elastic: 0,
+        n_inelastic: 0,
+        n_capture: 0,
+        e_fis_in_sum: 0.0,
+        e_el_in_sum: 0.0,
+        e_inel_in_sum: 0.0,
+        e_inel_out_sum: 0.0,
+        e_fis_in_sq_sum: 0.0,
+        e_el_in_sq_sum: 0.0,
+        e_inel_in_sq_sum: 0.0,
+        q_inel_sum: 0.0,
+    }
+}
+
+impl GpuRecursiveContext {
+    /// Number of rect lattices in this geometry. Sized by `lat_origin /
+    /// 3` (each lattice contributes a 3-vector origin). Used by
+    /// `TransportBuffers::new` to size the override scratch.
+    pub fn n_lattices(&self) -> usize {
+        self.lat_origin.len() / 3
     }
 }
 

@@ -133,11 +133,13 @@ pub struct CudaRunner<'a> {
     pub sab_nuc_idx: i32,
     pub max_events_per_history: i32,
     pub fis_capacity: usize,
-    /// Closure that builds the batch-1 source bank when no restart
-    /// state is provided. Default: rejection-sample uniform inside
-    /// the geometry's fissile cells (caller supplies this via
-    /// `crate::transport::simulate::initial_source` or equivalent).
     pub initial_source: Box<dyn Fn(usize, u64) -> Vec<(f64, f64, f64, f64)> + 'a>,
+    /// Persistent device-side buffer pool, lazily built on first
+    /// batch and reused across all batches in one case. `RefCell`
+    /// because `EigenvalueRunner::run` takes `&self`; CudaRunner is
+    /// !Sync anyway (`Box<dyn Fn>` non-Send closure), so the
+    /// runtime borrow check is sound.
+    pub buffers: std::cell::RefCell<Option<crate::gpu_recursive::TransportBuffers>>,
 }
 
 #[cfg(feature = "cuda")]
@@ -185,9 +187,38 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 })
                 .collect();
 
+            // Lazy-init the pool on the first batch — we need
+            // params_len from the transport context, which only the
+            // GpuTransportContext can size.
+            let mut buffers_guard = self.buffers.borrow_mut();
+            if buffers_guard.is_none() {
+                let params_len = self
+                    .transport
+                    .build_transport_params_vec(
+                        self.nuc_data,
+                        self.mat_data,
+                        self.sab_data,
+                        self.wmp_data,
+                        0,
+                    )
+                    .len();
+                let pool = crate::gpu_recursive::TransportBuffers::new(
+                    &self.recursive.stream,
+                    n,
+                    self.fis_capacity,
+                    self.mat_k_t.len(),
+                    self.recursive.n_lattices(),
+                    params_len,
+                )
+                .expect("TransportBuffers::new failed");
+                *buffers_guard = Some(pool);
+            }
+            let buffers = buffers_guard.as_mut().expect("buffers init above");
+
             let result = self
                 .recursive
-                .transport_recursive(
+                .transport_recursive_with_buffers(
+                    buffers,
                     self.transport,
                     self.nuc_data,
                     self.mat_data,
@@ -200,7 +231,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                     self.max_events_per_history,
                     self.fis_capacity,
                 )
-                .expect("transport_recursive failed");
+                .expect("transport_recursive_with_buffers failed");
 
             let active = batch > config.inactive;
             if active {

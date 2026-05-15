@@ -327,6 +327,7 @@ fn main() {
                     .map(|fs| (fs.pos.x, fs.pos.y, fs.pos.z, fs.energy))
                     .collect()
             }),
+            buffers: std::cell::RefCell::new(None),
         };
         let gpu_outcome = runner.run(&cfg);
         let mut gpu_act = Active::default();

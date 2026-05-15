@@ -1860,14 +1860,9 @@ fn run_gpu_eigenvalue(
         max_events_per_history: limits.max_events_per_history as i32,
         fis_capacity: limits.fis_capacity(n),
         initial_source: init_src,
+        buffers: std::cell::RefCell::new(None),
     };
 
-    // CudaRunner holds a non-Send Box<dyn Fn> for its initial-source
-    // closure plus non-Send device handles, so `py.allow_threads` is
-    // out of reach without an upstream `Send + Sync` bound. Run with
-    // the GIL held — GPU kernels execute on the device regardless and
-    // the host-side per-batch work is short enough that other Python
-    // threads rarely notice.
     let _ = py;
     let outcome = runner.run(config);
     Ok((outcome.batches, outcome.k_eff, xs_memory_bytes))
@@ -3141,6 +3136,7 @@ fn run_gpu_icsbep(
         max_events_per_history: limits.max_events_per_history as i32,
         fis_capacity: limits.fis_capacity(n),
         initial_source: init_src,
+        buffers: std::cell::RefCell::new(None),
     };
 
     let outcome = runner.run(config);
