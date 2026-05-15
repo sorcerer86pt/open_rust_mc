@@ -1,20 +1,18 @@
-//! Material definitions — nuclide compositions and macroscopic cross-sections.
+//! Material = nuclide compositions + macroscopic XS.
 
-/// A nuclide within a material: atom density + cross-section kernel index.
 #[derive(Debug, Clone)]
 pub struct NuclideEntry {
-    /// Atom density (atoms/barn-cm).
+    /// atoms/barn-cm.
     pub atom_density: f64,
-    /// Index into the global cross-section kernels array.
+    /// Index into the global XS kernels array.
     pub xs_kernel_idx: usize,
 }
 
-/// A material: a mixture of nuclides at given atom densities.
 #[derive(Debug, Clone)]
 pub struct Material {
     pub name: String,
     pub nuclides: Vec<NuclideEntry>,
-    /// Temperature in Kelvin (used for cross-section lookup).
+    /// K; drives XS lookup.
     pub temperature: f64,
 }
 
@@ -34,12 +32,8 @@ impl Material {
         });
     }
 
-    /// Update the atom density of the nuclide that uses
-    /// `xs_kernel_idx`. Returns `true` if a matching entry was
-    /// updated. Used by the depletion driver to push CRAM-evolved
-    /// number densities back into the live material before the next
-    /// transport solve. No effect on entries with a different
-    /// `xs_kernel_idx`.
+    /// Returns `true` on hit. Used by depletion to push CRAM-evolved
+    /// densities back before the next transport solve.
     pub fn set_atom_density(&mut self, xs_kernel_idx: usize, atom_density: f64) -> bool {
         for nuc in &mut self.nuclides {
             if nuc.xs_kernel_idx == xs_kernel_idx {
@@ -50,8 +44,6 @@ impl Material {
         false
     }
 
-    /// Lookup the atom density of the nuclide that uses
-    /// `xs_kernel_idx`, or `None` if not present in this material.
     pub fn atom_density_of(&self, xs_kernel_idx: usize) -> Option<f64> {
         self.nuclides
             .iter()
@@ -59,12 +51,7 @@ impl Material {
             .map(|n| n.atom_density)
     }
 
-    /// Compute macroscopic total cross-section at a given energy.
-    ///
-    /// Σ_t(E) = Σ_i N_i · σ_t,i(E)
-    ///
-    /// `micro_totals` is a slice of microscopic total cross-sections (barns)
-    /// for each nuclide in this material, evaluated at the particle's energy.
+    /// Σ_t = Σ_i N_i · σ_t,i (barns × atoms/barn-cm = 1/cm).
     #[inline]
     pub fn macro_total(&self, micro_totals: &[f64]) -> f64 {
         self.nuclides
@@ -74,10 +61,7 @@ impl Material {
             .sum()
     }
 
-    /// Sample which nuclide a collision occurs with.
-    ///
-    /// Returns the index into `self.nuclides`.
-    /// Probability proportional to N_i · σ_t,i(E).
+    /// P_i ∝ N_i · σ_t,i.
     #[inline]
     pub fn sample_nuclide(&self, micro_totals: &[f64], macro_total: f64, xi: f64) -> usize {
         let threshold = xi * macro_total;
@@ -95,23 +79,10 @@ impl Material {
     ///
     /// ICSBEP benchmark cards specify compositions as `(bulk density,
     /// per-nuclide weight fraction)` — this is the canonical way to
-    /// describe a material in nuclear data. The conversion to the
-    /// atoms/(barn·cm) units the transport engine consumes is:
-    ///
-    /// ```text
-    /// N_i [atoms/(b·cm)] = ρ [g/cm³] · w_i / A_i [u] · (N_A / 1e24)
-    ///                    = ρ · w_i / A_i · 0.6022140857
-    /// ```
-    ///
-    /// `entries` is `(xs_kernel_idx, atomic_mass_u, weight_fraction)`.
-    /// Weight fractions should sum to ~1.0; this function does *not*
-    /// renormalise — pass the values exactly as the benchmark card
-    /// specifies them and let small drift propagate so the discrepancy
-    /// is visible in the resulting atom densities.
-    ///
-    /// Use [`Material::from_mass_fractions_awr`] when the caller has
-    /// AWR (atomic weight ratio, `M / m_n`) from `ResolvedNuclide`
-    /// rather than atomic mass in u.
+    /// `N_i = ρ · w_i / A_i · N_A / 1e24`. `entries` =
+    /// `(xs_kernel_idx, atomic_mass_u, weight_fraction)`. Weight
+    /// fractions are NOT renormalised — drift propagates so it's
+    /// visible. Use `_awr` variant when caller has AWR not A in u.
     pub fn from_mass_fractions(
         name: &str,
         temperature: f64,
@@ -127,13 +98,8 @@ impl Material {
         mat
     }
 
-    /// Same as [`Material::from_mass_fractions`] but accepts AWR (the
-    /// atomic weight ratio `M / m_n` read from the HDF5
-    /// `atomic_weight_ratio` attribute, as exposed by
-    /// `ResolvedNuclide.awr`). Internally converts AWR → atomic mass in
-    /// u via `A = AWR · m_n`, with `m_n = 1.008664916 u`.
-    ///
-    /// `entries` is `(xs_kernel_idx, awr, weight_fraction)`.
+    /// `A = AWR · m_n` with `m_n = 1.008664916 u`. `entries` =
+    /// `(xs_kernel_idx, awr, weight_fraction)`.
     pub fn from_mass_fractions_awr(
         name: &str,
         temperature: f64,
@@ -151,20 +117,9 @@ impl Material {
         mat
     }
 
-    /// Build a material from bulk density + per-nuclide atom (number)
-    /// fractions. ICSBEP cards occasionally give compositions this way
-    /// — particularly for solutions where the molar concentration of
-    /// the fissile species is the natural variable.
-    ///
-    /// ```text
-    /// M̄    = Σ x_i · A_i           (average atomic mass)
-    /// n_total = ρ · N_A / M̄ / 1e24  (total atom density)
-    /// N_i  = x_i · n_total
-    /// ```
-    ///
-    /// `entries` is `(xs_kernel_idx, atomic_mass_u, atom_fraction)`.
-    /// Atom fractions should sum to 1.0; the function does *not*
-    /// renormalise.
+    /// `M̄ = Σ x_i·A_i`, `n_total = ρ·N_A/M̄/1e24`, `N_i = x_i·n_total`.
+    /// `entries` = `(xs_kernel_idx, atomic_mass_u, atom_fraction)`.
+    /// Not renormalised.
     pub fn from_atom_fractions(
         name: &str,
         temperature: f64,
@@ -182,23 +137,11 @@ impl Material {
     }
 }
 
-/// Neutron mass in atomic mass units (2018 CODATA): `m_n = 1.008664916 u`.
-/// Used to convert AWR (= M / m_n) into atomic mass in u.
+/// 2018 CODATA.
 pub const NEUTRON_MASS_U: f64 = 1.008_664_916;
-
-/// Avogadro's constant scaled to barns: `N_A · 1e-24` with the exact
-/// post-2019-SI value `N_A = 6.02214076 × 10²³ /mol`. Multiplies
-/// `ρ · w / A` (g/cm³ · dimensionless / (g/mol)) to give atom density
-/// in atoms/(barn·cm).
+/// Post-2019-SI exact: `N_A · 1e-24`.
 pub const AVOGADRO_PER_BARN_CM: f64 = 0.602_214_076;
-
-/// Avogadro's constant scaled to barns and divided by the neutron mass
-/// in u. Used by [`Material::from_mass_fractions_awr`] so callers can
-/// pass AWR directly without converting to u first:
-/// `N = ρ · w / AWR · AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS`.
-///
-/// Defined as a `const` division of the two constants above so the two
-/// can never drift relative to each other.
+/// `const` division so the two can never drift.
 pub const AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS: f64 =
     AVOGADRO_PER_BARN_CM / NEUTRON_MASS_U;
 

@@ -1,27 +1,11 @@
-// Gauss-Legendre nodes / weights are transcendental constants that
-// genuinely need every digit of f64 precision; clippy's
-// "excessive precision" lint flags them as if they were typos.
+// Transcendental constants need every f64 digit; clippy flags them
+// as typos.
 #![allow(clippy::excessive_precision)]
 //! Gauss-Legendre quadrature tables — single source of truth.
 //!
-//! Hardcoded transcribed tables are a correctness risk: a typo in any
-//! single digit will silently bias every integral that uses them. This
-//! module addresses that with two safeguards:
-//!
-//! 1. **One copy, used everywhere.** Photon NEE, MoC quadrature in
-//!    random-ray (when added), any future numerical-integration callers
-//!    all import from here.
-//! 2. **Validated against known integrals at test time.** The
-//!    `tests` module integrates `1`, `x`, `x²`, ..., `x^(2N-1)` —
-//!    every polynomial that an N-point Gauss-Legendre rule should
-//!    integrate exactly — and asserts the result to machine precision.
-//!    A typo in any node or weight breaks one of those tests.
-//!
-//! Source for the 16-point table values: Abramowitz & Stegun (1964),
-//! *Handbook of Mathematical Functions*, Table 25.4 (corrected
-//! edition). Cross-checked against the `gauss_quad` crate
-//! (https://docs.rs/gauss-quad) and Wolfram Alpha for spot-checks of
-//! `LegendreP[15, x]` roots.
+//! Source: Abramowitz & Stegun (1964) Table 25.4. Validated by
+//! integrating `1`, `x`, ..., `x^(2N-1)` to machine precision in the
+//! `tests` module — a typo in any digit breaks the test.
 
 /// 16-point Gauss-Legendre nodes on `[-1, 1]`.
 pub const GL16_NODES: [f64; 16] = [

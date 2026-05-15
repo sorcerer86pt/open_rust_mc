@@ -1,10 +1,6 @@
-//! Cache key — canonical path + blake3 file hash + rank-policy hash +
-//! temp index + binary-format version.
-//!
-//! The file hash is what makes the cache **safe across ENDF library
-//! swaps**: replacing `data/endfb-vii.1-hdf5/U235.h5` with the VIII.0
-//! version (same path) produces a different blake3 → different key, and
-//! the cache transparently rebuilds. There is no time-based eviction.
+//! Cache key. File hash makes the cache safe across ENDF library
+//! swaps — replacing U235.h5 with the VIII.0 version produces a
+//! different blake3 → different key → rebuild.
 
 use std::collections::BTreeMap;
 use std::io::{self, Read};
@@ -14,38 +10,24 @@ use crate::transport::xs_provider::RankPolicy;
 
 use super::binary_format::FORMAT_VERSION;
 
-/// Process-wide identifier for one cached `Arc<NuclideKernels>`.
-///
-/// `Eq` + `Hash` come from the field tuple — every key field
-/// participates so two keys collide iff every parameter agrees. The 32
-/// blake3 bytes dominate the hashing cost but DashMap's xxh3 over them
-/// is still O(few hundred ns).
+/// Every field participates in `Eq + Hash`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct NuclideKey {
-    /// Canonicalised path. Kept in the key (in addition to the hash) so
-    /// debug dumps and L2 disk filenames are human-readable.
+    /// Canonicalised; kept human-readable for L2 filenames.
     pub path: PathBuf,
-    /// blake3(file contents). 32 bytes. Differentiates ENDF library
-    /// versions and any other on-disk mutation.
+    /// blake3 of file contents.
     pub file_hash: [u8; 32],
-    /// blake3 of the policy fields (default rank + sorted per-MT
-    /// overrides + sorted table_mts). One stable hash collapses the
-    /// (default, per-MT, table_mts) triple to 32 bytes.
+    /// blake3 of `(default_rank, sorted_per_mt, sorted_table_mts)`.
     pub policy_hash: [u8; 32],
-    /// HDF5 temperature column index (0 = 294 K, 1 = 600 K, ...). Tied
-    /// to the evaluation's per-file temperature grid.
+    /// HDF5 temperature column (0 = 294 K, 1 = 600 K, ...).
     pub temp_idx: u32,
-    /// Binary-format version stamp. Bumped whenever the encode/decode
-    /// layout changes — old entries fail key match and are rebuilt.
+    /// Bump to invalidate cache on layout changes.
     pub format_version: u32,
 }
 
 impl NuclideKey {
-    /// Build a key by canonicalising `path`, hashing its contents, and
-    /// hashing the policy. Returns `Err` only when the file cannot be
-    /// opened for reading — in that case the caller should skip the
-    /// cache and route through the HDF5 loader directly so its existing
-    /// error path can run.
+    /// `Err` only when the file can't be opened — caller skips cache
+    /// and routes through the HDF5 loader directly.
     pub fn from_inputs(
         path: &Path,
         policy: &RankPolicy,
@@ -63,13 +45,9 @@ impl NuclideKey {
         })
     }
 
-    /// Hex-encoded compact identifier — used as the L2 disk filename.
-    /// Includes only the hash fields so renaming the source `.h5`
-    /// without touching its contents still hits the same cache file.
+    /// Hash-only filename; renaming the .h5 without touching contents
+    /// still hits the same cache file.
     pub fn disk_filename(&self) -> String {
-        // 32B file_hash + 32B policy_hash + 4B temp_idx + 4B format_version
-        // → 144 hex chars + ".nuc". Plenty unique across a single
-        // user's cache dir; collisions would require a blake3 break.
         let mut s = String::with_capacity(144 + 4);
         for b in &self.file_hash {
             s.push_str(&format!("{b:02x}"));
@@ -84,9 +62,7 @@ impl NuclideKey {
     }
 }
 
-/// Stream-hash the file in 256 KB chunks — large .h5 files (~200 MB
-/// for actinides with full temperature ladders) would otherwise pull
-/// the whole file into memory just to hash it.
+/// 256 KB chunks — actinide .h5 files reach ~200 MB.
 fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
     let mut hasher = blake3::Hasher::new();
     let mut f = std::fs::File::open(path)?;
