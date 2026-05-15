@@ -1,12 +1,7 @@
-//! Bounding Volume Hierarchy — O(log n) cell lookup.
-//!
-//! Builds a binary tree of AABBs over cells. Traversal skips entire
-//! subtrees when the ray doesn't intersect the bounding box.
-//! Construction uses the Surface Area Heuristic (SAH) for optimal splits.
+//! Surface-Area-Heuristic BVH for O(log n) cell lookup.
 
 use super::{Aabb, Cell, Surface, Vec3};
 
-/// BVH node — either a leaf (single cell) or an internal node (two children).
 #[derive(Debug, Clone)]
 enum BvhNode {
     Leaf {
@@ -20,20 +15,17 @@ enum BvhNode {
     },
 }
 
-/// The BVH acceleration structure.
 #[derive(Debug, Clone)]
 pub struct Bvh {
     root: Option<BvhNode>,
 }
 
 impl Bvh {
-    /// Build a BVH from a set of cells.
     pub fn build(cells: &[Cell]) -> Self {
         if cells.is_empty() {
             return Self { root: None };
         }
 
-        // Collect (cell_index, aabb, centroid) for cells with finite AABBs
         let mut entries: Vec<(usize, Aabb, Vec3)> = cells
             .iter()
             .enumerate()
@@ -49,19 +41,15 @@ impl Bvh {
         Self { root: Some(root) }
     }
 
-    /// Find which cell contains a point, using BVH acceleration.
     pub fn find_cell(&self, pos: Vec3, surfaces: &[Surface], cells: &[Cell]) -> Option<usize> {
         let root = self.root.as_ref()?;
         let evals: Vec<f64> = surfaces.iter().map(|s| s.evaluate(pos)).collect();
         find_cell_recursive(root, pos, &evals, cells)
     }
 
-    /// Build a BVH over only the cells whose indices appear in
-    /// `cell_indices`. Leaves carry the absolute (into `cells`)
-    /// index, so a hit can be looked up directly in the global cells
-    /// array. Returns an empty BVH if every referenced cell has a
-    /// non-finite AABB (the caller must fall back to a linear scan in
-    /// that case).
+    /// Leaves hold absolute indices into the global `cells` slice.
+    /// Returns empty BVH if every referenced cell has non-finite AABB —
+    /// caller falls back to linear scan.
     pub fn build_subset(cells: &[Cell], cell_indices: &[usize]) -> Self {
         let mut entries: Vec<(usize, Aabb, Vec3)> = cell_indices
             .iter()
@@ -81,18 +69,13 @@ impl Bvh {
         Self { root: Some(root) }
     }
 
-    /// Like `find_cell` but takes pre-computed surface evaluations,
-    /// indexed by absolute surface idx. Cheap re-use for
-    /// `find_cell_recursive`, which already keeps an `evals` buffer
-    /// for the cell-region tests.
+    /// Pre-computed evals from `find_cell_recursive`'s shared buffer.
     #[inline]
     pub fn find_cell_with_evals(&self, pos: Vec3, evals: &[f64], cells: &[Cell]) -> Option<usize> {
         let root = self.root.as_ref()?;
         find_cell_recursive(root, pos, evals, cells)
     }
 
-    /// True if the BVH has at least one leaf — useful for the
-    /// "fallback to linear scan" decision in `find_cell_recursive`.
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.root.is_none()

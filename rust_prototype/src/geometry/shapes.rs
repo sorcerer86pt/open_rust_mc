@@ -1,48 +1,19 @@
-//! Geometry shape builders for common patterns.
-//!
-//! Each builder returns the `Surface`s it generated and an
-//! "inside-the-shape" `Region` that uses surface indices starting at
-//! the caller-supplied `surface_offset`. The caller appends the
-//! surfaces to its own `Vec<Surface>` (in order, starting at the
-//! offset they passed) and slots the region into a `Cell`.
-//!
-//! Pattern:
-//! ```ignore
-//! let mut surfaces: Vec<Surface> = vec![/* ...pin cylinders... */];
-//! let (box_surfaces, box_region) =
-//!     shapes::rect_box([0.63, 0.63, 0.63], BC::Reflective, surfaces.len());
-//! surfaces.extend(box_surfaces);
-//! let outer_cell = Cell::new(CellId(7), box_region, CellFill::Lattice(0));
-//! ```
-//!
-//! No magic surface indices, no copy-paste of the same 6 PlaneX/PlaneY/PlaneZ
-//! literal block in every binary.
+//! Shape builders that emit `(Vec<Surface>, Region)` where the region
+//! uses indices in `[surface_offset, surface_offset + surfaces.len())`.
+//! Caller appends `surfaces` to its own Vec at that offset.
 
 use crate::geometry::Vec3;
 use crate::geometry::cell::Region;
 use crate::geometry::lattice::HexOrientation;
 use crate::geometry::surface::{BoundaryCondition, Surface};
 
-/// Result of a shape builder: the new surfaces and the
-/// inside-the-shape Region using indices `[surface_offset, surface_offset + surfaces.len())`.
 #[derive(Debug, Clone)]
 pub struct Shape {
     pub surfaces: Vec<Surface>,
     pub inside: Region,
 }
 
-/// Axis-aligned rectangular box centred at origin with half-extents
-/// `[half_x, half_y, half_z]`. Generates 6 planes (PlaneX±, PlaneY±,
-/// PlaneZ±) all carrying `bc`, and the region "inside the box".
-///
-/// Surface indices are assigned in this order, starting at
-/// `surface_offset`:
-///   0: PlaneX(-half_x)
-///   1: PlaneX(+half_x)
-///   2: PlaneY(-half_y)
-///   3: PlaneY(+half_y)
-///   4: PlaneZ(-half_z)
-///   5: PlaneZ(+half_z)
+/// Surfaces emitted (offset+i): 0/1 = PlaneX±, 2/3 = PlaneY±, 4/5 = PlaneZ±.
 pub fn rect_box(half: [f64; 3], bc: BoundaryCondition, surface_offset: usize) -> Shape {
     let surfaces = vec![
         Surface::PlaneX { x0: -half[0], bc },
@@ -53,7 +24,6 @@ pub fn rect_box(half: [f64; 3], bc: BoundaryCondition, surface_offset: usize) ->
         Surface::PlaneZ { z0: half[2], bc },
     ];
     let s = surface_offset;
-    // outside(-half) ∩ inside(+half) on each axis = inside the box.
     let inside = crate::geometry::cell::intersect_all(vec![
         crate::geometry::cell::outside(s),
         crate::geometry::cell::inside(s + 1),
@@ -65,10 +35,8 @@ pub fn rect_box(half: [f64; 3], bc: BoundaryCondition, surface_offset: usize) ->
     Shape { surfaces, inside }
 }
 
-/// Same as `rect_box` but with separate boundary conditions for the
-/// xy planes vs the z planes. Common pattern for assembly geometries
-/// where xy is reflective (infinite radial lattice) and z is either
-/// reflective (k_inf) or vacuum (k_eff with axial leakage).
+/// xy BC ≠ z BC; assembly k_inf (z reflective) vs axial-leakage
+/// k_eff (z vacuum).
 pub fn rect_box_split_bc(
     half: [f64; 3],
     xy_bc: BoundaryCondition,
