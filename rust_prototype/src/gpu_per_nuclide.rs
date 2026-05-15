@@ -255,6 +255,19 @@ pub struct LevelSlicesGpu {
     pub ang_lev_ne: Vec<i32>,
     pub ang_dist_local_off: Vec<i32>,
     pub ang_dist_sz: Vec<i32>,
+
+    /// Real data length of `basis` excluding the trailing `[0.0]`
+    /// sentinel (`build_level_slices` always inserts one so the
+    /// device pointer is non-null when used standalone). Equals
+    /// `basis.len()` when there's at least one populated level kernel;
+    /// `0` when `n_levels == 0` or every level's kernel was `None`.
+    /// Bundle assembly slices to this length to skip per-nuclide
+    /// sentinels.
+    pub basis_real_len: usize,
+    pub coeffs_real_len: usize,
+    pub ang_e_real_len: usize,
+    pub ang_mu_real_len: usize,
+    pub ang_dist_real_len: usize,
 }
 
 impl LevelSlicesGpu {
@@ -844,6 +857,227 @@ pub fn assemble_b_cat(
     })
 }
 
+/// Assembled cat-C (discrete inelastic levels) bundle slices.
+pub struct AssembledBundleCCat {
+    pub level_q_values: CudaSlice<f64>,
+    pub level_thresholds: CudaSlice<f64>,
+    pub level_mt: CudaSlice<i32>,
+    pub level_has_kernel: CudaSlice<i32>,
+    pub level_offsets_vec: Vec<i32>,
+    pub level_counts_vec: Vec<i32>,
+    pub level_basis: CudaSlice<f64>,
+    pub level_coeffs: CudaSlice<f64>,
+    pub level_basis_offsets_vec: Vec<i32>,
+    pub level_coeffs_offsets_vec: Vec<i32>,
+    pub lev_ang_energies: CudaSlice<f64>,
+    pub lev_ang_mu: CudaSlice<f64>,
+    pub lev_ang_cdf: CudaSlice<f64>,
+    pub lev_ang_dist_off_vec: Vec<i32>,
+    pub lev_ang_dist_sz_vec: Vec<i32>,
+    pub lev_ang_lev_off_vec: Vec<i32>,
+    pub lev_ang_lev_ne_vec: Vec<i32>,
+}
+
+/// Assemble cat-C discrete inelastic level data from per-nuclide
+/// slices via DtoD copy plus host-side offset shifting. Mirrors
+/// `gpu_transport::upload_nuclide_data_uncached` slots 1399-1571 and
+/// the sentinel rules at 1543-1569.
+///
+/// Tricky points:
+/// - per-nuclide `LevelSlicesGpu` carries `*_real_len` so the
+///   assembler slices past per-nuclide sentinels;
+/// - per-level offsets need *two* shifts to become global: by the
+///   running global offset into the bundle's flat buffer, AND
+///   nothing else (the per-nuclide ones are already 0-based within
+///   the nuclide);
+/// - `lev_ang_dist_*` and `lev_ang_lev_*` are indexed by separate
+///   per-nuclide running counts (per-level vs per-(level, e_inc)).
+pub fn assemble_c_cat(
+    stream: &Arc<CudaStream>,
+    per_nucs: &[Arc<PerNuclideGpu>],
+) -> Result<AssembledBundleCCat, Box<dyn std::error::Error>> {
+    // ── Step 1: totals (host-side prefix-sum reconnaissance) ──
+    let total_levels: usize = per_nucs.iter().map(|p| p.levels.n_levels as usize).sum();
+    let total_basis: usize = per_nucs.iter().map(|p| p.levels.basis_real_len).sum();
+    let total_coeffs: usize = per_nucs.iter().map(|p| p.levels.coeffs_real_len).sum();
+    let total_ang_e: usize = per_nucs.iter().map(|p| p.levels.ang_e_real_len).sum();
+    let total_ang_mu: usize = per_nucs.iter().map(|p| p.levels.ang_mu_real_len).sum();
+    let total_ang_dist: usize = per_nucs.iter().map(|p| p.levels.ang_dist_real_len).sum();
+
+    // ── Step 2: allocate destination CudaSlices (with sentinel rules
+    //    matching the legacy bundle). When the bundle is empty we
+    //    must emit a 1-element sentinel — clone_htod of an empty Vec
+    //    leaves a null device pointer on some drivers and the legacy
+    //    path pushes [0.0] / [0] in that case. ──
+    let level_n = total_levels.max(1);
+    let basis_n = total_basis.max(1);
+    let coeffs_n = total_coeffs.max(1);
+    let ang_e_n = total_ang_e.max(1);
+    let ang_mu_n = total_ang_mu.max(1);
+    let ang_dist_n = total_ang_dist.max(1);
+
+    let mut level_q_values = unsafe { stream.alloc::<f64>(level_n)? };
+    let mut level_thresholds = unsafe { stream.alloc::<f64>(level_n)? };
+    let mut level_mt = unsafe { stream.alloc::<i32>(level_n)? };
+    let mut level_has_kernel = unsafe { stream.alloc::<i32>(level_n)? };
+    let mut level_basis = unsafe { stream.alloc::<f64>(basis_n)? };
+    let mut level_coeffs = unsafe { stream.alloc::<f64>(coeffs_n)? };
+    let mut lev_ang_energies = unsafe { stream.alloc::<f64>(ang_e_n)? };
+    let mut lev_ang_mu = unsafe { stream.alloc::<f64>(ang_mu_n)? };
+    let mut lev_ang_cdf = unsafe { stream.alloc::<f64>(ang_mu_n)? };
+
+    // Zero out sentinel slots (only relevant when total = 0 → alloc is
+    // size 1 sentinel; otherwise the slot is overwritten below).
+    if total_levels == 0 {
+        stream.memset_zeros(&mut level_q_values)?;
+        stream.memset_zeros(&mut level_thresholds)?;
+        stream.memset_zeros(&mut level_mt)?;
+        stream.memset_zeros(&mut level_has_kernel)?;
+    }
+    if total_basis == 0 {
+        stream.memset_zeros(&mut level_basis)?;
+    }
+    if total_coeffs == 0 {
+        stream.memset_zeros(&mut level_coeffs)?;
+    }
+    if total_ang_e == 0 {
+        stream.memset_zeros(&mut lev_ang_energies)?;
+    }
+    if total_ang_mu == 0 {
+        stream.memset_zeros(&mut lev_ang_mu)?;
+        stream.memset_zeros(&mut lev_ang_cdf)?;
+    }
+
+    // ── Step 3: walk nuclides; DtoD the per-nuclide real-length
+    //    slices and emit host-side shifted offsets. ──
+    let mut level_offsets_vec = Vec::with_capacity(per_nucs.len());
+    let mut level_counts_vec = Vec::with_capacity(per_nucs.len());
+    let mut level_basis_offsets_vec: Vec<i32> = Vec::with_capacity(total_levels);
+    let mut level_coeffs_offsets_vec: Vec<i32> = Vec::with_capacity(total_levels);
+    let mut lev_ang_dist_off_vec: Vec<i32> = Vec::with_capacity(total_ang_dist);
+    let mut lev_ang_dist_sz_vec: Vec<i32> = Vec::with_capacity(total_ang_dist);
+    let mut lev_ang_lev_off_vec: Vec<i32> = Vec::with_capacity(total_levels);
+    let mut lev_ang_lev_ne_vec: Vec<i32> = Vec::with_capacity(total_levels);
+
+    let mut run_level = 0_usize;
+    let mut run_basis = 0_usize;
+    let mut run_coeffs = 0_usize;
+    let mut run_ang_e = 0_usize;
+    let mut run_ang_mu = 0_usize;
+
+    for p in per_nucs.iter() {
+        let nl = p.levels.n_levels as usize;
+        level_offsets_vec.push(run_level as i32);
+        level_counts_vec.push(nl as i32);
+
+        if nl > 0 {
+            // Copy first `nl` elements of the per-nuclide level
+            // scalars into the bundle. `slice(0..nl)` skips per-
+            // nuclide sentinel padding (which is the only entry when
+            // nl == 0 — and we just don't enter this branch).
+            let mut dst_q = level_q_values.slice_mut(run_level..run_level + nl);
+            stream.memcpy_dtod(&p.levels.q_values.slice(0..nl), &mut dst_q)?;
+            let mut dst_t = level_thresholds.slice_mut(run_level..run_level + nl);
+            stream.memcpy_dtod(&p.levels.thresholds.slice(0..nl), &mut dst_t)?;
+            let mut dst_m = level_mt.slice_mut(run_level..run_level + nl);
+            stream.memcpy_dtod(&p.levels.mt.slice(0..nl), &mut dst_m)?;
+            let mut dst_h = level_has_kernel.slice_mut(run_level..run_level + nl);
+            stream.memcpy_dtod(&p.levels.has_kernel.slice(0..nl), &mut dst_h)?;
+        }
+
+        let blen = p.levels.basis_real_len;
+        let clen = p.levels.coeffs_real_len;
+        if blen > 0 {
+            let mut dst = level_basis.slice_mut(run_basis..run_basis + blen);
+            stream.memcpy_dtod(&p.levels.basis.slice(0..blen), &mut dst)?;
+        }
+        if clen > 0 {
+            let mut dst = level_coeffs.slice_mut(run_coeffs..run_coeffs + clen);
+            stream.memcpy_dtod(&p.levels.coeffs.slice(0..clen), &mut dst)?;
+        }
+
+        // Per-level basis / coeffs offsets — shift the per-nuclide
+        // local offset by the running global byte counters.
+        for li in 0..nl {
+            level_basis_offsets_vec
+                .push(p.levels.basis_local_off[li] + run_basis as i32);
+            level_coeffs_offsets_vec
+                .push(p.levels.coeffs_local_off[li] + run_coeffs as i32);
+        }
+        // Per-level angular-energy locator — shift by global ang_e
+        // running offset.
+        for li in 0..nl {
+            lev_ang_lev_off_vec.push(p.levels.ang_lev_local_off[li] + run_ang_e as i32);
+            lev_ang_lev_ne_vec.push(p.levels.ang_lev_ne[li]);
+        }
+
+        // Per-(level, e_inc) angular distribution locator — shift by
+        // global ang_mu running offset.
+        let adlen = p.levels.ang_dist_real_len;
+        for di in 0..adlen {
+            lev_ang_dist_off_vec
+                .push(p.levels.ang_dist_local_off[di] + run_ang_mu as i32);
+            lev_ang_dist_sz_vec.push(p.levels.ang_dist_sz[di]);
+        }
+
+        // Copy per-nuclide angular-energy and (mu, cdf) bytes into
+        // the bundle.
+        let aelen = p.levels.ang_e_real_len;
+        if aelen > 0 {
+            let mut dst_e = lev_ang_energies.slice_mut(run_ang_e..run_ang_e + aelen);
+            stream.memcpy_dtod(&p.levels.ang_energies.slice(0..aelen), &mut dst_e)?;
+        }
+        let amlen = p.levels.ang_mu_real_len;
+        if amlen > 0 {
+            let mut dst_mu = lev_ang_mu.slice_mut(run_ang_mu..run_ang_mu + amlen);
+            stream.memcpy_dtod(&p.levels.ang_mu.slice(0..amlen), &mut dst_mu)?;
+            let mut dst_cdf = lev_ang_cdf.slice_mut(run_ang_mu..run_ang_mu + amlen);
+            stream.memcpy_dtod(&p.levels.ang_cdf.slice(0..amlen), &mut dst_cdf)?;
+        }
+
+        run_level += nl;
+        run_basis += blen;
+        run_coeffs += clen;
+        run_ang_e += aelen;
+        run_ang_mu += amlen;
+    }
+
+    // ── Bundle-level sentinels for the offset Vecs. When the bundle
+    //    has zero levels the legacy path pushes single-element
+    //    [0]-valued sentinels (slot 1543-1551) so the device pointers
+    //    remain valid even when the kernel never reads them. ──
+    if level_basis_offsets_vec.is_empty() {
+        level_basis_offsets_vec.push(0);
+        level_coeffs_offsets_vec.push(0);
+        lev_ang_lev_off_vec.push(0);
+        lev_ang_lev_ne_vec.push(0);
+    }
+    if lev_ang_dist_off_vec.is_empty() {
+        lev_ang_dist_off_vec.push(0);
+        lev_ang_dist_sz_vec.push(0);
+    }
+
+    Ok(AssembledBundleCCat {
+        level_q_values,
+        level_thresholds,
+        level_mt,
+        level_has_kernel,
+        level_offsets_vec,
+        level_counts_vec,
+        level_basis,
+        level_coeffs,
+        level_basis_offsets_vec,
+        level_coeffs_offsets_vec,
+        lev_ang_energies,
+        lev_ang_mu,
+        lev_ang_cdf,
+        lev_ang_dist_off_vec,
+        lev_ang_dist_sz_vec,
+        lev_ang_lev_off_vec,
+        lev_ang_lev_ne_vec,
+    })
+}
+
 /// Flatten URR per-band 2D rows into the bundle's row-major layout.
 /// Mirrors upload_nuclide_data_uncached:1883-1905.
 fn build_urr_slices(
@@ -1147,9 +1381,18 @@ fn build_level_slices(
         }
     }
 
+    // Capture real lengths BEFORE sentinel insertion so the bundle
+    // assembly stage can slice past the per-nuclide padding.
+    let basis_real_len = basis_buf.len();
+    let coeffs_real_len = coeffs_buf.len();
+    let ang_e_real_len = ang_e_buf.len();
+    let ang_mu_real_len = ang_mu_buf.len();
+    let ang_dist_real_len = ang_dist_local_off.len();
+
     // Sentinel for empty payloads — `clone_htod` of a zero-length
     // slice would leave a null device pointer on some drivers; the
-    // legacy bundle path uses the same `[0.0]` / `[0]` rule.
+    // legacy bundle path uses the same `[0.0]` / `[0]` rule. The
+    // sentinel slot is NOT included in `*_real_len` above.
     if q_values.is_empty() {
         q_values.push(0.0);
         thresholds.push(0.0);
@@ -1195,6 +1438,11 @@ fn build_level_slices(
         ang_lev_ne,
         ang_dist_local_off,
         ang_dist_sz,
+        basis_real_len,
+        coeffs_real_len,
+        ang_e_real_len,
+        ang_mu_real_len,
+        ang_dist_real_len,
     })
 }
 
@@ -1503,6 +1751,138 @@ mod tests {
             assembled.has_pw_vec,
             dtoh_i32(&bundle_legacy.has_pw),
             "has_pw",
+        );
+    }
+
+    #[test]
+    fn assemble_c_cat_matches_legacy_bundle_byte_for_byte() {
+        let Some(stream) = try_cuda_stream() else {
+            eprintln!("skipping: no CUDA device");
+            return;
+        };
+        use crate::gpu_transport::GpuTransportContext;
+        let Ok(ctx) = GpuTransportContext::new() else {
+            eprintln!("skipping: cannot construct GpuTransportContext");
+            return;
+        };
+        use crate::hdf5_reader::DiscreteLevelInfo;
+        use crate::transport::xs_provider::DiscreteLevel;
+
+        // nuc_a: two levels with Table kernels at different n_e.
+        // nuc_b: no discrete levels.
+        // This exercises both the populated and empty branches plus
+        // the running offset shift across nuclides.
+        let mut nuc_a = NuclideKernels::empty(235.0, 2.5);
+        nuc_a.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 1.0, 2.0e7],
+            vec![10.0, 5.0, 1.0],
+        ));
+        nuc_a.discrete_levels.push(DiscreteLevel {
+            info: DiscreteLevelInfo { mt: 51, q_value: -1.0e5, threshold: 1.0e5 },
+            kernel: Some(ReactionKernel::from_table(
+                vec![1.0e4, 1.0e6],
+                vec![2.0, 4.0],
+            )),
+        });
+        nuc_a.discrete_level_angles.push(None);
+        nuc_a.discrete_levels.push(DiscreteLevel {
+            info: DiscreteLevelInfo { mt: 52, q_value: -2.0e5, threshold: 2.0e5 },
+            kernel: Some(ReactionKernel::from_table(
+                vec![1.0e5, 5.0e6, 1.0e7],
+                vec![1.5, 3.0, 2.5],
+            )),
+        });
+        nuc_a.discrete_level_angles.push(None);
+
+        let mut nuc_b = NuclideKernels::empty(16.0, 0.0);
+        nuc_b.elastic = Some(ReactionKernel::from_table(
+            vec![1.0e-5, 100.0, 2.0e7],
+            vec![3.5, 3.6, 3.0],
+        ));
+
+        let nuclides: Vec<Arc<NuclideKernels>> =
+            vec![Arc::new(nuc_a), Arc::new(nuc_b)];
+        let rank = 5;
+
+        let bundle_legacy = ctx
+            .upload_nuclide_data_uncached(&nuclides, rank)
+            .expect("legacy upload");
+        let per_nucs: Vec<Arc<PerNuclideGpu>> = nuclides
+            .iter()
+            .map(|n| Arc::new(upload_one_nuclide(&stream, n, rank).unwrap()))
+            .collect();
+        let assembled = assemble_c_cat(&stream, &per_nucs).expect("assemble_c_cat");
+
+        let dtoh_f64 = |s: &CudaSlice<f64>| {
+            let mut v = vec![0.0_f64; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+        let dtoh_i32 = |s: &CudaSlice<i32>| {
+            let mut v = vec![0_i32; s.len()];
+            stream.memcpy_dtoh(s, &mut v).unwrap();
+            v
+        };
+
+        assert_eq!(
+            dtoh_f64(&assembled.level_q_values),
+            dtoh_f64(&bundle_legacy.level_q_values),
+            "level_q_values",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.level_thresholds),
+            dtoh_f64(&bundle_legacy.level_thresholds),
+            "level_thresholds",
+        );
+        assert_eq!(
+            dtoh_i32(&assembled.level_mt),
+            dtoh_i32(&bundle_legacy.level_mt),
+            "level_mt",
+        );
+        assert_eq!(
+            dtoh_i32(&assembled.level_has_kernel),
+            dtoh_i32(&bundle_legacy.level_has_kernel),
+            "level_has_kernel",
+        );
+        assert_eq!(
+            assembled.level_offsets_vec,
+            dtoh_i32(&bundle_legacy.level_offsets),
+            "level_offsets",
+        );
+        assert_eq!(
+            assembled.level_counts_vec,
+            dtoh_i32(&bundle_legacy.level_counts),
+            "level_counts",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.level_basis),
+            dtoh_f64(&bundle_legacy.level_basis),
+            "level_basis",
+        );
+        assert_eq!(
+            dtoh_f64(&assembled.level_coeffs),
+            dtoh_f64(&bundle_legacy.level_coeffs),
+            "level_coeffs",
+        );
+        assert_eq!(
+            assembled.level_basis_offsets_vec,
+            dtoh_i32(&bundle_legacy.level_basis_offsets),
+            "level_basis_offsets",
+        );
+        assert_eq!(
+            assembled.level_coeffs_offsets_vec,
+            dtoh_i32(&bundle_legacy.level_coeffs_offsets),
+            "level_coeffs_offsets",
+        );
+        assert_eq!(
+            assembled.lev_ang_lev_off_vec,
+            dtoh_i32(&bundle_legacy.lev_ang_lev_off),
+            "lev_ang_lev_off",
+        );
+        assert_eq!(
+            assembled.lev_ang_lev_ne_vec,
+            dtoh_i32(&bundle_legacy.lev_ang_lev_ne),
+            "lev_ang_lev_ne",
         );
     }
 
