@@ -1,19 +1,7 @@
-//! Compton (incoherent) scattering kernel.
-//!
-//! Phase 1 (this file): free-electron Klein-Nishina sampling with
-//! bound-electron `S(x, Z)/Z` rejection. Implements the algorithm used
-//! by OpenMC (`src/physics.cpp::sample_compton_angle` and
-//! `Element::compton_scatter`) and PENELOPE-2018 §2.3 without Doppler
-//! broadening. Outgoing `(E', μ)` lie on the free-electron Klein-Nishina
-//! kinematic curve and conserve energy-momentum for a free electron at
-//! rest. The bound-electron correction modifies the *angular*
-//! distribution by rejecting events with `S(x, Z)/Z` probability below
-//! 1 at low momentum transfer, but leaves the free kinematics intact.
-//!
-//! Phase 2 (future commit) will add Doppler broadening: select a
-//! Compton shell, sample `p_z` from `Jᵢ(|p_z|)`, and solve the Doppler
-//! quadratic for `E'(p_z, θ)`. That modifies the outgoing energy
-//! around the free-KN value.
+//! Compton scattering. Klein-Nishina + bound-electron `S(x,Z)/Z`
+//! rejection. Algorithm matches OpenMC `Element::compton_scatter` /
+//! PENELOPE-2018 §2.3 (no Doppler — that's the variant in
+//! `compton::doppler`).
 //!
 //! # Algorithm (PENELOPE §2.3.3 / OpenMC)
 //!
@@ -43,27 +31,18 @@
 use crate::photon::data::{PhotonElement, ScatteringFactor};
 use crate::transport::rng::Rng;
 
-// --- Physical constants ----------------------------------------------------
-
-/// Electron rest-mass energy, eV. CODATA-2018: 510998.95 eV.
+/// CODATA-2018.
 pub const M_E_C2_EV: f64 = 510_998.95;
-
-/// `h c` in eV·Å. CODATA-2018 exact: 12398.419843320... eV·Å.
+/// CODATA-2018 exact `hc`.
 pub const HC_EV_ANGSTROM: f64 = 12_398.419_843_320_025;
 
-// --- Types -----------------------------------------------------------------
-
-/// Outcome of a single Compton scattering event.
 #[derive(Debug, Clone, Copy)]
 pub struct ComptonOutcome {
-    /// Outgoing photon energy in eV.
     pub energy_out: f64,
-    /// Scattering cosine `cos θ ∈ [-1, 1]`.
+    /// `cos θ`.
     pub mu: f64,
-    /// Kinetic energy of the recoil electron in eV, phase-1
-    /// approximation: `E_in − E_out` (no shell binding subtracted).
-    /// Phase 2 with Doppler broadening will subtract the selected
-    /// shell's `B_i`.
+    /// Free-KN: `E_in − E_out` (no shell binding; Doppler variant
+    /// subtracts `B_i`).
     pub electron_kinetic: f64,
 }
 
