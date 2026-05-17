@@ -56,6 +56,8 @@ rayon = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 toml = { workspace = true }
+dashmap = { workspace = true }
+raw-cpuid = { workspace = true }
 cudarc = { workspace = true, optional = true }
 # Direct dep on minifb for the preview_scene binary's cursor-aware
 # event loop. The upstream `rust_mc_sim::preview::show_window` zooms
@@ -90,6 +92,12 @@ png = "0.17"
 # caches (l1_memory + gpu bundle) and tune rayon pool defaults.
 # One query at startup; runtime cost is negligible.
 hardware-query = "0.2.1"
+# CPUID-based CPU topology — bypasses WMI/sysfs for L3 cache size.
+# Required on AMD X3D chips where hardware-query under-reports L3:
+# WMI returns one CCX entry (8 MB) instead of the full stacked total
+# (96 MB on 9800X3D). raw-cpuid enumerates all cache topology leaves
+# and sums them correctly.
+raw-cpuid = "11"
 
 [features]
 default = []

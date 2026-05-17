@@ -1,8 +1,21 @@
 //! Process-wide hardware introspection cached at first access.
 //!
 //! Queries `hardware-query` for RAM, CPU cache hierarchy, AVX
-//! feature flags, and GPU VRAM. The cache below answers
-//! "what should I size for *this* machine?" without each call site
+//! feature flags, and GPU VRAM — then overrides two known-buggy
+//! values with more accurate sources:
+//!
+//! - **L3 cache:** `hardware-query` reads `Win32_CacheMemory` via WMI
+//!   which returns one CCX entry on AMD Zen chips.  On 9800X3D this
+//!   reports 8 MB instead of 96 MB.  We use `raw-cpuid` (leaf 4 /
+//!   8000_001D) to enumerate and sum all L3 topology entries.
+//!
+//! - **GPU VRAM:** `Win32_VideoController.AdapterRAM` is a 32-bit
+//!   DWORD; GPUs above 4 GB (RTX 3080 = 10 GB) overflow it.  When
+//!   the `cuda` feature is enabled we prefer `cuDeviceTotalMem`
+//!   which uses a 64-bit `size_t`.
+//!
+//! The cache below answers "what should I size for *this* machine?"
+//! without each call site re-querying.
 //! re-querying.
 //!
 //! Plumbed into:
@@ -182,18 +195,30 @@ fn query_profile() -> HardwareProfile {
     let cpu_logical_cores = cpu.as_ref().map(|c| c.logical_cores()).unwrap_or(0);
     let cpu_l1_kb = cpu.as_ref().map(|c| c.l1_cache_kb()).unwrap_or(0);
     let cpu_l2_kb = cpu.as_ref().map(|c| c.l2_cache_kb()).unwrap_or(0);
-    let cpu_l3_kb = cpu.as_ref().map(|c| c.l3_cache_kb()).unwrap_or(0);
+
+    // L3: hardware-query under-reports on AMD X3D chips.
+    // WMI returns one CCX entry (8 MB on 9800X3D) instead of the
+    // full stacked total. raw-cpuid enumerates all CPUID cache
+    // topology leaves and sums every L3 instance correctly.
+    let cpu_l3_kb = detect_l3_kb()
+        .or_else(|| cpu.as_ref().map(|c| c.l3_cache_kb()))
+        .unwrap_or(0);
+
     let cpu_features: Vec<String> = cpu
         .as_ref()
         .map(|c| c.features().iter().map(|f| f.to_string()).collect())
         .unwrap_or_default();
+
     // hardware-query under-reports FMA on some Windows machines.
-    // The canonical x86_64 source is `std::is_x86_feature_detected!`
-    // — fall back to hardware-query's list elsewhere.
     let (supports_avx2, supports_fma) = detect_simd();
 
     let cuda_gpu = gpus.iter().find(|g| g.supports_cuda());
-    let gpu_vram_bytes = cuda_gpu.map(|g| g.memory_mb() * MIB as u64);
+
+    // VRAM: Win32_VideoController.AdapterRAM is a 32-bit DWORD.
+    // RTX 3080 (10 GB) overflows it and wraps to ~4 GB.
+    // Prefer CUDA driver API which uses 64-bit size_t throughout.
+    let gpu_vram_bytes = detect_vram_bytes_cuda()
+        .or_else(|| cuda_gpu.map(|g| g.memory_mb() * MIB as u64));
     let cuda_capability = cuda_gpu.and_then(|g| g.cuda_capability().map(String::from));
 
     HardwareProfile {
@@ -210,6 +235,89 @@ fn query_profile() -> HardwareProfile {
         gpu_vram_bytes,
         cuda_capability,
     }
+}
+
+/// Detect total L3 cache by summing **all** CPUID cache-topology
+/// level-3 entries.
+///
+/// On AMD X3D chips the 3D V-Cache stacking is exposed as additional
+/// L3 entries in CPUID leaf 0x8000_001D (extended topology) or leaf
+/// 0x4 (Intel-style). Summing them gives the physically usable total
+/// (e.g. 32 MB base + 64 MB stacked = 96 MB on the 9800X3D) rather
+/// than the 8 MB single-CCX figure that WMI / `hardware-query`
+/// returns.
+///
+/// Falls back to `None` on non-x86_64 targets so the caller can
+/// revert to the `hardware-query` value.
+#[cfg(target_arch = "x86_64")]
+fn detect_l3_kb() -> Option<u32> {
+    use raw_cpuid::CpuId;
+
+    let cpuid = CpuId::new();
+
+    // Prefer the extended AMD cache topology leaf (8000_001D) which
+    // is more reliable on Zen architectures.
+    if let Some(params) = cpuid.get_extended_cache_parameters() {
+        let total_kb: u32 = params
+            .filter(|c| c.level() == 3)
+            .map(|c| {
+                (c.associativity() as u32)
+                    .saturating_mul(c.physical_line_partitions() as u32)
+                    .saturating_mul(c.coherency_line_size() as u32)
+                    .saturating_mul(c.sets() as u32)
+                    / 1024
+            })
+            .sum();
+        if total_kb > 0 {
+            return Some(total_kb);
+        }
+    }
+
+    // Intel / generic path via leaf 4.
+    if let Some(params) = cpuid.get_cache_parameters() {
+        let total_kb: u32 = params
+            .filter(|c| c.level() == 3)
+            .map(|c| {
+                (c.associativity() as u32)
+                    .saturating_mul(c.physical_line_partitions() as u32)
+                    .saturating_mul(c.coherency_line_size() as u32)
+                    .saturating_mul(c.sets() as u32)
+                    / 1024
+            })
+            .sum();
+        if total_kb > 0 {
+            return Some(total_kb);
+        }
+    }
+
+    None
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn detect_l3_kb() -> Option<u32> {
+    None
+}
+
+/// Detect CUDA GPU VRAM via the CUDA driver API.
+///
+/// `Win32_VideoController.AdapterRAM` is a 32-bit DWORD; GPUs with
+/// more than 4 GB VRAM (RTX 3080 = 10 GB, for example) overflow it
+/// and appear as ~4 GB to `hardware-query` on Windows.
+/// `cuDeviceTotalMem` / `cuMemGetInfo` use `size_t` (64-bit on all
+/// CUDA-supported platforms) so they return the correct value.
+///
+/// Returns `None` when the `cuda` feature is disabled or no CUDA
+/// device is present.
+#[cfg(feature = "cuda")]
+fn detect_vram_bytes_cuda() -> Option<u64> {
+    cudarc::driver::CudaDevice::new(0)
+        .ok()
+        .map(|dev| dev.total_mem() as u64)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn detect_vram_bytes_cuda() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
@@ -252,6 +360,62 @@ mod tests {
         };
         let cap = p2.estimated_bundle_capacity(0.75, 1_400_000_000);
         assert!(cap >= 7 && cap <= 9, "got {cap}");
+    }
+
+    /// L3 cache detection via raw-cpuid should return a non-zero value
+    /// on x86_64 hosts. On AMD X3D machines this should exceed 8 MB
+    /// (the single-CCX WMI value) when V-Cache is present.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn l3_detection_nonzero_on_x86() {
+        let l3 = super::detect_l3_kb();
+        // raw-cpuid should always find L3 on a modern x86_64 system.
+        assert!(l3.is_some(), "detect_l3_kb() returned None on x86_64");
+        let kb = l3.unwrap();
+        assert!(kb > 0, "detect_l3_kb() returned 0 KB");
+        eprintln!("detect_l3_kb() = {} KB ({} MB)", kb, kb / 1024);
+    }
+
+    /// Verify that the profile's L3 value matches what detect_l3_kb
+    /// returns when that function succeeds — i.e. raw-cpuid takes
+    /// priority over the hardware-query fallback.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn profile_uses_cpuid_l3_over_hardware_query() {
+        if let Some(cpuid_kb) = super::detect_l3_kb() {
+            let p = hardware_profile();
+            assert_eq!(
+                p.cpu_l3_kb, cpuid_kb,
+                "profile L3 ({} KB) should match raw-cpuid value ({} KB)",
+                p.cpu_l3_kb, cpuid_kb
+            );
+        }
+    }
+
+    /// VRAM detection should not report 4 GB on a GPU with > 4 GB
+    /// VRAM. This catches the Win32_VideoController.AdapterRAM
+    /// 32-bit overflow (0xFFFFFFFF bytes → 4095 MB ≈ 4 GB).
+    /// Only meaningful when a CUDA GPU is present.
+    #[test]
+    fn vram_not_clamped_to_4gb_on_high_vram_gpu() {
+        let p = hardware_profile();
+        if let Some(vram) = p.gpu_vram_bytes {
+            let gb = vram as f64 / GIB as f64;
+            eprintln!("Detected GPU VRAM: {:.2} GB", gb);
+            // If CUDA path ran, we should never see exactly 4 GB on a
+            // GPU that is known to have more (the overflow value is
+            // 4_294_967_295 bytes; we flag anything within 1 MB of it).
+            let overflow_sentinel = 0xFFFF_FFFF_u64;
+            assert!(
+                vram < overflow_sentinel.saturating_sub(MIB as u64)
+                    || vram > overflow_sentinel.saturating_add(MIB as u64),
+                "VRAM ({} bytes) looks like a 32-bit WMI overflow — \
+                 CUDA path did not override hardware-query",
+                vram
+            );
+        } else {
+            eprintln!("No CUDA GPU present — skipping VRAM overflow test.");
+        }
     }
 
     /// Self-test: writes a banner-style dump of every detected
