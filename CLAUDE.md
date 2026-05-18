@@ -356,30 +356,38 @@ from the ICSBEP handbook k_eff.
 
 ## What's Open / Research-Tier
 
-- **Residual CPU↔GPU divergence on multi-nuclide fast-spectrum
-  metal** — localised to **geometric traversal drift**, not physics.
-  After the angular-PDF quadratic fix (`27ffa24`) the gap narrowed
-  but didn't close. Per-event A/B diagnostic via the parametrised
-  `metal_stats_diag <case>` on `ieu-met-fast-001_case-3` (commit
-  `4d4ab8e` — TBD) found:
-  - **Surface crossings / source on GPU = +9.17%** vs CPU (11.50 →
-    12.55) at matched collision count (within 0.4%).
-  - All per-reaction counts (elastic, inelastic, fission, capture)
-    agree within 0.5%.
-  - GPU's ⟨E_in⟩ at fission is +1.6% higher, ⟨E_in⟩ elastic +1.4%
-    higher, ⟨E_out⟩ inelastic +0.6% higher — particles thermalise
-    measurably slower because the extra surface crossings shift
-    where collisions happen along each track.
-  Not a sampling / kinematics bug — `rotate_direction`,
-  `free_gas_scatter`, CM→lab transformations all match CPU
-  algebraically (verified by static code-diff in this session).
-  Candidate root causes: (a) `gr_trace_step` returning a near-zero
-  distance occasionally, registering as a no-op crossing;
-  (b) float-precision divergence in the sqrt(b² − c) sphere-intersect
-  formula for near-tangent rays hitting shell boundaries on the
-  25 cm outer sphere; (c) AABB cell-find tie-breaking on shared
-  surfaces. Next step: dump a single-particle trace on both backends
-  and diff the cell-by-cell surface_idx sequence.
+- **CPU↔GPU divergence on multi-nuclide fast-spectrum metal** —
+  largely closed by the URR bin-to-bin interpolation fix (commit
+  `0aa9591`). The GPU's old `apply_urr` used only the lower-energy
+  bin's factor; CPU samples the band at BOTH bracketing energies
+  (same xi) then interpolates per the ENDF interp code. Post-fix
+  6-case sweep at 3 M histories single-seed (commit `c7f2e5f`
+  `metal_stats_diag <case>`):
+
+  | case                       | nuclides                       | Δk pre-URR | Δk post-URR | URR-fix closure |
+  |----------------------------|--------------------------------|-----------:|------------:|----------------:|
+  | heu-met-fast-001_case-1    | bare U (Godiva)                |      ~0    |      +9 pcm |       (baseline)|
+  | heu-met-fast-011           | U + W-180..186 + poly + Fe     |    +702    |     −90 pcm |   **~700 pcm**  |
+  | heu-met-fast-029           | U + Cu + Ni + Fe + C           |    +204    |    +211 pcm |       none      |
+  | heu-met-fast-058_case-1    | HEU + Be (20 cm reflector)     |   −2484    |    −352 pcm | (SAB+URR combined) |
+  | heu-met-fast-058_case-3    | HEU + Be (thin reflector)      |    +591    |     +30 pcm |   **~560 pcm**  |
+  | ieu-met-fast-001_case-3    | U + Al/Mg/Cu/Mn/Cr/Fe/Ni       |    +325    |    +393 pcm |       none      |
+
+  URR fix is decisive on W-heavy and Be-thick cases where the
+  URR factor varies strongly across bins. Residual +200-400 pcm
+  on `heu-met-fast-029` and `ieu-met-fast-001_case-3` comes from
+  a separate source — those cases have URR-bearing nuclides
+  (Cu/Ni/Fe/Cr/Al/Mg) but the fast spectrum doesn't dwell in
+  their URR ranges. Suspect per-event RNG-draw-order divergence
+  between CPU PCG and GPU PCG-XSH-RR on the multi-isotope alloy
+  materials.
+
+  Surface-crossing observable on GPU is **decoupled from k_eff**:
+  heu-met-fast-011 has **+61% surf-crossing delta with near-zero
+  Δk**; heu-met-fast-029 has +0.1% surf delta with +211 pcm Δk.
+  So the +9% surf-crossing artifact on the 57-cell ieu-001-3 is
+  a geometric numerical observable on complex region trees, not
+  the k_eff cause.
 - **GPU survival biasing / Russian roulette unimplemented**.
   Verified: no `survival_bias` / `russian_roulette` / `w_min` hits in
   `gpu/cuda/*.cu`. CPU uses these for FOM (4.5× on PWR per the
