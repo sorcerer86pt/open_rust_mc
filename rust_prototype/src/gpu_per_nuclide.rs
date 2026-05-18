@@ -191,12 +191,21 @@ pub struct AngularSlicesGpu {
     pub energies: CudaSlice<f64>,
     pub mu: CudaSlice<f64>,
     pub cdf: CudaSlice<f64>,
+    /// PDF aligned 1:1 with `mu` / `cdf`. Enables the quadratic lin-
+    /// lin CDF inversion in `sample_mu_bin` — without this the kernel
+    /// falls back to a linear-CDF / histogram-PDF approximation that
+    /// biases forward-peaked angular distributions (Al-27, Mg, Cr,
+    /// Mn, W) — the +500-700 pcm CPU↔GPU gap on multi-nuclide fast-
+    /// metal benchmarks (ieu-met-fast-001, heu-met-fast-011). Mirrors
+    /// the `fis_pdf` / `inel91_pdf` fixes that closed the analogous
+    /// gap on the χ outgoing spectrum.
+    pub pdf: CudaSlice<f64>,
     /// `[n_energies]` host-side; offset into this nuclide's `mu` /
-    /// `cdf` buffers (starts at 0 per nuclide).
+    /// `cdf` / `pdf` buffers (starts at 0 per nuclide).
     pub dist_local_off: Vec<i32>,
     /// `[n_energies]`.
     pub dist_sz: Vec<i32>,
-    /// Real data length of `mu` / `cdf` excluding the trailing
+    /// Real data length of `mu` / `cdf` / `pdf` excluding the trailing
     /// sentinel that `build_angular_slices` inserts when every
     /// distribution is empty. Bundle assembly slices to this length
     /// so per-nuclide sentinels aren't concatenated.
@@ -208,6 +217,7 @@ impl AngularSlicesGpu {
         self.energies.num_bytes()
             + self.mu.num_bytes()
             + self.cdf.num_bytes()
+            + self.pdf.num_bytes()
             + (self.dist_local_off.len() + self.dist_sz.len())
                 * std::mem::size_of::<i32>()
     }
@@ -256,6 +266,10 @@ pub struct LevelSlicesGpu {
     pub ang_energies: CudaSlice<f64>,
     pub ang_mu: CudaSlice<f64>,
     pub ang_cdf: CudaSlice<f64>,
+    /// PDF aligned 1:1 with `ang_mu` / `ang_cdf`. Same role as
+    /// `AngularSlicesGpu::pdf` — enables quadratic lin-lin CDF
+    /// inversion in `sample_mu_bin`.
+    pub ang_pdf: CudaSlice<f64>,
     pub ang_lev_local_off: Vec<i32>,
     pub ang_lev_ne: Vec<i32>,
     pub ang_dist_local_off: Vec<i32>,
@@ -286,6 +300,7 @@ impl LevelSlicesGpu {
             + self.ang_energies.num_bytes()
             + self.ang_mu.num_bytes()
             + self.ang_cdf.num_bytes()
+            + self.ang_pdf.num_bytes()
             + (self.basis_local_off.len()
                 + self.coeffs_local_off.len()
                 + self.ang_lev_local_off.len()
@@ -877,6 +892,7 @@ pub struct AssembledBundleCCat {
     pub lev_ang_energies: CudaSlice<f64>,
     pub lev_ang_mu: CudaSlice<f64>,
     pub lev_ang_cdf: CudaSlice<f64>,
+    pub lev_ang_pdf: CudaSlice<f64>,
     pub lev_ang_dist_off_vec: Vec<i32>,
     pub lev_ang_dist_sz_vec: Vec<i32>,
     pub lev_ang_lev_off_vec: Vec<i32>,
@@ -940,6 +956,7 @@ pub fn assemble_c_cat(
     let mut lev_ang_energies = unsafe { stream.alloc::<f64>(ang_e_n)? };
     let mut lev_ang_mu = unsafe { stream.alloc::<f64>(ang_mu_n)? };
     let mut lev_ang_cdf = unsafe { stream.alloc::<f64>(ang_mu_n)? };
+    let mut lev_ang_pdf = unsafe { stream.alloc::<f64>(ang_mu_n)? };
 
     // Zero out sentinel slots (only relevant when total = 0 → alloc is
     // size 1 sentinel; otherwise the slot is overwritten below).
@@ -961,6 +978,7 @@ pub fn assemble_c_cat(
     if total_ang_mu == 0 {
         stream.memset_zeros(&mut lev_ang_mu)?;
         stream.memset_zeros(&mut lev_ang_cdf)?;
+        stream.memset_zeros(&mut lev_ang_pdf)?;
     }
 
     // ── Step 3: walk nuclides; DtoD the per-nuclide real-length
@@ -1054,6 +1072,8 @@ pub fn assemble_c_cat(
             stream.memcpy_dtod(&p.levels.ang_mu.slice(0..amlen), &mut dst_mu)?;
             let mut dst_cdf = lev_ang_cdf.slice_mut(run_ang_mu..run_ang_mu + amlen);
             stream.memcpy_dtod(&p.levels.ang_cdf.slice(0..amlen), &mut dst_cdf)?;
+            let mut dst_pdf = lev_ang_pdf.slice_mut(run_ang_mu..run_ang_mu + amlen);
+            stream.memcpy_dtod(&p.levels.ang_pdf.slice(0..amlen), &mut dst_pdf)?;
         }
 
         run_level += nl;
@@ -1094,6 +1114,7 @@ pub fn assemble_c_cat(
         lev_ang_energies,
         lev_ang_mu,
         lev_ang_cdf,
+        lev_ang_pdf,
         lev_ang_dist_off_vec,
         lev_ang_dist_sz_vec,
         lev_ang_lev_off_vec,
@@ -1587,6 +1608,7 @@ pub struct AssembledBundleA4Cat {
     pub ang_energies: CudaSlice<f64>,
     pub ang_mu: CudaSlice<f64>,
     pub ang_cdf: CudaSlice<f64>,
+    pub ang_pdf: CudaSlice<f64>,
     pub ang_dist_offsets_vec: Vec<i32>,
     pub ang_dist_sizes_vec: Vec<i32>,
     pub ang_nuc_offsets_vec: Vec<i32>,
@@ -1622,12 +1644,14 @@ pub fn assemble_a4_cat(
     let mut ang_energies = unsafe { stream.alloc::<f64>(total_e.max(1))? };
     let mut ang_mu = unsafe { stream.alloc::<f64>(total_mu.max(1))? };
     let mut ang_cdf = unsafe { stream.alloc::<f64>(total_mu.max(1))? };
+    let mut ang_pdf = unsafe { stream.alloc::<f64>(total_mu.max(1))? };
     if total_e == 0 {
         stream.memset_zeros(&mut ang_energies)?;
     }
     if total_mu == 0 {
         stream.memset_zeros(&mut ang_mu)?;
         stream.memset_zeros(&mut ang_cdf)?;
+        stream.memset_zeros(&mut ang_pdf)?;
     }
 
     let mut ang_dist_offsets_vec: Vec<i32> = Vec::with_capacity(total_e);
@@ -1658,6 +1682,8 @@ pub fn assemble_a4_cat(
             stream.memcpy_dtod(&ang.mu.slice(0..ml), &mut dst_mu)?;
             let mut dst_cdf = ang_cdf.slice_mut(run_mu..run_mu + ml);
             stream.memcpy_dtod(&ang.cdf.slice(0..ml), &mut dst_cdf)?;
+            let mut dst_pdf = ang_pdf.slice_mut(run_mu..run_mu + ml);
+            stream.memcpy_dtod(&ang.pdf.slice(0..ml), &mut dst_pdf)?;
         }
         for ei in 0..ne {
             ang_dist_offsets_vec.push(ang.dist_local_off[ei] + run_mu as i32);
@@ -1679,6 +1705,7 @@ pub fn assemble_a4_cat(
         ang_energies,
         ang_mu,
         ang_cdf,
+        ang_pdf,
         ang_dist_offsets_vec,
         ang_dist_sizes_vec,
         ang_nuc_offsets_vec,
@@ -1980,6 +2007,7 @@ fn build_angular_slices(
     let n_energies = ad.energies.len();
     let mut mu_buf: Vec<f64> = Vec::new();
     let mut cdf_buf: Vec<f64> = Vec::new();
+    let mut pdf_buf: Vec<f64> = Vec::new();
     let mut dist_local_off: Vec<i32> = Vec::with_capacity(n_energies);
     let mut dist_sz: Vec<i32> = Vec::with_capacity(n_energies);
     for (i, _e) in ad.energies.iter().enumerate() {
@@ -1988,11 +2016,23 @@ fn build_angular_slices(
         dist_sz.push(dist.mu.len() as i32);
         mu_buf.extend_from_slice(&dist.mu);
         cdf_buf.extend_from_slice(&dist.cdf);
+        // Length-matched PDF — CPU's TabularMuDist always carries pdf
+        // alongside mu / cdf. Pad if a malformed distribution has
+        // fewer pdf entries than mu / cdf so the GPU stride stays
+        // consistent and the kernel's `pd[i]` indexing is safe.
+        if dist.pdf.len() == dist.mu.len() {
+            pdf_buf.extend_from_slice(&dist.pdf);
+        } else {
+            let mut padded = dist.pdf.clone();
+            padded.resize(dist.mu.len(), 0.0);
+            pdf_buf.extend_from_slice(&padded);
+        }
     }
     let mu_real_len = mu_buf.len();
     if mu_buf.is_empty() {
         mu_buf.push(0.0);
         cdf_buf.push(0.0);
+        pdf_buf.push(0.0);
     }
     Ok(AngularSlicesGpu {
         n_energies: n_energies as i32,
@@ -2000,6 +2040,7 @@ fn build_angular_slices(
         energies: stream.clone_htod(&ad.energies)?,
         mu: stream.clone_htod(&mu_buf)?,
         cdf: stream.clone_htod(&cdf_buf)?,
+        pdf: stream.clone_htod(&pdf_buf)?,
         dist_local_off,
         dist_sz,
         mu_real_len,
@@ -2036,6 +2077,7 @@ fn build_level_slices(
     let mut ang_e_buf: Vec<f64> = Vec::new();
     let mut ang_mu_buf: Vec<f64> = Vec::new();
     let mut ang_cdf_buf: Vec<f64> = Vec::new();
+    let mut ang_pdf_buf: Vec<f64> = Vec::new();
     let mut ang_lev_local_off: Vec<i32> = Vec::with_capacity(n_levels);
     let mut ang_lev_ne: Vec<i32> = Vec::with_capacity(n_levels);
     let mut ang_dist_local_off: Vec<i32> = Vec::new();
@@ -2109,6 +2151,16 @@ fn build_level_slices(
                     ang_dist_sz.push(dist.mu.len() as i32);
                     ang_mu_buf.extend_from_slice(&dist.mu);
                     ang_cdf_buf.extend_from_slice(&dist.cdf);
+                    // Length-matched PDF for the quadratic CDF
+                    // inversion. Same padding rule as the elastic
+                    // angular path.
+                    if dist.pdf.len() == dist.mu.len() {
+                        ang_pdf_buf.extend_from_slice(&dist.pdf);
+                    } else {
+                        let mut padded = dist.pdf.clone();
+                        padded.resize(dist.mu.len(), 0.0);
+                        ang_pdf_buf.extend_from_slice(&padded);
+                    }
                 }
             }
             _ => {
@@ -2148,6 +2200,7 @@ fn build_level_slices(
     if ang_mu_buf.is_empty() {
         ang_mu_buf.push(0.0);
         ang_cdf_buf.push(0.0);
+        ang_pdf_buf.push(0.0);
     }
     if ang_dist_local_off.is_empty() {
         ang_dist_local_off.push(0);
@@ -2171,6 +2224,7 @@ fn build_level_slices(
         ang_energies: stream.clone_htod(&ang_e_buf)?,
         ang_mu: stream.clone_htod(&ang_mu_buf)?,
         ang_cdf: stream.clone_htod(&ang_cdf_buf)?,
+        ang_pdf: stream.clone_htod(&ang_pdf_buf)?,
         ang_lev_local_off,
         ang_lev_ne,
         ang_dist_local_off,

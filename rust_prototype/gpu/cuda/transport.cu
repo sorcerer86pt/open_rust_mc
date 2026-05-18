@@ -338,7 +338,28 @@
 #define P_SAB_SLOT_INC_BOUND_XS     179
 #define P_SAB_SLOT_INC_DEBYE_WALLER 180
 
-#define N_PARAMS            181
+// ── Angular-distribution PDF per-nuc base pointers — slots 181-182 ──
+//
+// Mirrors P_ANG_MU_PTRS / P_LEV_ANG_MU_PTRS layout exactly: `[n_nuc]`
+// u64 entries, each one the device address of the corresponding
+// per-nuclide `AngularSlicesGpu::pdf` / `LevelSlicesGpu::ang_pdf`
+// buffer. Pairs with the existing P_ANG_DIST_LOCAL_OFF / P_LEV_ANG_
+// DIST_LOCAL_OFF tables — same offsets are used for mu / cdf / pdf
+// since the three arrays are length-matched on upload.
+//
+// Drives the quadratic lin-lin CDF inversion in `sample_mu_bin` for
+// ENDF/B-VII.1 angular distributions that aren't histogram (every
+// nuclide with `histogram=false` — most of them). Without these the
+// kernel falls back to a linear-CDF approximation that biased
+// forward-peaked scatter for Al-27, Mg-24..26, Mn-55, Cr-50..54, and
+// W-180..186, surfacing as the +500-700 pcm CPU↔GPU gap on multi-
+// nuclide fast-spectrum benchmarks (ieu-met-fast-001, heu-met-fast-
+// 011) — analog of the fis_pdf / inel91_pdf fixes that closed the
+// same gap on the χ outgoing spectrum.
+#define P_ANG_PDF_PTRS              181
+#define P_LEV_ANG_PDF_PTRS          182
+
+#define N_PARAMS            183
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -985,15 +1006,52 @@ __device__ __forceinline__ double sample_fission_emit_energy(
 }
 
 // CDF-invert mu within one bin using a pre-drawn xi.
+// Inverse-CDF μ sampler. Quadratic lin-lin inversion when a PDF array
+// is supplied (the OpenMC `Tabular::sample` formula — mirrors
+// `TabularMuDist::sample_with_xi` in hdf5_reader.rs and the
+// `sample_eout_bin` quadratic in this file). Falls back to histogram-
+// PDF / linear-CDF interpolation when `pd == nullptr` or the PDF is
+// zero — that's the legacy path, kept for backward compatibility but
+// no longer the default for ENDF/B-VII.1 angular data.
+//
+// Without the quadratic path every forward-peaked elastic scatter on
+// Al-27 / Mg / Cr / Mn / W-180..186 was biased — surfaced as
+// ~+500-700 pcm CPU↔GPU gap on ieu-met-fast-001 / heu-met-fast-011.
 __device__ __forceinline__ double sample_mu_bin(
-    double xi, const double* mu, const double* cd, int sz)
+    double xi, const double* mu, const double* cd, const double* pd, int sz)
 {
     if (sz <= 1) return 2.0*xi - 1.0;
     int lo=0, hi=sz-1;
     while (hi-lo > 1) { int mid=(lo+hi) >> 1; if (cd[mid] <= xi) lo=mid; else hi=mid; }
-    double f = (xi - cd[lo]) / fmax(cd[hi]-cd[lo], 1e-30);
-    double m = mu[lo] + f * (mu[hi] - mu[lo]);
-    return fmax(-1.0, fmin(1.0, m));
+    const double mu_lo = mu[lo];
+    const double mu_hi = mu[hi];
+    const double cdf_lo = cd[lo];
+    const double cdf_hi = cd[hi];
+    const double dmu = mu_hi - mu_lo;
+    if (fabs(cdf_hi - cdf_lo) < 1e-15) return fmax(-1.0, fmin(1.0, mu_lo));
+    if (pd != nullptr && dmu > 0.0) {
+        const double p_lo = pd[lo];
+        const double p_hi = pd[hi];
+        const double dc = xi - cdf_lo;
+        if (p_lo > 0.0 || p_hi > 0.0) {
+            const double slope = (p_hi - p_lo) / dmu;
+            if (fabs(slope) < 1e-30) {
+                if (p_lo > 0.0) {
+                    double m = mu_lo + dc / p_lo;
+                    return fmax(-1.0, fmin(1.0, m));
+                }
+            } else {
+                const double disc = p_lo * p_lo + 2.0 * slope * dc;
+                if (disc >= 0.0) {
+                    double m = mu_lo + (sqrt(disc) - p_lo) / slope;
+                    return fmax(-1.0, fmin(1.0, m));
+                }
+            }
+        }
+    }
+    // Histogram fallback.
+    double f = (xi - cdf_lo) / fmax(cdf_hi - cdf_lo, 1e-30);
+    return fmax(-1.0, fmin(1.0, mu_lo + f * dmu));
 }
 
 __device__ double sample_angular_dist(
@@ -1013,18 +1071,20 @@ __device__ double sample_angular_dist(
         (const double*) __ldg(&PTR_U64(p, P_ANG_MU_PTRS)[hit_nuc]);
     const double* nuc_cdf =
         (const double*) __ldg(&PTR_U64(p, P_ANG_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_ANG_PDF_PTRS)[hit_nuc]);
 
     // Edge: below grid
     if (E <= ae[0]) {
         int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[a_off];
         int sz  = PTR_I(p, P_ANG_DIST_SZ)[a_off];
-        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], &nuc_pdf[off], sz);
     }
     // Edge: above grid
     if (E >= ae[a_ne-1]) {
         int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[a_off + a_ne - 1];
         int sz  = PTR_I(p, P_ANG_DIST_SZ)[a_off + a_ne - 1];
-        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], &nuc_pdf[off], sz);
     }
 
     // Binary search for energy bracket
@@ -1039,7 +1099,7 @@ __device__ double sample_angular_dist(
     int chosen = pick_hi ? (a_off + ie + 1) : (a_off + ie);
     int off = PTR_I(p, P_ANG_DIST_LOCAL_OFF)[chosen];
     int sz  = PTR_I(p, P_ANG_DIST_SZ)[chosen];
-    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
+    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], &nuc_pdf[off], sz);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1071,18 +1131,20 @@ __device__ double sample_level_angular(
         (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_MU_PTRS)[hit_nuc]);
     const double* nuc_cdf =
         (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_LEV_ANG_PDF_PTRS)[hit_nuc]);
     const double* ae = &nuc_ae[e_off_local];
 
     // Below / above grid: pick the edge distribution directly.
     if (E <= ae[0]) {
         int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[e_off_global];
         int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off_global];
-        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], &nuc_pdf[off], sz);
     }
     if (E >= ae[n_e - 1]) {
         int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[e_off_global + n_e - 1];
         int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[e_off_global + n_e - 1];
-        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
+        return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], &nuc_pdf[off], sz);
     }
 
     int ie; { int lo = 0, hi = n_e - 1;
@@ -1094,7 +1156,7 @@ __device__ double sample_level_angular(
     int chosen = e_off_global + (pick_hi ? ie + 1 : ie);
     int off = PTR_I(p, P_LEV_ANG_DIST_LOCAL_OFF)[chosen];
     int sz  = PTR_I(p, P_LEV_ANG_DIST_SZ)[chosen];
-    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], sz);
+    return sample_mu_bin(pcg_uniform(rng), &nuc_mu[off], &nuc_cdf[off], &nuc_pdf[off], sz);
 }
 
 // Per-slot accessor helpers. `slot` is the index returned by

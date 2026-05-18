@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 181;
+const N_PARAMS: usize = 183;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -204,9 +204,17 @@ pub struct GpuNuclideData {
     pub ang_e_ptrs: CudaSlice<u64>,
     pub ang_mu_ptrs: CudaSlice<u64>,
     pub ang_cdf_ptrs: CudaSlice<u64>,
+    /// Per-nuc base pointer into `AngularSlicesGpu::pdf` for the
+    /// elastic angular path. Same per-nuc indexing as
+    /// `ang_mu_ptrs[hit_nuc]`; used by the quadratic lin-lin CDF
+    /// inversion in `sample_mu_bin`.
+    pub ang_pdf_ptrs: CudaSlice<u64>,
     pub lev_ang_e_ptrs: CudaSlice<u64>,
     pub lev_ang_mu_ptrs: CudaSlice<u64>,
     pub lev_ang_cdf_ptrs: CudaSlice<u64>,
+    /// Per-nuc base pointer into `LevelSlicesGpu::ang_pdf` for the
+    /// per-level discrete-inelastic angular path.
+    pub lev_ang_pdf_ptrs: CudaSlice<u64>,
     /// `[total_e]` — un-shifted within-nuc ang_mu offsets for the
     /// elastic angular path. Pairs with `ang_mu_ptrs[hit_nuc]`.
     pub ang_dist_local_off: CudaSlice<i32>,
@@ -282,6 +290,7 @@ pub struct GpuNuclideData {
     pub lev_ang_energies: CudaSlice<f64>, // flat: incident-energy grid per level
     pub lev_ang_mu: CudaSlice<f64>,       // flat: cosine values
     pub lev_ang_cdf: CudaSlice<f64>,      // flat: CDF values
+    pub lev_ang_pdf: CudaSlice<f64>,      // flat: PDF values — quadratic CDF inversion
     pub lev_ang_dist_off: CudaSlice<i32>, // per (global_level, energy_idx) → offset
     pub lev_ang_dist_sz: CudaSlice<i32>,  // per (global_level, energy_idx) → size
     pub lev_ang_lev_off: CudaSlice<i32>,  // per global level → offset into lev_ang_energies
@@ -290,6 +299,7 @@ pub struct GpuNuclideData {
     pub ang_energies: CudaSlice<f64>, // flat: energy grids for angular dist
     pub ang_mu: CudaSlice<f64>,       // flat: cosine values
     pub ang_cdf: CudaSlice<f64>,      // flat: CDF values
+    pub ang_pdf: CudaSlice<f64>,      // flat: PDF values — quadratic CDF inversion
     pub ang_dist_offsets: CudaSlice<i32>, // per (nuc, energy) → offset into mu/cdf
     pub ang_dist_sizes: CudaSlice<i32>, // per (nuc, energy) → n_mu
     pub ang_nuc_offsets: CudaSlice<i32>, // per-nuclide → offset into ang_energies
@@ -545,9 +555,11 @@ impl GpuNuclideData {
             + self.ang_e_ptrs.num_bytes()
             + self.ang_mu_ptrs.num_bytes()
             + self.ang_cdf_ptrs.num_bytes()
+            + self.ang_pdf_ptrs.num_bytes()
             + self.lev_ang_e_ptrs.num_bytes()
             + self.lev_ang_mu_ptrs.num_bytes()
             + self.lev_ang_cdf_ptrs.num_bytes()
+            + self.lev_ang_pdf_ptrs.num_bytes()
             + self.ang_dist_local_off.num_bytes()
             + self.lev_ang_lev_local_off.num_bytes()
             + self.lev_ang_dist_local_off.num_bytes()
@@ -1366,6 +1378,10 @@ impl GpuTransportContext {
             dptr!(&sab_data.slot_coh_n),
             dptr!(&sab_data.slot_inc_bound_xs),
             dptr!(&sab_data.slot_inc_debye_waller),
+            // Angular PDF pointer arrays — slots 181-182. See
+            // P_ANG_PDF_PTRS / P_LEV_ANG_PDF_PTRS in transport.cu.
+            dptr!(&nuc_data.ang_pdf_ptrs),
+            dptr!(&nuc_data.lev_ang_pdf_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1595,6 +1611,11 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.elastic_angle.as_ref().map(|a| &a.cdf),
         )?;
+        let ang_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| p.elastic_angle.as_ref().map(|a| &a.pdf),
+        )?;
         let lev_ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
             &self.stream,
             &per_nucs,
@@ -1623,6 +1644,17 @@ impl GpuTransportContext {
             |p| {
                 if p.levels.n_levels > 0 {
                     Some(&p.levels.ang_cdf)
+                } else {
+                    None
+                }
+            },
+        )?;
+        let lev_ang_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream,
+            &per_nucs,
+            |p| {
+                if p.levels.n_levels > 0 {
+                    Some(&p.levels.ang_pdf)
                 } else {
                     None
                 }
@@ -1713,9 +1745,11 @@ impl GpuTransportContext {
             ang_e_ptrs,
             ang_mu_ptrs,
             ang_cdf_ptrs,
+            ang_pdf_ptrs,
             lev_ang_e_ptrs,
             lev_ang_mu_ptrs,
             lev_ang_cdf_ptrs,
+            lev_ang_pdf_ptrs,
             ang_dist_local_off,
             lev_ang_lev_local_off,
             lev_ang_dist_local_off,
@@ -1767,6 +1801,7 @@ impl GpuTransportContext {
             lev_ang_energies: c.lev_ang_energies,
             lev_ang_mu: c.lev_ang_mu,
             lev_ang_cdf: c.lev_ang_cdf,
+            lev_ang_pdf: c.lev_ang_pdf,
             lev_ang_dist_off: self.stream.clone_htod(&c.lev_ang_dist_off_vec)?,
             lev_ang_dist_sz: self.stream.clone_htod(&c.lev_ang_dist_sz_vec)?,
             lev_ang_lev_off: self.stream.clone_htod(&c.lev_ang_lev_off_vec)?,
@@ -1774,6 +1809,7 @@ impl GpuTransportContext {
             ang_energies: a4.ang_energies,
             ang_mu: a4.ang_mu,
             ang_cdf: a4.ang_cdf,
+            ang_pdf: a4.ang_pdf,
             ang_dist_offsets: self.stream.clone_htod(&a4.ang_dist_offsets_vec)?,
             ang_dist_sizes: self.stream.clone_htod(&a4.ang_dist_sizes_vec)?,
             ang_nuc_offsets: self.stream.clone_htod(&a4.ang_nuc_offsets_vec)?,
