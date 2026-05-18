@@ -586,6 +586,8 @@ __device__ double svd_reconstruct_interp(
 }
 
 // Legacy: single-point reconstruct (used by discrete levels)
+// Note: exp2f(float) was tested here (commit context) — gives 0% speedup because
+// the MIO stall is dominated by BRX dynamic branching, not MUFU transcendentals.
 __device__ double svd_reconstruct(
     const double* __restrict__ basis,
     const double* __restrict__ coeffs,
