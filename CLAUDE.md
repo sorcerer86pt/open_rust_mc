@@ -356,6 +356,42 @@ from the ICSBEP handbook k_eff.
 
 ## What's Open / Research-Tier
 
+- **CPU↔GPU divergence on multi-nuclide fast-spectrum metal**
+  (`ieu-met-fast-001`, `heu-met-fast-011`). Empirical 3-seed averages
+  on quick (80 b × 5 k × 3 seeds) settings:
+  - `ieu-met-fast-001_case-3`: CPU avg +82 pcm, GPU avg +590 pcm —
+    **~510 pcm GPU hot**.
+  - `heu-met-fast-011`: CPU avg −951 pcm, GPU avg −249 pcm —
+    **~702 pcm gap**.
+  - `heu-met-fast-029` (HEU + DU layers, no W, no polyethylene):
+    CPU avg +437, GPU avg +440 — **3 pcm gap** (clean reference).
+  Pattern correlates with the presence of structural / heavy
+  reflector nuclides (W-isotopes, Fe, polyethylene). Likely
+  candidates: elastic angular CDF upload, per-MT discrete level
+  rank-padding miss for non-actinides, multi-nuclide
+  `eval_nuclide_macro_xs` accumulator. The HEU-MET-FAST-058 case-1
+  SAB-elastic fix (commit `563815e`) did NOT close this — these
+  cases have no S(α,β). Next focused dive.
+- **GPU survival biasing / Russian roulette unimplemented**.
+  Verified: no `survival_bias` / `russian_roulette` / `w_min` hits in
+  `gpu/cuda/*.cu`. CPU uses these for FOM (4.5× on PWR per CLAUDE.md
+  headline numbers); GPU runs analog. *Not* a k_eff bias (analog and
+  non-analog absorption have the same expected value), but the GPU
+  has worse seed-to-seed variance on capture-heavy systems.
+- **GPU stochastic temperature interpolation across SAB kT columns
+  unimplemented**. CPU calls `tsl.select_temperature(cell.T, ξ)` per
+  collision (4 sites in `simulate.rs`); GPU locks each slot to a
+  single `temp_idx` at upload time. Doesn't bias when the cell temp
+  sits at the bottom of the SAB grid (HEU-MET-FAST-058 case-1 at
+  293.6 K is below the 294 K column), but mis-models cases with
+  cell T between SAB columns.
+- **GPU per-cell `Mat3` rotation unimplemented**. CPU's `Cell.rotation:
+  Option<Mat3>` propagates through `CoordStack` descent. No
+  ICSBEP scene currently uses rotated cells, so the gap is silent —
+  but adding a rotated lattice would yield wrong cell-finds on GPU.
+- **GPU `PeriodicBC` unimplemented**. CPU has it; GPU only knows
+  `GR_BC_TRANSMISSION` / `GR_BC_VACUUM` / `GR_BC_REFLECTIVE`. No
+  current scene uses Periodic BCs.
 - **DXTRAN-style continuous splitting** for >14 mfp photon penetration.
   All `(ratio, growth) ∈ {5,10,20} × {0,1,2,3}` at 300 cm give 0
   transmitted in 500k — `max_split=8` ceiling bounds geometric WW.
