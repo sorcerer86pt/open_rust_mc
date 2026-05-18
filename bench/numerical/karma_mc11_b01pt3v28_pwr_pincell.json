@@ -1,5 +1,5 @@
 {
-  "_doc": "Single PWR pin cell, KARMA 1.1 ACE7 17x17 design (KAERI). 3.0 wt%% U-235 UO2 fuel at 900 K, Zircaloy clad at 600 K, light water moderator at 600 K with 500 ppm soluble boron and c_H_in_H2O.h5 thermal scattering. Reflective square box on all six faces => k_inf. Dimensions: fuel r=0.40958, clad IR=0.41873, clad OR=0.47600, pin pitch=1.26230 cm. Reference k_inf from MCNP4C2 (continuous ENDF/B-VI R8) is 1.24206 +/- 0.00025 — Lee et al., M&C 2011, Rio de Janeiro, Table VI row B01PT3V28.",
+  "_doc": "Single PWR pin cell, KARMA 1.1 ACE7 17x17 design (KAERI). 3.0 wt%% U-235 UO2 fuel at 900 K, Zircaloy clad at 600 K, light water moderator at 600 K with 500 ppm soluble boron and c_H_in_H2O.h5 thermal scattering. Reflective square box on all six faces => k_inf. Dimensions: fuel r=0.40958, clad IR=0.41873, clad OR=0.47600, pin pitch=1.26230 cm. NOT an ICSBEP experimental case — this is a numerical / code-to-code benchmark. Reference k_inf 1.24206 +/- 0.00025 is MCNP4C2 with ENDF/B-VI R8 (Lee et al., M&C 2011, Rio de Janeiro, Table VI row B01PT3V28). Comparing it to an ENDF/B-VII.1 run grades library + code together; expect ~+1000-1500 pcm just from VI -> VII.1 on a soft-spectrum LEU pin cell. For ICSBEP PWR-style coverage use the LEU-COMP-THERM family instead.",
   "benchmark": {
     "suite": "KARMA-MC11",
     "case_id": "B01PT3V28",
