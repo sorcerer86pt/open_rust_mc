@@ -236,12 +236,15 @@ transport_recursive_persistent(
         double sum_t = 0.0;
         double nuc_t[MAX_NUC_PER_MAT] = {};
         double urr_xi = pcg_uniform(&rng);
+        // Cell kT (eV) for SAB stochastic-T interpolation in
+        // eval_nuclide_macro_xs.
+        double xs_cell_kT = (mat >= 0 && mat < n_materials) ? mat_kT[mat] : -1.0;
 
         for (int i = 0; i < n_nuc; i++) {
             int ni    = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + i]);
             double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + i]);
             NuclideMacroXs xs = eval_nuclide_macro_xs(ni, Ni, E, urr_xi,
-                                                     sab_nuc_idx, rank, p);
+                                                     sab_nuc_idx, rank, p, xs_cell_kT);
             nuc_t[i] = xs.s_t;
             sum_t   += xs.s_t;
         }
@@ -300,7 +303,7 @@ transport_recursive_persistent(
         // urr_xi drawn above so the resampled Σ_x sum back to nuc_t[hit_l]
         // and reaction selection stays unbiased.
         NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
-            hit_nuc, Ni_hit, E, urr_xi, sab_nuc_idx, rank, p);
+            hit_nuc, Ni_hit, E, urr_xi, sab_nuc_idx, rank, p, xs_cell_kT);
 
         // Sample reaction — el, inel, n2n, n3n, fis, cap (matches CPU)
         double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
@@ -316,7 +319,13 @@ transport_recursive_persistent(
             // correct slot — `sab_nuc_idx` is retained as a kernel
             // parameter for ABI stability but no longer consulted.
             if (SCALAR_I(p, P_SAB_N_SLOTS) > 0) {
-                int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[hit_nuc];
+                // Stochastic-T variant — independent rng draw from
+                // the XS-path deterministic select. Mirrors CPU
+                // simulate.rs:1080 (separate select_temperature
+                // call from line 868). Two independent uniform draws
+                // on the kT axis are valid samples from the same
+                // interpolation distribution.
+                int sab_slot = sab_select_slot(hit_nuc, xs_cell_kT, &rng, p);
                 if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
                     double E_sab, mu_sab;
                     sab_sample(E, &rng, sab_slot, p, &E_sab, &mu_sab);

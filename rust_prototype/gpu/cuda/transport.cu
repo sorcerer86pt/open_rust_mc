@@ -359,7 +359,19 @@
 #define P_ANG_PDF_PTRS              181
 #define P_LEV_ANG_PDF_PTRS          182
 
-#define N_PARAMS            183
+// ── Stochastic temperature interpolation across SAB kT columns ─────
+// `P_SAB_SLOT_COUNT_PER_NUC[nuc]` gives the count of consecutive
+// slots reserved for that nuclide (= TSL's kT-grid length); the
+// existing `P_SAB_SLOT_PER_NUC[nuc]` is now the FIRST slot. The
+// kernel reads `P_SAB_SLOT_KT[slot]` for each slot's kT and selects
+// stochastically between the two bracketing entries via cell_kT —
+// mirrors CPU's `tsl.select_temperature(cell.T, ξ)` (4 call sites
+// in simulate.rs). Closes the GPU's static-temperature mis-sampling
+// for any cell whose temperature lies strictly between SAB columns.
+#define P_SAB_SLOT_COUNT_PER_NUC    183
+#define P_SAB_SLOT_KT               184
+
+#define N_PARAMS            185
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1180,6 +1192,61 @@ __device__ __forceinline__ double sab_slot_emax(int slot, Params p) {
     return PTR_D(p, P_SAB_SLOT_EMAX)[slot];
 }
 
+// ── Stochastic temperature interpolation across SAB kT columns ─────
+//
+// Each SAB-bearing nuclide owns `P_SAB_SLOT_COUNT_PER_NUC[nuc]`
+// consecutive slots starting at `P_SAB_SLOT_PER_NUC[nuc]`. Each slot
+// carries data for one kT column of the TSL, with kT recorded in
+// `P_SAB_SLOT_KT[slot]`. Returns the chosen slot index for the
+// requested `cell_kT`, drawn stochastically between the two
+// bracketing columns via an inverse-CDF on the kT axis (matches CPU
+// `ThermalScatteringData::select_temperature`).
+//
+// Returns -1 when the nuclide has no SAB bound (slot_count == 0).
+__device__ __forceinline__ int sab_select_slot(
+    int nuc_idx, double cell_kT, PcgState* rng, Params p)
+{
+    int first = PTR_I(p, P_SAB_SLOT_PER_NUC)[nuc_idx];
+    if (first < 0) return -1;
+    int count = PTR_I(p, P_SAB_SLOT_COUNT_PER_NUC)[nuc_idx];
+    if (count <= 0) return -1;
+    if (count == 1) return first;
+    const double* kts = &PTR_D(p, P_SAB_SLOT_KT)[first];
+    if (cell_kT <= kts[0]) return first;
+    if (cell_kT >= kts[count - 1]) return first + count - 1;
+    int lo = 0, hi = count - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (kts[mid] <= cell_kT) lo = mid; else hi = mid;
+    }
+    double f = (cell_kT - kts[lo]) / fmax(kts[hi] - kts[lo], 1e-30);
+    return first + (pcg_uniform(rng) < f ? hi : lo);
+}
+
+// Variant for sites that lack an rng (e.g. XS evaluator on the macro
+// path) — returns the LOWER bracketing slot deterministically. Used
+// only when the caller can't draw a uniform; the bias is bounded by
+// (cell_kT - kt_lo) / (kt_hi - kt_lo) × Δσ, which is small for the
+// typical 50-100 K column spacing.
+__device__ __forceinline__ int sab_select_slot_det(
+    int nuc_idx, double cell_kT, Params p)
+{
+    int first = PTR_I(p, P_SAB_SLOT_PER_NUC)[nuc_idx];
+    if (first < 0) return -1;
+    int count = PTR_I(p, P_SAB_SLOT_COUNT_PER_NUC)[nuc_idx];
+    if (count <= 0) return -1;
+    if (count == 1) return first;
+    const double* kts = &PTR_D(p, P_SAB_SLOT_KT)[first];
+    if (cell_kT <= kts[0]) return first;
+    if (cell_kT >= kts[count - 1]) return first + count - 1;
+    int lo = 0, hi = count - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (kts[mid] <= cell_kT) lo = mid; else hi = mid;
+    }
+    return first + lo;
+}
+
 // ── SAB elastic channel ────────────────────────────────────────────
 //
 // Per-slot dispatch on `P_SAB_SLOT_ELASTIC_MODE[slot]`:
@@ -1692,9 +1759,13 @@ struct NuclideMacroXs {
     double s_el, s_inel, s_n2n, s_n3n, s_fis, s_cap;
 };
 
+// `cell_kT` (eV) drives the SAB stochastic-temperature lookup; pass
+// `mat_kT[mat]` from the caller. -1.0 disables SAB temp interp and
+// falls back to the legacy single-temp behaviour (used by debug
+// kernels that don't carry a meaningful temperature).
 __device__ NuclideMacroXs eval_nuclide_macro_xs(
     int ni, double Ni, double E, double urr_xi,
-    int sab_nuc_idx, int rank, Params p)
+    int sab_nuc_idx, int rank, Params p, double cell_kT)
 {
     int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[ni]);
     int n_e   = __ldg(&PTR_I(p, P_N_ENERGIES)[ni]);
@@ -1836,7 +1907,12 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
     // — the per-nuclide table is authoritative.
     (void)sab_nuc_idx;
     if (SCALAR_I(p, P_SAB_N_SLOTS) > 0 && E > 0.0) {
-        int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[ni];
+        // Deterministic select on the XS path (no rng in scope) — the
+        // sampling path below uses the stochastic variant. Bias from
+        // picking the lower-bracket column on the XS is bounded by
+        // the per-bin σ difference, much smaller than ignoring temp
+        // interp entirely.
+        int sab_slot = sab_select_slot_det(ni, cell_kT, p);
         if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
             // Replace the free-atom elastic with SAB inelastic + SAB
             // elastic (coh / inc) — the elastic block was previously
@@ -1944,7 +2020,8 @@ transport_persistent(
             // index 3 is H-1 in that hardcoded geometry. Pass sab_nuc_idx
             // = 3 so the helper reproduces the prior `ni == 3` gate.
             NuclideMacroXs xs = eval_nuclide_macro_xs(ni, Ni, E, urr_xi,
-                                                     /*sab_nuc_idx*/ 3, rank, p);
+                                                     /*sab_nuc_idx*/ 3, rank, p,
+                                                     /*cell_kT*/ -1.0);
             nuc_t[i] = xs.s_t;
             sum_t   += xs.s_t;
         }
@@ -1987,7 +2064,8 @@ transport_persistent(
             // urr_xi as Pass 1 — deterministic, so Σ_x sum back to Σ_t
             // and reaction weights stay normalised.
             NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
-                hit_nuc, Ni_hit, E, urr_xi, /*sab_nuc_idx*/ 3, rank, p);
+                hit_nuc, Ni_hit, E, urr_xi, /*sab_nuc_idx*/ 3, rank, p,
+                /*cell_kT*/ -1.0);
 
             // Sample reaction — order matches CPU: el, inel, n2n, n3n, fis, cap
             double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
@@ -1997,11 +2075,18 @@ transport_persistent(
             if (xi_rxn < cum_rxn) {
                 // ═══ Elastic scattering ═══
 
+                // Legacy hardcoded cell_kT — kept here only because the
+                // pre-recursive `transport_persistent` kernel has no
+                // material table to read mat_kT[mat] from. Used by
+                // both the SAB slot select and the free-gas branch.
+                double cell_kT = (cell==0 && gt==GEOM_PWR) ? 900.0*8.617333262e-5 : 600.0*8.617333262e-5;
+                if (gt==GEOM_GODIVA) cell_kT = 294.0*8.617333262e-5;
+
                 // S(α,β) via the per-nuclide slot lookup. The
                 // hardcoded `hit_nuc==3` legacy assumption is gone;
                 // any nuclide can now carry a TSL.
                 if (SCALAR_I(p, P_SAB_N_SLOTS) > 0) {
-                    int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[hit_nuc];
+                    int sab_slot = sab_select_slot(hit_nuc, cell_kT, &rng, p);
                     if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
                         double E_sab, mu_sab;
                         sab_sample(E, &rng, sab_slot, p, &E_sab, &mu_sab);
@@ -2011,10 +2096,6 @@ transport_persistent(
                         goto end_coll;
                     }
                 }
-
-                // Free-gas thermal for light nuclides
-                double cell_kT = (cell==0 && gt==GEOM_PWR) ? 900.0*8.617333262e-5 : 600.0*8.617333262e-5;
-                if (gt==GEOM_GODIVA) cell_kT = 294.0*8.617333262e-5;
 
                 if (E < 400.0*cell_kT) {
                     double sigma=sqrt(cell_kT/A), v_n=sqrt(2.0*E);
@@ -2424,7 +2505,8 @@ extern "C" __global__ void debug_transport_trace(
             int ni    = __ldg(&PTR_I(p, P_MAT_NUC_IDX)[mat * MAX_NUC_PER_MAT + i]);
             double Ni = __ldg(&PTR_D(p, P_MAT_ATOM_DENS)[mat * MAX_NUC_PER_MAT + i]);
             NuclideMacroXs xs = eval_nuclide_macro_xs(ni, Ni, E, urr_xi,
-                                                     /*sab_nuc_idx*/ 3, rank, p);
+                                                     /*sab_nuc_idx*/ 3, rank, p,
+                                                     /*cell_kT*/ -1.0);
             nuc_t[i] = xs.s_t;
             sum_t   += xs.s_t;
         }
@@ -2473,7 +2555,8 @@ extern "C" __global__ void debug_transport_trace(
             // Pass 1 → Σ_x sum back to nuc_t[hit_l]; reaction weights
             // stay normalised.
             NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
-                hit_nuc, Ni_hit, E, urr_xi, /*sab_nuc_idx*/ 3, rank, p);
+                hit_nuc, Ni_hit, E, urr_xi, /*sab_nuc_idx*/ 3, rank, p,
+                /*cell_kT*/ -1.0);
 
             trace[row+10] = (double)hit_nuc;
             trace[row+11] = hit_xs.s_el  / Ni_hit;

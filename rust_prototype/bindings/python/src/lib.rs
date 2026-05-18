@@ -1788,27 +1788,22 @@ fn run_gpu_eigenvalue(
     // simultaneous H-in-H₂O + D-in-D₂O + C-in-graphite all sample
     // correctly on the GPU.
     let n_nuc = nuclide_specs.len();
+    // Stochastic-T interpolation: upload the full kT grid for each
+    // TSL — `nuclide_specs[i].3` (the precomputed temp_idx) is now
+    // unused.
     let sab_slots: Vec<(
         &open_rust_mc::thermal::ThermalScatteringData,
-        usize,
         usize,
     )> = thermal
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| {
-            t.as_ref().map(|tsl| {
-                let (_, _, _, temp_idx) = &nuclide_specs[i];
-                (tsl.as_ref(), *temp_idx, i)
-            })
-        })
+        .filter_map(|(i, t)| t.as_ref().map(|tsl| (tsl.as_ref(), i)))
         .collect();
     // sab_nuc_idx is retained for compatibility with the CudaRunner
-    // field but is no longer authoritative — the slot table is. Set it
-    // to the first SAB-bearing nuclide so legacy kernel paths that
-    // still consult it stay correct for single-TSL scenes.
+    // field but is no longer authoritative — the slot table is.
     let sab_nuc_idx: i32 = sab_slots
         .first()
-        .map(|(_, _, idx)| *idx as i32)
+        .map(|(_, idx)| *idx as i32)
         .unwrap_or(-1);
     let sab_data = gpu
         .upload_sab_data_multi(&sab_slots, n_nuc)
@@ -3063,31 +3058,24 @@ fn run_gpu_icsbep(
         .map_err(|e| gpu_err("upload materials", e))?;
 
     // Multi-slot SAB upload — every thermal nuclide goes into its own
-    // slot. The first material temperature is used to pick each TSL's
-    // temperature index (mirrors `tests/cuda_runs.rs` semantics).
-    let pick_temp = if !materials_rt.is_empty() {
-        materials_rt[0].temperature
-    } else {
-        294.0
-    };
+    // slot. Every TSL's full kT grid is uploaded — the kernel selects
+    // stochastically between bracketing temps at every collision via
+    // `mat_kT[mat]`. The previous "pick one temp_idx at upload time"
+    // shortcut locked the GPU to materials_rt[0].temperature and
+    // mis-sampled cells whose material temp differed.
+    let _ = limits.sab_temperature_tolerance; // no longer consulted here
     let sab_slots: Vec<(
         &open_rust_mc::thermal::ThermalScatteringData,
-        usize,
         usize,
     )> = provider
         .thermal
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| {
-            t.as_ref().map(|tsl| {
-                let t_idx = tsl.select_temperature(pick_temp, limits.sab_temperature_tolerance);
-                (tsl.as_ref(), t_idx, i)
-            })
-        })
+        .filter_map(|(i, t)| t.as_ref().map(|tsl| (tsl.as_ref(), i)))
         .collect();
     let sab_nuc_idx: i32 = sab_slots
         .first()
-        .map(|(_, _, idx)| *idx as i32)
+        .map(|(_, idx)| *idx as i32)
         .unwrap_or(-1);
     let sab_data = gpu
         .upload_sab_data_multi(&sab_slots, n_nuc)

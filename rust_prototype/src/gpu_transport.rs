@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 183;
+const N_PARAMS: usize = 185;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -601,12 +601,22 @@ pub struct GpuSabData {
     pub xs: CudaSlice<f64>,
 
     // Per-slot indirection.
-    /// Number of populated slots. `0` means no SAB.
+    /// Number of populated slots. `0` means no SAB. Each SAB-bearing
+    /// nuclide contributes N slots, one per kT column on its TSL — the
+    /// kernel selects stochastically between them per collision.
     pub n_slots: i32,
-    /// `[n_nuc]`: nuclide → slot index, or `-1`. Always allocated even
-    /// when `n_slots == 0` (filled with `-1`) so the kernel can
-    /// indirect unconditionally.
+    /// `[n_nuc]`: nuclide → FIRST slot index, or `-1`. The remaining
+    /// `slot_count_per_nuc[nuc_idx] - 1` slots immediately follow.
     pub slot_per_nuc: CudaSlice<i32>,
+    /// `[n_nuc]`: number of consecutive slots for this nuclide
+    /// (= TSL's `kts.len()`). `0` when no SAB is bound. Always
+    /// allocated so the kernel can indirect unconditionally.
+    pub slot_count_per_nuc: CudaSlice<i32>,
+    /// `[n_slots]`: per-slot kT (eV). Paired with `slot_per_nuc` to
+    /// drive the stochastic temperature interpolation — kernel reads
+    /// `slot_kt[first..first+count]` and selects between bracketing
+    /// entries via `mat_kT[mat]`.
+    pub slot_kt: CudaSlice<f64>,
     /// `[n_slots]`: offset into `inc_energies` / `xs` where this slot's
     /// inc-energy grid starts.
     pub slot_inc_e_off: CudaSlice<i32>,
@@ -1382,6 +1392,10 @@ impl GpuTransportContext {
             // P_ANG_PDF_PTRS / P_LEV_ANG_PDF_PTRS in transport.cu.
             dptr!(&nuc_data.ang_pdf_ptrs),
             dptr!(&nuc_data.lev_ang_pdf_ptrs),
+            // Stochastic-T interpolation — slots 183-184. See
+            // P_SAB_SLOT_COUNT_PER_NUC / P_SAB_SLOT_KT in transport.cu.
+            dptr!(&sab_data.slot_count_per_nuc),
+            dptr!(&sab_data.slot_kt),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1971,11 +1985,14 @@ impl GpuTransportContext {
     pub fn upload_sab_data(
         &self,
         tsl: &crate::thermal::ThermalScatteringData,
-        temp_idx: usize,
+        _temp_idx: usize,
         nuc_idx: usize,
         n_nuc: usize,
     ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
-        self.upload_sab_data_multi(&[(tsl, temp_idx, nuc_idx)], n_nuc)
+        // `_temp_idx` is now unused — `upload_sab_data_multi` uploads
+        // every kT column and the kernel selects stochastically per
+        // collision. Wrapper kept for backwards-compatible signature.
+        self.upload_sab_data_multi(&[(tsl, nuc_idx)], n_nuc)
     }
 
     /// Upload multiple S(α,β) libraries simultaneously, one per
@@ -1986,11 +2003,19 @@ impl GpuTransportContext {
     ///
     /// Discrete-mode TSLs are currently uploaded as empty slots; the
     /// fast continuous-inelastic path is what the kernel consumes.
+    /// Stochastic-T interpolation: every TSL's full kT grid is now
+    /// uploaded as N consecutive slots (one per temperature column).
+    /// `slot_per_nuc[nuc_idx]` points at the FIRST slot for that
+    /// nuclide; `slot_count_per_nuc[nuc_idx]` is N. The kernel picks
+    /// stochastically between the two bracketing slots at every
+    /// collision using `mat_kT[mat]` — mirroring the CPU's
+    /// `tsl.select_temperature(cell.T, ξ)` call (4 sites in
+    /// `simulate.rs`). Previously the GPU picked one temp_idx at
+    /// upload time and locked to it.
     pub fn upload_sab_data_multi(
         &self,
         slots: &[(
             &crate::thermal::ThermalScatteringData,
-            usize, /* temp_idx */
             usize, /* nuc_idx */
         )],
         n_nuc: usize,
@@ -2025,10 +2050,15 @@ impl GpuTransportContext {
         let mut coh_bragg_edges_flat: Vec<f64> = Vec::new();
         let mut coh_factors_flat: Vec<f64> = Vec::new();
 
-        // Per-nuclide → slot lookup. Default -1.
+        // Per-nuclide → (first slot, count) lookup. Default (-1, 0).
         let mut slot_per_nuc: Vec<i32> = vec![-1; n_nuc.max(1)];
+        let mut slot_count_per_nuc: Vec<i32> = vec![0; n_nuc.max(1)];
+        // Per-slot kT (eV) — needed for the kernel-side `select_temp`
+        // routine that picks between bracketing slots based on
+        // `mat_kT[mat]` per collision.
+        let mut slot_kt: Vec<f64> = Vec::new();
 
-        for (tsl, temp_idx, nuc_idx) in slots.iter().copied() {
+        for (tsl, nuc_idx) in slots.iter().copied() {
             if nuc_idx >= n_nuc {
                 return Err(format!(
                     "upload_sab_data_multi: nuc_idx {nuc_idx} >= n_nuc {n_nuc}"
@@ -2041,8 +2071,14 @@ impl GpuTransportContext {
                 )
                 .into());
             }
+            let first_slot = slot_inc_e_off.len() as i32;
+            slot_per_nuc[nuc_idx] = first_slot;
+            slot_count_per_nuc[nuc_idx] = tsl.kts.len() as i32;
+
+            // Iterate every kT column of this TSL — one slot per temp.
+            for temp_idx in 0..tsl.kts.len() {
             let slot_id = slot_inc_e_off.len() as i32;
-            slot_per_nuc[nuc_idx] = slot_id;
+            slot_kt.push(tsl.kts[temp_idx]);
 
             let inel = &tsl.inelastic[temp_idx];
             match &inel.dist {
@@ -2152,6 +2188,7 @@ impl GpuTransportContext {
                     );
                 }
             }
+            } // end inner `for temp_idx in 0..tsl.kts.len()`
         }
 
         // Ensure no flat array is empty (cudarc rejects zero-sized
@@ -2196,8 +2233,13 @@ impl GpuTransportContext {
             coh_bragg_edges_flat.push(0.0);
             coh_factors_flat.push(0.0);
         }
+        if slot_kt.is_empty() {
+            slot_kt.push(0.0);
+        }
 
-        let n_slots = slots.len() as i32;
+        // Total slots = Σ (kts.len() per uploaded TSL) — not the
+        // number of nuclides. Was `slots.len()` before multi-temp.
+        let n_slots: i32 = slot_count_per_nuc.iter().sum();
         // Legacy mirrors for the single-slot fast path in transport.cu.
         let (legacy_n_inc, legacy_emax) = if n_slots > 0 {
             (slot_n_inc[0], slot_emax[0])
@@ -2220,6 +2262,8 @@ impl GpuTransportContext {
 
             n_slots,
             slot_per_nuc: self.stream.clone_htod(&slot_per_nuc)?,
+            slot_count_per_nuc: self.stream.clone_htod(&slot_count_per_nuc)?,
+            slot_kt: self.stream.clone_htod(&slot_kt)?,
             slot_inc_e_off: self.stream.clone_htod(&slot_inc_e_off)?,
             slot_n_inc: self.stream.clone_htod(&slot_n_inc)?,
             slot_eout_table_off: self.stream.clone_htod(&slot_eout_table_off)?,
