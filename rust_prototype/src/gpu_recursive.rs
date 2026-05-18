@@ -416,6 +416,31 @@ impl GpuRecursiveContext {
     /// Build a context for `geom`. The kernel is compiled with NVRTC
     /// and the geometry tables are uploaded once.
     pub fn build(geom: &Geometry, n_threads_max: usize) -> Result<Self, String> {
+        // CPU geometry supports per-cell Mat3 rotations propagating
+        // through `CoordStack` descent (`geometry/coord.rs:75`,
+        // `geometry/ray.rs:174-202`). The GPU `gr_find_cell` /
+        // `gr_trace_step` kernels descend axis-aligned only — they
+        // never apply a rotation matrix to the parent-frame position
+        // / direction during cell entry. No ICSBEP / KARMA scene
+        // currently sets `rotation` on any cell, but a custom scene
+        // (VVER hex pin rotations, rotated assemblies) would silently
+        // mis-find cells on the GPU. Fail loud here so the gap is
+        // visible the moment a rotated scene is loaded.
+        if let Some((cell_idx, _)) = geom
+            .cells
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.rotation.is_some())
+        {
+            return Err(format!(
+                "GPU recursive geometry does not support per-cell Mat3 \
+                 rotations yet (cell index {cell_idx} has `rotation = \
+                 Some(...)`). CPU recursive descent applies rotations in \
+                 `CoordStack::local_pos / local_dir`; the GPU descent \
+                 path has no equivalent. Use Runner.Cpu for this scene \
+                 or remove the cell rotation."
+            ));
+        }
         let ctx = CudaContext::new(0).map_err(|e| format!("CUDA init: {e}"))?;
         let stream = ctx.default_stream();
 

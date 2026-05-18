@@ -2116,29 +2116,27 @@ impl GpuTransportContext {
                     );
                 }
                 crate::thermal::InelasticDist::Discrete(_) => {
-                    println!(
-                        "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): discrete mode — \
-                         empty placeholder"
-                    );
-                    let inc_e_off = inc_e_flat.len() as i32;
-                    inc_e_flat.push(0.0);
-                    xs_flat.push(0.0);
-                    let eout_table_off = eout_offsets_flat.len() as i32;
-                    eout_offsets_flat.push(0);
-                    eout_sizes_flat.push(0);
-                    let mu_table_off = mu_offsets_flat.len() as i32;
-                    mu_offsets_flat.push(0);
-                    mu_sizes_flat.push(0);
-
-                    slot_inc_e_off.push(inc_e_off);
-                    slot_n_inc.push(0);
-                    slot_eout_table_off.push(eout_table_off);
-                    slot_mu_table_off.push(mu_table_off);
-                    slot_emax.push(0.0);
-
-                    // Discrete-inelastic slot still gets its elastic
-                    // packed — elastic data is independent of the
-                    // inelastic distribution kind.
+                    // Discrete S(α,β) inelastic (NJOY iwt=0/1) is not
+                    // implemented on the GPU device sampler. The CPU
+                    // path lives at `thermal.rs::sample_discrete_inelastic`
+                    // (called from `simulate.rs` thermal branch); the
+                    // GPU would need an equivalent device-side sampler
+                    // plus uploads of the `energy_out[n_inc][n_out]` and
+                    // `mu_out[n_inc][n_out][n_mu]` tensors. The OpenMC
+                    // ENDF/B-VII.1 HDF5 distribution ships every TSL
+                    // as `incoherent_inelastic` (continuous), so no
+                    // case in the current ICSBEP / KARMA corpus hits
+                    // this branch — but custom ACE→HDF5 conversions
+                    // can produce discrete TSLs and would silently
+                    // mis-sample on the GPU. Fail loud here instead.
+                    return Err(format!(
+                        "upload_sab_data_multi: nuc {nuc_idx} TSL uses \
+                         discrete inelastic (NJOY iwt=0/1) which is not \
+                         implemented on the GPU device sampler. Use \
+                         Runner.Cpu, or rebuild this TSL with the \
+                         continuous (iwt=2) inelastic format."
+                    ).into());
+                    #[allow(unreachable_code)]
                     pack_sab_elastic(
                         tsl,
                         temp_idx,
