@@ -20,6 +20,11 @@ rayon = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 toml = "0.8"
+dashmap = "6"
+# CPUID-based cache topology — bypasses WMI/sysfs for L2/L3 sizes.
+# On AMD X3D chips WMI returns one CCX entry (8 MB) instead of the
+# stacked total (96 MB on 9800X3D); raw-cpuid sums all entries.
+raw-cpuid = "11"
 
 [workspace.lints.clippy]
 # Physics-specific lint overrides applied across the entire workspace
@@ -74,11 +79,10 @@ smallvec = { version = "1", features = ["const_generics", "union"] }
 num-complex = "0.4"
 serde_json = "1"
 # Nuclide kernel cache — see src/transport/nuclide_cache. DashMap drives
-# the in-process L1 store, blake3 keys the L2 disk store (content-addressed
-# so swapping ENDF/B-VII.1 for VIII.0 in the same path auto-invalidates
-# entries), bytemuck does zero-copy reinterpretation of raw f64/i32 blobs
-# for the binary on-disk format.
-dashmap = "6"
+# the in-process L1 store (workspace dep above), blake3 keys the L2 disk
+# store (content-addressed so swapping ENDF/B-VII.1 for VIII.0 in the
+# same path auto-invalidates entries), bytemuck does zero-copy reinterp
+# of raw f64/i32 blobs for the binary on-disk format.
 blake3 = "1"
 bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 # Native PNG encoder for `preview_scene` headless renders. Solid-
@@ -92,12 +96,10 @@ png = "0.17"
 # caches (l1_memory + gpu bundle) and tune rayon pool defaults.
 # One query at startup; runtime cost is negligible.
 hardware-query = "0.2.1"
-# CPUID-based CPU topology — bypasses WMI/sysfs for L3 cache size.
-# Required on AMD X3D chips where hardware-query under-reports L3:
-# WMI returns one CCX entry (8 MB) instead of the full stacked total
-# (96 MB on 9800X3D). raw-cpuid enumerates all cache topology leaves
-# and sums them correctly.
-raw-cpuid = "11"
+# raw-cpuid (workspace dep above) is used for L2 / L3 cache topology:
+# on AMD X3D chips WMI returns one CCX entry (8 MB) instead of the full
+# stacked total (96 MB on 9800X3D). raw-cpuid enumerates the CPUID
+# cache-topology leaves directly and sums them correctly.
 
 [features]
 default = []

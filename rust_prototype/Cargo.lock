@@ -1726,6 +1726,7 @@ dependencies = [
  "ndarray-npy",
  "num-complex",
  "png",
+ "raw-cpuid",
  "rayon",
  "rust-mc-sim",
  "serde",
