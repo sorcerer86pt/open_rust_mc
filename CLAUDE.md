@@ -356,42 +356,50 @@ from the ICSBEP handbook k_eff.
 
 ## What's Open / Research-Tier
 
-- **CPU↔GPU divergence on multi-nuclide fast-spectrum metal**
-  (`ieu-met-fast-001`, `heu-met-fast-011`). Empirical 3-seed averages
-  on quick (80 b × 5 k × 3 seeds) settings:
-  - `ieu-met-fast-001_case-3`: CPU avg +82 pcm, GPU avg +590 pcm —
-    **~510 pcm GPU hot**.
-  - `heu-met-fast-011`: CPU avg −951 pcm, GPU avg −249 pcm —
-    **~702 pcm gap**.
-  - `heu-met-fast-029` (HEU + DU layers, no W, no polyethylene):
-    CPU avg +437, GPU avg +440 — **3 pcm gap** (clean reference).
-  Pattern correlates with the presence of structural / heavy
-  reflector nuclides (W-isotopes, Fe, polyethylene). Likely
-  candidates: elastic angular CDF upload, per-MT discrete level
-  rank-padding miss for non-actinides, multi-nuclide
-  `eval_nuclide_macro_xs` accumulator. The HEU-MET-FAST-058 case-1
-  SAB-elastic fix (commit `563815e`) did NOT close this — these
-  cases have no S(α,β). Next focused dive.
+- **Residual CPU↔GPU divergence on multi-nuclide fast-spectrum
+  metal**. After the angular-PDF quadratic fix (`27ffa24`) the gap
+  narrowed substantially but didn't close. 3-seed quick (80 b × 5 k)
+  averages:
+  - `ieu-met-fast-001_case-3`: gap +510 → **+340 pcm** (170 closed).
+  - `heu-met-fast-011`: gap +702 → **+631 pcm** (70 closed).
+  - `heu-met-fast-029` (clean reference): unchanged within MC noise.
+  Pattern still correlates with structural / heavy nuclides (W, H-1
+  in polyethylene, Al-27, Cr, Mn). Likely remaining candidates:
+  free-gas thermal elastic on light nuclides (Box-Muller target
+  velocity sampling), CM→lab transformation in anisotropic elastic,
+  per-MT angular for non-actinide MT=51..91. Needs CPU/GPU
+  per-event-type A/B diagnostic to localise.
 - **GPU survival biasing / Russian roulette unimplemented**.
   Verified: no `survival_bias` / `russian_roulette` / `w_min` hits in
-  `gpu/cuda/*.cu`. CPU uses these for FOM (4.5× on PWR per CLAUDE.md
-  headline numbers); GPU runs analog. *Not* a k_eff bias (analog and
-  non-analog absorption have the same expected value), but the GPU
-  has worse seed-to-seed variance on capture-heavy systems.
+  `gpu/cuda/*.cu`. CPU uses these for FOM (4.5× on PWR per the
+  headline numbers above); GPU runs analog. *Not* a k_eff bias
+  (analog and non-analog absorption have the same expected value)
+  — affects GPU seed-to-seed variance only. Lower priority than
+  correctness gaps.
 - **GPU stochastic temperature interpolation across SAB kT columns
   unimplemented**. CPU calls `tsl.select_temperature(cell.T, ξ)` per
   collision (4 sites in `simulate.rs`); GPU locks each slot to a
-  single `temp_idx` at upload time. Doesn't bias when the cell temp
-  sits at the bottom of the SAB grid (HEU-MET-FAST-058 case-1 at
-  293.6 K is below the 294 K column), but mis-models cases with
-  cell T between SAB columns.
-- **GPU per-cell `Mat3` rotation unimplemented**. CPU's `Cell.rotation:
-  Option<Mat3>` propagates through `CoordStack` descent. No
-  ICSBEP scene currently uses rotated cells, so the gap is silent —
-  but adding a rotated lattice would yield wrong cell-finds on GPU.
-- **GPU `PeriodicBC` unimplemented**. CPU has it; GPU only knows
-  `GR_BC_TRANSMISSION` / `GR_BC_VACUUM` / `GR_BC_REFLECTIVE`. No
-  current scene uses Periodic BCs.
+  single `temp_idx` at upload time via the
+  `sab_temperature_tolerance` envelope. Within tolerance of a grid
+  column the difference is negligible — most current ICSBEP scenes
+  set cell temperatures that coincide with library columns (293.6,
+  400, 600, 900 K). Cases with cell T strictly between columns are
+  mis-modelled by up to the column-to-column σ difference. Open.
+- **GPU per-cell `Mat3` rotation unimplemented**. CPU's
+  `Cell.rotation: Option<Mat3>` propagates through `CoordStack`
+  descent (`geometry/coord.rs:75`, `geometry/ray.rs:174-202`). No
+  ICSBEP scene currently sets `rotation` on any cell.
+  `GpuRecursiveContext::build` (commit `9816710`) now errors out
+  loudly if any cell has `rotation = Some(...)` — silent mis-finds
+  are no longer possible on the GPU.
+- **GPU discrete S(α,β) inelastic (NJOY iwt=0/1) unimplemented**.
+  Same pattern as the rotation gap. CPU has
+  `thermal::sample_discrete_inelastic`; GPU device sampler is
+  continuous-only. OpenMC's ENDF/B-VII.1 HDF5 distribution emits
+  every TSL as `incoherent_inelastic` (continuous), so zero hits in
+  the 157-case sweep. `upload_sab_data_multi` (commit `9816710`)
+  now errors when a TSL arrives as `InelasticDist::Discrete`
+  instead of silently uploading an empty placeholder.
 - **DXTRAN-style continuous splitting** for >14 mfp photon penetration.
   All `(ratio, growth) ∈ {5,10,20} × {0,1,2,3}` at 300 cm give 0
   transmitted in 500k — `max_split=8` ceiling bounds geometric WW.
