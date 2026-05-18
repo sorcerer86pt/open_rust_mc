@@ -221,9 +221,20 @@ fn report_delta(cpu: &Active, gpu: &Active, particles_per_batch: u64) {
 }
 
 fn main() {
-    let case_file = workspace_root()
-        .join("bench/icsbep")
-        .join("heu-met-fast-001_case-1.json");
+    // Optional argv[1] = case stem (e.g. "ieu-met-fast-001_case-3") or
+    // full JSON path. Defaults to heu-met-fast-001_case-1 (Godiva) so
+    // historical invocations keep working.
+    let case_arg: Option<String> = std::env::args().nth(1);
+    let case_file = match case_arg {
+        Some(s) if s.ends_with(".json") => std::path::PathBuf::from(s),
+        Some(stem) => workspace_root()
+            .join("bench/icsbep")
+            .join(format!("{stem}.json")),
+        None => workspace_root()
+            .join("bench/icsbep")
+            .join("heu-met-fast-001_case-1.json"),
+    };
+    eprintln!("case: {}", case_file.display());
     let text = std::fs::read_to_string(&case_file).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 

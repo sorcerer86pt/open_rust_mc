@@ -357,18 +357,29 @@ from the ICSBEP handbook k_eff.
 ## What's Open / Research-Tier
 
 - **Residual CPU↔GPU divergence on multi-nuclide fast-spectrum
-  metal**. After the angular-PDF quadratic fix (`27ffa24`) the gap
-  narrowed substantially but didn't close. 3-seed quick (80 b × 5 k)
-  averages:
-  - `ieu-met-fast-001_case-3`: gap +510 → **+340 pcm** (170 closed).
-  - `heu-met-fast-011`: gap +702 → **+631 pcm** (70 closed).
-  - `heu-met-fast-029` (clean reference): unchanged within MC noise.
-  Pattern still correlates with structural / heavy nuclides (W, H-1
-  in polyethylene, Al-27, Cr, Mn). Likely remaining candidates:
-  free-gas thermal elastic on light nuclides (Box-Muller target
-  velocity sampling), CM→lab transformation in anisotropic elastic,
-  per-MT angular for non-actinide MT=51..91. Needs CPU/GPU
-  per-event-type A/B diagnostic to localise.
+  metal** — localised to **geometric traversal drift**, not physics.
+  After the angular-PDF quadratic fix (`27ffa24`) the gap narrowed
+  but didn't close. Per-event A/B diagnostic via the parametrised
+  `metal_stats_diag <case>` on `ieu-met-fast-001_case-3` (commit
+  `4d4ab8e` — TBD) found:
+  - **Surface crossings / source on GPU = +9.17%** vs CPU (11.50 →
+    12.55) at matched collision count (within 0.4%).
+  - All per-reaction counts (elastic, inelastic, fission, capture)
+    agree within 0.5%.
+  - GPU's ⟨E_in⟩ at fission is +1.6% higher, ⟨E_in⟩ elastic +1.4%
+    higher, ⟨E_out⟩ inelastic +0.6% higher — particles thermalise
+    measurably slower because the extra surface crossings shift
+    where collisions happen along each track.
+  Not a sampling / kinematics bug — `rotate_direction`,
+  `free_gas_scatter`, CM→lab transformations all match CPU
+  algebraically (verified by static code-diff in this session).
+  Candidate root causes: (a) `gr_trace_step` returning a near-zero
+  distance occasionally, registering as a no-op crossing;
+  (b) float-precision divergence in the sqrt(b² − c) sphere-intersect
+  formula for near-tangent rays hitting shell boundaries on the
+  25 cm outer sphere; (c) AABB cell-find tie-breaking on shared
+  surfaces. Next step: dump a single-particle trace on both backends
+  and diff the cell-by-cell surface_idx sequence.
 - **GPU survival biasing / Russian roulette unimplemented**.
   Verified: no `survival_bias` / `russian_roulette` / `w_min` hits in
   `gpu/cuda/*.cu`. CPU uses these for FOM (4.5× on PWR per the
