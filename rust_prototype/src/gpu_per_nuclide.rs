@@ -119,6 +119,11 @@ pub struct UrrSlicesGpu {
     pub n_energies: i32,
     pub n_bands: i32,
     pub multiply_smooth: i32,
+    /// ENDF interpolation code: 2 = lin-lin (default), 5 = log-log.
+    /// Used by the GPU `apply_urr` to interpolate URR factors between
+    /// the two bracketing energy bins — mirrors CPU's
+    /// `UrrProbabilityTables::sample` (hdf5_reader.rs:1948).
+    pub interpolation: i32,
     pub energies: CudaSlice<f64>,
     pub cum_prob: CudaSlice<f64>,
     pub total_factor: CudaSlice<f64>,
@@ -1199,6 +1204,10 @@ pub struct AssembledBundleA7Cat {
     pub urr_n_energies_vec: Vec<i32>,
     pub urr_n_bands_vec: Vec<i32>,
     pub urr_multiply_smooth_vec: Vec<i32>,
+    /// Per-nuclide URR interpolation code (2 = lin-lin, 5 = log-log).
+    /// `0` when no URR for this nuclide (kernel guards on
+    /// `urr_n_energies_vec[ni] > 0` anyway).
+    pub urr_interpolation_vec: Vec<i32>,
 }
 
 pub fn assemble_a7_cat(
@@ -1237,6 +1246,7 @@ pub fn assemble_a7_cat(
     let mut urr_n_energies_vec = vec![0_i32; n_nuc];
     let mut urr_n_bands_vec = vec![0_i32; n_nuc];
     let mut urr_multiply_smooth_vec = vec![0_i32; n_nuc];
+    let mut urr_interpolation_vec = vec![0_i32; n_nuc];
 
     let mut run_e = 0_usize;
     let mut run_fac = 0_usize;
@@ -1249,6 +1259,7 @@ pub fn assemble_a7_cat(
         urr_n_energies_vec[nuc_idx] = u.n_energies;
         urr_n_bands_vec[nuc_idx] = u.n_bands;
         urr_multiply_smooth_vec[nuc_idx] = u.multiply_smooth;
+        urr_interpolation_vec[nuc_idx] = u.interpolation;
         if ne > 0 {
             let mut dst = urr_energies.slice_mut(run_e..run_e + ne);
             stream.memcpy_dtod(&u.energies, &mut dst)?;
@@ -1280,6 +1291,7 @@ pub fn assemble_a7_cat(
         urr_n_energies_vec,
         urr_n_bands_vec,
         urr_multiply_smooth_vec,
+        urr_interpolation_vec,
     })
 }
 
@@ -1862,6 +1874,7 @@ fn build_urr_slices(
         n_energies: urr.energies.len() as i32,
         n_bands: urr.n_bands as i32,
         multiply_smooth: if urr.multiply_smooth { 1 } else { 0 },
+        interpolation: urr.interpolation as i32,
         energies: stream.clone_htod(&urr.energies)?,
         cum_prob: stream.clone_htod(&cp)?,
         total_factor: stream.clone_htod(&tf)?,

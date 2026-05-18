@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 185;
+const N_PARAMS: usize = 186;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -381,6 +381,13 @@ pub struct GpuNuclideData {
     pub urr_n_energies: CudaSlice<i32>,
     pub urr_n_bands: CudaSlice<i32>,
     pub urr_multiply_smooth: CudaSlice<i32>,
+    /// Per-nuclide URR interpolation code (2 = lin-lin / linear,
+    /// 5 = log-log). Drives the URR-factor interpolation between the
+    /// two bracketing energy bins in the GPU `apply_urr`. Previously
+    /// the GPU only used the lower bin (no interpolation), biasing
+    /// the URR factor and hardening the spectrum on multi-nuclide
+    /// structural-reflector cases (Fe/Cr/Mn/Cu/Ni/W URR ranges).
+    pub urr_interpolation: CudaSlice<i32>,
     // ── Synthesized MT=4 + per-level CDF for nuclides whose ENDF/B-VII.1
     //    evaluation omits the total-inelastic block (Zr-90/91/92/94, U-238).
     //    Replaces the do_inelastic 13-level walk with a single binary
@@ -1396,6 +1403,8 @@ impl GpuTransportContext {
             // P_SAB_SLOT_COUNT_PER_NUC / P_SAB_SLOT_KT in transport.cu.
             dptr!(&sab_data.slot_count_per_nuc),
             dptr!(&sab_data.slot_kt),
+            // URR bin-to-bin interpolation code — slot 185.
+            dptr!(&nuc_data.urr_interpolation),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1867,6 +1876,7 @@ impl GpuTransportContext {
             urr_n_energies: self.stream.clone_htod(&a7.urr_n_energies_vec)?,
             urr_n_bands: self.stream.clone_htod(&a7.urr_n_bands_vec)?,
             urr_multiply_smooth: self.stream.clone_htod(&a7.urr_multiply_smooth_vec)?,
+            urr_interpolation: self.stream.clone_htod(&a7.urr_interpolation_vec)?,
             inel_cdf_data: a8.inel_cdf_data,
             inel_cdf_off: self.stream.clone_htod(&a8.inel_cdf_off_vec)?,
             inel_cdf_n_e: self.stream.clone_htod(&a8.inel_cdf_n_e_vec)?,

@@ -371,7 +371,15 @@
 #define P_SAB_SLOT_COUNT_PER_NUC    183
 #define P_SAB_SLOT_KT               184
 
-#define N_PARAMS            185
+// ── URR interpolation code per nuclide (slot 185) ─────────────────
+// `[n_nuc]`: 2 = lin-lin (default), 5 = log-log; `0` when no URR is
+// bound for this nuclide. Drives the bin-to-bin interpolation in
+// `apply_urr`. Without this, the kernel just used the lower-bin URR
+// factor at E < grid[i_hi] — systematically biased the spectrum on
+// multi-nuclide structural-reflector cases.
+#define P_URR_INTERP                185
+
+#define N_PARAMS            186
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1482,6 +1490,35 @@ __device__ void sab_sample(
     *mu_out = fmax(-1.0, fmin(1.0, mu_k + hw * (pcg_uniform(rng) - 0.5)));
 }
 
+// Pick the band index at energy-grid row `base` from the cumulative
+// probability table `cp` using one ξ. Mirrors the `upper_bound` /
+// CPU `pick` closure (xs_provider.rs:518 → hdf5_reader.rs:1975).
+__device__ __forceinline__ int urr_pick_band(
+    const double* cp, int base, int n_b, double xi)
+{
+    int band = n_b - 1;
+    for (int b = 0; b < n_b; b++) {
+        if (xi < cp[base + b]) { band = b; break; }
+    }
+    return band;
+}
+
+// URR factor lookup. Mirrors CPU `UrrProbabilityTables::sample`:
+//   1. Find bracketing energy indices i_lo, i_hi = i_lo + 1.
+//   2. Sample band INDEPENDENTLY at both rows using the SAME ξ (the
+//      "correlated CDF interpolation" OpenMC documents in
+//      `calculate_urr_xs`).
+//   3. Look up the per-band factor at both rows.
+//   4. Interpolate between them — lin-lin (interp == 2) or log-log
+//      (interp == 5).
+// Edge case: at the boundary (i_lo == n_e-1, or E == ue[0]) use the
+// single-row lookup, matching CPU.
+//
+// Pre-fix the GPU just used the i_lo row's factor — no interpolation
+// at all. That biased the URR factor toward the lower-energy band
+// at every intermediate energy → systematic spectrum-hardening on
+// multi-nuclide structural-reflector cases (Fe / Cr / Mn / Ni / Cu
+// URR ranges in IEU + bare-HEU benchmarks).
 __device__ void apply_urr(
     Params p, int nuc_idx,
     double* sig_el, double* sig_fis, double* sig_cap, double E, double xi)
@@ -1489,19 +1526,19 @@ __device__ void apply_urr(
     int n_e = __ldg(&PTR_I(p, P_URR_N_ENERGIES)[nuc_idx]);
     if (n_e <= 0) return;
     int n_b = __ldg(&PTR_I(p, P_URR_N_BANDS)[nuc_idx]);
-    // Stage C step D — per-nuclide pointer load. Per-nuc URR tables
-    // start at their own base, so the legacy `off * n_b` term in
-    // `base` becomes zero.
     const double* ue =
         (const double*) __ldg(&PTR_U64(p, P_URR_E_PTRS)[nuc_idx]);
     if (E < ue[0] || E > ue[n_e-1]) return;
-    int ie=0; { int lo=0,hi=n_e-1;
-        while(hi-lo>1){int mid=(lo+hi) >> 1;if(ue[mid]<=E)lo=mid;else hi=mid;} ie=lo; }
-    int base = ie * n_b;
+    int ie = 0; {
+        int lo = 0, hi = n_e - 1;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >> 1;
+            if (ue[mid] <= E) lo = mid; else hi = mid;
+        }
+        ie = lo;
+    }
     const double* cp =
         (const double*) __ldg(&PTR_U64(p, P_URR_CP_PTRS)[nuc_idx]);
-    int band=0;
-    for (int b=0; b<n_b; b++) { if (xi < cp[base+b]) { band=b; break; } band=b; }
     // ft (total factor) not used — reaction-specific factors applied directly
     (void) PTR_U64(p, P_URR_TF_PTRS);
     const double* fe_arr =
@@ -1510,12 +1547,42 @@ __device__ void apply_urr(
         (const double*) __ldg(&PTR_U64(p, P_URR_FF_PTRS)[nuc_idx]);
     const double* fc_arr =
         (const double*) __ldg(&PTR_U64(p, P_URR_CF_PTRS)[nuc_idx]);
-    double fe = fe_arr[base+band];
-    double ff = ff_arr[base+band];
-    double fc = fc_arr[base+band];
+
+    int base_lo = ie * n_b;
+    int band_lo = urr_pick_band(cp, base_lo, n_b, xi);
+    double fe = fe_arr[base_lo + band_lo];
+    double ff = ff_arr[base_lo + band_lo];
+    double fc = fc_arr[base_lo + band_lo];
+
+    // Edge case: at the upper bin or exactly on the lower energy
+    // — single-row lookup, matching CPU's
+    // `if (n_e == 1 || i_lo+1 >= n_e || energy <= self.energies[0])`.
+    if (ie + 1 < n_e && E > ue[0]) {
+        int base_hi = (ie + 1) * n_b;
+        int band_hi = urr_pick_band(cp, base_hi, n_b, xi);
+        double fe_hi = fe_arr[base_hi + band_hi];
+        double ff_hi = ff_arr[base_hi + band_hi];
+        double fc_hi = fc_arr[base_hi + band_hi];
+
+        double e_lo = ue[ie], e_hi = ue[ie + 1];
+        int interp = __ldg(&PTR_I(p, P_URR_INTERP)[nuc_idx]);
+        double f;
+        if (interp == 5 && e_lo > 0.0 && e_hi > 0.0) {
+            // Log-log
+            double den = log(e_hi / e_lo);
+            f = (fabs(den) > 1e-30) ? log(E / e_lo) / den : 0.0;
+        } else {
+            // Lin-lin (interp == 2, default)
+            f = (E - e_lo) / fmax(e_hi - e_lo, 1e-30);
+        }
+        fe = (1.0 - f) * fe + f * fe_hi;
+        ff = (1.0 - f) * ff + f * ff_hi;
+        fc = (1.0 - f) * fc + f * fc_hi;
+    }
+
     int ms = __ldg(&PTR_I(p, P_URR_MULT_SM)[nuc_idx]);
-    if (ms) { *sig_el*=fe; *sig_fis*=ff; *sig_cap*=fc; }
-    else { *sig_el=fe; *sig_fis=ff; *sig_cap=fc; }
+    if (ms) { *sig_el *= fe; *sig_fis *= ff; *sig_cap *= fc; }
+    else    { *sig_el  = fe; *sig_fis  = ff; *sig_cap  = fc; }
 }
 
 __device__ int energy_to_bin(double E) {
