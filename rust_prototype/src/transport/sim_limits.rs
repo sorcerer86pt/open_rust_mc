@@ -4,7 +4,7 @@
 //!
 //! TOML example:
 //! ```toml
-//! max_events_per_history = 5000
+//! max_events_per_history = 1000000
 //! fis_capacity_factor = 4
 //! sab_temperature_tolerance = 0.5
 //! initial_source_max_attempts_factor = 10000
@@ -16,7 +16,13 @@ use std::path::Path;
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct SimLimits {
-    /// GPU per-history step budget. CPU transport ignores this.
+    /// Per-history step budget — matches OpenMC's
+    /// `max_particle_events = 1_000_000` so thermal-trap and
+    /// thick-reflector cases (e.g. HEU-MET-FAST-058 case-1 with a
+    /// 20 cm Be reflector at 293.6 K) don't silently truncate. The
+    /// GPU recursive transport honours this exactly; CPU transport
+    /// uses its own hardcoded copy of 1_000_000 — both stay in lock-
+    /// step on the default.
     pub max_events_per_history: u32,
     /// `n × factor` slot reserve for the GPU fission bank; overflow
     /// dropped (bank resampled to `n` regardless).
@@ -32,7 +38,7 @@ pub struct SimLimits {
 impl Default for SimLimits {
     fn default() -> Self {
         Self {
-            max_events_per_history: 5_000,
+            max_events_per_history: 1_000_000,
             fis_capacity_factor: 4,
             sab_temperature_tolerance: 0.5,
             initial_source_max_attempts_factor: 10_000,
@@ -97,7 +103,11 @@ mod tests {
     #[test]
     fn defaults_match_historical_constants() {
         let l = SimLimits::default();
-        assert_eq!(l.max_events_per_history, 5_000);
+        // Bumped 5_000 -> 1_000_000 to match OpenMC's
+        // max_particle_events and stop silently truncating thermal-
+        // trap / thick-reflector histories on the GPU (HEU-MET-FAST-
+        // 058 case-1 was failing 3000 pcm cold for this reason).
+        assert_eq!(l.max_events_per_history, 1_000_000);
         assert_eq!(l.fis_capacity_factor, 4);
         assert!((l.sab_temperature_tolerance - 0.5).abs() < 1e-12);
         assert_eq!(l.initial_source_max_attempts_factor, 10_000);
