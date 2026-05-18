@@ -376,15 +376,15 @@ from the ICSBEP handbook k_eff.
   (analog and non-analog absorption have the same expected value)
   — affects GPU seed-to-seed variance only. Lower priority than
   correctness gaps.
-- **GPU stochastic temperature interpolation across SAB kT columns
-  unimplemented**. CPU calls `tsl.select_temperature(cell.T, ξ)` per
-  collision (4 sites in `simulate.rs`); GPU locks each slot to a
-  single `temp_idx` at upload time via the
-  `sab_temperature_tolerance` envelope. Within tolerance of a grid
-  column the difference is negligible — most current ICSBEP scenes
-  set cell temperatures that coincide with library columns (293.6,
-  400, 600, 900 K). Cases with cell T strictly between columns are
-  mis-modelled by up to the column-to-column σ difference. Open.
+- ~~GPU stochastic temperature interpolation across SAB kT columns
+  unimplemented~~. Implemented in commit `e3a2ecc` — every TSL now
+  uploads its full kT grid as N consecutive slots, and the device
+  selector `sab_select_slot(nuc, cell_kT, ξ, p)` picks
+  stochastically between the two bracketing columns. Mirrors CPU
+  `tsl.select_temperature(cell.T, ξ)`. The XS evaluator uses a
+  deterministic lower-bracket select (no rng in scope there); the
+  sampler uses the stochastic variant — same independent-draws
+  pattern as `simulate.rs:868` and `simulate.rs:1080`.
 - **GPU per-cell `Mat3` rotation unimplemented**. CPU's
   `Cell.rotation: Option<Mat3>` propagates through `CoordStack`
   descent (`geometry/coord.rs:75`, `geometry/ray.rs:174-202`). No
