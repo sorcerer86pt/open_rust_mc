@@ -235,6 +235,26 @@ fn main() {
             .join("heu-met-fast-001_case-1.json"),
     };
     eprintln!("case: {}", case_file.display());
+
+    // Optional argv[2..] = `b=NN i=NN p=NN s=NN` to bump statistics
+    // past the 80b × 5k Godiva default. Anything not set keeps the
+    // legacy value.
+    let mut arg_b: u32 = 80;
+    let mut arg_i: u32 = 20;
+    let mut arg_p: u32 = 5_000;
+    let mut arg_s: u64 = 42;
+    for a in std::env::args().skip(2) {
+        if let Some(v) = a.strip_prefix("b=") {
+            arg_b = v.parse().unwrap_or(arg_b);
+        } else if let Some(v) = a.strip_prefix("i=") {
+            arg_i = v.parse().unwrap_or(arg_i);
+        } else if let Some(v) = a.strip_prefix("p=") {
+            arg_p = v.parse().unwrap_or(arg_p);
+        } else if let Some(v) = a.strip_prefix("s=") {
+            arg_s = v.parse().unwrap_or(arg_s);
+        }
+    }
+    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s}");
     let text = std::fs::read_to_string(&case_file).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
@@ -243,10 +263,10 @@ fn main() {
     let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, 15).unwrap();
 
     let mut cfg = SimConfig::default();
-    cfg.batches = 80;
-    cfg.inactive = 20;
-    cfg.particles_per_batch = 5_000;
-    cfg.seed = 42;
+    cfg.batches = arg_b;
+    cfg.inactive = arg_i;
+    cfg.particles_per_batch = arg_p;
+    cfg.seed = arg_s;
     cfg.verbose = false;
 
     let inactive = cfg.inactive;
