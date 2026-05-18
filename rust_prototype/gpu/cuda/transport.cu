@@ -317,7 +317,28 @@
 #define P_INEL91_PDF_PTRS       172
 #define P_INEL91_DIST_LOCAL_OFF 173
 
-#define N_PARAMS            174
+// ── SAB elastic channel — slots 174-180 ─────────────────────────────
+//
+// Adds the coherent / incoherent elastic S(α,β) data the GPU was
+// missing. `P_SAB_SLOT_ELASTIC_MODE[slot]` selects per-slot variant:
+//   0 = none, 1 = Coherent (Bragg), 2 = Incoherent (Debye-Waller).
+// Coherent uses the flat `P_SAB_COH_BRAGG_EDGES` / `P_SAB_COH_FACTORS`
+// arrays plus per-slot offset / count (`P_SAB_SLOT_COH_OFF` /
+// `P_SAB_SLOT_COH_N`). Incoherent reads per-slot scalars from
+// `P_SAB_SLOT_INC_BOUND_XS` / `P_SAB_SLOT_INC_DEBYE_WALLER`.
+//
+// Restores the reflector-return mechanism in thick-Be / -graphite /
+// -polyethylene geometries (HEU-MET-FAST-058 case-1 was -2500 pcm
+// cold against handbook before this).
+#define P_SAB_SLOT_ELASTIC_MODE     174
+#define P_SAB_COH_BRAGG_EDGES       175
+#define P_SAB_COH_FACTORS           176
+#define P_SAB_SLOT_COH_OFF          177
+#define P_SAB_SLOT_COH_N            178
+#define P_SAB_SLOT_INC_BOUND_XS     179
+#define P_SAB_SLOT_INC_DEBYE_WALLER 180
+
+#define N_PARAMS            181
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1097,6 +1118,116 @@ __device__ __forceinline__ double sab_slot_emax(int slot, Params p) {
     return PTR_D(p, P_SAB_SLOT_EMAX)[slot];
 }
 
+// ── SAB elastic channel ────────────────────────────────────────────
+//
+// Per-slot dispatch on `P_SAB_SLOT_ELASTIC_MODE[slot]`:
+//   0 = none, returns σ = 0 / no-op angular sample.
+//   1 = Coherent (Bragg) — σ(E) = (1/E) Σ_{E_i < E} s_i ; angular
+//       sample picks an edge by cumulative factor and computes
+//       μ = 1 − 2 E_i / E (OpenMC docs Eq. 79 + Eq. 82).
+//   2 = Incoherent (Debye-Waller) — σ(E) = σ_b/(2) · (1 − e^{-4EW})
+//       / (2 E W) ; angular sample uses the inverse-CDF closed form
+//       μ = 1 + ln(1 − ξ (1 − e^{-4EW})) / (2EW) (Mac MacFarlane
+//       NJOY THERMR notes / OpenMC sample_inelastic in CE).
+__device__ __forceinline__ int sab_slot_elastic_mode(int slot, Params p) {
+    return PTR_I(p, P_SAB_SLOT_ELASTIC_MODE)[slot];
+}
+
+__device__ double sab_coherent_xs(double E, int slot, Params p) {
+    int off = PTR_I(p, P_SAB_SLOT_COH_OFF)[slot];
+    int n   = PTR_I(p, P_SAB_SLOT_COH_N)[slot];
+    if (off < 0 || n <= 0 || E <= 0.0) return 0.0;
+    const double* edges   = &PTR_D(p, P_SAB_COH_BRAGG_EDGES)[off];
+    const double* factors = &PTR_D(p, P_SAB_COH_FACTORS)[off];
+    // Find idx = first edge index whose energy is >= E. Then the sum
+    // of structure factors for edges below E is `factors[idx-1]`
+    // because the input is cumulative.
+    if (E <= edges[0]) return 0.0;
+    if (E >= edges[n-1]) return factors[n-1] / E;
+    int lo = 0, hi = n;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (edges[mid] < E) lo = mid; else hi = mid;
+    }
+    // edges[lo] < E <= edges[hi], so factors[lo] is the cumulative
+    // sum below E.
+    return factors[lo] / E;
+}
+
+__device__ double sab_incoherent_elastic_xs(double E, int slot, Params p) {
+    double bxs = PTR_D(p, P_SAB_SLOT_INC_BOUND_XS)[slot];
+    double w   = PTR_D(p, P_SAB_SLOT_INC_DEBYE_WALLER)[slot];
+    if (bxs <= 0.0 || w <= 0.0 || E <= 0.0) return 0.0;
+    double x = 4.0 * E * w;
+    if (x < 1e-10) return bxs;  // limit (1−e^{-x})/x → 1
+    return bxs * 0.5 * (1.0 - exp(-x)) / (2.0 * E * w);
+}
+
+__device__ double sab_elastic_xs(double E, int slot, Params p) {
+    if (slot < 0) return 0.0;
+    int mode = sab_slot_elastic_mode(slot, p);
+    if (mode == 1) return sab_coherent_xs(E, slot, p);
+    if (mode == 2) return sab_incoherent_elastic_xs(E, slot, p);
+    return 0.0;
+}
+
+// Sample an elastic-scatter angle for the slot's mode. Energy is
+// preserved by elastic kinematics; caller keeps E_in.
+__device__ double sab_elastic_sample_mu(double E, int slot, Params p,
+                                        PcgState* rng) {
+    if (slot < 0) return 2.0 * pcg_uniform(rng) - 1.0;
+    int mode = sab_slot_elastic_mode(slot, p);
+    if (mode == 1) {
+        // Coherent: sample a Bragg edge weighted by factor s_i, then
+        // μ = 1 − 2 E_i / E. (OpenMC docs Eq. 81–82.)
+        int off = PTR_I(p, P_SAB_SLOT_COH_OFF)[slot];
+        int n   = PTR_I(p, P_SAB_SLOT_COH_N)[slot];
+        if (off < 0 || n <= 0 || E <= 0.0) {
+            return 2.0 * pcg_uniform(rng) - 1.0;
+        }
+        const double* edges   = &PTR_D(p, P_SAB_COH_BRAGG_EDGES)[off];
+        const double* factors = &PTR_D(p, P_SAB_COH_FACTORS)[off];
+        // Number of edges below E:
+        int n_eff;
+        if (E <= edges[0]) return 2.0 * pcg_uniform(rng) - 1.0;
+        if (E >= edges[n-1]) n_eff = n;
+        else {
+            int lo = 0, hi = n;
+            while (hi - lo > 1) {
+                int mid = (lo + hi) >> 1;
+                if (edges[mid] < E) lo = mid; else hi = mid;
+            }
+            n_eff = lo + 1;  // edges 0..lo inclusive are below E
+        }
+        double total_s = factors[n_eff - 1];
+        double xi = pcg_uniform(rng) * total_s;
+        // First edge whose cumulative factor >= xi.
+        int lo = 0, hi = n_eff;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >> 1;
+            if (factors[mid] < xi) lo = mid; else hi = mid;
+        }
+        int edge_idx = (factors[lo] < xi) ? hi : lo;
+        if (edge_idx >= n_eff) edge_idx = n_eff - 1;
+        double mu = 1.0 - 2.0 * edges[edge_idx] / E;
+        return fmax(-1.0, fmin(1.0, mu));
+    }
+    if (mode == 2) {
+        // Incoherent Debye-Waller: inverse CDF
+        //   F(μ) = (1 − e^{-2EW(1−μ)}) / (1 − e^{-4EW})
+        //   μ = 1 + ln(1 − ξ(1 − e^{-4EW})) / (2EW)
+        double w = PTR_D(p, P_SAB_SLOT_INC_DEBYE_WALLER)[slot];
+        if (w <= 0.0 || E <= 0.0) return 2.0 * pcg_uniform(rng) - 1.0;
+        double four_ew = 4.0 * E * w;
+        double xi = pcg_uniform(rng);
+        double denom = 1.0 - exp(-four_ew);
+        if (denom <= 1e-20) return 2.0 * pcg_uniform(rng) - 1.0;
+        double mu = 1.0 + log(fmax(1.0 - xi * denom, 1e-300)) / (2.0 * E * w);
+        return fmax(-1.0, fmin(1.0, mu));
+    }
+    return 2.0 * pcg_uniform(rng) - 1.0;
+}
+
 __device__ double sab_total_xs(double E, int slot, Params p) {
     if (slot < 0) return 0.0;
     int n = sab_slot_n_inc(slot, p);
@@ -1117,6 +1248,19 @@ __device__ void sab_sample(
     double* E_out, double* mu_out)
 {
     if (slot < 0) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
+
+    // Roll elastic vs inelastic by their cross-section ratio at E_in.
+    // If we land on the elastic branch, energy is preserved (Bragg /
+    // Debye-Waller is purely angular); the inelastic branch samples
+    // E_out / μ from the continuous SAB tables below.
+    double inel = sab_total_xs(E_in, slot, p);
+    double el   = sab_elastic_xs(E_in, slot, p);
+    double tot  = inel + el;
+    if (tot > 0.0 && pcg_uniform(rng) * tot < el) {
+        *E_out  = E_in;
+        *mu_out = sab_elastic_sample_mu(E_in, slot, p, rng);
+        return;
+    }
     int n = sab_slot_n_inc(slot, p);
     if (n <= 0) { *E_out=E_in; *mu_out=2.0*pcg_uniform(rng)-1.0; return; }
 
@@ -1632,11 +1776,17 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
     if (SCALAR_I(p, P_SAB_N_SLOTS) > 0 && E > 0.0) {
         int sab_slot = PTR_I(p, P_SAB_SLOT_PER_NUC)[ni];
         if (sab_slot >= 0 && E < PTR_D(p, P_SAB_SLOT_EMAX)[sab_slot]) {
-            double sab_xs_val = sab_total_xs(E, sab_slot, p);
-            if (sab_xs_val > 0.0) {
-                double delta = sab_xs_val - s_el;
+            // Replace the free-atom elastic with SAB inelastic + SAB
+            // elastic (coh / inc) — the elastic block was previously
+            // unimplemented on the GPU, biasing thick-moderator
+            // problems cold (HEU-MET-FAST-058 case-1 was -2500 pcm).
+            double sab_inel = sab_total_xs(E, sab_slot, p);
+            double sab_el   = sab_elastic_xs(E, sab_slot, p);
+            double sab_tot  = sab_inel + sab_el;
+            if (sab_tot > 0.0) {
+                double delta = sab_tot - s_el;
                 micro_t += delta;
-                s_el = sab_xs_val;
+                s_el = sab_tot;
             }
         }
     }

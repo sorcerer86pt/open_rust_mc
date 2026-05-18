@@ -14,7 +14,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 174;
+const N_PARAMS: usize = 181;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -615,6 +615,109 @@ pub struct GpuSabData {
     // until every call site is on the slot-aware path.
     pub n_inc: i32,
     pub energy_max: f64,
+
+    // ─── Elastic S(α,β) ───────────────────────────────────────────
+    //
+    // Until now the GPU only carried the inelastic part of every TSL;
+    // the CPU runs the elastic channel via `ElasticThermal::*` in
+    // `src/thermal.rs`. For materials whose elastic-S(α,β) channel
+    // dominates at thermal energies (Be, graphite, polyethylene,
+    // hydrogenous solids) the missing path biased k_eff cold —
+    // HEU-MET-FAST-058 case-1 with its 20 cm Be reflector was off by
+    // ~2500 pcm on the GPU while passing on the CPU.
+    //
+    // `slot_elastic_mode[slot]` selects the per-slot variant:
+    //   0 = no elastic data (e.g. discrete-inelastic-only TSLs)
+    //   1 = Coherent Bragg (graphite, Be) — uses the per-slot slice of
+    //       `coh_bragg_edges` / `coh_factors`.
+    //   2 = Incoherent analytic (Debye-Waller) — uses the per-slot
+    //       scalars in `slot_inc_bound_xs` / `slot_inc_debye_waller`.
+    //
+    // `IncoherentDiscrete` (CPU variant) collapses onto mode 2 for
+    // the XS evaluator and onto Debye-Waller angular sampling for the
+    // angle — the tabulated discrete cosines are not yet plumbed.
+    pub slot_elastic_mode: CudaSlice<i32>,
+    /// Flat per-slot Bragg edges (eV), packed for every Coherent slot
+    /// in upload order. Slots that aren't Coherent contribute zero
+    /// entries.
+    pub coh_bragg_edges: CudaSlice<f64>,
+    /// Cumulative structure factors, parallel to `coh_bragg_edges`.
+    pub coh_factors: CudaSlice<f64>,
+    /// `[n_slots]` start index of this slot in `coh_bragg_edges` /
+    /// `coh_factors`. `-1` when the slot is not Coherent.
+    pub slot_coh_off: CudaSlice<i32>,
+    /// `[n_slots]` number of Bragg edges for this slot; `0` when not
+    /// Coherent.
+    pub slot_coh_n: CudaSlice<i32>,
+    /// `[n_slots]` σ_b for the Incoherent / IncoherentDiscrete variants
+    /// (barns). Zero when not applicable.
+    pub slot_inc_bound_xs: CudaSlice<f64>,
+    /// `[n_slots]` Debye-Waller integral W'/A in eV⁻¹. Zero when not
+    /// applicable.
+    pub slot_inc_debye_waller: CudaSlice<f64>,
+}
+
+/// Append one slot's elastic-S(α,β) entry into the parallel buffers
+/// that `upload_sab_data_multi` accumulates.
+///
+/// Reads `tsl.elastic[temp_idx]`, dispatches by `ElasticThermal`
+/// variant, and pushes one row into every per-slot buffer so the
+/// arrays stay rectangular. No-elastic / no-data slots push mode 0
+/// and zero placeholders.
+#[allow(clippy::too_many_arguments)]
+fn pack_sab_elastic(
+    tsl: &crate::thermal::ThermalScatteringData,
+    temp_idx: usize,
+    nuc_idx: usize,
+    slot_id: i32,
+    slot_elastic_mode: &mut Vec<i32>,
+    slot_coh_off: &mut Vec<i32>,
+    slot_coh_n: &mut Vec<i32>,
+    slot_inc_bound_xs: &mut Vec<f64>,
+    slot_inc_debye_waller: &mut Vec<f64>,
+    coh_bragg_edges_flat: &mut Vec<f64>,
+    coh_factors_flat: &mut Vec<f64>,
+) {
+    use crate::thermal::ElasticThermal;
+    let elastic = tsl.elastic.as_ref().and_then(|v| v.get(temp_idx));
+    match elastic {
+        Some(ElasticThermal::Coherent { bragg_edges, factors }) => {
+            let off = coh_bragg_edges_flat.len() as i32;
+            let n = bragg_edges.len() as i32;
+            coh_bragg_edges_flat.extend_from_slice(bragg_edges);
+            coh_factors_flat.extend_from_slice(factors);
+            slot_elastic_mode.push(1);
+            slot_coh_off.push(off);
+            slot_coh_n.push(n);
+            slot_inc_bound_xs.push(0.0);
+            slot_inc_debye_waller.push(0.0);
+            println!(
+                "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): coherent \
+                 elastic, {n} Bragg edges"
+            );
+        }
+        Some(ElasticThermal::Incoherent { bound_xs, debye_waller })
+        | Some(ElasticThermal::IncoherentDiscrete {
+            bound_xs, debye_waller, ..
+        }) => {
+            slot_elastic_mode.push(2);
+            slot_coh_off.push(-1);
+            slot_coh_n.push(0);
+            slot_inc_bound_xs.push(*bound_xs);
+            slot_inc_debye_waller.push(*debye_waller);
+            println!(
+                "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): incoherent \
+                 elastic, σ_b={bound_xs:.2} b, W'={debye_waller:.4} eV⁻¹"
+            );
+        }
+        None => {
+            slot_elastic_mode.push(0);
+            slot_coh_off.push(-1);
+            slot_coh_n.push(0);
+            slot_inc_bound_xs.push(0.0);
+            slot_inc_debye_waller.push(0.0);
+        }
+    }
 }
 
 /// Material composition data on GPU.
@@ -1253,6 +1356,16 @@ impl GpuTransportContext {
             dptr!(&nuc_data.inel91_cdf_ptrs),
             dptr!(&nuc_data.inel91_pdf_ptrs),
             dptr!(&nuc_data.inel91_dist_local_off),
+            // SAB elastic — slots 174-180. See `GpuSabData` for the
+            // per-slot semantics and `transport.cu` for the kernel use
+            // (`sab_elastic_xs`, `sab_elastic_sample`).
+            dptr!(&sab_data.slot_elastic_mode),
+            dptr!(&sab_data.coh_bragg_edges),
+            dptr!(&sab_data.coh_factors),
+            dptr!(&sab_data.slot_coh_off),
+            dptr!(&sab_data.slot_coh_n),
+            dptr!(&sab_data.slot_inc_bound_xs),
+            dptr!(&sab_data.slot_inc_debye_waller),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1866,6 +1979,16 @@ impl GpuTransportContext {
         let mut slot_mu_table_off: Vec<i32> = Vec::new();
         let mut slot_emax: Vec<f64> = Vec::new();
 
+        // Per-slot elastic channel — 0 none, 1 Coherent, 2 Incoherent.
+        // See the `slot_elastic_mode` doc comment on `GpuSabData`.
+        let mut slot_elastic_mode: Vec<i32> = Vec::new();
+        let mut slot_coh_off: Vec<i32> = Vec::new();
+        let mut slot_coh_n: Vec<i32> = Vec::new();
+        let mut slot_inc_bound_xs: Vec<f64> = Vec::new();
+        let mut slot_inc_debye_waller: Vec<f64> = Vec::new();
+        let mut coh_bragg_edges_flat: Vec<f64> = Vec::new();
+        let mut coh_factors_flat: Vec<f64> = Vec::new();
+
         // Per-nuclide → slot lookup. Default -1.
         let mut slot_per_nuc: Vec<i32> = vec![-1; n_nuc.max(1)];
 
@@ -1933,6 +2056,22 @@ impl GpuTransportContext {
                     slot_mu_table_off.push(mu_table_off);
                     slot_emax.push(tsl.energy_max);
 
+                    // Pack the elastic channel for this slot — see
+                    // `slot_elastic_mode` doc.
+                    pack_sab_elastic(
+                        tsl,
+                        temp_idx,
+                        nuc_idx,
+                        slot_id,
+                        &mut slot_elastic_mode,
+                        &mut slot_coh_off,
+                        &mut slot_coh_n,
+                        &mut slot_inc_bound_xs,
+                        &mut slot_inc_debye_waller,
+                        &mut coh_bragg_edges_flat,
+                        &mut coh_factors_flat,
+                    );
+
                     println!(
                         "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): {n_inc_this} inc \
                          energies, {} E_out pts, {} mu pts",
@@ -1960,6 +2099,23 @@ impl GpuTransportContext {
                     slot_eout_table_off.push(eout_table_off);
                     slot_mu_table_off.push(mu_table_off);
                     slot_emax.push(0.0);
+
+                    // Discrete-inelastic slot still gets its elastic
+                    // packed — elastic data is independent of the
+                    // inelastic distribution kind.
+                    pack_sab_elastic(
+                        tsl,
+                        temp_idx,
+                        nuc_idx,
+                        slot_id,
+                        &mut slot_elastic_mode,
+                        &mut slot_coh_off,
+                        &mut slot_coh_n,
+                        &mut slot_inc_bound_xs,
+                        &mut slot_inc_debye_waller,
+                        &mut coh_bragg_edges_flat,
+                        &mut coh_factors_flat,
+                    );
                 }
             }
         }
@@ -1995,6 +2151,17 @@ impl GpuTransportContext {
             slot_mu_table_off.push(0);
             slot_emax.push(0.0);
         }
+        if slot_elastic_mode.is_empty() {
+            slot_elastic_mode.push(0);
+            slot_coh_off.push(-1);
+            slot_coh_n.push(0);
+            slot_inc_bound_xs.push(0.0);
+            slot_inc_debye_waller.push(0.0);
+        }
+        if coh_bragg_edges_flat.is_empty() {
+            coh_bragg_edges_flat.push(0.0);
+            coh_factors_flat.push(0.0);
+        }
 
         let n_slots = slots.len() as i32;
         // Legacy mirrors for the single-slot fast path in transport.cu.
@@ -2027,6 +2194,14 @@ impl GpuTransportContext {
 
             n_inc: legacy_n_inc,
             energy_max: legacy_emax,
+
+            slot_elastic_mode: self.stream.clone_htod(&slot_elastic_mode)?,
+            coh_bragg_edges: self.stream.clone_htod(&coh_bragg_edges_flat)?,
+            coh_factors: self.stream.clone_htod(&coh_factors_flat)?,
+            slot_coh_off: self.stream.clone_htod(&slot_coh_off)?,
+            slot_coh_n: self.stream.clone_htod(&slot_coh_n)?,
+            slot_inc_bound_xs: self.stream.clone_htod(&slot_inc_bound_xs)?,
+            slot_inc_debye_waller: self.stream.clone_htod(&slot_inc_debye_waller)?,
         })
     }
 
