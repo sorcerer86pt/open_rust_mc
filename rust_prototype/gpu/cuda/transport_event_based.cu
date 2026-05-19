@@ -42,6 +42,28 @@
 #define EV_N3N        4
 #define EV_TYPE_COUNT 5
 
+// Energy binning for the partition (PHYSOR 2022 Optimization G —
+// sort by energy within each reaction class for XS-lookup memory
+// locality). 16 log-spaced bins covering the typical ENDF range
+// [1e-5 eV, 2e7 eV]. Each (class, bin) slot is a separate atomic
+// counter, so adjacent threads in a reaction kernel access
+// neighbouring nuclide-XS energy regions and see L1/L2 reuse.
+//
+// Bonus on small GPUs: 80 hot atomic addresses instead of 5
+// reduces contention on the trace_and_sample emit path.
+#define EB_N_EBINS     16
+#define EB_N_PART_BINS (EV_TYPE_COUNT * EB_N_EBINS)   // 80
+
+// Log-axis: bin = floor(log10(E_eV / 1e-5) / EB_LOG_DECADES_PER_BIN)
+// EB_LOG_DECADES_PER_BIN = log10(2e7 / 1e-5) / 16 ≈ 0.7689
+__device__ __forceinline__ int eb_energy_bin(double E) {
+    double l = log10(fmax(E, 1e-30) / 1e-5);
+    int b = (int)(l / 0.769);
+    if (b < 0) b = 0;
+    if (b >= EB_N_EBINS) b = EB_N_EBINS - 1;
+    return b;
+}
+
 // ── SoA stack pack / unpack helpers ───────────────────────────────────
 
 __device__ __forceinline__ void eb_load_stack(
@@ -277,7 +299,12 @@ gr_trace_and_sample(
     // Per-event output
     int* d_event_type, int* d_event_hit_nuc, int* d_event_mat,
     double* d_event_kT, double* d_event_hit_Ni, double* d_event_urr_xi,
-    // Atomic per-step counters
+    // Energy bin emitted per event for the 2-D (class, energy_bin)
+    // partition (PHYSOR 2022 Optimization G). Particles with the same
+    // (class, bin) end up adjacent in d_sorted_idx so neighbouring
+    // threads in a reaction kernel access the same XS energy region.
+    int* d_event_ebin,
+    // Atomic per-(class, bin) counters — EB_N_PART_BINS = 80 slots.
     int* d_type_count,
     // Tallies / counters
     int* cnt_coll, int* cnt_leak, int* cnt_surf, int* cnt_capture,
@@ -369,6 +396,13 @@ gr_trace_and_sample(
 
         int n_nuc = __ldg(&PTR_I(p, P_MAT_N_NUC)[mat]);
         double sum_t = 0.0;
+        // Per-nuclide sigma_t accumulator. We tried streaming this
+        // (drop the array, re-evaluate XS in the selection pass) to
+        // reduce register pressure per Tramm et al. PHYSOR 2022;
+        // empirically that was ~5× slower on the RTX A1000 (Godiva
+        // micro-bench), because the 2× XS-eval cost dominates the
+        // register-pressure savings on small SMs. Keeping the array
+        // — the persistent-history kernel does the same.
         double nuc_t[MAX_NUC_PER_MAT] = {};
         double urr_xi = pcg_uniform(&rng);
         double xs_cell_kT = (mat >= 0 && mat < n_materials) ? mat_kT[mat] : -1.0;
@@ -458,7 +492,13 @@ gr_trace_and_sample(
         kT_out = xs_cell_kT;
         Ni_out = Ni_hit;
         urr_xi_out = urr_xi;
-        atomicAdd(&d_type_count[rxn], 1);
+        // 2-D partition: bucket by (reaction class, energy bin) so
+        // particles in the same bucket end up adjacent in
+        // d_sorted_idx and the reaction kernels see energy-clustered
+        // workloads → improved XS-table cache reuse.
+        int ebin = eb_energy_bin(E);
+        d_event_ebin[tid] = ebin;
+        atomicAdd(&d_type_count[rxn * EB_N_EBINS + ebin], 1);
         break;
     }
 
@@ -506,9 +546,21 @@ gr_trace_and_sample(
 // host-side computation.
 // ═══════════════════════════════════════════════════════════════════════
 
+// d_type_count          [EB_N_PART_BINS]   in  — per-(class,bin) counts
+// d_type_offsets        [EB_N_PART_BINS+1] out — exclusive scan
+// d_type_class_total    [EV_TYPE_COUNT]    out — per-class totals
+//                                                (sum over bins)
+// d_type_class_offsets  [EV_TYPE_COUNT]    out — offset of class's
+//                                                first bin in
+//                                                d_sorted_idx (used
+//                                                by reaction kernels)
+// d_type_total          [1]                out — total event count
+// d_type_scatter        [EB_N_PART_BINS]   out — zeroed for partition
 extern "C" __global__ void gr_scan_offsets(
     const int* d_type_count,
     int* d_type_offsets,
+    int* d_type_class_total,
+    int* d_type_class_offsets,
     int* d_type_total,
     int* d_type_scatter)
 {
@@ -516,10 +568,18 @@ extern "C" __global__ void gr_scan_offsets(
     int acc = 0;
     d_type_offsets[0] = 0;
     #pragma unroll
-    for (int i = 0; i < EV_TYPE_COUNT; ++i) {
-        d_type_scatter[i] = 0;
-        acc += d_type_count[i];
-        d_type_offsets[i + 1] = acc;
+    for (int c = 0; c < EV_TYPE_COUNT; ++c) {
+        d_type_class_offsets[c] = acc;
+        int class_acc = 0;
+        for (int b = 0; b < EB_N_EBINS; ++b) {
+            int slot = c * EB_N_EBINS + b;
+            d_type_scatter[slot] = 0;
+            int v = d_type_count[slot];
+            class_acc += v;
+            acc += v;
+            d_type_offsets[slot + 1] = acc;
+        }
+        d_type_class_total[c] = class_acc;
     }
     d_type_total[0] = acc;
 }
@@ -534,6 +594,7 @@ extern "C" __global__ void gr_scan_offsets(
 
 extern "C" __global__ void gr_partition(
     const int* d_event_type,
+    const int* d_event_ebin,
     const int* alive,
     int n_particles,
     const int* d_type_offsets,
@@ -544,8 +605,10 @@ extern "C" __global__ void gr_partition(
     if (tid >= n_particles) return;
     int t = d_event_type[tid];
     if (t < 0 || !alive[tid]) return;
-    int pos = atomicAdd(&d_type_scatter[t], 1);
-    d_sorted_idx[d_type_offsets[t] + pos] = tid;
+    int b = d_event_ebin[tid];
+    int slot = t * EB_N_EBINS + b;
+    int pos = atomicAdd(&d_type_scatter[slot], 1);
+    d_sorted_idx[d_type_offsets[slot] + pos] = tid;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -557,7 +620,12 @@ extern "C" __global__ void gr_partition(
 
 extern "C" __global__ void gr_elastic_event(
     Params p,
-    const int* d_type_count, const int* d_type_offsets,
+    // Per-class totals & class-start offsets (computed by
+    // gr_scan_offsets). Reaction kernels are launched once per
+    // class with `n_threads = d_type_class_total[CLASS]` and walk
+    // d_sorted_idx[d_type_class_offsets[CLASS] + idx]. Particles
+    // within the class are bin-sorted by energy.
+    const int* d_type_class_total, const int* d_type_class_offsets,
     const int* d_sorted_idx,
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
@@ -568,9 +636,9 @@ extern "C" __global__ void gr_elastic_event(
     int* cnt_elastic)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int count = d_type_count[EV_ELASTIC];
+    int count = d_type_class_total[EV_ELASTIC];
     if (idx >= count) return;
-    int tid = d_sorted_idx[d_type_offsets[EV_ELASTIC] + idx];
+    int tid = d_sorted_idx[d_type_class_offsets[EV_ELASTIC] + idx];
 
     int rank = SCALAR_I(p, P_RANK);
     int hit_nuc = d_event_hit_nuc[tid];
@@ -665,7 +733,12 @@ end_elastic:
 
 extern "C" __global__ void gr_inelastic_event(
     Params p,
-    const int* d_type_count, const int* d_type_offsets,
+    // Per-class totals & class-start offsets (computed by
+    // gr_scan_offsets). Reaction kernels are launched once per
+    // class with `n_threads = d_type_class_total[CLASS]` and walk
+    // d_sorted_idx[d_type_class_offsets[CLASS] + idx]. Particles
+    // within the class are bin-sorted by energy.
+    const int* d_type_class_total, const int* d_type_class_offsets,
     const int* d_sorted_idx,
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
@@ -677,9 +750,9 @@ extern "C" __global__ void gr_inelastic_event(
     double* e_inel_out_sum, double* q_inel_sum)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int count = d_type_count[EV_INELASTIC];
+    int count = d_type_class_total[EV_INELASTIC];
     if (idx >= count) return;
-    int tid = d_sorted_idx[d_type_offsets[EV_INELASTIC] + idx];
+    int tid = d_sorted_idx[d_type_class_offsets[EV_INELASTIC] + idx];
 
     int rank = SCALAR_I(p, P_RANK);
     int hit_nuc = d_event_hit_nuc[tid];
@@ -839,7 +912,12 @@ extern "C" __global__ void gr_inelastic_event(
 
 extern "C" __global__ void gr_fission_event(
     Params p,
-    const int* d_type_count, const int* d_type_offsets,
+    // Per-class totals & class-start offsets (computed by
+    // gr_scan_offsets). Reaction kernels are launched once per
+    // class with `n_threads = d_type_class_total[CLASS]` and walk
+    // d_sorted_idx[d_type_class_offsets[CLASS] + idx]. Particles
+    // within the class are bin-sorted by energy.
+    const int* d_type_class_total, const int* d_type_class_offsets,
     const int* d_sorted_idx,
     const double* pos_x, const double* pos_y, const double* pos_z,
     double* energy,
@@ -853,9 +931,9 @@ extern "C" __global__ void gr_fission_event(
     double* e_fis_in_sum, double* e_fis_in_sq_sum)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int count = d_type_count[EV_FISSION];
+    int count = d_type_class_total[EV_FISSION];
     if (idx >= count) return;
-    int tid = d_sorted_idx[d_type_offsets[EV_FISSION] + idx];
+    int tid = d_sorted_idx[d_type_class_offsets[EV_FISSION] + idx];
 
     int hit_nuc = d_event_hit_nuc[tid];
     double E = energy[tid];
@@ -894,7 +972,12 @@ extern "C" __global__ void gr_fission_event(
 
 extern "C" __global__ void gr_multi_event(
     Params p,
-    const int* d_type_count, const int* d_type_offsets,
+    // Per-class totals & class-start offsets (computed by
+    // gr_scan_offsets). Reaction kernels are launched once per
+    // class with `n_threads = d_type_class_total[CLASS]` and walk
+    // d_sorted_idx[d_type_class_offsets[CLASS] + idx]. Particles
+    // within the class are bin-sorted by energy.
+    const int* d_type_class_total, const int* d_type_class_offsets,
     const int* d_sorted_idx,
     const double* pos_x, const double* pos_y, const double* pos_z,
     double* dir_x, double* dir_y, double* dir_z,
@@ -909,9 +992,11 @@ extern "C" __global__ void gr_multi_event(
     // d_sorted_idx (offsets[3]..offsets[5]). Each thread reads its
     // own event_type to pick the right secondary count and Q value.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int count = d_type_count[EV_N2N] + d_type_count[EV_N3N];
+    int count = d_type_class_total[EV_N2N] + d_type_class_total[EV_N3N];
     if (idx >= count) return;
-    int tid = d_sorted_idx[d_type_offsets[EV_N2N] + idx];
+    // N2N and N3N classes are adjacent in d_sorted_idx (class offsets
+    // are monotonic with class index). One range covers both.
+    int tid = d_sorted_idx[d_type_class_offsets[EV_N2N] + idx];
 
     int ev = d_event_type[tid];
     int hit_nuc = d_event_hit_nuc[tid];

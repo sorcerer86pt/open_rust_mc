@@ -66,7 +66,14 @@ param(
     [string]$Runner   = "auto",
     [int]   $Batches  = 150,
     [int]   $Inactive = 30,
-    [int]   $Particles = 20000,
+    # Particles-per-batch ceiling on GPU MC scales linearly with VRAM
+    # up to ~8 M per Tramm et al. PHYSOR 2022. Practical recommendations:
+    #   4 GB VRAM (RTX A1000 laptop):  ≤   50_000
+    #   10 GB VRAM (RTX 3080):          200_000 – 500_000
+    #   40 GB VRAM (A100 SXM4):       1_000_000+
+    # The default below is laptop-safe; override with `-Particles` on
+    # larger cards.
+    [int]   $Particles = 50000,
     [int]   $Seeds    = 5,
     [int]   $BaseSeed = 42,
     [int]   $Rank     = 15,
