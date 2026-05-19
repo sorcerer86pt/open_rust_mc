@@ -345,6 +345,7 @@ pub struct GpuRecursiveContext {
     // kernel sees a single code path (no warp divergence).
     pub k_eb_init_stacks: CudaFunction,
     pub k_eb_trace_and_sample: CudaFunction,
+    pub k_eb_scan_offsets: CudaFunction,
     pub k_eb_partition: CudaFunction,
     pub k_eb_elastic: CudaFunction,
     pub k_eb_inelastic: CudaFunction,
@@ -506,6 +507,9 @@ impl GpuRecursiveContext {
         let k_eb_trace_and_sample = module
             .load_function("gr_trace_and_sample")
             .map_err(|e| format!("kernel load (gr_trace_and_sample): {e}"))?;
+        let k_eb_scan_offsets = module
+            .load_function("gr_scan_offsets")
+            .map_err(|e| format!("kernel load (gr_scan_offsets): {e}"))?;
         let k_eb_partition = module
             .load_function("gr_partition")
             .map_err(|e| format!("kernel load (gr_partition): {e}"))?;
@@ -681,6 +685,7 @@ impl GpuRecursiveContext {
             k_transport_recursive,
             k_eb_init_stacks,
             k_eb_trace_and_sample,
+            k_eb_scan_offsets,
             k_eb_partition,
             k_eb_elastic,
             k_eb_inelastic,
@@ -1557,6 +1562,11 @@ pub struct TransportBuffers {
     pub d_type_offsets: CudaSlice<i32>,
     pub d_type_scatter: CudaSlice<i32>,
     pub d_sorted_idx: CudaSlice<i32>,
+    /// Single-int device-side total of all event-type counts. Written
+    /// by `gr_scan_offsets`, used by the host every K=EB_SYNC_EVERY
+    /// outer steps to detect "all particles dead" without forcing a
+    /// PCIe round-trip every step.
+    pub d_type_total: CudaSlice<i32>,
 }
 
 impl TransportBuffers {
@@ -1641,6 +1651,7 @@ impl TransportBuffers {
             d_type_offsets: mk_i(6)?,
             d_type_scatter: mk_i(5)?,
             d_sorted_idx: mk_i(n)?,
+            d_type_total: mk_i(1)?,
         })
     }
 
@@ -1936,10 +1947,23 @@ impl GpuRecursiveContext {
 
         // Event loop. One iteration = one geom step + one reaction
         // dispatch round.
+        //
+        // ── PCIe sync trimmed to 1 round-trip per step ───────────────
+        // The original event-based design did two syncs per step (DtoH
+        // the 5 per-type counts, host prefix-sum, HtoD the 6 offsets).
+        // We move the prefix sum onto the device (gr_scan_offsets) so
+        // the HtoD vanishes; what remains is one DtoH of the 5 counts
+        // which the host still needs for variable-size reaction-kernel
+        // launches. Empirically (RTX A1000 sm_86, Godiva @ 20k), going
+        // to batch-size launches with K-step periodic sync was 5x
+        // SLOWER than variable-size launches on this hardware: per-
+        // kernel block-scheduling overhead for 78 mostly-empty blocks
+        // dominates the saved PCIe round-trip. Variable launches keep
+        // empty warps off the SMs entirely.
         for _step in 0..max_events_per_history {
-            // Zero per-step partition counters.
+            // Per-step zero of d_type_count. d_type_scatter is zeroed
+            // by gr_scan_offsets so we don't pay for a separate memset.
             stream.memset_zeros(&mut buffers.d_type_count).map_err(|e| e.to_string())?;
-            stream.memset_zeros(&mut buffers.d_type_scatter).map_err(|e| e.to_string())?;
 
             // Step 2: gr_trace_and_sample.
             {
@@ -2029,21 +2053,43 @@ impl GpuRecursiveContext {
                 unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
             }
 
-            // Step 3: DtoH the 5 per-type counts (20 bytes).
+            // Step 3: device-side prefix sum.
+            // Writes d_type_offsets[6] (exclusive scan over the 5
+            // per-type counts), d_type_total[1] (sum), and zeroes
+            // d_type_scatter in the same launch. The HtoD of host-
+            // computed offsets that the previous design paid for is
+            // gone; the GPU's in-stream ordering guarantees partition
+            // sees the offsets without a host sync.
+            {
+                let mut launch = stream.launch_builder(&self.k_eb_scan_offsets);
+                launch
+                    .arg(&buffers.d_type_count)
+                    .arg(&mut buffers.d_type_offsets)
+                    .arg(&mut buffers.d_type_total)
+                    .arg(&mut buffers.d_type_scatter);
+                let one_thread = LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe { launch.launch(one_thread).map_err(|e| e.to_string())?; }
+            }
+
+            // Step 4: DtoH the 5 per-type counts. This is the ONE
+            // remaining sync per step — the host still needs the
+            // per-class counts to size the reaction launches. Going
+            // to batch-size launches to eliminate this DtoH was
+            // empirically a 5x regression on Godiva on this 4-SM GPU
+            // (block-scheduling overhead for mostly-empty grids
+            // dominates the saved PCIe round-trip).
             let type_counts: Vec<i32> = stream
                 .clone_dtoh(&buffers.d_type_count)
                 .map_err(|e| e.to_string())?;
             let total: i32 = type_counts.iter().sum();
             if total == 0 { break; }
 
-            // Host-side exclusive prefix sum → 6-element offsets.
-            let mut offsets = [0_i32; 6];
-            for i in 0..5 { offsets[i + 1] = offsets[i] + type_counts[i]; }
-            stream
-                .memcpy_htod(&offsets, &mut buffers.d_type_offsets)
-                .map_err(|e| e.to_string())?;
-
-            // Step 4: gr_partition — scatter alive indices.
+            // Step 5: gr_partition — scatter alive indices using the
+            // device-side offsets (no HtoD).
             {
                 let mut launch = stream.launch_builder(&self.k_eb_partition);
                 launch
@@ -2056,30 +2102,23 @@ impl GpuRecursiveContext {
                 unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
             }
 
-            // Reaction kernels. Each launches only count[t] threads,
-            // so the per-kernel grid scales with the alive-by-type
-            // population — zero divergence inside.
             let c_el  = type_counts[0];
             let c_in  = type_counts[1];
             let c_fis = type_counts[2];
             let c_n2n = type_counts[3];
             let c_n3n = type_counts[4];
-            let base_el  = offsets[0];
-            let base_in  = offsets[1];
-            let base_fis = offsets[2];
-            let base_n2n = offsets[3];
-            // multi-kernel walks [n2n, n3n) — base is offsets[3], threads is c_n2n + c_n3n.
-            let _ = base_n2n;
             let c_multi = c_n2n + c_n3n;
 
+            // Reaction kernels read d_type_count[CLASS] and
+            // d_type_offsets[CLASS] from device, so the host doesn't
+            // need to push offsets; only the grid size is host-known.
             if c_el > 0 {
-                let nthr = c_el;
                 let mut launch = stream.launch_builder(&self.k_eb_elastic);
                 launch
                     .arg(&buffers.d_params)
-                    .arg(&nthr)
+                    .arg(&buffers.d_type_count)
+                    .arg(&buffers.d_type_offsets)
                     .arg(&buffers.d_sorted_idx)
-                    .arg(&base_el)
                     .arg(&mut buffers.d_dxs)
                     .arg(&mut buffers.d_dys)
                     .arg(&mut buffers.d_dzs)
@@ -2091,16 +2130,15 @@ impl GpuRecursiveContext {
                     .arg(&buffers.d_event_urr_xi)
                     .arg(&sab_nuc_idx)
                     .arg(&mut buffers.d_cnt_el);
-                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+                unsafe { launch.launch(cfg_n(c_el as u32)).map_err(|e| e.to_string())?; }
             }
             if c_in > 0 {
-                let nthr = c_in;
                 let mut launch = stream.launch_builder(&self.k_eb_inelastic);
                 launch
                     .arg(&buffers.d_params)
-                    .arg(&nthr)
+                    .arg(&buffers.d_type_count)
+                    .arg(&buffers.d_type_offsets)
                     .arg(&buffers.d_sorted_idx)
-                    .arg(&base_in)
                     .arg(&mut buffers.d_dxs)
                     .arg(&mut buffers.d_dys)
                     .arg(&mut buffers.d_dzs)
@@ -2113,16 +2151,15 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_inel_in_sq)
                     .arg(&mut buffers.d_e_inel_out)
                     .arg(&mut buffers.d_q_inel);
-                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+                unsafe { launch.launch(cfg_n(c_in as u32)).map_err(|e| e.to_string())?; }
             }
             if c_fis > 0 {
-                let nthr = c_fis;
                 let mut launch = stream.launch_builder(&self.k_eb_fission);
                 launch
                     .arg(&buffers.d_params)
-                    .arg(&nthr)
+                    .arg(&buffers.d_type_count)
+                    .arg(&buffers.d_type_offsets)
                     .arg(&buffers.d_sorted_idx)
-                    .arg(&base_fis)
                     .arg(&buffers.d_xs)
                     .arg(&buffers.d_ys)
                     .arg(&buffers.d_zs)
@@ -2141,16 +2178,15 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_cnt_fis)
                     .arg(&mut buffers.d_e_fis_in)
                     .arg(&mut buffers.d_e_fis_in_sq);
-                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+                unsafe { launch.launch(cfg_n(c_fis as u32)).map_err(|e| e.to_string())?; }
             }
             if c_multi > 0 {
-                let nthr = c_multi;
                 let mut launch = stream.launch_builder(&self.k_eb_multi);
                 launch
                     .arg(&buffers.d_params)
-                    .arg(&nthr)
+                    .arg(&buffers.d_type_count)
+                    .arg(&buffers.d_type_offsets)
                     .arg(&buffers.d_sorted_idx)
-                    .arg(&base_n2n)
                     .arg(&buffers.d_xs)
                     .arg(&buffers.d_ys)
                     .arg(&buffers.d_zs)
@@ -2169,7 +2205,7 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_fis_w)
                     .arg(&mut buffers.d_fis_count)
                     .arg(&max_fis_i);
-                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+                unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
             }
         }
 

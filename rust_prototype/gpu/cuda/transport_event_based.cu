@@ -481,6 +481,41 @@ gr_trace_and_sample(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Kernel 2b: gr_scan_offsets
+//
+// Tiny scan over the 5 per-type counts. Single thread is fine — N is
+// fixed at 5 and the alternative (a warp shuffle) saves microseconds
+// at most. Side effects:
+//   * d_type_offsets[6] ← exclusive prefix sum (offsets[0]=0)
+//   * d_type_total[1]   ← total event count (used by host driver every
+//                         K=EB_SYNC_EVERY steps to detect "all dead")
+//   * d_type_scatter[5] ← zeroed in preparation for partition kernel
+//
+// Moving this onto the device eliminates the per-step DtoH→host-prefix-
+// sum→HtoD round-trip the previous driver paid: the prefix sum is 5
+// integer adds, smaller than the PCIe sync latency that gated the
+// host-side computation.
+// ═══════════════════════════════════════════════════════════════════════
+
+extern "C" __global__ void gr_scan_offsets(
+    const int* d_type_count,
+    int* d_type_offsets,
+    int* d_type_total,
+    int* d_type_scatter)
+{
+    if (threadIdx.x != 0 || blockIdx.x != 0) return;
+    int acc = 0;
+    d_type_offsets[0] = 0;
+    #pragma unroll
+    for (int i = 0; i < EV_TYPE_COUNT; ++i) {
+        d_type_scatter[i] = 0;
+        acc += d_type_count[i];
+        d_type_offsets[i + 1] = acc;
+    }
+    d_type_total[0] = acc;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Kernel 3: gr_partition
 //
 // Scatter alive particle indices into d_sorted_idx grouped by event
@@ -513,8 +548,8 @@ extern "C" __global__ void gr_partition(
 
 extern "C" __global__ void gr_elastic_event(
     Params p,
-    int n_threads,
-    const int* d_sorted_idx, int sorted_base,
+    const int* d_type_count, const int* d_type_offsets,
+    const int* d_sorted_idx,
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
     unsigned long long* rng_state_arr,
@@ -524,8 +559,9 @@ extern "C" __global__ void gr_elastic_event(
     int* cnt_elastic)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n_threads) return;
-    int tid = d_sorted_idx[sorted_base + idx];
+    int count = d_type_count[EV_ELASTIC];
+    if (idx >= count) return;
+    int tid = d_sorted_idx[d_type_offsets[EV_ELASTIC] + idx];
 
     int rank = SCALAR_I(p, P_RANK);
     int hit_nuc = d_event_hit_nuc[tid];
@@ -620,8 +656,8 @@ end_elastic:
 
 extern "C" __global__ void gr_inelastic_event(
     Params p,
-    int n_threads,
-    const int* d_sorted_idx, int sorted_base,
+    const int* d_type_count, const int* d_type_offsets,
+    const int* d_sorted_idx,
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
     unsigned long long* rng_state_arr,
@@ -632,8 +668,9 @@ extern "C" __global__ void gr_inelastic_event(
     double* e_inel_out_sum, double* q_inel_sum)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n_threads) return;
-    int tid = d_sorted_idx[sorted_base + idx];
+    int count = d_type_count[EV_INELASTIC];
+    if (idx >= count) return;
+    int tid = d_sorted_idx[d_type_offsets[EV_INELASTIC] + idx];
 
     int rank = SCALAR_I(p, P_RANK);
     int hit_nuc = d_event_hit_nuc[tid];
@@ -793,8 +830,8 @@ extern "C" __global__ void gr_inelastic_event(
 
 extern "C" __global__ void gr_fission_event(
     Params p,
-    int n_threads,
-    const int* d_sorted_idx, int sorted_base,
+    const int* d_type_count, const int* d_type_offsets,
+    const int* d_sorted_idx,
     const double* pos_x, const double* pos_y, const double* pos_z,
     double* energy,
     int* alive,
@@ -807,8 +844,9 @@ extern "C" __global__ void gr_fission_event(
     double* e_fis_in_sum, double* e_fis_in_sq_sum)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n_threads) return;
-    int tid = d_sorted_idx[sorted_base + idx];
+    int count = d_type_count[EV_FISSION];
+    if (idx >= count) return;
+    int tid = d_sorted_idx[d_type_offsets[EV_FISSION] + idx];
 
     int hit_nuc = d_event_hit_nuc[tid];
     double E = energy[tid];
@@ -847,8 +885,8 @@ extern "C" __global__ void gr_fission_event(
 
 extern "C" __global__ void gr_multi_event(
     Params p,
-    int n_threads,
-    const int* d_sorted_idx, int sorted_base,
+    const int* d_type_count, const int* d_type_offsets,
+    const int* d_sorted_idx,
     const double* pos_x, const double* pos_y, const double* pos_z,
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
@@ -858,9 +896,13 @@ extern "C" __global__ void gr_multi_event(
     double* fis_x, double* fis_y, double* fis_z,
     double* fis_e, double* fis_w, int* fis_count, int max_fis)
 {
+    // Sweeps both N2N and N3N classes — their slots are adjacent in
+    // d_sorted_idx (offsets[3]..offsets[5]). Each thread reads its
+    // own event_type to pick the right secondary count and Q value.
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    if (idx >= n_threads) return;
-    int tid = d_sorted_idx[sorted_base + idx];
+    int count = d_type_count[EV_N2N] + d_type_count[EV_N3N];
+    if (idx >= count) return;
+    int tid = d_sorted_idx[d_type_offsets[EV_N2N] + idx];
 
     int ev = d_event_type[tid];
     int hit_nuc = d_event_hit_nuc[tid];
