@@ -11,9 +11,9 @@ Deferred specs:
   time-dependent kinetics, real continuous-energy adjoint MC, and
   validated full-PWR depletion bench land first.
 
-`origin/main` at `43b3236`. Lib tests **260 / 260 green** on the
-default profile; `cargo check --features cuda` clean; Python
-bindings (`-p open-rust-mc-py`) clean.
+`origin/main` at `b2270c7`. Lib tests **438 / 438 green** on the
+default profile and on `--features cuda`; Python bindings
+(`-p open-rust-mc-py`) clean.
 
 ## What's on main
 
