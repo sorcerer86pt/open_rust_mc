@@ -3185,6 +3185,53 @@ fn preload_nuclide_cache_weights(
     Ok(n)
 }
 
+/// Snapshot the process-wide nuclide-cache hit/miss telemetry.
+///
+/// Returns a dict with the per-tier counters and computed hit rates.
+/// Each tier reports `<tier>_hits`, `<tier>_misses`, and (when traffic
+/// has landed) `<tier>_hit_rate` (a fraction in `[0, 1]`). The `puts`
+/// counter counts every successful insert into the cache regardless
+/// of tier — a sweep that pre-warms via `preload_nuclide_cache_weights`
+/// followed by N cases with M unique nuclides should see ~M puts in
+/// the first pass and zero in subsequent passes.
+///
+/// MPI deployments: each Python interpreter holds its own counters
+/// (they are process-local atomics). Aggregate across ranks by
+/// gathering this dict from every rank and summing on the controller.
+///
+/// Side effects: none. Calling this does not modify cache state.
+#[pyfunction]
+fn cache_stats(py: Python<'_>) -> PyResult<PyObject> {
+    use open_rust_mc::transport::nuclide_cache;
+    let snap = nuclide_cache::stats().snapshot();
+    let d = pyo3::types::PyDict::new_bound(py);
+    d.set_item("l1_hits", snap.l1_hits)?;
+    d.set_item("l1_misses", snap.l1_misses)?;
+    d.set_item("l2_hits", snap.l2_hits)?;
+    d.set_item("l2_misses", snap.l2_misses)?;
+    d.set_item("l3_hits", snap.l3_hits)?;
+    d.set_item("l3_misses", snap.l3_misses)?;
+    d.set_item("puts", snap.puts)?;
+    if let Some(r) = snap.l1_hit_rate() {
+        d.set_item("l1_hit_rate", r)?;
+    }
+    if let Some(r) = snap.l2_hit_rate() {
+        d.set_item("l2_hit_rate", r)?;
+    }
+    if let Some(r) = snap.l3_hit_rate() {
+        d.set_item("l3_hit_rate", r)?;
+    }
+    Ok(d.into())
+}
+
+/// Reset every nuclide-cache counter to zero. Useful for per-phase
+/// telemetry — call between the preload pass and the first transport
+/// run to scope `cache_stats()` to just the transport workload.
+#[pyfunction]
+fn cache_stats_reset() {
+    open_rust_mc::transport::nuclide_cache::stats().reset();
+}
+
 // ── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -3225,6 +3272,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(deplete_constant_flux, m)?)?;
     m.add_function(wrap_pyfunction!(deplete_with_flux_callback, m)?)?;
     m.add_function(wrap_pyfunction!(preload_nuclide_cache_weights, m)?)?;
+    m.add_function(wrap_pyfunction!(cache_stats, m)?)?;
+    m.add_function(wrap_pyfunction!(cache_stats_reset, m)?)?;
 
     Ok(())
 }
