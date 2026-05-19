@@ -121,6 +121,15 @@ impl<'a, XS: crate::transport::simulate::XsProvider> EigenvalueRunner for CpuRun
 /// per-batch source-bank management, k_eff active-mean aggregation,
 /// and statepoint hook all live here so binaries don't reproduce
 /// that loop themselves.
+///
+/// **Recommended `particles_per_batch` for the event-based pipeline:
+/// 50_000**. The event-based driver (Tramm 2024) replaces a single
+/// persistent history kernel with a 7-stage pipeline that amortises
+/// per-kernel-launch overhead over the batch. ncu profiling of the
+/// previous persistent kernel showed active_threads_per_warp = 6.2/32
+/// across every scene where reaction-type dispatch diverged warps
+/// (not only PWR-17×17). Smaller batches (≤5k) leave most of the
+/// pipeline launch cost unamortised.
 #[cfg(feature = "cuda")]
 pub struct CudaRunner<'a> {
     pub recursive: &'a crate::gpu_recursive::GpuRecursiveContext,

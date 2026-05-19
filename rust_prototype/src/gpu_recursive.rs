@@ -339,6 +339,17 @@ pub struct GpuRecursiveContext {
     pub k_multi_step_walk: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
     pub k_transport_recursive: CudaFunction,
+    // Event-based pipeline kernels (Tramm 2024). Replace the single
+    // persistent history kernel with a 7-stage pipeline that sorts
+    // particles by reaction type between geom steps so each reaction
+    // kernel sees a single code path (no warp divergence).
+    pub k_eb_init_stacks: CudaFunction,
+    pub k_eb_trace_and_sample: CudaFunction,
+    pub k_eb_partition: CudaFunction,
+    pub k_eb_elastic: CudaFunction,
+    pub k_eb_inelastic: CudaFunction,
+    pub k_eb_fission: CudaFunction,
+    pub k_eb_multi: CudaFunction,
     // Geometry tables on device.
     surf_type: CudaSlice<i32>,
     surf_params: CudaSlice<f64>,
@@ -384,6 +395,7 @@ const RECURSIVE_KERNELS: &str = include_str!("../gpu/cuda/geom_recursive_kernels
 const CONST_XS_KERNEL: &str = include_str!("../gpu/cuda/transport_recursive_const.cu");
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 const TRANSPORT_RECURSIVE: &str = include_str!("../gpu/cuda/transport_recursive.cu");
+const TRANSPORT_EVENT_BASED: &str = include_str!("../gpu/cuda/transport_event_based.cu");
 
 fn assemble_kernel_source() -> String {
     // NVRTC has no concept of source-include paths — concatenate the
@@ -404,11 +416,12 @@ fn assemble_kernel_source() -> String {
     // come first, then the recursive geometry primitives, then the
     // kernels that consume both.
     format!(
-        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}",
+        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}\n{}",
         strip(TRANSPORT_KERNELS),
         strip(RECURSIVE_KERNELS),
         strip(CONST_XS_KERNEL),
         strip(TRANSPORT_RECURSIVE),
+        strip(TRANSPORT_EVENT_BASED),
     )
 }
 
@@ -486,6 +499,28 @@ impl GpuRecursiveContext {
         let k_transport_recursive = module
             .load_function("transport_recursive_persistent")
             .map_err(|e| format!("kernel load (transport_recursive): {e}"))?;
+        // Event-based pipeline.
+        let k_eb_init_stacks = module
+            .load_function("gr_init_stacks")
+            .map_err(|e| format!("kernel load (gr_init_stacks): {e}"))?;
+        let k_eb_trace_and_sample = module
+            .load_function("gr_trace_and_sample")
+            .map_err(|e| format!("kernel load (gr_trace_and_sample): {e}"))?;
+        let k_eb_partition = module
+            .load_function("gr_partition")
+            .map_err(|e| format!("kernel load (gr_partition): {e}"))?;
+        let k_eb_elastic = module
+            .load_function("gr_elastic_event")
+            .map_err(|e| format!("kernel load (gr_elastic_event): {e}"))?;
+        let k_eb_inelastic = module
+            .load_function("gr_inelastic_event")
+            .map_err(|e| format!("kernel load (gr_inelastic_event): {e}"))?;
+        let k_eb_fission = module
+            .load_function("gr_fission_event")
+            .map_err(|e| format!("kernel load (gr_fission_event): {e}"))?;
+        let k_eb_multi = module
+            .load_function("gr_multi_event")
+            .map_err(|e| format!("kernel load (gr_multi_event): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
@@ -644,6 +679,13 @@ impl GpuRecursiveContext {
             k_multi_step_walk,
             k_const_xs_transport,
             k_transport_recursive,
+            k_eb_init_stacks,
+            k_eb_trace_and_sample,
+            k_eb_partition,
+            k_eb_elastic,
+            k_eb_inelastic,
+            k_eb_fission,
+            k_eb_multi,
             surf_type,
             surf_params,
             surf_bc,
@@ -1483,6 +1525,38 @@ pub struct TransportBuffers {
     pub d_params: CudaSlice<u64>,
     /// `vec![1_i32; n]` lifted out of the per-batch path.
     alive_host_ones: Vec<i32>,
+
+    // ── Event-based pipeline buffers ─────────────────────────────────
+    /// SoA coord stack ─ [n × GR_MAX_DEPTH=4] per field. Replaces the
+    /// per-thread `GrCoord stack[GR_MAX_DEPTH]` register/local-memory
+    /// allocation in the persistent history kernel so the geom kernel
+    /// can hand off state between launches.
+    pub d_stack_universe: CudaSlice<i32>,
+    pub d_stack_cell_idx: CudaSlice<i32>,
+    pub d_stack_has_lattice: CudaSlice<i32>,
+    pub d_stack_lattice_id: CudaSlice<i32>,
+    pub d_stack_lat_ix: CudaSlice<i32>,
+    pub d_stack_lat_iy: CudaSlice<i32>,
+    pub d_stack_lat_iz: CudaSlice<i32>,
+    pub d_stack_offx: CudaSlice<f64>,
+    pub d_stack_offy: CudaSlice<f64>,
+    pub d_stack_offz: CudaSlice<f64>,
+    pub d_depth: CudaSlice<i32>,
+    /// Per-event metadata emitted by `gr_trace_and_sample`, consumed
+    /// by the four reaction kernels.
+    pub d_event_type: CudaSlice<i32>,
+    pub d_event_hit_nuc: CudaSlice<i32>,
+    pub d_event_mat: CudaSlice<i32>,
+    pub d_event_kT: CudaSlice<f64>,
+    pub d_event_hit_Ni: CudaSlice<f64>,
+    pub d_event_urr_xi: CudaSlice<f64>,
+    /// Partitioning: per-type count (zeroed per step), prefix-sum
+    /// offsets (length 6 — exclusive sums + total), per-type atomic
+    /// write cursor (zeroed per step), and the sorted index buffer.
+    pub d_type_count: CudaSlice<i32>,
+    pub d_type_offsets: CudaSlice<i32>,
+    pub d_type_scatter: CudaSlice<i32>,
+    pub d_sorted_idx: CudaSlice<i32>,
 }
 
 impl TransportBuffers {
@@ -1543,6 +1617,30 @@ impl TransportBuffers {
             d_q_inel: mk_d(1)?,
             d_params: mk_u(params_len)?,
             alive_host_ones: vec![1_i32; n],
+            // Event-based pipeline. GR_MAX_DEPTH = 4 (matches the CUDA
+            // header). Memory ~208 bytes per particle for the stack
+            // arrays — 10.4 MB at n=50k.
+            d_stack_universe: mk_i(n * 4)?,
+            d_stack_cell_idx: mk_i(n * 4)?,
+            d_stack_has_lattice: mk_i(n * 4)?,
+            d_stack_lattice_id: mk_i(n * 4)?,
+            d_stack_lat_ix: mk_i(n * 4)?,
+            d_stack_lat_iy: mk_i(n * 4)?,
+            d_stack_lat_iz: mk_i(n * 4)?,
+            d_stack_offx: mk_d(n * 4)?,
+            d_stack_offy: mk_d(n * 4)?,
+            d_stack_offz: mk_d(n * 4)?,
+            d_depth: mk_i(n)?,
+            d_event_type: mk_i(n)?,
+            d_event_hit_nuc: mk_i(n)?,
+            d_event_mat: mk_i(n)?,
+            d_event_kT: mk_d(n)?,
+            d_event_hit_Ni: mk_d(n)?,
+            d_event_urr_xi: mk_d(n)?,
+            d_type_count: mk_i(5)?,
+            d_type_offsets: mk_i(6)?,
+            d_type_scatter: mk_i(5)?,
+            d_sorted_idx: mk_i(n)?,
         })
     }
 
@@ -1755,9 +1853,8 @@ impl GpuRecursiveContext {
             .map_err(|e| e.to_string())?;
 
         let block = 128_u32;
-        let grid = (n as u32).div_ceil(block);
-        let cfg = LaunchConfig {
-            grid_dim: (grid, 1, 1),
+        let cfg_n = |n_threads: u32| LaunchConfig {
+            grid_dim: (n_threads.div_ceil(block).max(1), 1, 1),
             block_dim: (block, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1767,90 +1864,313 @@ impl GpuRecursiveContext {
         let n_lat = n_lat_owned as i32;
         let max_fis_i = fis_capacity as i32;
 
-        let mut launch = stream.launch_builder(&self.k_transport_recursive);
-        launch
-            .arg(&buffers.d_params)
-            .arg(&mut buffers.d_xs)
-            .arg(&mut buffers.d_ys)
-            .arg(&mut buffers.d_zs)
-            .arg(&mut buffers.d_dxs)
-            .arg(&mut buffers.d_dys)
-            .arg(&mut buffers.d_dzs)
-            .arg(&mut buffers.d_e)
-            .arg(&mut buffers.d_alive)
-            .arg(&mut buffers.d_rng_state)
-            .arg(&mut buffers.d_rng_inc)
-            .arg(&n_i32)
-            .arg(&max_events_per_history)
-            .arg(&self.surf_type)
-            .arg(&self.surf_params)
-            .arg(&self.surf_bc)
-            .arg(&n_surf)
-            .arg(&self.cell_region_off)
-            .arg(&self.cell_region_len)
-            .arg(&self.cell_fill_type)
-            .arg(&self.cell_fill_data)
-            .arg(&self.cell_aabb_min)
-            .arg(&self.cell_aabb_max)
-            .arg(&self.region_op)
-            .arg(&self.region_arg)
-            .arg(&self.univ_cells_off)
-            .arg(&self.univ_cells_len)
-            .arg(&self.univ_surfaces_off)
-            .arg(&self.univ_surfaces_len)
-            .arg(&self.univ_cell_indices)
-            .arg(&self.univ_surface_indices)
-            .arg(&root)
-            .arg(&self.lat_origin)
-            .arg(&self.lat_pitch)
-            .arg(&self.lat_shape)
-            .arg(&self.lat_universes_off)
-            .arg(&self.lat_universes)
-            .arg(&n_lat)
-            .arg(&self.hex_center)
-            .arg(&self.hex_pitch_xy)
-            .arg(&self.hex_pitch_z)
-            .arg(&self.hex_n_rings)
-            .arg(&self.hex_n_axial)
-            .arg(&self.hex_orientation)
-            .arg(&self.hex_universes_off)
-            .arg(&self.hex_universes)
-            .arg(&self.n_hex_lattices)
-            .arg(&buffers.d_lat_override_off)
-            .arg(&buffers.d_lat_override_count)
-            .arg(&buffers.d_override_lat_idx)
-            .arg(&buffers.d_override_cell_idx)
-            .arg(&buffers.d_override_mat)
-            .arg(&buffers.d_mat_kt)
-            .arg(&n_materials)
-            .arg(&sab_nuc_idx)
-            .arg(&self.evals_scratch)
-            .arg(&mut buffers.d_fis_x)
-            .arg(&mut buffers.d_fis_y)
-            .arg(&mut buffers.d_fis_z)
-            .arg(&mut buffers.d_fis_e)
-            .arg(&mut buffers.d_fis_w)
-            .arg(&mut buffers.d_fis_count)
-            .arg(&max_fis_i)
-            .arg(&mut buffers.d_cnt_coll)
-            .arg(&mut buffers.d_cnt_fis)
-            .arg(&mut buffers.d_cnt_leak)
-            .arg(&mut buffers.d_cnt_surf)
-            .arg(&mut buffers.d_cnt_el)
-            .arg(&mut buffers.d_cnt_inel)
-            .arg(&mut buffers.d_cnt_cap)
-            .arg(&mut buffers.d_e_fis_in)
-            .arg(&mut buffers.d_e_el_in)
-            .arg(&mut buffers.d_e_inel_in)
-            .arg(&mut buffers.d_e_inel_out)
-            .arg(&mut buffers.d_e_fis_in_sq)
-            .arg(&mut buffers.d_e_el_in_sq)
-            .arg(&mut buffers.d_e_inel_in_sq)
-            .arg(&mut buffers.d_q_inel);
-        // SAFETY: kernel signature matches the argument list above
-        // (transport_recursive_persistent in transport_recursive.cu).
-        unsafe {
-            launch.launch(cfg).map_err(|e| e.to_string())?;
+        // Event-based pipeline (Tramm 2024). Replaces the single
+        // persistent history kernel — the ncu profile showed
+        // active_threads_per_warp = 6.2/32 in the history kernel
+        // because reaction-type dispatch diverged every warp. Sorting
+        // by reaction type between geom steps gives each reaction
+        // kernel a single code path. Affects every scene whose
+        // history kernel saw warp divergence, not just PWR-17×17.
+        //
+        // Step 1: gr_init_stacks (once per batch). Locates each
+        // particle's deepest cell and seeds the SoA stack arrays.
+        {
+            let mut launch = stream.launch_builder(&self.k_eb_init_stacks);
+            launch
+                .arg(&mut buffers.d_xs)
+                .arg(&mut buffers.d_ys)
+                .arg(&mut buffers.d_zs)
+                .arg(&mut buffers.d_alive)
+                .arg(&n_i32)
+                .arg(&self.surf_type)
+                .arg(&self.surf_params)
+                .arg(&self.surf_bc)
+                .arg(&n_surf)
+                .arg(&self.cell_region_off)
+                .arg(&self.cell_region_len)
+                .arg(&self.cell_fill_type)
+                .arg(&self.cell_fill_data)
+                .arg(&self.cell_aabb_min)
+                .arg(&self.cell_aabb_max)
+                .arg(&self.region_op)
+                .arg(&self.region_arg)
+                .arg(&self.univ_cells_off)
+                .arg(&self.univ_cells_len)
+                .arg(&self.univ_surfaces_off)
+                .arg(&self.univ_surfaces_len)
+                .arg(&self.univ_cell_indices)
+                .arg(&self.univ_surface_indices)
+                .arg(&root)
+                .arg(&self.lat_origin)
+                .arg(&self.lat_pitch)
+                .arg(&self.lat_shape)
+                .arg(&self.lat_universes_off)
+                .arg(&self.lat_universes)
+                .arg(&n_lat)
+                .arg(&self.hex_center)
+                .arg(&self.hex_pitch_xy)
+                .arg(&self.hex_pitch_z)
+                .arg(&self.hex_n_rings)
+                .arg(&self.hex_n_axial)
+                .arg(&self.hex_orientation)
+                .arg(&self.hex_universes_off)
+                .arg(&self.hex_universes)
+                .arg(&self.n_hex_lattices)
+                .arg(&self.evals_scratch)
+                .arg(&mut buffers.d_stack_universe)
+                .arg(&mut buffers.d_stack_cell_idx)
+                .arg(&mut buffers.d_stack_has_lattice)
+                .arg(&mut buffers.d_stack_lattice_id)
+                .arg(&mut buffers.d_stack_lat_ix)
+                .arg(&mut buffers.d_stack_lat_iy)
+                .arg(&mut buffers.d_stack_lat_iz)
+                .arg(&mut buffers.d_stack_offx)
+                .arg(&mut buffers.d_stack_offy)
+                .arg(&mut buffers.d_stack_offz)
+                .arg(&mut buffers.d_depth)
+                .arg(&mut buffers.d_cnt_leak);
+            // SAFETY: kernel signature matches the argument list
+            // (gr_init_stacks in transport_event_based.cu).
+            unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+        }
+
+        // Event loop. One iteration = one geom step + one reaction
+        // dispatch round.
+        for _step in 0..max_events_per_history {
+            // Zero per-step partition counters.
+            stream.memset_zeros(&mut buffers.d_type_count).map_err(|e| e.to_string())?;
+            stream.memset_zeros(&mut buffers.d_type_scatter).map_err(|e| e.to_string())?;
+
+            // Step 2: gr_trace_and_sample.
+            {
+                let mut launch = stream.launch_builder(&self.k_eb_trace_and_sample);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&mut buffers.d_xs)
+                    .arg(&mut buffers.d_ys)
+                    .arg(&mut buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&n_i32)
+                    .arg(&self.surf_type)
+                    .arg(&self.surf_params)
+                    .arg(&self.surf_bc)
+                    .arg(&n_surf)
+                    .arg(&self.cell_region_off)
+                    .arg(&self.cell_region_len)
+                    .arg(&self.cell_fill_type)
+                    .arg(&self.cell_fill_data)
+                    .arg(&self.cell_aabb_min)
+                    .arg(&self.cell_aabb_max)
+                    .arg(&self.region_op)
+                    .arg(&self.region_arg)
+                    .arg(&self.univ_cells_off)
+                    .arg(&self.univ_cells_len)
+                    .arg(&self.univ_surfaces_off)
+                    .arg(&self.univ_surfaces_len)
+                    .arg(&self.univ_cell_indices)
+                    .arg(&self.univ_surface_indices)
+                    .arg(&root)
+                    .arg(&self.lat_origin)
+                    .arg(&self.lat_pitch)
+                    .arg(&self.lat_shape)
+                    .arg(&self.lat_universes_off)
+                    .arg(&self.lat_universes)
+                    .arg(&n_lat)
+                    .arg(&self.hex_center)
+                    .arg(&self.hex_pitch_xy)
+                    .arg(&self.hex_pitch_z)
+                    .arg(&self.hex_n_rings)
+                    .arg(&self.hex_n_axial)
+                    .arg(&self.hex_orientation)
+                    .arg(&self.hex_universes_off)
+                    .arg(&self.hex_universes)
+                    .arg(&self.n_hex_lattices)
+                    .arg(&buffers.d_lat_override_off)
+                    .arg(&buffers.d_lat_override_count)
+                    .arg(&buffers.d_override_lat_idx)
+                    .arg(&buffers.d_override_cell_idx)
+                    .arg(&buffers.d_override_mat)
+                    .arg(&buffers.d_mat_kt)
+                    .arg(&n_materials)
+                    .arg(&sab_nuc_idx)
+                    .arg(&self.evals_scratch)
+                    .arg(&mut buffers.d_stack_universe)
+                    .arg(&mut buffers.d_stack_cell_idx)
+                    .arg(&mut buffers.d_stack_has_lattice)
+                    .arg(&mut buffers.d_stack_lattice_id)
+                    .arg(&mut buffers.d_stack_lat_ix)
+                    .arg(&mut buffers.d_stack_lat_iy)
+                    .arg(&mut buffers.d_stack_lat_iz)
+                    .arg(&mut buffers.d_stack_offx)
+                    .arg(&mut buffers.d_stack_offy)
+                    .arg(&mut buffers.d_stack_offz)
+                    .arg(&mut buffers.d_depth)
+                    .arg(&mut buffers.d_event_type)
+                    .arg(&mut buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_event_mat)
+                    .arg(&mut buffers.d_event_kT)
+                    .arg(&mut buffers.d_event_hit_Ni)
+                    .arg(&mut buffers.d_event_urr_xi)
+                    .arg(&mut buffers.d_type_count)
+                    .arg(&mut buffers.d_cnt_coll)
+                    .arg(&mut buffers.d_cnt_leak)
+                    .arg(&mut buffers.d_cnt_surf)
+                    .arg(&mut buffers.d_cnt_cap)
+                    .arg(&mut buffers.d_e_el_in)
+                    .arg(&mut buffers.d_e_el_in_sq);
+                // SAFETY: kernel signature matches the argument list
+                // (gr_trace_and_sample in transport_event_based.cu).
+                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+            }
+
+            // Step 3: DtoH the 5 per-type counts (20 bytes).
+            let type_counts: Vec<i32> = stream
+                .clone_dtoh(&buffers.d_type_count)
+                .map_err(|e| e.to_string())?;
+            let total: i32 = type_counts.iter().sum();
+            if total == 0 { break; }
+
+            // Host-side exclusive prefix sum → 6-element offsets.
+            let mut offsets = [0_i32; 6];
+            for i in 0..5 { offsets[i + 1] = offsets[i] + type_counts[i]; }
+            stream
+                .memcpy_htod(&offsets, &mut buffers.d_type_offsets)
+                .map_err(|e| e.to_string())?;
+
+            // Step 4: gr_partition — scatter alive indices.
+            {
+                let mut launch = stream.launch_builder(&self.k_eb_partition);
+                launch
+                    .arg(&buffers.d_event_type)
+                    .arg(&buffers.d_alive)
+                    .arg(&n_i32)
+                    .arg(&buffers.d_type_offsets)
+                    .arg(&mut buffers.d_type_scatter)
+                    .arg(&mut buffers.d_sorted_idx);
+                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+            }
+
+            // Reaction kernels. Each launches only count[t] threads,
+            // so the per-kernel grid scales with the alive-by-type
+            // population — zero divergence inside.
+            let c_el  = type_counts[0];
+            let c_in  = type_counts[1];
+            let c_fis = type_counts[2];
+            let c_n2n = type_counts[3];
+            let c_n3n = type_counts[4];
+            let base_el  = offsets[0];
+            let base_in  = offsets[1];
+            let base_fis = offsets[2];
+            let base_n2n = offsets[3];
+            // multi-kernel walks [n2n, n3n) — base is offsets[3], threads is c_n2n + c_n3n.
+            let _ = base_n2n;
+            let c_multi = c_n2n + c_n3n;
+
+            if c_el > 0 {
+                let nthr = c_el;
+                let mut launch = stream.launch_builder(&self.k_eb_elastic);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&nthr)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&base_el)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&buffers.d_event_kT)
+                    .arg(&buffers.d_event_urr_xi)
+                    .arg(&sab_nuc_idx)
+                    .arg(&mut buffers.d_cnt_el);
+                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+            }
+            if c_in > 0 {
+                let nthr = c_in;
+                let mut launch = stream.launch_builder(&self.k_eb_inelastic);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&nthr)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&base_in)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_cnt_inel)
+                    .arg(&mut buffers.d_e_inel_in)
+                    .arg(&mut buffers.d_e_inel_in_sq)
+                    .arg(&mut buffers.d_e_inel_out)
+                    .arg(&mut buffers.d_q_inel);
+                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+            }
+            if c_fis > 0 {
+                let nthr = c_fis;
+                let mut launch = stream.launch_builder(&self.k_eb_fission);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&nthr)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&base_fis)
+                    .arg(&buffers.d_xs)
+                    .arg(&buffers.d_ys)
+                    .arg(&buffers.d_zs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_fis_x)
+                    .arg(&mut buffers.d_fis_y)
+                    .arg(&mut buffers.d_fis_z)
+                    .arg(&mut buffers.d_fis_e)
+                    .arg(&mut buffers.d_fis_w)
+                    .arg(&mut buffers.d_fis_count)
+                    .arg(&max_fis_i)
+                    .arg(&mut buffers.d_cnt_fis)
+                    .arg(&mut buffers.d_e_fis_in)
+                    .arg(&mut buffers.d_e_fis_in_sq);
+                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+            }
+            if c_multi > 0 {
+                let nthr = c_multi;
+                let mut launch = stream.launch_builder(&self.k_eb_multi);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&nthr)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&base_n2n)
+                    .arg(&buffers.d_xs)
+                    .arg(&buffers.d_ys)
+                    .arg(&buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_type)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_fis_x)
+                    .arg(&mut buffers.d_fis_y)
+                    .arg(&mut buffers.d_fis_z)
+                    .arg(&mut buffers.d_fis_e)
+                    .arg(&mut buffers.d_fis_w)
+                    .arg(&mut buffers.d_fis_count)
+                    .arg(&max_fis_i);
+                unsafe { launch.launch(cfg_n(nthr as u32)).map_err(|e| e.to_string())?; }
+            }
         }
 
         let fis_count =
