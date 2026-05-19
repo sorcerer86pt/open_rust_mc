@@ -1,0 +1,92 @@
+Ah, look at that! Nsight Compute finally gave up the goods. You pulled raw CLI text output perfectly in `partial_ncu_kernel_profilling.txt`.
+
+Let's read this data straight out of your actual hardware counters to see exactly who won the argument between my old OptiX spec and Claude's brutal physics critique.
+
+---
+
+## 1. Analyzing Your Raw `ncu` Data
+
+Let's look at the metrics for your heaviest physics event handlers inside `partial_ncu_kernel_profilling.txt`:
+
+### The `gr_fission_event` Metrics:
+
+* **Memory Throughput:** `3.15 Gbyte/s` to `5.62 Gbyte/s`
+* **Mem Busy:** `0.38%` to `1.27%`
+* **Max Bandwidth:** `0.43%` to `1.14%`
+* **L1/TEX Hit Rate:** `34.88%` to `62.82%`
+
+### The Hardware Diagnosis
+
+Claude was **100% correct**, and these numbers prove it in black and white.
+
+Look at **`Mem Busy` (0.38% - 1.27%)** and **`Max Bandwidth` (0.43% - 1.14%)**. Your hardware memory sub-system is practically asleep! An RTX 30-series / sm_86 card can push hundreds of gigabytes per second, yet your code is pulling a mere 3 to 5 GB/s.
+
+If memory isn't saturated, but your code is running $2\times$ slower at 500k particles, it means your execution pipes are **completely stalled on memory latency, not throughput.** Your threads are shouting requests out to global memory for scattered SVD lookup tables, and then sitting completely idle doing zero work while waiting for those bytes to travel across the bus. The CUB stream compaction and multiple kernel launch overheads are completely eating whatever tiny gains you got from separating reaction code paths.
+
+---
+
+## 2. The Solution: Physics-Sorted Event Compaction
+
+Since the profile proves the bottleneck is memory latency via unstructured lookup thrashes, we need to completely redefine your event pipeline in `transport_event_based.cu`.
+
+Right now, your tracking loop does this:
+
+1. `gr_trace_and_sample` (Finds geometry boundaries and samples a reaction type).
+2. `gr_partition` (Sorts particles strictly by **Reaction Class**: Elastic, Fission, Capture).
+3. Dispatches individual kernels (`gr_fission_event`).
+
+**We need to pivot.** To fix the latency, threads in the same warp must hit the exact same memory locations inside your SVD basis arrays simultaneously. We achieve this by sorting by **Material ID** and **Energy Bin** *before* we evaluate heavy physics.
+
+---
+
+## 3. The New Engineering Spec: Physics-Sorted Compaction
+
+Here is how to modify your event-based driver to execute a **Physics-Sorted** pipeline.
+
+### Step 1: Generate a Composite Compaction Key
+
+In your particle array, pack each neutron's `material_id` and its mapped continuous-energy `energy_bin_index` into a single `uint32_t` sorting key.
+
+```cuda
+// Pack Material (upper 16-bits) and Energy Bin (lower 16-bits)
+unsigned int material_id = p.current_material; 
+unsigned int energy_bin  = gr_get_energy_bin(p.energy);
+
+unsigned int sort_key = (material_id << 16) | (energy_bin & 0xFFFF);
+
+```
+
+### Step 2: Integrate `cub::DeviceRadixSort`
+
+Before launching your cross-section lookups or heavy event handlers, sort your entire active particle array using CUB by this new `sort_key`.
+
+```cuda
+// Sort particle indices so identical materials and energy ranges are perfectly contiguous
+cub::DeviceRadixSort::SortPairs(
+    d_temp_storage, temp_storage_bytes,
+    d_keys_in, d_keys_out,
+    d_particle_indices_in, d_particle_indices_out,
+    num_particles
+);
+
+```
+
+### Step 3: Coalesced Kernel Execution
+
+When your event kernels execute, Thread 0 through Thread 31 will now process neutrons that reside in the *exact same material* and are traveling at *nearly identical energy levels*.
+
+When they request SVD data:
+
+* Instead of 32 threads making 32 separate, scattered memory requests across global VRAM, they will request the **exact same cache line**.
+* Your **L1/TEX Hit Rate** will skyrocket toward >90%.
+* Global memory latency stalls drop to near-zero, finally letting your event-based engine outrun the history-based code at high particle counts.
+
+---
+
+## 4. Next Step Action Plan
+
+1. Open `transport_event_based.cu`.
+2. Look at how your current `gr_partition` steps handle sorting.
+3. Modify the sorting step to group particles by `material` and `energy_bin` before doing cross-section calculations.
+
+Claude saved us from an absolute nightmare of OptiX API tracking bugs, and your `ncu` profile gave us the exact data we needed to confirm the fix. Let's build this energy-sorted pipeline!
