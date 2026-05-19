@@ -368,9 +368,19 @@ from the ICSBEP handbook k_eff.
 - **Continuous particle refill (PHYSOR 2022 Optimization F).** When
   particles die mid-batch, our outer driver leaves the per-event-type
   queues progressively under-filled, hurting SM occupancy in the
-  batch tail. The paper's rebirth-on-the-fly strategy keeps queues
-  saturated and was credited with a meaningful share of their
-  end-to-end speedup. Not implemented in our driver.
+  batch tail. The paper rebirths from the previous-generation source
+  bank into dead slots, effectively making a "batch" consume more
+  than `particles_per_batch` source entries — `particles_per_batch`
+  becomes "in-flight slot count" rather than "histories per batch".
+  This requires per-particle weight handling threaded through every
+  tally accumulator (currently we count raw events) so generational
+  k_eff stays unbiased. Reported gain on A100: 1.1× (Table I row F),
+  and the gain shrinks further at large batch sizes where the
+  batch-tail fraction is small. The implementation surface is wide
+  (every reaction kernel + every `d_cnt_*` / `d_e_*` accumulator);
+  not landed because the marginal expected win doesn't justify the
+  blast radius without a statistical-validation harness beyond the
+  current `cuda_runs.rs` regression suite.
 - **Energy sort within reaction class (PHYSOR 2022 Optimization G).**
   We currently sort by reaction class only. Adding a secondary
   per-class sort by particle energy improves XS-lookup memory
