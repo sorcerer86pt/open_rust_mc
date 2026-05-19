@@ -356,6 +356,37 @@ from the ICSBEP handbook k_eff.
 
 ## What's Open / Research-Tier
 
+- **GPU batch-size saturation.** Tramm et al., "Toward Portable GPU
+  Acceleration of the OpenMC Monte Carlo Particle Transport Code"
+  (PHYSOR 2022), report that A100 event-based MC continues to gain
+  performance up to **8 million particles in flight** before
+  exhausting device memory. Current `particles_per_batch` defaults
+  in our binaries are 5 k–50 k — two orders of magnitude below the
+  saturation point. On a 3080 (10 GB VRAM) the practical ceiling is
+  in the 100 k–1 M range; the 4 GB RTX A1000 laptop tops out near
+  50 k. Bumping this is the single largest expected win on any GPU.
+- **Continuous particle refill (PHYSOR 2022 Optimization F).** When
+  particles die mid-batch, our outer driver leaves the per-event-type
+  queues progressively under-filled, hurting SM occupancy in the
+  batch tail. The paper's rebirth-on-the-fly strategy keeps queues
+  saturated and was credited with a meaningful share of their
+  end-to-end speedup. Not implemented in our driver.
+- **Energy sort within reaction class (PHYSOR 2022 Optimization G).**
+  We currently sort by reaction class only. Adding a secondary
+  per-class sort by particle energy improves XS-lookup memory
+  locality (adjacent threads access the same energy grid neighbour).
+  Paper measured 1.3 × on A100; cost is a small device-side sort
+  per step.
+- **MAX_NUCLIDES_PER_MATERIAL=128 register pressure.** The
+  trace_and_sample kernel holds a `double nuc_t[MAX_NUC_PER_MAT]`
+  on the stack (1 kB per thread) to accumulate per-nuclide macro XS
+  before the reaction sampler. This forces register spills on
+  small GPUs. Streaming the per-nuclide loop (compute and immediately
+  fold into the running cumulative without retaining nuc_t[]) would
+  trade an extra eval pass for the reaction-selection at runtime
+  against lower register pressure / higher occupancy.
+
+
 - **CPU↔GPU divergence on multi-nuclide fast-spectrum metal** —
   largely closed by the URR bin-to-bin interpolation fix (commit
   `0aa9591`). The GPU's old `apply_urr` used only the lower-energy

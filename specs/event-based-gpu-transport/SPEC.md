@@ -7,7 +7,10 @@ active threads/warp = **6.2 / 32** (82% idle) and 75% of cycles stalled on MIO
 short-scoreboard BRX branches — the reaction-type dispatch (elastic / inelastic /
 fission / n2n / capture) causes every warp to diverge.
 
-Event-based transport (Tramm 2024): sort particles by reaction type before executing
+Event-based transport (Tramm et al., "Toward Portable GPU Acceleration of the
+OpenMC Monte Carlo Particle Transport Code", PHYSOR 2022; original formulation
+Brown & Martin, Prog. Nucl. Energy 14(3), 1984): sort particles by reaction type
+before executing
 reactions → all threads in a reaction kernel execute the same code path → zero
 divergence inside each kernel.
 

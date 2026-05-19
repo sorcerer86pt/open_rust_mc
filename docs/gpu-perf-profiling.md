@@ -162,8 +162,9 @@ rises even if per-instruction latency is unchanged.
 
 Sort particles by collision type before processing. Threads in a warp would then
 all execute the same branch (all elastic, all inelastic, etc.), pushing active
-threads/warp from 6.2 → 32. This is the Tramm 2024 approach flagged in
-`STATUS.md`. The 82.3% divergence potential speedup is the theoretical ceiling.
+threads/warp from 6.2 → 32. Canonical reference: Tramm et al., "Toward Portable
+GPU Acceleration of the OpenMC Monte Carlo Particle Transport Code" (PHYSOR
+2022). The 82.3% divergence potential speedup is the theoretical ceiling.
 
 **Expected gain:** ~5× on the divergence-bound portion; combined with O1 could
 approach the paper's CPU–GPU parity target.

@@ -122,14 +122,19 @@ impl<'a, XS: crate::transport::simulate::XsProvider> EigenvalueRunner for CpuRun
 /// and statepoint hook all live here so binaries don't reproduce
 /// that loop themselves.
 ///
-/// **Recommended `particles_per_batch` for the event-based pipeline:
-/// 50_000**. The event-based driver (Tramm 2024) replaces a single
-/// persistent history kernel with a 7-stage pipeline that amortises
-/// per-kernel-launch overhead over the batch. ncu profiling of the
-/// previous persistent kernel showed active_threads_per_warp = 6.2/32
-/// across every scene where reaction-type dispatch diverged warps
-/// (not only PWR-17×17). Smaller batches (≤5k) leave most of the
-/// pipeline launch cost unamortised.
+/// **Recommended `particles_per_batch` for the event-based pipeline.**
+/// Tramm et al., "Toward Portable GPU Acceleration of the OpenMC
+/// Monte Carlo Particle Transport Code" (PHYSOR 2022), report that
+/// on an A100 the event-based mode continues to gain performance up
+/// to **8 million particles in-flight** before exhausting device
+/// memory — i.e. saturation is two orders of magnitude beyond what
+/// is conventional for CPU MC runs. A reasonable target on a 3080
+/// with 10 GB VRAM is **100k–1M particles per batch**; on the 4 GB
+/// RTX A1000 laptop, 50 k is the practical ceiling. Smaller batches
+/// (≤5 k) leave most of the per-kernel-launch and per-step PCIe
+/// overhead unamortised. ncu profiling of the previous persistent
+/// kernel showed active_threads_per_warp = 6.2/32 on PWR-17×17 and
+/// every other scene where reaction-type dispatch diverged warps.
 #[cfg(feature = "cuda")]
 pub struct CudaRunner<'a> {
     pub recursive: &'a crate::gpu_recursive::GpuRecursiveContext,

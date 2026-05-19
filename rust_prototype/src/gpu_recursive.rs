@@ -339,7 +339,10 @@ pub struct GpuRecursiveContext {
     pub k_multi_step_walk: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
     pub k_transport_recursive: CudaFunction,
-    // Event-based pipeline kernels (Tramm 2024). Replace the single
+    // Event-based pipeline kernels (Tramm et al., PHYSOR 2022 —
+    // "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
+    // Particle Transport Code"; original formulation: Brown & Martin,
+    // Prog. Nucl. Energy 14(3), 1984). Replace the single
     // persistent history kernel with a 7-stage pipeline that sorts
     // particles by reaction type between geom steps so each reaction
     // kernel sees a single code path (no warp divergence).
@@ -1875,7 +1878,7 @@ impl GpuRecursiveContext {
         let n_lat = n_lat_owned as i32;
         let max_fis_i = fis_capacity as i32;
 
-        // Event-based pipeline (Tramm 2024). Replaces the single
+        // Event-based pipeline (Tramm et al., PHYSOR 2022). Replaces the single
         // persistent history kernel — the ncu profile showed
         // active_threads_per_warp = 6.2/32 in the history kernel
         // because reaction-type dispatch diverged every warp. Sorting

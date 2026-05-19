@@ -1,5 +1,14 @@
 // ═══════════════════════════════════════════════════════════════════════
-// Event-based GPU transport (Tramm 2024).
+// Event-based GPU transport. Canonical recent GPU reference is Tramm
+// et al., "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
+// Particle Transport Code", PHYSOR 2022. Original event-based
+// formulation: Brown & Martin, "Monte Carlo methods for radiation
+// transport analysis on vector computers", Prog. Nucl. Energy 14(3),
+// 1984. The PHYSOR 2022 paper uses 8 coarser-grained events and a
+// per-event-type queue (atomic enqueue) instead of a sorted partition
+// — our implementation is the simpler "sort by reaction class then
+// dispatch" variant. See `specs/event-based-gpu-transport/SPEC.md`
+// for the architectural choice.
 //
 // Sorts particles by reaction type between geometry steps so each
 // reaction kernel sees a single code path. Eliminates the warp
