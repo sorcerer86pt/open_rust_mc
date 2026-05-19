@@ -596,17 +596,20 @@ Neutron k-eigenvalue:
   harness (runs a case JSON directly without going through PyO3).
   Useful for profiling the engine without Python overhead in the
   call graph.
-- `thermal_audit` — S(α,β) sampler probe (one-off; HEU-SOL-THERM
-  bias investigation 2026).
-- `u233_diag` — per-nuclide χ + ν̄(E) dump used during the U-233
-  systematic-bias session (2026-05-11).
-- `u235_thermal_xs` — U-235 thermal-XS sanity probe (sub-eV
-  Doppler curve cross-check).
-- `watt_validate` / `wmp_validate` — single-issue validators for
-  the Watt fission-spectrum sampler and the windowed-multipole
-  pointwise provider. Both are now also covered by
-  integration tests, but the binaries dump raw moment / pole
-  tables for hand-checking.
+
+> **Diagnostic-binary cleanup, 2026-05-19.** Thirteen one-off
+> diagnostic binaries (`bench_mem`, `pareto_bench`, `gpu_cpu_bench`,
+> `gpu_cpu_trace`, `watt_validate`, `wmp_validate`, `u235_thermal_xs`,
+> `rr_adjoint_sweep`, `u233_diag`, `cp_analysis`, `thermal_audit`,
+> `gpu_compton_scaling`, `gpu_compton_validate`) were removed —
+> each was scaffolding from a specific bug-hunt that has since
+> closed, with no inbound doc / test references. The physics
+> coverage they provided is now in the integration test suite or
+> in checked-in `outputs/*.csv` snapshots. **Future-work note:** a
+> single `diag` binary with sub-commands for each of these
+> diagnostics would be the right replacement once we have a clear
+> menu of common debugging needs; collapsing them avoids re-paying
+> the per-binary build / link cost.
 - `preview_scene` (cargo `--features preview`) — interactive XY
   cross-section viewer for any scene JSON. Walks `bench/icsbep/`
   upward from CWD so case names like `pwr_assembly_17x17` work

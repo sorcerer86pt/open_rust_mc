@@ -123,19 +123,7 @@ workspace = true
 # --- Binaries ---
 
 [[bin]]
-name = "gpu_compton_validate"
-required-features = ["cuda"]
-
-[[bin]]
-name = "gpu_compton_scaling"
-required-features = ["cuda"]
-
-[[bin]]
 name = "gpu_photon_features"
-required-features = ["cuda"]
-
-[[bin]]
-name = "gpu_cpu_bench"
 required-features = ["cuda"]
 
 [[bin]]
@@ -144,10 +132,6 @@ required-features = ["cuda"]
 
 [[bin]]
 name = "gpu_pwr_bench"
-required-features = ["cuda"]
-
-[[bin]]
-name = "gpu_cpu_trace"
 required-features = ["cuda"]
 
 [[bin]]
