@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, RwLock};
 
 use crate::geometry::scene_io::{MaterialDto, NuclideEntryDto};
 use crate::hdf5_reader;
@@ -12,6 +12,69 @@ use crate::thermal::ThermalScatteringData;
 use crate::transport::material::Material;
 use crate::transport::nuclides::{NuclideLibrary, NuclideLibraryError, ResolvedNuclide};
 use crate::transport::xs_provider::{self, NuclideKernels, SvdXsProvider};
+
+// ── Process-wide thermal-scattering cache ───────────────────────────
+//
+// `load_thermal_scattering` parses a `c_*.h5` file and unpacks 8-12
+// temperature columns × tens-of-thousands of E_out / mu points each
+// (≈60 MB per S(α,β) library; c_Be was observed at ~64 MB across 8
+// kTs). On ICSBEP sweeps with hundreds of cases sharing the same
+// thermal files (every PWR pin cell uses c_H_in_H2O, every Be-
+// reflected case uses c_Be) the per-case `resolve_materials` call
+// was re-parsing each file from disk every time. Telemetry on the
+// 73-case `feat/gpu-perf-and-per-nuclide-tally` baseline log
+// (origin/main 008db58) showed `c_Be` loaded **125 times** in a
+// single sweep — roughly 8 GB of redundant HtoD + HDF5-parse work.
+//
+// The cache is keyed by canonical absolute path. Thermal files are
+// effectively immutable for the lifetime of a process (ENDF
+// distribution is read-only), and even when a developer overwrites
+// one mid-session the previous Arc remains usable for any caller
+// already holding it. No size cap — total inventory is bounded by
+// the number of distinct TSL files (typically ≤ 20 per data
+// directory), well under the 46 GB host cache budget reported by
+// the hardware-profile banner.
+//
+// Same pattern as the SVD nuclide-kernel `TieredStore` but lighter
+// weight: thermal data has no temperature key, no SVD rank
+// participation, and no L2 / L3 tier (the parse step is cheap
+// enough on miss that a disk-content-addressed tier wouldn't
+// amortise).
+fn thermal_cache() -> &'static RwLock<HashMap<PathBuf, Arc<ThermalScatteringData>>> {
+    static C: OnceLock<RwLock<HashMap<PathBuf, Arc<ThermalScatteringData>>>> = OnceLock::new();
+    C.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+/// Cached `load_thermal_scattering` — first call parses the HDF5
+/// file, subsequent calls for the same canonical path return the
+/// cached `Arc`. Falls back to a fresh load if path canonicalisation
+/// fails (e.g. file removed between resolve passes), so callers see
+/// the same error semantics as the uncached path.
+fn load_thermal_scattering_cached(
+    path: &Path,
+) -> Result<Arc<ThermalScatteringData>, crate::error::SvdError> {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    // Fast path: read-lock and return existing Arc.
+    if let Some(arc) = thermal_cache().read().unwrap().get(&key) {
+        return Ok(Arc::clone(arc));
+    }
+    // Miss — load outside the write lock to keep the critical
+    // section short. A concurrent miss for the same key may
+    // race-parse; whichever Arc lands first wins, the other gets
+    // dropped. Acceptable since both parses produce equivalent data.
+    let data = hdf5_reader::load_thermal_scattering(path)?;
+    let arc = Arc::new(data);
+    let mut w = thermal_cache().write().unwrap();
+    let entry = w.entry(key).or_insert_with(|| Arc::clone(&arc));
+    Ok(Arc::clone(entry))
+}
+
+/// Test hook: drop every cached thermal entry. Tests that mutate
+/// shared state on disk (rare) call this between cases.
+#[doc(hidden)]
+pub fn _thermal_cache_clear_for_tests() {
+    thermal_cache().write().unwrap().clear();
+}
 
 pub struct ResolvedMaterials {
     pub provider: SvdXsProvider,
@@ -254,21 +317,24 @@ pub fn resolve_materials_with_data_dir(
     }
 
     // Deduplicate path loads — the same `c_H_in_H2O.h5` shared across
-    // multiple materials should only hit disk once.
+    // multiple materials should only hit disk once *per process*. The
+    // local HashMap dedupes within this resolve call; the process-
+    // wide cache (`load_thermal_scattering_cached`) dedupes across
+    // calls so a 73-case ICSBEP sweep parses each TSL file once
+    // instead of once per case (was 125× for `c_Be` on the
+    // origin/main 008db58 baseline log).
     let mut loaded: HashMap<PathBuf, Arc<ThermalScatteringData>> = HashMap::new();
     let mut thermal: Vec<Option<Arc<ThermalScatteringData>>> = vec![None; kernels.len()];
     for (k_idx, path) in thermal_requests {
         let arc = if let Some(arc) = loaded.get(&path) {
             Arc::clone(arc)
         } else {
-            let tsl = hdf5_reader::load_thermal_scattering(&path).map_err(|e| {
-                ResolveError::ThermalLoad {
+            let arc =
+                load_thermal_scattering_cached(&path).map_err(|e| ResolveError::ThermalLoad {
                     material: String::new(),
                     path: path.display().to_string(),
                     reason: format!("{e}"),
-                }
-            })?;
-            let arc = Arc::new(tsl);
+                })?;
             loaded.insert(path.clone(), Arc::clone(&arc));
             arc
         };
