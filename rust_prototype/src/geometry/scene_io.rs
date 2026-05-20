@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `scene.json` deserializer — loads NMC bundle geometry into a
 //! runnable [`Geometry`].
 //!

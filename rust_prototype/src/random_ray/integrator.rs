@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Closed-form MoC ODE across a flat segment of length `l`,
 //! `τ = Σ_t·l`:
 //!

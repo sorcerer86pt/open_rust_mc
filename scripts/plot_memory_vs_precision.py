@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Memory-vs-precision Pareto plot from rank-sweep CSVs.
 
 Reads outputs/sweep_svd_wins_<geom>.csv (produced by sweep_svd_wins.py),

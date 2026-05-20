@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! χ sampling diagnostic.
 //!
 //! Loads U-235's fission energy distribution and samples it under

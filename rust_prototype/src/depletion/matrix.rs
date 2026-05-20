@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Builds `A·Δt` for `cram::cram16`. Row-major `n×n`.
 //!
 //! ```text

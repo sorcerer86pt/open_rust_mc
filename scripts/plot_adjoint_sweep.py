@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Plot adjoint-flux SVD compression sweep across mesh sizes.
 
 Reads two CSVs (one per Frobenius tolerance) produced by

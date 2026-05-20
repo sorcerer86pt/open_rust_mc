@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Heavy-water-moderated pin-cell demo.
 //!
 //! Same fuel + clad geometry as `pwr_pincell` (3.1 % UO₂, Zircaloy-4

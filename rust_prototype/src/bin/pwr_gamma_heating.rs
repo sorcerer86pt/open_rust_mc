@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! PWR pin cell gamma-heating estimate — coupled neutron + photon
 //! transport on a shared CSG geometry, **using per-nuclide γ spectra
 //! loaded directly from the HDF5 data library**.

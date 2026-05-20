@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! L2 disk cache. Path: `$OPEN_RUST_MC_CACHE_DIR` (`off` to disable)
 //! → `std::env::temp_dir()/open_rust_mc_cache`. Atomic writes via
 //! `.tmp` + rename. Content-addressed → process races are

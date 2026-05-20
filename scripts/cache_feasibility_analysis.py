@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Madman Architecture Feasibility — Cache-fit SVD Reconstruction Analysis
 

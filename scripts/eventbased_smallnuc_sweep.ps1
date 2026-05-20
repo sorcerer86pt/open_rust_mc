@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Upper-bound register-pressure experiment: MAX_NUCLIDES_PER_MATERIAL

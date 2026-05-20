@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Hybrid SVD + WMP experiment.
 

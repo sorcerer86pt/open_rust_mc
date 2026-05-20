@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Dump the structure of an OpenMC photon HDF5 file for reader scaffolding."""
 import sys
 import h5py

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // ═══════════════════════════════════════════════════════════════════════
 // open_rust_mc — Event-based GPU neutron transport kernel
 //

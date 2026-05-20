@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Surface constructor functions use CamelCase to match the Python class
 // names the users see (`Sphere`, `ZCylinder`, ...). Rust's snake_case
 // lint would rename them; suppress project-wide in this binding crate.

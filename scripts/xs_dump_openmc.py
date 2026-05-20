@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Per-nuclide cross-section reference dump from OpenMC's Python API.
 

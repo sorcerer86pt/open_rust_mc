@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Process-wide hardware introspection cached at first access.
 //!
 //! Queries `hardware-query` for RAM, CPU cache hierarchy, AVX

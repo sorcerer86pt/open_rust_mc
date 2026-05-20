@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Centralised constants. Canonical definitions live in owning
 //! modules (`photon::compton::M_E_C2_EV` etc.); this module
 //! re-exports them so analysis code has one consistent path.

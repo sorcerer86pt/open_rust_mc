@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Custom binary format for cached `NuclideKernels`.
 //!
 //! Design goals:

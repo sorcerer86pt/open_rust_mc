@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Run OpenMC's depletion solver on the same PWR pin cell + pwr_actinides
 chain that `deplete_pwr.rs` runs, so we can put the U-235 / Pu-239 /
 Xe-135 / Sm-149 trajectories from both codes side-by-side.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Continuous-energy adjoint photon walker (CADIS pipeline core).
 //!
 //! Composes the adjoint Compton kernel

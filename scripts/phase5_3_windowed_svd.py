@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 5.3 — Windowed SVD: independent SVD per energy region.
 

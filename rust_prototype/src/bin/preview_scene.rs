@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Interactive preview window for any scene JSON in `bench/icsbep/`
 //! (or any compatible scene spec). Mirrors `pwr_assembly --preview`
 //! but pulls the geometry from `scene_io::load_scene_from_json`

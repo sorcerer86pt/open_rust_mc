@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Surface-Area-Heuristic BVH for O(log n) cell lookup.
 
 use super::{Aabb, Cell, Surface, Vec3};

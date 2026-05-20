@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CPU↔GPU parity test for the recursive cell-find primitives.
 //!
 //! Builds a small recursive geometry (the 2×2 lattice from

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Flat-source-region (FSR) mesh.
 //!
 //! Two modes share a single `FsrMesh` struct, distinguished by the

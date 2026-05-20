@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! L1 in-process byte-budgeted cache with LFU-with-recency
 //! eviction (see `super::eviction`). Host-side mirror of
 //! `gpu_transport::nuclide_buffer_cache`.

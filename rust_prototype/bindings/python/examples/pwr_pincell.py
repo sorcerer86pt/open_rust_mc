@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Neutron-only PWR pin cell k_inf via the Python API.
 
 Standard 3.1 % UO2 / He gap / Zircaloy-4 / borated water pin at

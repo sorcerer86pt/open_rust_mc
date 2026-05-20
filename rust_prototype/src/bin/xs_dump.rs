@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Engine-side XS dump at fixed (nuclide, energy, temperature) triples.
 //!
 //! Loads the same nine PWR pin-cell nuclides as `pwr_pincell` (same

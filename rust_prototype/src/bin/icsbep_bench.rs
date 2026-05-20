@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ICSBEP benchmark runner.
 //!
 //! Walks a directory of benchmark case files (`*.json`), invokes the

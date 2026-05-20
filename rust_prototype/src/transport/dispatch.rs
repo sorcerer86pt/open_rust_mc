@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Backend dispatch — one entry point that runs the eigenvalue loop
 //! on CPU or CUDA without the binary having to branch on the
 //! `cuda` feature flag.

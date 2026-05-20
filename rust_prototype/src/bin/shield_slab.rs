@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Photon shielding slab benchmark — fixed-source γ transmission
 //! through a thick water (or pluggable) slab.
 //!

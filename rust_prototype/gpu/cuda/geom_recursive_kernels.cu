@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Launchable kernel that runs `gr_find_cell` over a batch of points.
 // Used by the GPU<->CPU parity test for the recursive geometry port.
 

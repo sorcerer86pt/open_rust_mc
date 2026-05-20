@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Run OpenMC PWR pin cell with 5 seeds to produce a reference k_inf for the
 Pareto plot. Matches the open_rust_mc pwr_pincell geometry exactly:
   - 3.1% enriched UO2 at 900 K (U235/U238/O16)

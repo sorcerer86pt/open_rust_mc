@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! SVD compression of the random-ray adjoint flux ψ*(r,g) for
 //! weight-window storage (Evans 2020 method).
 //!

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU-accelerated photon sampling kernels (feature `cuda`).
 //!
 //! Mirrors the CPU samplers in `src/photon/{compton,coherent,pair}.rs`:

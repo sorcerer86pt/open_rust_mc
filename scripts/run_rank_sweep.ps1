@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     SVD rank sweep for Godiva and PWR pin cell (CPU and GPU).

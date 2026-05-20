@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Universes tile space; cells may recursively be filled with
 //! another universe (pin universe repeated inside a lattice).
 

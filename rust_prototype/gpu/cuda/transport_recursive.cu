@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // ═══════════════════════════════════════════════════════════════════════
 // Stage 3b of task #22: full-physics GPU transport on recursive geometry.
 //

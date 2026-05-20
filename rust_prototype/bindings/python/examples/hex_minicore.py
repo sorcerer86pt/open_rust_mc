@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Hex-bounded PWR pin cell via the Python API.
 
 Demonstrates ``Scene.add_hex_boundary`` + ``Scene.add_pin_cylinders``:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Morning experiment: does U-238 capture (MT=102) stay low-rank under
 log-E SVD, and does low-rank reconstruction survive off-library T?
 

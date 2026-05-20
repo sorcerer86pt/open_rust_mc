@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Continuous-energy adjoint neutron kernels (CADIS for neutrons).
 //!
 //! Companion to `transport::adjoint_photon`. Lands the **adjoint

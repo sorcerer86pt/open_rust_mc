@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Collision processing — determine what happens when a neutron hits a nucleus.
 //!
 //! At each collision:

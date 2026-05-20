@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Photon transport data + physics. Loaded from OpenMC photon-per-
 //! element `photon/*.h5`.
 //!

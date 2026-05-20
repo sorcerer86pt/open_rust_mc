@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `scene_io::MaterialDto` → `(Material, SvdXsProvider)`. Maps
 //! `(zaid | hdf5_file) → (path, AWR, temp_idx)` via `NuclideLibrary`
 //! and dedupes per `(zaid, temp_idx)`.

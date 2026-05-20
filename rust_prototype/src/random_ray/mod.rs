@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Random Ray (TRRM) — multigroup forward + adjoint solver.
 //! Deliverable: ψ*(r,g) for FW-CADIS via
 //! `transport::weight_window::WeightWindow::from_flux`.

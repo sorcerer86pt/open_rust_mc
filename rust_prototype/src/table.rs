@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Traditional pointwise table lookup — the baseline competitor.
 //!
 //! This simulates what OpenMC does today: binary search the energy grid,

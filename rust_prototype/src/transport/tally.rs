@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Opt-in tallies (via `SimConfig.tallies`; unset → hot-path no-op).
 //!
 //! `SurfaceCurrentTally`: J+/J- by `dir·normal` sign.

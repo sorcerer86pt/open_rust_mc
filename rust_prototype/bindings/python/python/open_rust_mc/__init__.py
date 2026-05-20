@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """open-rust-mc: Python bindings for a pure-Rust Monte Carlo neutron transport engine.
 
 This is a thin convenience wrapper around the native `_core` extension

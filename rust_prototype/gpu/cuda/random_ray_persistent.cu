@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Persistent immortal-ray random-ray kernel.
 //
 // Each CUDA thread owns one persistent ray (pos, dir, psi[g], stack).

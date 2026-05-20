@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Pusa 2016 CRAM coefficients: full f64 precision is the algorithm's
 // correctness contract.
 #![allow(clippy::excessive_precision)]

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Sweep ALL reaction types in U-235 — singular spectrum analysis for each.
 Produces a comprehensive table of which reactions are SVD-compressible.

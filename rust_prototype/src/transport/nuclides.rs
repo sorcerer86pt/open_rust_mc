@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ZAID-driven nuclide library.
 //!
 //! Replaces the per-binary `NUCLIDE_SPECS: &[(&str, f64, f64, usize)]`

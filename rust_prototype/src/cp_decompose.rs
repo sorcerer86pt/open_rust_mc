@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CP / PARAFAC decomposition of a 3-tensor — re-exports the
 //! implementation from
 //! [`rust_mc_sim::cp`](rust_mc_sim::cp) under the engine's historical

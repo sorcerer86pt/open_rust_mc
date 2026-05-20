@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Load SVD factors and energy grids from numpy `.npy` files produced
 //! by the Python analysis pipeline.
 

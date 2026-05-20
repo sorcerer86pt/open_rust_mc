@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! S(α,β) thermal scattering data and sampling algorithms.
 //!
 //! Implements thermal neutron scattering for bound atoms in molecules and

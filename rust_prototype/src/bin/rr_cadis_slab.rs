@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Random-ray FW-CADIS importance map for `shield_slab`.
 //!
 //! Replaces the "lite" detector-backward collision-density proxy

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! open_rust_mc — SVD cross-section reconstruction engine.
 //!
 //! Two modes:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Xe-135 equilibrium poisoning via the Python depletion API.
 
 Constant-flux Bateman / CRAM demo — same physics as the Rust

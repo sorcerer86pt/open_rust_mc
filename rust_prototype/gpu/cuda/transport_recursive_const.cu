@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Stage 3a of task #22: simplest end-to-end recursive transport on GPU.
 //
 // Constant cross-sections per material (sigma_t, sigma_a, sigma_f, nu).

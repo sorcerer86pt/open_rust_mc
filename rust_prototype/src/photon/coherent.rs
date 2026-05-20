@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Coherent (Rayleigh) scattering kernel.
 //!
 //! Elastic — the photon keeps its energy, only its direction changes.

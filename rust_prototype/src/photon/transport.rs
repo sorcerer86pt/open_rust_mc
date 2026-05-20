@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Fixed-source photon transport driver.
 //!
 //! Streams a photon through a homogeneous `PhotonMaterial` until it is

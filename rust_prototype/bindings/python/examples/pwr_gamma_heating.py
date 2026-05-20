@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """PWR pin cell gamma-heating via the Python API.
 
 Python counterpart to `src/bin/pwr_gamma_heating.rs`. Builds the same

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Eigenvalue simulation — power iteration for k_eff. See
 //! `docs/engine-notes.md § transport/simulate.rs` for SimConfig knob
 //! semantics, Windows-stdout / rayon-loader-lock workarounds, and

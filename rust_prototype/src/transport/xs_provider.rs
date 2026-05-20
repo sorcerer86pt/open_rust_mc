@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! SVD-based cross-section provider — connects the SVD reconstruction
 //! kernel to the transport loop.
 //!

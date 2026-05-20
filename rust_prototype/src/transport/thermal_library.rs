@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Name → ENDF/B `c_*.h5` path table for S(α,β) data. Loading still
 //! goes through `hdf5_reader::load_thermal_scattering`.
 

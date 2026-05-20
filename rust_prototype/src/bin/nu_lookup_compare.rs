@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ν̄(E) CPU↔GPU A/B diagnostic.
 //!
 //! Investigates whether the metal-hot bias on Godiva/Jezebel is a ν

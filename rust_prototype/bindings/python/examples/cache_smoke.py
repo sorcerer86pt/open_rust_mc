@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Cache smoke test — run 2 small cases from the same ICSBEP family
 and dump `cache_stats()` between them. The first case populates the
 L1 nuclide cache from L2 disk + fresh HDF5 parses; the second case

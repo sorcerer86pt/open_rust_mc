@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Paper benchmark: OpenMC reference values for Godiva and PWR pin cell.
 Runs multiple seeds and reports per-seed k_eff for Table in appendix.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Hex-lattice mini-core eigenvalue on GPU.
 //!
 //! Mirrors `hex_minicore` (same nuclides, same materials, same hex

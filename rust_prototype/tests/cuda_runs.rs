@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CUDA backend ICSBEP regression — `--features cuda` only.
 //!
 //! Reuses `material_resolve` and the JSON case format from

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Per-discrete-level XS A/B between CPU and GPU.
 //!
 //! `metal_stats_diag` localised the metal hot bias to discrete-level

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `Geometry` — the canonical owner of surfaces, cells, universes and
 //! lattices for a problem.
 //!

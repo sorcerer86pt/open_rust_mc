@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Per-nuclide GPU XS bundle (Stage C of the GPU cache redesign).
 //!
 //! Stores a single nuclide's worth of GPU-side data so the bundle

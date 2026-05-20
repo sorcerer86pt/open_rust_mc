@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """OpenMC cross-validation of water exposure buildup factor at 1 MeV.
 
 Runs the same benchmark as tests/ansi_ans_buildup.rs using OpenMC.

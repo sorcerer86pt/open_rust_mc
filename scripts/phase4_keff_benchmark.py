@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 4 — Godiva k_eff benchmark: original vs SVD-reconstructed cross-sections.
 

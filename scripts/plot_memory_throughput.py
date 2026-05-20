@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Generate memory and throughput comparison plots for the paper.
 

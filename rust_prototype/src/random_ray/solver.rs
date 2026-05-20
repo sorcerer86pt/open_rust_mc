@@ -1,4 +1,5 @@
 #![allow(clippy::needless_range_loop, clippy::collapsible_if)]
+// SPDX-License-Identifier: MIT
 //! Random Ray solver — forward + adjoint, multigroup, flat source.
 //!
 //! Top-level loop:

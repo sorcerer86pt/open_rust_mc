@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """OpenMC reference dump for Godiva nuclides (U-234, U-235, U-238) at 294 K.
 Mirrors the grid used by rust_prototype/src/bin/xs_dump_godiva.rs so that
 the two CSVs can be diffed channel-by-channel to localise the fast-spectrum

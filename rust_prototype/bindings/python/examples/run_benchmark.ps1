@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     One-shot ICSBEP / engine-internal benchmark sweep.

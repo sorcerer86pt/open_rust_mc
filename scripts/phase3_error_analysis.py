@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 3 — Point-wise physical error analysis and Dense-and-Sparse hybrid.
 

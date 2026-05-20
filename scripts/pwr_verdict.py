@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """PWR off-library verdict runner.
 
 Runs `pwr_pincell --mode all` at tightened statistics, parses the

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Shape builders that emit `(Vec<Surface>, Region)` where the region
 //! uses indices in `[surface_offset, surface_offset + surfaces.len())`.
 //! Caller appends `surfaces` to its own Vec at that offset.

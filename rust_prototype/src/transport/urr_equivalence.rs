@@ -1,4 +1,5 @@
 #![allow(clippy::doc_overindented_list_items)]
+// SPDX-License-Identifier: MIT
 //! URR equivalence theory — Stoker-Weiss / NJOY spatial self-shielding.
 //!
 //! Probability-table URR sampling (the existing `apply_urr` path) is

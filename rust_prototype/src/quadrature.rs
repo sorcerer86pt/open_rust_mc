@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Transcendental constants need every f64 digit; clippy flags them
 // as typos.
 #![allow(clippy::excessive_precision)]

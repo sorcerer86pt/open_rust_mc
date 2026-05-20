@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Lattice — regular arrays of universes.
 //!
 //! Rectangular and hexagonal lattices for repeated geometry (e.g., fuel

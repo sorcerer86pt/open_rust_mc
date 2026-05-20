@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! FW-CADIS bridge. `WeightWindow::from_flux` takes a forward-flux
 //! proxy and emits `w_target ∝ flux_max / flux`. Feed it ψ*(r) and
 //! you get the CADIS recipe directly.

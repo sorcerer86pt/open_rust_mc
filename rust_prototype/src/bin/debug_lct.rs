@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Diagnostic: walk find_cell_recursive on LCT-008 at a handful of
 //! world positions and dump the stack + leaf cell.fill so we can see
 //! why initial_source can't resolve to a Material leaf.

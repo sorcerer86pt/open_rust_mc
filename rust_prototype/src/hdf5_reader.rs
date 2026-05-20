@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Pure-Rust HDF5 reader for OpenMC nuclear data files.
 //!
 //! Uses `hdf5-pure` (zero C dependencies) to read OpenMC nuclide HDF5 files.

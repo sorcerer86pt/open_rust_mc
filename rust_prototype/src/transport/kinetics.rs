@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Time-dependent point-kinetics with 6-group delayed-neutron precursors.
 //!
 //! Closed-form one-spatial-mode reduction of the Boltzmann equation.

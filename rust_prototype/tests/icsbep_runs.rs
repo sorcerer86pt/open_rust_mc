@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! ICSBEP cases as `cargo test` integration tests — the canonical
 //! regression harness once `Geometry::from_json` exists.
 //!

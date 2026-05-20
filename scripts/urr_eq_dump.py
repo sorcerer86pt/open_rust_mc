@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Diagnostic dump of the URR-equivalence math at a PWR pin cell point.
 Uses OpenMC's HDF5 directly to get U-238 ground-truth XS in the URR
 window, then walks through what the Rust apply_equivalence_correction

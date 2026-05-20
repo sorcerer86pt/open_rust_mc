@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Filter rr_adjoint_sweep CSVs to keep only physically meaningful meshes.
 
 For the slab benchmark (100 cm of water at 1 MeV, mfp ≈ 14.14 cm), a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Pair production kernel (nuclear + triplet channels), Bethe-Heitler
 //! sampling with in-flight-then-at-rest positron annihilation.
 //!

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Sweep Godiva across SVD ranks and temperature regimes to identify
 where SVD wins on both memory and speed versus the ACE+WMP industry
 baseline. Produces outputs/sweep_svd_wins.png plus a CSV with raw data.

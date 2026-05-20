@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU event-based transport benchmark for PWR pin cell.
 //!
 //! Paper-quality benchmark with multi-seed statistics.

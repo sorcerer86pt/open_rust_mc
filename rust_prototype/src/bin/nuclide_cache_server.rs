@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! L3 nuclide-kernel cache daemon.
 //!
 //! Single-process TCP server holding an in-memory map from

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Predictor-corrector depletion (CE/LI — Constant flux Extrapolation
 //! / Linear Interpolation, Isotalo-Aarnio 2011).
 //!

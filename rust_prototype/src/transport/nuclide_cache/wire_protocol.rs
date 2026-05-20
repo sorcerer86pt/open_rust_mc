@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! TCP framing for the L3 cache daemon — the same `binary_format`
 //! payload, wrapped in a request / response envelope.
 //!

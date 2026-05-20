@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! SVD + WMP hybrid: WMP overrides elastic / fission / capture
 //! inside `[E_min^WMP, E_max^WMP]`. Inelastic / (n,2n) / (n,3n) stay
 //! on SVD. URR delegated to SVD (applies above `E_max^WMP`).

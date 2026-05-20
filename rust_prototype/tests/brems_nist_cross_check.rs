@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Cross-check the bremsstrahlung Seltzer-Berger 1986 χ tables against
 //! NIST ESTAR.
 //!

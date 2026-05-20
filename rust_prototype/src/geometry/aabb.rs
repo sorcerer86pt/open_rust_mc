@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Axis-Aligned Bounding Box. Slab-method ray-AABB intersection;
 //! first test in BVH traversal.
 

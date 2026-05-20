@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Diagnostic: compare CPU vs GPU cross-section and angular distribution data.
 //!
 //! Verifies bit-exact agreement between CPU and GPU for:

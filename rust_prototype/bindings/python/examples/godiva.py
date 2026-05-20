@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Godiva (ICSBEP HEU-MET-FAST-001) k-eigenvalue benchmark via Python.
 
 This is the Python-API counterpart to `src/bin/godiva.rs`. It builds

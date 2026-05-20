@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Engine-policy bounds — separates "engine should stay responsive"
 //! from per-run user intent (which lives in `SimConfig`). Defaults
 //! reproduce the engine's historical behaviour bit-for-bit.

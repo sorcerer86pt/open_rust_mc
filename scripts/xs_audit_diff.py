@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Diff the OpenMC and Rust-engine XS dumps to find where the shared
 ~120 pcm engine offset comes from.

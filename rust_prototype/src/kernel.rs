@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! SVD reconstruction kernel — re-exports from
 //! [`rust_mc_sim`](rust_mc_sim).
 //!

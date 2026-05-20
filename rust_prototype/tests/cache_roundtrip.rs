@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Real-HDF5 `NuclideKernels` ↔ binary-format roundtrip.
 //!
 //! The 8 in-lib `nuclide_cache::binary_format::tests` cover the empty

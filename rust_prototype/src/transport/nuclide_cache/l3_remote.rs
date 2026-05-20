@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! L3 remote `NuclideStore` — TCP client(s) that talk to one or more
 //! `nuclide_cache_server` daemons over the [wire_protocol].
 //!

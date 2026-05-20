@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """High-statistics re-run of HEU-SOL-THERM-001.case-1 to confirm the
 −895 pcm bias is real (and not the 2000 particles/batch noise).
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Pareto frontier: SVD reconstruction time vs cross-section RMSE.
 
 Reads:

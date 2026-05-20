@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """OpenMC Godiva with reaction-rate + leakage tallies for channel-level
 cross-code comparison against the Rust engine. Goal: localize the
 ~430 pcm Godiva fast-spectrum offset.

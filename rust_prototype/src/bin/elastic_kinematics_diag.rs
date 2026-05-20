@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Sampler-level A/B for the metal hot bias.
 //!
 //! The integrated-tally diagnostic (`bin/metal_stats_diag`) showed

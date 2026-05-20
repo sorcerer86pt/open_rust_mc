@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Build the OpenMC input for HEU-SOL-THERM-001 case-1 from the
 identical NMC bundle that `tests/icsbep_runs.rs` runs, and execute
 under the same ENDF/B-VII.1 HDF5 library. The goal is an A/B vs the

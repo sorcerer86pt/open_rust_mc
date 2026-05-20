@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Smoke test: load every `bench/icsbep/*.json` case file through
 //! `geometry::scene_io::load_scene_from_json` and report what fraction
 //! the deserializer accepts.

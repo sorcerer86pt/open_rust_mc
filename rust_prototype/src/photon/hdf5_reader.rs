@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! HDF5 reader for OpenMC photon-interaction files (`photon/<Sym>.h5`).
 //!
 //! Layout (verified against ENDF/B-VII.1 photon library, `filetype =

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 # ============================================================================
 # Download and organize nuclear data libraries for benchmarking
 #

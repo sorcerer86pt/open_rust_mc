@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! `BurnupMapping` — table that pairs every chain ZAID with the
 //! transport-side `(material_idx, xs_kernel_idx)` it lives in.
 //!

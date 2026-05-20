@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Transport-time allocator pressure bench.
 //!
 //! Runs one ICSBEP CPU eigenvalue loop (Godiva, 80×5k×1 seed) with a

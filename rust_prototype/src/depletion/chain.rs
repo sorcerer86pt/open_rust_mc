@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Depletion chain (static; pairs with flux + per-nuclide one-group
 //! XS to build `A` in `matrix.rs`).
 

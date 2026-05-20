@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Cache key. File hash makes the cache safe across ENDF library
 //! swaps — replacing U235.h5 with the VIII.0 version produces a
 //! different blake3 → different key → rebuild.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Post-fused-memset sweep — same shape as the other two sweeps. Run

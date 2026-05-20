@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Geometry engine — CSG with BVH acceleration.
 //!
 //! Design:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Export OpenMC reference cross-section values for validation against Rust.
 

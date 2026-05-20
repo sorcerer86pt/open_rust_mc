@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Multigroup XS for random-ray transport. Adjoint is a view (no
 //! copy): transposed `Σ_s`, swapped `(χ, νΣ_f)`. Solver passes
 //! `is_adjoint` flag; integrator picks the right lookup.

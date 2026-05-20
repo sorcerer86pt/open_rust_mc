@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Render the SVD singular-value spectrum for representative reactions
 across several PWR nuclides, plus a histogram showing how many of

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Strong-scaling baseline sweep of the event-based GPU pipeline.

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Photoelectric absorption kernel with full EADL relaxation cascade.
 //!
 //! Photon destroyed, electron ejected with `T_e = E − B_i` where `B_i`

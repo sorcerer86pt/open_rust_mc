@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Engine-side XS dump at (U-234, U-235, U-238), 294 K, on a dense
 //! energy grid. Matches the Godiva operating conditions. Used for
 //! channel-level diff against scripts/xs_dump_godiva_openmc.py to

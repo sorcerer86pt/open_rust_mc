@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Event-based GPU neutron transport.
 //!
 //! CUDA kernel source in `gpu/cuda/transport.cu`, loaded via `include_str!`.

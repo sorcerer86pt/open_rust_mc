@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU vs CPU constant-XS transport comparison on the 2×2 lattice.
 //!
 //! Validates that the device-side const_xs_transport kernel produces

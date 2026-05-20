@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Sweep ICSBEP cases across the n_nuc spectrum and measure how

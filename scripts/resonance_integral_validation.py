@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Resonance Integral Validation — SVD vs pointwise reference.
 

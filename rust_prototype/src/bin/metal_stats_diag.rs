@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CPU-vs-GPU integrated-tally diagnostic for the metal hot bias.
 //!
 //! Runs Godiva (HEU-MET-FAST-001 case-1) eigenvalue on both backends

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // ═══════════════════════════════════════════════════════════════════════
 // Event-based GPU transport. Canonical recent GPU reference is Tramm
 // et al., "Toward Portable GPU Acceleration of the OpenMC Monte Carlo

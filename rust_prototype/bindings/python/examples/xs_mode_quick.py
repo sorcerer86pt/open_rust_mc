@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Quick smoke test: one Godiva run per XsMode at very small N."""
 import sys
 from pathlib import Path

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Particle state and fission bank.
 
 use crate::geometry::coord::{Coord, CoordStack};

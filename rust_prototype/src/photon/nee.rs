@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Next-event estimator for photon-shielding tallies.
 //!
 //! At every Compton collision in a slab geometry, the analog estimator

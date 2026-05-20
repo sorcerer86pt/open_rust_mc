@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """OpenMC cross-code run for coupled n-gamma PWR pin cell gamma heating.
 
 Mirrors bin/pwr_gamma_heating.rs geometry exactly (same materials,

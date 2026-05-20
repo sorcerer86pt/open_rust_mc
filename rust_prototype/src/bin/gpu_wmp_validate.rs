@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU Faddeeva + WMP evaluator validation.
 //!
 //! Uploads one nuclide's WMP data to the GPU, evaluates at a list of test

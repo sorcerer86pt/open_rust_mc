@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Smoke test: cycle through all four XsMode variants on the Godiva pin
 and print the stats() dict for each. Demonstrates the builder toggle

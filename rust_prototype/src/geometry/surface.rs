@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Surface definitions — enum dispatch, no vtables.
 //!
 //! Each surface divides space into a positive and negative half-space.

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Run any of our `bench/icsbep/*.json` scenes through OpenMC at matched
 statistics, for cross-code k_eff comparison.
 

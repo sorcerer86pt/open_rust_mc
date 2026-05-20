@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 5.1 — SVD analysis for MT=2 (elastic) and MT=102 (capture),
 plus MT=18 (fission) for comparison. All on ENDF/B-VII.1 U-235.

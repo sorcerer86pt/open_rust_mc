@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Run a control + refill-on pair through nnuc_scaling_sweep.ps1 and

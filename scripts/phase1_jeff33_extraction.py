@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 1 (JEFF 3.3) — Extract U-235 fission cross-sections from both
 JEFF 3.3 HDF5 libraries and merge into a single matrix with all

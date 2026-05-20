@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Comparison between original and SVD-reconstructed cross-sections.
 
 /// Error statistics for a single comparison.

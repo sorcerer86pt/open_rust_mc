@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 5.5 — Cross-isotope basis sharing analysis.
 

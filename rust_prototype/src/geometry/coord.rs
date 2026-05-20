@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Coordinate stack for nested-universe geometry.
 //!
 //! `this_local = rotation * (parent_local - offset)`; when

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Track-integrated CSDA electron deposition on a CSG geometry, with
 //! optional Highland-Gaussian multiple scattering.
 //!

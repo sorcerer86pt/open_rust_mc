@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Cs-137 pulse-height spectrum benchmark in a 3"×3" NaI(Tl) detector.
 //!
 //! Injects mono-energetic 662 keV photons axially into a 7.62 cm thick

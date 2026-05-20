@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Transport module — particle state, transport loop, and event processing.
 
 pub mod adjoint_neutron;

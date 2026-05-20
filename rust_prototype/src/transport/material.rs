@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Material = nuclide compositions + macroscopic XS.
 
 #[derive(Debug, Clone)]

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU port of the immortal-ray random-ray solver — scaffold.
 //!
 //! Mirrors the CPU `random_ray::solver` design: each GPU thread owns

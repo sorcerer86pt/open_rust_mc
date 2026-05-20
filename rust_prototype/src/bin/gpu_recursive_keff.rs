@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU recursive transport with real XS — smoke + parity test (task #22, stage 3b).
 //!
 //! Runs `transport_recursive_persistent` on a recursive Godiva geometry

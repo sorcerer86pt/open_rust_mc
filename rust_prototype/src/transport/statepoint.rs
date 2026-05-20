@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! HDF5 statepoint = analysis + restart snapshot. Datasets:
 //! `/header` scalars, `/k_eff`, `/k_track`,
 //! `/source_bank/{positions,energies,weights}`,

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Multi-seed Godiva sweep — Student-t 95 % confidence interval on k_eff.
 
 Runs the ICSBEP HEU-MET-FAST-001 benchmark N times with independent

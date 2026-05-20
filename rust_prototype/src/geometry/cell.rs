@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CSG cells: half-space ∧/∨/¬ combinations.
 
 use super::{Aabb, Mat3};

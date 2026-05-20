@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Photon material composition and macroscopic cross-section
 //! aggregation across a multi-element target.
 //!

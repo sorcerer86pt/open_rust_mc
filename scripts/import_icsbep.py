@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
 """Bulk-import ICSBEP cases from open-source proxy repositories.
 
 Walks the `mit-crpg/benchmarks` OpenMC XML tree (geometry/materials/settings)

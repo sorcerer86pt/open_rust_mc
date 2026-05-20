@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! End-to-end Godiva eigenvalue simulation in pure Rust.
 //!
 //! Reads U-234, U-235, U-238 HDF5 files, builds SVD kernels or pointwise

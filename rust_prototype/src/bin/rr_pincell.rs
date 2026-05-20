@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Random-ray PWR pin-cell benchmark — 2-group multigroup transport.
 //!
 //! Validates the multigroup random-ray pipeline (forward + adjoint,

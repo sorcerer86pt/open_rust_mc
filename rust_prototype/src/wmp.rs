@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Windowed Multipole (WMP) cross-section evaluation.
 //!
 //! Ports OpenMC's `openmc.data.WindowedMultipole._evaluate` (Python) and the

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Post-bucketing sweep — same shape as eventbased_baseline_sweep.ps1

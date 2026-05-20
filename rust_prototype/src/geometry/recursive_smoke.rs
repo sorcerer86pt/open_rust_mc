@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Smoke test for recursive-geometry transport with synthetic XS.
 //!
 //! Drives `find_cell_recursive` + `trace_step_recursive` end-to-end

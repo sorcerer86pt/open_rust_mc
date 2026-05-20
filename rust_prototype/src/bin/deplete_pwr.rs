@@ -1,4 +1,5 @@
 #![allow(
+// SPDX-License-Identifier: MIT
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::manual_is_multiple_of,

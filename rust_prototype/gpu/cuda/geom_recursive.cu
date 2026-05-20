@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 // Recursive-geometry device functions for the GPU port (task #19).
 //
 // Mirrors the CPU primitives in `geometry/ray.rs`:

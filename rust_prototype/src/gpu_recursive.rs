@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU port of the recursive cell-find primitives.
 //!
 //! Converts a `Geometry` to SoA arrays consumed by the device

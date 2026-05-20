@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! CE adjoint-photon FW-CADIS importance map for `shield_slab`.
 //!
 //! Runs the continuous-energy adjoint photon slab walker

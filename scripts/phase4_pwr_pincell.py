@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 4 extension — PWR pin cell benchmark.
 

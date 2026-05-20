@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Ray tracing — find the nearest surface crossing along a direction.
 //!
 //! This is the inner loop of particle transport: given a particle's

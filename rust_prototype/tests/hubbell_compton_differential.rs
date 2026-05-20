@@ -1,4 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::needless_range_loop)]
+// SPDX-License-Identifier: MIT
 //! Hubbell-1975 differential Compton cross-section validation.
 //!
 //! The bound-electron incoherent differential cross section is

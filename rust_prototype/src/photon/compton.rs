@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Compton scattering. Klein-Nishina + bound-electron `S(x,Z)/Z`
 //! rejection. Algorithm matches OpenMC `Element::compton_scatter` /
 //! PENELOPE-2018 §2.3 (no Doppler — that's the variant in

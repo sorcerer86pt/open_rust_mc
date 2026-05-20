@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Hex-lattice mini-core demo — first eigenvalue exercise of
 //! `HexLattice` transport.
 //!

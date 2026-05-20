@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU-accelerated SVD reconstruction via CUDA (cudarc).
 //!
 //! Provides batch cross-section reconstruction on NVIDIA GPUs.

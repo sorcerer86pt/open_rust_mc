@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Depletion: solves `dN/dt = A·N` via CRAM-16 (Pusa 2016). `A`
 //! eigenvalues lie in the left half-plane; CRAM is accurate to
 //! ~1e-14 in `(-∞, 0]`.

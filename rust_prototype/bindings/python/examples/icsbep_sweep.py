@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Sweep every ICSBEP benchmark JSON in `bench/icsbep/`.
 
 Runs each `*.json` through `run_icsbep_case`, optionally averaged over

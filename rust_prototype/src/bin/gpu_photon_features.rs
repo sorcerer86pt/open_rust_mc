@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU technology features harness for photon transport.
 //!
 //! Each `--<feature>` flag exercises one CUDA technology and prints a

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Diagnostic CLI: load an OpenMC photon HDF5 file and print a summary.
 //!
 //! Usage:

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
     Quick CPU throughput probe on HMF-001 — three particle counts to

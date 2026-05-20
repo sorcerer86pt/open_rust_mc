@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """PWR Pareto: reconstruction speed vs cross-section accuracy, with 4 curves.
 
 Reads:

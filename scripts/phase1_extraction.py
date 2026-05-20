@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 1 — Extract U-235 cross-section data and build the SVD matrix.
 

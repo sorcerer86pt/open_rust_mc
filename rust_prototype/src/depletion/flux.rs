@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Flux extractor — bridges `transport::tally::MeshFluxTally`
 //! results into a one-group flux scalar that the depletion matrix
 //! consumes.

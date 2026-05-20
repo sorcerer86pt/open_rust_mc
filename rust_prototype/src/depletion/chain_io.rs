@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Depletion-chain JSON loader.
 //!
 //! The in-memory `DepletionChain` is rich (HashMaps, Option fields,

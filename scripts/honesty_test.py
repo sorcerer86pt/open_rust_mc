@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Honesty Test — Three-way comparison: SVD vs Pointwise Table vs OpenMC.
 

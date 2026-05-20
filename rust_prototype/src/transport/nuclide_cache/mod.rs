@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Process-wide nuclide kernel cache.
 //!
 //! HDF5 load + SVD + CDF + URR assembly costs hundreds of ms / file;

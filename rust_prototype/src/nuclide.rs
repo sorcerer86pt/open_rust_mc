@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Load nuclide cross-section data from `.npy` files (exported by Python).
 //!
 //! Expected files in `dir` with a given `prefix`:

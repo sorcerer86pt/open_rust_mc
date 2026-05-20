@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Run an ICSBEP regression case from Python.
 
 The same JSON files `tests/cuda_runs.rs` consumes drive this harness.

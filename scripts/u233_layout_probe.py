@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Probe U-233's reaction_018 layout to identify which ENDF law(s) the
 prompt-neutron outgoing-energy distribution uses, and confirm whether
 the engine's tabular-law reader is dropping it on the floor.

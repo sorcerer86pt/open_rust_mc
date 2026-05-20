@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 4 extension — Godiva k_eff with ALL reactions SVD-modified.
 

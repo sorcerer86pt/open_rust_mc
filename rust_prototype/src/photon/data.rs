@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Photon-interaction data structures, element-indexed.
 //!
 //! An OpenMC photon HDF5 file (`photon/<Sym>.h5`) stores one element's

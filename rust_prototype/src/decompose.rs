@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! SVD decomposition using faer — compute U, Σ, V^T from the cross-section matrix.
 
 use faer::Mat;

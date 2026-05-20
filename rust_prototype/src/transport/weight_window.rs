@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Cartesian weight-window forward path:
 //!
 //! - `w > w_upper` → split into `ceil(w/w_survive)` (capped by

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Scattering kinematics. Elastic: free-gas, isotropic CM.
 //! Inelastic: level excitation (Q-value from caller / nuclear data),
 //! isotropic CM.

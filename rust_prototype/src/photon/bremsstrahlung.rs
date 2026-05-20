@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! Single-photon thick-target bremsstrahlung sampling using the
 //! Seltzer-Berger 1986 scaled DCS tabulation already loaded into
 //! [`PhotonElement::bremsstrahlung`].

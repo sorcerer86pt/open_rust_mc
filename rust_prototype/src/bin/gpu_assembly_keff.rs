@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! 17×17 PWR fuel assembly k_inf on GPU — task #22 stage 4.
 //!
 //! Drives `transport_recursive_persistent` through a full source

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """
 Phase 2 — SVD decomposition and singular spectrum analysis.
 

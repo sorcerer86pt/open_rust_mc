@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: MIT
 //! GPU SVD reconstruction benchmark.
 //!
 //! Loads real nuclear data, reconstructs cross-sections on GPU,
