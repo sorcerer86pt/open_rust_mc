@@ -343,7 +343,117 @@ def main() -> int:
                 f"{dpcm:>+10.1f}  {status}\n"
             )
     print(f"wrote {summary_path}")
+
+    # Companion plot: k_calc vs k_ref scatter with a 45-degree identity
+    # line. Same data, different framing — Δk-vs-EALF answers "is the
+    # engine biased somewhere in the spectrum?", while k_calc-vs-k_ref
+    # answers "how well does the engine reproduce the handbook absolute
+    # k across the corpus?" Two views, one subprocess: filename derived
+    # by string substitution from args.output so both plots land in the
+    # same directory.
+    calc_ref_path = args.output.parent / args.output.name.replace(
+        "delta_k_vs_ealf", "k_calc_vs_k_ref"
+    )
+    if calc_ref_path == args.output:
+        # Output name didn't contain the substitutable token — fall back
+        # to <stem>__k_calc_vs_k_ref.png so we don't clobber the Δk plot.
+        calc_ref_path = args.output.with_name(
+            args.output.stem + "__k_calc_vs_k_ref" + args.output.suffix
+        )
+    write_k_calc_vs_k_ref(cases, calc_ref_path, args)
     return 0
+
+
+def write_k_calc_vs_k_ref(
+    cases: list,  # same tuple shape produced in main()
+    output_path: Path,
+    args: argparse.Namespace,
+) -> None:
+    """Produce the calibration-style scatter: each case at (k_ref, k_calc)
+    with the y=x diagonal drawn for visual reference. Points above the
+    line = overprediction; below = underprediction. Distance from the
+    line is the absolute-k version of `delta_pcm` from the Δk plot.
+
+    Colours and per-point labels follow the same conventions as the
+    Δk plot: spectrum-bucket (or --by-category) colouring, label every
+    point when the corpus is small, label outliers only otherwise.
+    """
+    if not cases:
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 8))
+
+    # Series — same colour conventions as the Δk plot for cross-
+    # readability.
+    if args.by_category:
+        by_cat: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+        for case, _ealf, _dpcm, ksig, _status, k_calc, k_ref, _sx in cases:
+            by_cat[category_from_case(case)].append((k_ref, k_calc, ksig))
+        cmap = plt.get_cmap("tab20", len(by_cat))
+        for i, (cat, pts) in enumerate(sorted(by_cat.items())):
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            errs = [p[2] for p in pts]
+            ax.errorbar(xs, ys, yerr=errs, fmt="o", ms=4, color=cmap(i),
+                        label=f"{cat.upper()} ({len(pts)})", alpha=0.7,
+                        elinewidth=0.5, capsize=2)
+    else:
+        buckets: list[list[tuple[float, float, float]]] = [[], [], []]
+        for case, ealf, _dpcm, ksig, _status, k_calc, k_ref, _sx in cases:
+            buckets[spectrum_bucket(ealf)].append((k_ref, k_calc, ksig))
+        for i, (label, color) in enumerate(SPECTRUM_COLORS):
+            pts = buckets[i]
+            if not pts:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            errs = [p[2] for p in pts]
+            ax.errorbar(xs, ys, yerr=errs, fmt="o", ms=5, color=color,
+                        label=f"{label} ({len(pts)})", alpha=0.75,
+                        elinewidth=0.7, capsize=2)
+
+    # 45° identity line + ±150 pcm parallel guides (the regression
+    # envelope translated into k space).
+    ks = [c[5] for c in cases] + [c[6] for c in cases]
+    k_lo, k_hi = min(ks) - 0.01, max(ks) + 0.01
+    diag = [k_lo, k_hi]
+    ax.plot(diag, diag, color="#666666", linestyle="--", linewidth=0.8,
+            label="y = x  (perfect agreement)", zorder=0)
+    ax.plot(diag, [k - 0.0015 for k in diag], color="#cccccc",
+            linestyle=":", linewidth=0.6, zorder=0)
+    ax.plot(diag, [k + 0.0015 for k in diag], color="#cccccc",
+            linestyle=":", linewidth=0.6, zorder=0,
+            label="±150 pcm bound")
+
+    # Per-point labels — same rule as the Δk plot.
+    label_all = len(cases) <= 50
+    for case, _ealf, dpcm, _ksig, status, k_calc, k_ref, _sx in cases:
+        is_outlier = (status == "FAIL") or (abs(dpcm) > 300.0)
+        if label_all or is_outlier:
+            ax.annotate(case, (k_ref, k_calc), xytext=(5, 5),
+                        textcoords="offset points", fontsize=6.5,
+                        color=("#c84a4a" if status == "FAIL" else "#222"),
+                        alpha=0.85)
+
+    ax.set_xlabel("k_eff (handbook reference)")
+    ax.set_ylabel("k_eff (engine, k_calc)")
+    ax.set_xlim(k_lo, k_hi)
+    ax.set_ylim(k_lo, k_hi)
+    ax.set_aspect("equal")
+    n_pass = sum(1 for c in cases if c[4] == "PASS")
+    title = (
+        f"ICSBEP sweep — engine k_calc vs handbook k_ref  "
+        f"({len(cases)} cases, {n_pass} PASS)\n"
+        f"source: {args.csv.name}"
+    )
+    ax.set_title(title)
+    ax.grid(True, alpha=0.25, linewidth=0.5)
+    ax.legend(loc="best", fontsize=9, framealpha=0.95)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=args.dpi)
+    print(f"wrote {output_path}")
+    plt.close(fig)
 
 
 if __name__ == "__main__":
