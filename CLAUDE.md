@@ -687,10 +687,14 @@ Neutron k-eigenvalue:
   cross-section viewer for any scene JSON. Walks `bench/icsbep/`
   upward from CWD so case names like `pwr_assembly_17x17` work
   without explicit paths. Mirrors `pwr_assembly --preview` plumbing.
-  **Known bug**: for JSON-loaded scenes that use lattices, the
-  rendering doesn't expand the pin universes per-element — shows
-  one stretched pin instead of the 17×17 grid. Transport k_eff on
-  the same JSON is correct, so this is visualisation only.
+  Headless PNG / PPM output via `--png-out` / `--ppm-out` (no preview
+  feature required). Lattice rendering verified end-to-end:
+  pwr_assembly_17x17 + leu-comp-therm-008 zoom both resolve pin
+  cylinders per-element (no "stretched pin" — the historical bug
+  was already fixed by the lattice-descent rework). Regression test
+  in `tests/preview_lattice_descent.rs` probes
+  `find_cell_recursive` at three distinct lattice elements + at
+  pin-centre vs pin-edge to catch any future descent collapse.
 
 ICSBEP harness (Python, via `bindings/python/examples/`):
 - `icsbep_run.py <case> {cpu|gpu}` — single-case run with the

@@ -609,6 +609,31 @@ def main() -> int:
 
     if args.csv:
         print(f"\n  CSV: {args.csv}")
+        # Fire-and-forget the delta-k vs EALF plotter as a separate
+        # process. Decoupled from the sweep:
+        #   - matplotlib import / draw failures never affect the
+        #     sweep's exit code (sweep returns based on PASS/FAIL only)
+        #   - non-blocking: the sweep returns immediately while the
+        #     plot child writes its PNG in parallel
+        #   - the PNG lands at outputs/icsbep/plots/<csv_stem>_delta_k_vs_ealf.png
+        #     so the dashboard / publish step can grab it by glob
+        # The plot script is itself idempotent; rerunning the sweep
+        # overwrites the PNG with fresh data.
+        import subprocess
+        plot_script = Path(__file__).resolve().parents[4] / "scripts" / "plot_delta_k_vs_ealf.py"
+        plot_dir = Path("outputs") / "icsbep" / "plots"
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        plot_png = plot_dir / f"{args.csv.stem}_delta_k_vs_ealf.png"
+        try:
+            subprocess.Popen(
+                [sys.executable, str(plot_script), str(args.csv), "--output", str(plot_png)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            print(f"  Plot: {plot_png}  (generating in background)")
+        except OSError as e:  # plot script missing, python missing, etc.
+            print(f"  Plot generation skipped: {e}", file=sys.stderr)
 
     # Graceful stop (Ctrl-C or stop-file) returns 0 — the partial CSV
     # is durable and `--resume` will pick up where we left off. Non-zero
