@@ -561,18 +561,21 @@ gr_trace_and_sample(
 // host-side computation.
 // ═══════════════════════════════════════════════════════════════════════
 
-// d_type_count          [EB_N_PART_BINS]   in  — per-(class,bin) counts
-// d_type_offsets        [EB_N_PART_BINS+1] out — exclusive scan
-// d_type_class_total    [EV_TYPE_COUNT]    out — per-class totals
-//                                                (sum over bins)
-// d_type_class_offsets  [EV_TYPE_COUNT]    out — offset of class's
-//                                                first bin in
-//                                                d_sorted_idx (used
-//                                                by reaction kernels)
-// d_type_total          [1]                out — total event count
-// d_type_scatter        [EB_N_PART_BINS]   out — zeroed for partition
+// d_type_count          [EB_N_PART_BINS]   in/out — per-slot counts;
+//                                                    zeroed after read
+//                                                    so the host no
+//                                                    longer needs a
+//                                                    per-step memset.
+// d_type_offsets        [EB_N_PART_BINS+1] out    — exclusive scan
+// d_type_class_total    [EV_TYPE_COUNT]    out    — per-class totals
+//                                                    (sum over slots)
+// d_type_class_offsets  [EV_TYPE_COUNT]    out    — offset of class's
+//                                                    first slot in
+//                                                    d_sorted_idx
+// d_type_total          [1]                out    — total event count
+// d_type_scatter        [EB_N_PART_BINS]   out    — zeroed for partition
 extern "C" __global__ void gr_scan_offsets(
-    const int* d_type_count,
+    int* d_type_count,
     int* d_type_offsets,
     int* d_type_class_total,
     int* d_type_class_offsets,
@@ -588,6 +591,10 @@ extern "C" __global__ void gr_scan_offsets(
     // 0.5 % of the typical 5 ms trace_and_sample step. If this grows
     // into a real fraction (e.g. larger MAX_NUC_PER_MAT) the next
     // step is a warp-shuffle scan or cub::DeviceScan::ExclusiveSum.
+    //
+    // Zeroes d_type_count[slot] after reading it — folds the per-step
+    // host-side memset_zeros into this scan so the host driver drops
+    // one launch per outer step.
     #pragma unroll
     for (int c = 0; c < EV_TYPE_COUNT; ++c) {
         d_type_class_offsets[c] = acc;
@@ -596,6 +603,7 @@ extern "C" __global__ void gr_scan_offsets(
             int slot = c * EB_N_SUB_BINS + sb;
             d_type_scatter[slot] = 0;
             int v = d_type_count[slot];
+            d_type_count[slot] = 0;
             class_acc += v;
             acc += v;
             d_type_offsets[slot + 1] = acc;

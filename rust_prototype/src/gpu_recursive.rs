@@ -2000,9 +2000,11 @@ impl GpuRecursiveContext {
         // dominates the saved PCIe round-trip. Variable launches keep
         // empty warps off the SMs entirely.
         for _step in 0..max_events_per_history {
-            // Per-step zero of d_type_count. d_type_scatter is zeroed
-            // by gr_scan_offsets so we don't pay for a separate memset.
-            stream.memset_zeros(&mut buffers.d_type_count).map_err(|e| e.to_string())?;
+            // d_type_count is zeroed in-place by gr_scan_offsets after
+            // it reads each slot — same for d_type_scatter. Buffer is
+            // also alloc_zeros'd so the very first step starts clean.
+            // One fewer host-side launch per step compared to the
+            // previous memset_zeros + scan_offsets sequence.
 
             // Step 2: gr_trace_and_sample.
             {
