@@ -27,12 +27,14 @@
       "inactive": 40,
       "particles": 20000,
       "seeds": 5,
-      "_doc": "Compound intermediate: heterogeneous geometry, moderate inactive."
+      "_doc": "Compound intermediate: heterogeneous geometry, moderate inactive.",
+      "particles_gpu": 500000,
+      "gpu_auto_refill": true
     },
     "local_validation": {
       "_what_this_is": "A SECONDARY apples-to-apples reference: k_eff measured by OpenMC running THE EXACT SAME scene JSON our engine consumes. Confirms the ~+600 pcm engine delta vs the handbook is scene-JSON transcription drift, not engine bias.",
-      "_what_this_is_not": "Not a redefinition of truth. The handbook k_eff_reference (1.00000 ± 0.00570) stays the canonical target. local_validation only grades engine quality apart from scene drift.",
-      "_known_class_bias": "HEU-COMP-INTER-003 is the Linenberger-era LANL uranium hydride critical assembly series (UH3-UR / UH3-NI; G.A. Linenberger et al., Nucl. Sci. Eng., late 1940s-1950s, original LA-1033 / LA-1036 reports). The Wright/Leal ORNL evaluation (osti.gov/servlets/purl/7814) of 34 intermediate-spectrum hydride benchmarks reports C/E range 0.9902-1.0146 on ENDF/B-VI.5 — a documented ~1500 pcm spread. ENDF/B-VII.1 keeps comparable structure. Our +556 pcm engine delta sits comfortably inside that documented range.",
+      "_what_this_is_not": "Not a redefinition of truth. The handbook k_eff_reference (1.00000 \u00c2\u00b1 0.00570) stays the canonical target. local_validation only grades engine quality apart from scene drift.",
+      "_known_class_bias": "HEU-COMP-INTER-003 is the Linenberger-era LANL uranium hydride critical assembly series (UH3-UR / UH3-NI; G.A. Linenberger et al., Nucl. Sci. Eng., late 1940s-1950s, original LA-1033 / LA-1036 reports). The Wright/Leal ORNL evaluation (osti.gov/servlets/purl/7814) of 34 intermediate-spectrum hydride benchmarks reports C/E range 0.9902-1.0146 on ENDF/B-VI.5 \u00e2\u20ac\u201d a documented ~1500 pcm spread. ENDF/B-VII.1 keeps comparable structure. Our +556 pcm engine delta sits comfortably inside that documented range.",
       "_runtime_semantics": "tests/cuda_runs.rs::run_case_cuda and tests/icsbep_runs.rs::run_case_e2e prefer local_validation.openmc_k_eff over benchmark.k_eff_reference when present. report() / assert_passes still log the handbook delta as informational.",
       "openmc_k_eff": 1.00672,
       "openmc_k_sigma_seeds": 0.00276,
@@ -43,7 +45,7 @@
       "openmc_particles_per_seed": 5000,
       "openmc_batches": 50,
       "openmc_inactive": 20,
-      "_stats_note": "Scoping-grade single-seed run (1.18σ_combined vs handbook). The +672 pcm OpenMC delta is statistically consistent with our +556 pcm engine delta — both codes agree on this transcribed JSON within ~110 pcm. Refining to paper-quality (3 seeds × 100 batches × 20k particles, matching HMF-008's block) is a follow-up but does not change the scene-drift conclusion.",
+      "_stats_note": "Scoping-grade single-seed run (1.18\u00cf\u0192_combined vs handbook). The +672 pcm OpenMC delta is statistically consistent with our +556 pcm engine delta \u00e2\u20ac\u201d both codes agree on this transcribed JSON within ~110 pcm. Refining to paper-quality (3 seeds \u00c3\u2014 100 batches \u00c3\u2014 20k particles, matching HMF-008's block) is a follow-up but does not change the scene-drift conclusion.",
       "handbook_minus_openmc_pcm": -672,
       "handbook_minus_openmc_note": "Scene-JSON transcription drift from canonical ICSBEP/NEA handbook. The MIT-CRPG/benchmarks proxy this JSON came from is hand-transcribed, geometrically close but not bit-identical. Closing requires the registered NEA/OECD handbook spec."
     }

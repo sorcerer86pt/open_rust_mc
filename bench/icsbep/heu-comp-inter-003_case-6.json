@@ -27,7 +27,9 @@
       "inactive": 40,
       "particles": 20000,
       "seeds": 5,
-      "_doc": "Compound intermediate: heterogeneous geometry, moderate inactive."
+      "_doc": "Compound intermediate: heterogeneous geometry, moderate inactive.",
+      "particles_gpu": 500000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {

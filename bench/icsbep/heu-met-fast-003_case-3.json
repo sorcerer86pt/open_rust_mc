@@ -27,7 +27,9 @@
       "inactive": 30,
       "particles": 20000,
       "seeds": 5,
-      "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence."
+      "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence.",
+      "particles_gpu": 1000000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {

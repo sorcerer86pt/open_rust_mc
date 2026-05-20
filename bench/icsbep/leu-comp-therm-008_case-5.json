@@ -27,7 +27,9 @@
       "inactive": 50,
       "particles": 15000,
       "seeds": 5,
-      "_doc": "Compound thermal (LCT): pin-lattice thermal, slower source convergence."
+      "_doc": "Compound thermal (LCT): pin-lattice thermal, slower source convergence.",
+      "particles_gpu": 500000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {

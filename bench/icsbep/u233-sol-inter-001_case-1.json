@@ -27,7 +27,9 @@
       "inactive": 40,
       "particles": 15000,
       "seeds": 5,
-      "_doc": "Solution intermediate: tank geometry with moderate moderation."
+      "_doc": "Solution intermediate: tank geometry with moderate moderation.",
+      "particles_gpu": 500000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {

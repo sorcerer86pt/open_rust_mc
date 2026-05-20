@@ -13,7 +13,9 @@
       "batches": 200,
       "inactive": 50,
       "particles": 30000,
-      "seeds": 5
+      "seeds": 5,
+      "particles_gpu": 1000000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {

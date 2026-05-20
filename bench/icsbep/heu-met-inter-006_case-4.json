@@ -27,7 +27,9 @@
       "inactive": 35,
       "particles": 20000,
       "seeds": 5,
-      "_doc": "Intermediate-spectrum metal: a few more inactive cycles than fast-metal."
+      "_doc": "Intermediate-spectrum metal: a few more inactive cycles than fast-metal.",
+      "particles_gpu": 500000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {

@@ -27,7 +27,9 @@
       "inactive": 50,
       "particles": 15000,
       "seeds": 5,
-      "_doc": "Solution thermal: thermal MFP large vs tank size, slowest source convergence."
+      "_doc": "Solution thermal: thermal MFP large vs tank size, slowest source convergence.",
+      "particles_gpu": 500000,
+      "gpu_auto_refill": true
     }
   },
   "scene": {
