@@ -384,29 +384,76 @@ from the ICSBEP handbook k_eff.
 
   Practical ceilings per card: 4 GB RTX A1000 ≈ 50 k; 10 GB RTX
   3080 ≈ 1 M; A100 40 GB extrapolates to ~5–8 M.
-- **Continuous particle refill (PHYSOR 2022 Optimization F).** When
-  particles die mid-batch, our outer driver leaves the per-event-type
-  queues progressively under-filled, hurting SM occupancy in the
-  batch tail. The paper rebirths from the previous-generation source
-  bank into dead slots, effectively making a "batch" consume more
-  than `particles_per_batch` source entries — `particles_per_batch`
-  becomes "in-flight slot count" rather than "histories per batch".
-  This requires per-particle weight handling threaded through every
-  tally accumulator (currently we count raw events) so generational
-  k_eff stays unbiased. Reported gain on A100: 1.1× (Table I row F),
-  and the gain shrinks further at large batch sizes where the
-  batch-tail fraction is small. The saturation table above suggests
-  the gain on the 3080 at saturation is ≤10 % — at 1 M particles
-  even an 80 % die-off leaves 200 k in flight, well into the
-  saturated regime. The implementation surface is wide (every
-  reaction kernel + every `d_cnt_*` / `d_e_*` accumulator); not
-  landed because the marginal expected win doesn't justify the
-  blast radius without a statistical-validation harness beyond the
-  current `cuda_runs.rs` regression suite. Note: the cheapest
-  refill variant (drain & restart with no in-history weights) is
-  feasible without the tally refactor and could be tried as a
-  bounded experiment, but the saturation data above shows higher
-  `-Particles` is a strictly better lever first.
+- **Continuous particle refill (PHYSOR 2022 Optimization F) — LANDED,
+  opt-in, validated on RTX 3080.** When particles die mid-batch the
+  outer driver leaves the per-event-type queues progressively under-
+  filled, hurting SM occupancy in the batch tail. Implemented in
+  commits `78ad47b` (kernel + `RefillBuffers` infrastructure) and
+  `23bd6fc` (end-to-end dispatch wiring + two validation-caught bugs).
+  Opt-in via `SimConfig::gpu_refill_pool_factor: Option<f64>` (or
+  `PySettings.gpu_refill_pool_factor`). When `Some(f)`, the source
+  bank size becomes `particles_per_batch * f` and the overflow refills
+  dead slots between event-pipeline steps; the kernel self-gates on
+  `alive[tid] == 0` per particle.
+
+  **No per-particle weights** — each refilled history is unit-weight,
+  k_eff stays unbiased because `total_histories` is bumped by the
+  device-side refill counter and used as the k_eff denominator. This
+  is the "generational refill" variant; preserves all existing tallies
+  without a tally-wide refactor.
+
+  **Validation on RTX 3080, HMF-008 (21 nuc, fast metal),
+  Particles=250 000, Batches=80 / Inactive=20:**
+
+  | metric           | refill_off      | refill_2x      | delta                          |
+  |------------------|----------------:|---------------:|-------------------------------:|
+  | sim wall         |        48.67 s  |       48.23 s  | -1 % (tied)                    |
+  | us_per_collision |          1.162  |         0.575  | -50.5 %                        |
+  | collisions       |        41.9 M   |       83.8 M   | +100 %                         |
+  | fissions         |         5.73 M  |       11.47 M  | +100 %                         |
+  | k_calc           |        0.99456  |       0.99485  | +29 pcm (MC noise)             |
+  | k_sigma          |        0.00040  |       0.00019  | 2.1x tighter                   |
+  | status           | PASS (-124 pcm) | PASS (-95 pcm) | both inside ICSBEP envelope    |
+
+  At this particle count, refill doubled the histories at the same
+  wall time and tightened sigma by 2.1x (vs the sqrt(2)=1.41x naive
+  prediction — the convergence bonus is real, refill also feeds
+  inactive-batch source convergence).
+
+  **CRITICAL: refill effectiveness must be measured against headroom.**
+  The gain only exists when the kernel grid has SMs idle during the
+  batch tail. Three regimes:
+
+    - **Under-occupied (small batch).** Initial particle count below
+      the SM-coverage threshold (e.g. A1000 with `Particles < 5 000`,
+      3080 with `Particles < 35 000`). Refill doesn't help — the
+      problem is at step 0, not in the tail. Refill adds wall time
+      with no payoff. A1000 smoke test at 5 000 particles measured
+      0.987x throughput (refill slightly slower).
+    - **Mid-curve (refill sweet spot).** Initial population fills the
+      SMs at step 0 but population decays during the batch (typical
+      Godiva / HMF-class fast-metal needs ~5-10 events/history,
+      population halves every 3-5 steps). Refill closes the tail
+      gap → 1.5-2.0x throughput observed on 3080 at 250 k particles.
+    - **Saturated.** Initial population so large that even after 80 %
+      die-off the remaining alive count still fills the SMs (e.g.
+      3080 at `Particles >= 1M` — see saturation curve above). Refill
+      adds memcpy / kernel-launch overhead with no SM headroom left
+      to fill. Expected gain shrinks to ~5-10 %.
+
+  To pick a target `RefillFactor`, look at the same-card saturation
+  curve (`outputs/saturation_*.csv`) and find the **knee** where
+  doubling `-Particles` only buys <20 % ns/p drop. Run *under* that
+  knee (where headroom exists) and the refill factor should bring
+  effective histories up *to* the knee. For 3080: saturation at
+  ~500 k-1 M particles, refill sweet spot at ~200 k-300 k with
+  factor 2-4. For an A100 / H100-class card: extrapolate the
+  saturation knee accordingly (likely 2-10 M particles).
+
+  Bench script: `scripts/refill_compare_sweep.ps1` runs the off/on
+  pair side-by-side and prints the speedup table. The headline
+  column is `ns/p speedup (off / on)` — expect >1.0× in the
+  mid-curve regime, ~1.0× at saturation, <1.0× when under-occupied.
 - **Energy sort within reaction class (PHYSOR 2022 Optimization G).**
   We currently sort by reaction class only. Adding a secondary
   per-class sort by particle energy improves XS-lookup memory
@@ -824,6 +871,8 @@ Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 | RTX 3080 saturation knee on HMF-001 (event-based) | `[godiva]` | **500 k – 1 M particles/batch** |
 | RTX 3080 peak throughput at saturation | `[godiva]` | **~1.2 M histories/sec** (vs 95 k/s at 5 k particles) |
 | Default particles=5k → particles=1M throughput gain | `[godiva]` | **14×** (no code change) |
+| RTX 3080 refill 2× at mid-curve (HMF-008, 250k particles) | `[micro]` | **2.0× histories at same wall**, σ 2.1× tighter, Δk +29 pcm |
+| RTX 3080 refill us/collision drop (same case) | `[micro]` | 1.162 → 0.575 µs/coll (**−50.5 %**, batch-tail SM gap closed) |
 | Hybrid SVD+WMP throughput vs CPU SVD | `[pwr]` | **0.49×** (2.06× slower) |
 | Hybrid in-engine memory vs Table | `[pwr]` | **5.2× larger** (519 MB vs 100.6 MB) |
 | Godiva dk (all rxn SVD k=4, pre-coupling) | `[godiva]` | 3.7 pcm |
