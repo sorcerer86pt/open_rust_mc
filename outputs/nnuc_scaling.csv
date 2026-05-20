@@ -1,0 +1,3 @@
+case,max_n_nuc,total_n_nuc,n_mats,sim_s,load_s,collisions,fissions,leaks,us_per_collision,us_per_particle,k_calc,k_sigma,delta_pcm,sigma_ratio,status
+heu-met-fast-001_case-1,3,20,7,3.860,1.120,789073,115469,171224,4.892,12.87,1.00373,0.00272,+373,1.29,PASS
+heu-met-fast-008,21,42,4,11.520,2.550,838807,114641,171482,13.734,38.40,0.99537,0.00222,-43,0.16,PASS

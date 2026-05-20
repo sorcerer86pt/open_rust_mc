@@ -10,7 +10,6 @@
 
 use open_rust_mc::geometry::scene_io;
 use open_rust_mc::transport::dispatch::{CudaRunner, EigenvalueRunner};
-use open_rust_mc::transport::material::Material;
 use open_rust_mc::transport::material_resolve;
 use open_rust_mc::transport::nuclides::NuclideLibrary;
 use open_rust_mc::transport::simulate::SimConfig;
@@ -205,6 +204,8 @@ fn run_case_cuda(
                 .map(|fs| (fs.pos.x, fs.pos.y, fs.pos.z, fs.energy))
                 .collect()
         }),
+        buffers: std::cell::RefCell::new(None),
+        refill: std::cell::RefCell::new(None),
     };
     let _ = materials;
     let outcome = runner.run(&cfg);

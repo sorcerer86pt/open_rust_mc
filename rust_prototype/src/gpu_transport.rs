@@ -2519,15 +2519,33 @@ impl GpuTransportContext {
                 .launch(cfg_full)?;
         }
 
-        // Build packed TransportParams buffer (N_PARAMS u64 values)
-        // Extract raw device pointers from each CudaSlice
+        // Build packed TransportParams buffer (N_PARAMS u64 values).
+        //
+        // Legacy: this site held an open-coded vec! that only packed
+        // slots 0..135 and then asserted len == N_PARAMS (186). It
+        // worked when N_PARAMS was 136; later params (per-nuclide
+        // pointer arrays, SAB elastic, ang PDF ptrs, URR interp) were
+        // added to `build_transport_params_vec` but this site was
+        // missed, so any call into `run_batch` panicked on the
+        // assertion. Delegate to the canonical builder.
+        let params_vec = self.build_transport_params_vec(
+            nuc_data, mat_data, sab_data, wmp_data, geom_type,
+        );
+
+        // The compiler still needs to see `dptr!` defined for the
+        // dead-stripped (commented-out) inline-pack reference below,
+        // and the original macro is referenced from neighbouring code
+        // paths in this function. Keep the macro definition so future
+        // diffs against the open-coded version stay reviewable.
+        #[allow(unused_macros)]
         macro_rules! dptr {
             ($slice:expr) => {{
                 let (ptr, _guard) = $slice.device_ptr(&self.stream);
-                ptr // CUdeviceptr = u64
+                ptr
             }};
         }
-        let params_vec: Vec<u64> = vec![
+        #[cfg(any())]
+        let _legacy_params_vec: Vec<u64> = vec![
             dptr!(&nuc_data.all_basis),            //  0 P_BASIS
             dptr!(&nuc_data.all_coeffs),           //  1 P_COEFFS
             dptr!(&nuc_data.all_energy_grids),     //  2 P_ENERGY_GRIDS

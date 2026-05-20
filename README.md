@@ -507,6 +507,143 @@ paper/                        LaTeX manuscript (main.tex) + bib
 .github/workflows/ci.yml      Rust + Python + LaTeX CI
 ```
 
+## Distributed nuclide cache
+
+Re-loading the same ENDF nuclide from HDF5 on every ICSBEP case dominates
+the wall time of short sweeps. The crate ships a three-tier cache that
+makes the parse + SVD assembly cost a one-time tax — first across the
+process, then across the disk, then across a LAN of cooperating boxes.
+
+### Tiers
+
+| Tier | Where | Backed by | Persistence | Capacity |
+|------|-------|-----------|-------------|----------|
+| L1 | in-process | `Arc<NuclideKernels>` keyed by file hash + policy hash + temperature index | process lifetime | byte-budgeted LFU-with-recency (default ~24 GB or 75 % of RAM) |
+| L2 | local disk | content-addressed `.nuc` files | survives reboots | unbounded (small footprint — full ENDF/B-VII.1 fits in ~5 GB) |
+| L3 | LAN daemon | one or more `nuclide_cache_server` instances over TCP | daemon lifetime | unbounded in-memory + optional disk persistence |
+
+Reads cascade L1 → L2 → L3 → HDF5; hits at any tier populate every
+upstream tier so the next lookup is faster. Writes (after an HDF5
+parse) replicate to every enabled tier. The cache key is
+`blake3(file) ⊕ blake3(policy) ⊕ temp_idx ⊕ format_version`, so
+swapping ENDF libraries or changing SVD rank invalidates cleanly
+without manual eviction.
+
+### Observable benefit (laptop, single process)
+
+```text
+── Case 1: heu-met-fast-058_case-1.json ──
+  k_eff       = 1.00497 ± 0.00339
+  runtime     = 9.07 s
+  Δ cache:    L1 +   0h / +  17m  | L2 + 17h / +  0m  | puts +0
+
+── Case 2: heu-met-fast-058_case-3.json ──   (same family, 17 shared nuclides)
+  k_eff       = 1.00188 ± 0.00363
+  runtime     = 1.51 s                       ← 6.0× faster than case 1
+  Δ cache:    L1 +  17h / +   0m             ← every lookup served from L1
+```
+
+Reproduce with `python rust_prototype/bindings/python/examples/cache_smoke.py`.
+
+### Telemetry from Python
+
+```python
+import open_rust_mc as orm
+
+orm.cache_stats_reset()
+run_my_sweep()
+print(orm.cache_stats())
+# {'l1_hits': 4218, 'l1_misses': 142, 'l1_hit_rate': 0.967,
+#  'l2_hits':   89, 'l2_misses':  53, 'l2_hit_rate': 0.627,
+#  'l3_hits':    0, 'l3_misses':   0, 'puts': 142}
+```
+
+The counters are atomic and process-local. On MPI runs each rank
+holds its own; gather + sum on the controller for a swarm-wide view.
+
+### L2 disk cache
+
+L2 writes through to `$OPEN_RUST_MC_CACHE_DIR` (default
+`%LOCALAPPDATA%/open_rust_mc/cache` on Windows, `~/.cache/open_rust_mc`
+elsewhere). Set the env var to share an L2 directory across users on
+the same host, or to a fast scratch volume. No file locking is
+needed — entries are content-addressed and immutable.
+
+### L3 distributed cache (MPI / multi-node)
+
+Enable with the `cache-remote` cargo feature and one or more
+`nuclide_cache_server` daemons reachable over TCP:
+
+```bash
+# On every cache-server host:
+cargo run --release --features cache-remote --bin nuclide_cache_server -- \
+    --listen 0.0.0.0:53700 \
+    --cache-dir /scratch/orm-cache \
+    --data $DATA \
+    --rank 5
+
+# On every client (compute node, MPI rank, sweep harness, …):
+export OPEN_RUST_MC_CACHE_SERVER=tcp://node01:53700,tcp://node02:53700,tcp://node03:53700
+mpirun -np 64 python sweep.py
+```
+
+**Read semantics:** the client walks the comma-separated peer list in
+order; the first peer that returns a HIT wins. Dead peers (TCP
+timeout) count as MISS and the walker advances. Worst-case latency
+when N peers are all unreachable is `N × CONNECT_TIMEOUT` (500 ms
+each), so keep the list under ~20 and prune dead entries with
+`OPEN_RUST_MC_CACHE_SERVER=off` to disable L3 entirely.
+
+**Write semantics:** when a client parses a nuclide on its own (an
+L3-wide miss) it replicates the result to every reachable peer. The
+swarm is eventually-consistent — a peer that was down at write time
+re-warms via the next client's JIT parse. This is safe because the
+cache key pins the bytes exactly: any peer that holds key K holds
+byte-identical data.
+
+**Operational notes:**
+
+- One server, many clients ➜ a build-cluster pattern. Smaller than
+  ENDF/B-VII.1 fits in ~10 GB RAM; the daemon happily holds the
+  whole library.
+- N servers, M clients (full swarm) ➜ MPI-friendly. Replication is
+  N-fold but happens once per unique nuclide, after which every
+  subsequent client GET is a HIT on the nearest peer.
+- The daemon supports an eager pre-load step (`--data <HDF5_DIR>`)
+  that walks the library at startup and pre-populates the in-memory
+  map. Combine with `--cache-dir` and the second daemon launch is
+  ~50 ms / nuclide instead of the full ~1 s HDF5 parse.
+- No authentication. Deploy on a trusted LAN or behind WireGuard /
+  reverse proxy for public networks.
+
+### Pre-warming the L1 from a sweep manifest
+
+If you know up front which nuclides a sweep will touch (and how
+often), pre-hash + pre-load the library so the first transport call
+already runs warm:
+
+```python
+import open_rust_mc as orm
+
+# (zaid, temperature_K, weight) — `weight` is the expected hit count.
+# Heavy hitters survive eviction pressure when many cases compete.
+weights = [
+    (8016,  294.0, 507),   # O16 — every case
+    (92235, 294.0, 480),   # U235 — most HEU
+    (92238, 294.0, 480),   # U238
+    (26056, 294.0, 480),   # Fe56 — structural
+]
+n_loaded = orm.preload_nuclide_cache_weights(
+    data_dir="/data/endfb-vii.1-hdf5/neutron",
+    weights=weights,
+    rank=5,
+)
+print(f"pre-loaded {n_loaded} nuclides")
+```
+
+Cost: ~30-60 s for ~50 actinides on SSD (one full HDF5 parse per
+nuclide). Amortises across hundreds of cases in any real sweep.
+
 ## Test environment for the numbers in this README
 
 All quantitative results in this document (γ-heating splits, GPU

@@ -1,0 +1,490 @@
+# n_nuc scaling sweep - 2026-05-20 13:32:43
+# Particles/batch: 5000
+# Ncu mode: True
+# Ncu kernel filter: gr_trace_and_sample
+
+============================================================
+case=heu-met-fast-001_case-1  max_n_nuc=3  total_nuc=20  n_mats=7  wall=32,1s
+============================================================
+==PROF== Connected to process 324 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  GPU transport kernels compiled (8 kernels)
+  GPU: WMP payload = 0.0 KB (0 / 5 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : heu-met-fast-001_case-1
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.00000 +/- 0.00100
+  acceptance    : k = 1.00000 +/- 0.00100   sigma_combined = 241 pcm
+  k_calc        : 0.99937 +/- 0.00219
+  delta         : -63 pcm   0.26-sigma   bound = +/-482 pcm   [PASS]
+  timing        : load = 0.76 s, sim = 28.02 s, total = 28.78 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 788,873, fis = 115,009, leak = 171,567
+==PROF== Disconnected from process 324
+==PROF== Report: E:\git\open_rust_mc\outputs\heu-met-fast-001_case-1.ncu-rep
+
+
+============================================================
+case=heu-met-fast-011  max_n_nuc=21  total_nuc=27  n_mats=3  wall=418,4s
+============================================================
+==PROF== Connected to process 25724 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  Thermal: c_H_in_CH2  nuclides=[]  energy_max=1.42 eV  AWR=0.999
+  Temperatures: ["296K", "350K"]
+    Continuous: 95 inc energies, 32973 E_out pts, 527568 mu pts
+    296K inelastic: 95 energies, type=incoherent_inelastic
+    Continuous: 95 inc energies, 33607 E_out pts, 537712 mu pts
+    350K inelastic: 95 energies, type=incoherent_inelastic
+    296K elastic: incoherent, σ_b=164.0 b, W'=34.9570 eV⁻¹
+    350K elastic: incoherent, σ_b=164.0 b, W'=40.2820 eV⁻¹
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 21): incoherent elastic, σ_b=163.96 b, W'=34.9570 eV⁻¹
+  GPU S(α,β) slot 0 (nuc 21): 95 inc energies, 32973 E_out pts, 527568 mu pts
+  GPU S(α,β) slot 1 (nuc 21): incoherent elastic, σ_b=163.96 b, W'=40.2820 eV⁻¹
+  GPU S(α,β) slot 1 (nuc 21): 95 inc energies, 33607 E_out pts, 537712 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : heu-met-fast-011
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 0.99890 +/- 0.00150
+  acceptance    : k = 0.99890 +/- 0.00150   sigma_combined = 272 pcm
+  k_calc        : 0.99225 +/- 0.00227
+  delta         : -665 pcm   2.45-sigma   bound = +/-544 pcm   [FAIL]
+  timing        : load = 1.29 s, sim = 414.35 s, total = 415.64 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 23,956,647, fis = 116,158, leak = 73,042
+==PROF== Disconnected from process 25724
+==ERROR== The application returned an error code (1).
+==PROF== Report: E:\git\open_rust_mc\outputs\heu-met-fast-011.ncu-rep
+
+
+============================================================
+case=heu-met-fast-008  max_n_nuc=21  total_nuc=42  n_mats=4  wall=24,2s
+============================================================
+==PROF== Connected to process 17084 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  GPU transport kernels compiled (8 kernels)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : heu-met-fast-008
+  runner        : gpu_cuda
+  reference     : local_validation (OpenMC on this scene)
+  handbook      : k = 0.99890 +/- 0.00160
+  acceptance    : k = 0.99580 +/- 0.00160   sigma_combined = 277 pcm
+  k_calc        : 0.99640 +/- 0.00227
+  delta         : +60 pcm   0.22-sigma   bound = +/-555 pcm   [PASS]
+  timing        : load = 0.96 s, sim = 18.74 s, total = 19.70 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 838,998, fis = 114,786, leak = 171,376
+==PROF== Disconnected from process 17084
+==PROF== Report: E:\git\open_rust_mc\outputs\heu-met-fast-008.ncu-rep
+
+
+============================================================
+case=leu-comp-therm-008_case-1  max_n_nuc=28  total_nuc=37  n_mats=3  wall=95,7s
+============================================================
+==PROF== Connected to process 30780 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 0): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 0): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 0): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 0): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 0): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 0): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 0): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 0): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 0): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 35 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : leu-comp-therm-008_case-1
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.00070 +/- 0.00120
+  acceptance    : k = 1.00070 +/- 0.00120   sigma_combined = 257 pcm
+  k_calc        : 1.00108 +/- 0.00227
+  delta         : +38 pcm   0.15-sigma   bound = +/-513 pcm   [PASS]
+  timing        : load = 1.59 s, sim = 90.67 s, total = 92.27 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 9,633,972, fis = 121,839, leak = 6,508
+==PROF== Disconnected from process 30780
+==PROF== Report: E:\git\open_rust_mc\outputs\leu-comp-therm-008_case-1.ncu-rep
+
+
+============================================================
+case=heu-sol-therm-001_case-1  max_n_nuc=30  total_nuc=38  n_mats=2  wall=41,7s
+============================================================
+==PROF== Connected to process 13804 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 7): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 7): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 7): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 7): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 7): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 7): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 7): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 7): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 7): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 38 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : heu-sol-therm-001_case-1
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.00040 +/- 0.00600
+  acceptance    : k = 1.00040 +/- 0.00600   sigma_combined = 656 pcm
+  k_calc        : 0.99971 +/- 0.00266
+  delta         : -69 pcm   0.11-sigma   bound = +/-1313 pcm   [PASS]
+  timing        : load = 1.38 s, sim = 37.33 s, total = 38.71 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 5,835,882, fis = 122,975, leak = 133,932
+==PROF== Disconnected from process 13804
+==PROF== Report: E:\git\open_rust_mc\outputs\heu-sol-therm-001_case-1.ncu-rep
+
+
+============================================================
+case=mix-met-fast-008_8h  max_n_nuc=37  total_nuc=64  n_mats=3  wall=183,0s
+============================================================
+==PROF== Connected to process 15248 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\V50.h5 (rank=15)...
+    AWR = 49.518 (6 temps, 3587 energy pts)
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Elastic angular dist: 97 energies, CM=true
+    Total XS: summed 55 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.1255 b
+    Total XS: summed 55 leaf reactions (no MT=3 available)
+    Pointwise XS: 3587 energy pts × 7 channels = 196.2 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\V51.h5 (rank=15)...
+    AWR = 50.506 (6 temps, 20102 energy pts)
+    Discrete levels: 30/30 (continuum=true, angle_dists=29)
+    Elastic angular dist: 25 energies, CM=true
+    Total XS: summed 41 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 30 levels, CDF=47.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0663 b
+    Total XS: summed 41 leaf reactions (no MT=3 available)
+    Pointwise XS: 20102 energy pts × 7 channels = 1099.3 KB
+  GPU transport kernels compiled (8 kernels)
+  GPU: WMP payload = 0.0 KB (0 / 41 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : mix-met-fast-008_8h
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.03000 +/- 0.00250
+  acceptance    : k = 1.03000 +/- 0.00250   sigma_combined = 351 pcm
+  k_calc        : 1.02105 +/- 0.00246
+  delta         : -895 pcm   2.55-sigma   bound = +/-702 pcm   [FAIL]
+  timing        : load = 1.30 s, sim = 178.42 s, total = 179.72 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 10,849,115, fis = 118,970, leak = 0
+==PROF== Disconnected from process 15248
+==ERROR== The application returned an error code (1).
+==PROF== Report: E:\git\open_rust_mc\outputs\mix-met-fast-008_8h.ncu-rep
+
+
+============================================================
+case=pu-sol-therm-009_case-1  max_n_nuc=67  total_nuc=79  n_mats=2  wall=241,9s
+============================================================
+==PROF== Connected to process 20072 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Pu238.h5 (rank=15)...
+    AWR = 236.005 (6 temps, 20164 energy pts)
+    nu-bar(E): 22 pts, 2.901 @ thermal, 3.071 @ 1 MeV
+    Discrete levels: 39/39 (continuum=true, angle_dists=38)
+    Fission spectrum: 22 energies
+    Elastic angular dist: 73 energies, CM=true
+    URR: 31 energies, 20 bands, 500–60000 eV
+    Total XS: summed 45 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 39 levels, CDF=61.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=18 (fission)  rank=15
+    MT=102 (capture) rank=15
+    MT=37 (n,4n)     rank=15
+    Total XS: summed 45 leaf reactions (no MT=3 available)
+    Pointwise XS: 20164 energy pts × 7 channels = 1102.7 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Pu242.h5 (rank=15)...
+    AWR = 239.979 (6 temps, 22643 energy pts)
+    nu-bar(E): 2 pts, 2.893 @ thermal, 3.031 @ 1 MeV
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Fission spectrum: 30 energies
+    Elastic angular dist: 94 energies, CM=true
+    URR: 25 energies, 20 bands, 923–44726 eV
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=18 (fission)  rank=15
+    MT=102 (capture) rank=15
+    MT=37 (n,4n)     rank=15
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    Pointwise XS: 22643 energy pts × 7 channels = 1238.3 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cl35.h5 (rank=15)...
+    AWR = 34.668 (6 temps, 21354 energy pts)
+    Discrete levels: 31/31 (continuum=true, angle_dists=30)
+    Elastic angular dist: 61 energies, CM=true
+    Total XS: summed 43 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 31 levels, CDF=48.6 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=34.9030 b
+    Total XS: summed 43 leaf reactions (no MT=3 available)
+    Pointwise XS: 21354 energy pts × 7 channels = 1167.8 KB
+  Loading E:\git\open_rust_mc\data\endfb-vii.1-hdf5\neutron\Cl37.h5 (rank=15)...
+    AWR = 36.648 (6 temps, 13935 energy pts)
+    Discrete levels: 28/28 (continuum=true, angle_dists=27)
+    Elastic angular dist: 68 energies, CM=true
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 28 levels, CDF=43.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0797 b
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    Pointwise XS: 13935 energy pts × 7 channels = 762.1 KB
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 6): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 6): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 6): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 6): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 6): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 6): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 6): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 6): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 6): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 74 nuclides covered)
+==PROF== Profiling "gr_trace_and_sample": 0%
+==WARNING== Backing up device memory in system memory. Kernel replay might be slow. Consider using "--replay-mode application" to avoid memory save-and-restore.
+....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+==PROF== Profiling "gr_trace_and_sample": 0%....50%....100% - 17 passes
+  case          : pu-sol-therm-009_case-1
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.00000 +/- 0.00330
+  acceptance    : k = 1.00000 +/- 0.00330   sigma_combined = 406 pcm
+  k_calc        : 1.01574 +/- 0.00236
+  delta         : +1574 pcm   3.88-sigma   bound = +/-812 pcm   [FAIL]
+  timing        : load = 3.36 s, sim = 235.52 s, total = 238.87 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 23,426,747, fis = 105,913, leak = 28,730
+==PROF== Disconnected from process 20072
+==ERROR== The application returned an error code (1).
+==PROF== Report: E:\git\open_rust_mc\outputs\pu-sol-therm-009_case-1.ncu-rep
+
+
+============================================================
+case=heu-met-fast-069_case-1  max_n_nuc=69  total_nuc=531  n_mats=9  wall=10,4s
+============================================================
+==PROF== Connected to process 8024 (C:\Users\Fabio\AppData\Local\Python\pythoncore-3.14-64\python.exe)
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 69): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 69): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 69): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 69): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 69): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 69): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 69): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 69): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 69): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 69): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 69): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 69): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 69): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 69): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 69): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 69): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 100 nuclides covered)
+
+==ERROR== An error was reported by the driver:
+==ERROR== For more information, see C
+==ERROR== Profiling failed because a driver resource was unavailable. Ensure that no other tool (like DCGM) is concurrently collecting profiling data. See https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#faq for more details.
+==ERROR== For more information, see C
+==ERROR== Failed to profile "gr_trace_and_sample" in process 8024
+==PROF== Trying to shutdown target application
+==ERROR== An error occurred while trying to profile.
+

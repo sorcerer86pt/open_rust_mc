@@ -1,0 +1,934 @@
+┌─ open_rust_mc — hardware profile ─
+│ RAM 31.7 GB, 14p/20l cores, L1 288 KB / L2 1280 KB / L3 24576 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 20 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 23.8 GB (75%× detected RAM).
+│ GPU bundle cache budget: 3.0 GB (75% of 4.0 GB VRAM).
+└──
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ag107.h5 (rank=15)...
+    AWR = 105.987 (6 temps, 58742 energy pts)
+    Discrete levels: 17/17 (continuum=true, angle_dists=17)
+    Elastic angular dist: 47 energies, CM=true
+    URR: 21 energies, 20 bands, 6500–100000 eV
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) rank=15
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0218 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 58742 energy pts × 7 channels = 3212.5 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ag109.h5 (rank=15)...
+    AWR = 107.969 (6 temps, 65226 energy pts)
+    Discrete levels: 19/19 (continuum=true, angle_dists=18)
+    Elastic angular dist: 44 energies, CM=true
+    URR: 20 energies, 20 bands, 7120–88915 eV
+    Total XS: summed 29 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 19 levels, CDF=29.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0264 b
+    Total XS: summed 29 leaf reactions (no MT=3 available)
+    Pointwise XS: 65226 energy pts × 7 channels = 3567.0 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba130.h5 (rank=15)...
+    AWR = 128.790 (6 temps, 18706 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=8)
+    Elastic angular dist: 55 energies, CM=true
+    URR: 22 energies, 20 bands, 2800–100000 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 8 levels, CDF=12.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0588 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 18706 energy pts × 7 channels = 1023.0 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba132.h5 (rank=15)...
+    AWR = 130.772 (6 temps, 3228 energy pts)
+    Discrete levels: 11/11 (continuum=true, angle_dists=11)
+    Elastic angular dist: 58 energies, CM=true
+    URR: 39 energies, 20 bands, 130–100000 eV
+    Total XS: summed 22 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 11 levels, CDF=17.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0461 b
+    Total XS: summed 22 leaf reactions (no MT=3 available)
+    Pointwise XS: 3228 energy pts × 7 channels = 176.5 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba134.h5 (rank=15)...
+    AWR = 132.754 (6 temps, 22603 energy pts)
+    Discrete levels: 14/14 (continuum=true, angle_dists=14)
+    Elastic angular dist: 61 energies, CM=true
+    URR: 15 energies, 20 bands, 11000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 14 levels, CDF=21.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0397 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 22603 energy pts × 7 channels = 1236.1 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba135.h5 (rank=15)...
+    AWR = 133.747 (6 temps, 29904 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=8)
+    Elastic angular dist: 55 energies, CM=true
+    URR: 21 energies, 20 bands, 4700–100000 eV
+    Total XS: summed 20 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 8 levels, CDF=12.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0435 b
+    Total XS: summed 20 leaf reactions (no MT=3 available)
+    Pointwise XS: 29904 energy pts × 7 channels = 1635.4 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba136.h5 (rank=15)...
+    AWR = 134.737 (6 temps, 24058 energy pts)
+    Discrete levels: 11/11 (continuum=true, angle_dists=11)
+    Elastic angular dist: 58 energies, CM=true
+    URR: 8 energies, 20 bands, 35000–100000 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 11 levels, CDF=17.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0349 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 24058 energy pts × 7 channels = 1315.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba137.h5 (rank=15)...
+    AWR = 135.730 (6 temps, 18654 energy pts)
+    Discrete levels: 9/9 (continuum=true, angle_dists=9)
+    Elastic angular dist: 56 energies, CM=true
+    URR: 17 energies, 20 bands, 12500–100000 eV
+    Total XS: summed 20 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 9 levels, CDF=14.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0393 b
+    Total XS: summed 20 leaf reactions (no MT=3 available)
+    Pointwise XS: 18654 energy pts × 7 channels = 1020.1 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ba138.h5 (rank=15)...
+    AWR = 136.720 (6 temps, 7444 energy pts)
+    Discrete levels: 4/4 (continuum=true, angle_dists=4)
+    Elastic angular dist: 102 energies, CM=true
+    Total XS: summed 15 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 4 levels, CDF=6.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0623 b
+    Total XS: summed 15 leaf reactions (no MT=3 available)
+    Pointwise XS: 7444 energy pts × 7 channels = 407.1 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Bi209.h5 (rank=15)...
+    AWR = 207.185 (6 temps, 14071 energy pts)
+    Discrete levels: 20/20 (continuum=true, angle_dists=20)
+    Elastic angular dist: 68 energies, CM=true
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 20 levels, CDF=31.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=2.6153 b
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 14071 energy pts × 7 channels = 769.5 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ca40.h5 (rank=15)...
+    AWR = 39.619 (6 temps, 11144 energy pts)
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Elastic angular dist: 104 energies, CM=true
+    Total XS: summed 40 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.1596 b
+    Total XS: summed 40 leaf reactions (no MT=3 available)
+    Pointwise XS: 11144 energy pts × 7 channels = 609.4 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ca42.h5 (rank=15)...
+    AWR = 41.598 (6 temps, 9093 energy pts)
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Elastic angular dist: 104 energies, CM=true
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.1766 b
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    Pointwise XS: 9093 energy pts × 7 channels = 497.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ca43.h5 (rank=15)...
+    AWR = 42.590 (6 temps, 6881 energy pts)
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Elastic angular dist: 104 energies, CM=true
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.1819 b
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    Pointwise XS: 6881 energy pts × 7 channels = 376.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ca44.h5 (rank=15)...
+    AWR = 43.578 (6 temps, 5946 energy pts)
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Elastic angular dist: 104 energies, CM=true
+    Total XS: summed 35 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.1869 b
+    Total XS: summed 35 leaf reactions (no MT=3 available)
+    Pointwise XS: 5946 energy pts × 7 channels = 325.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ca46.h5 (rank=15)...
+    AWR = 45.559 (6 temps, 1084 energy pts)
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Elastic angular dist: 103 energies, CM=true
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.1963 b
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    Pointwise XS: 1084 energy pts × 7 channels = 59.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Ca48.h5 (rank=15)...
+    AWR = 47.541 (6 temps, 1597 energy pts)
+    Discrete levels: 21/21 (continuum=true, angle_dists=20)
+    Elastic angular dist: 104 energies, CM=true
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 21 levels, CDF=32.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.2050 b
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    Pointwise XS: 1597 energy pts × 7 channels = 87.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd106.h5 (rank=15)...
+    AWR = 104.996 (6 temps, 14778 energy pts)
+    Discrete levels: 12/12 (continuum=true, angle_dists=12)
+    Elastic angular dist: 59 energies, CM=true
+    URR: 17 energies, 20 bands, 6000–100000 eV
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 12 levels, CDF=18.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.2465 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 14778 energy pts × 7 channels = 808.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd108.h5 (rank=15)...
+    AWR = 106.977 (6 temps, 14836 energy pts)
+    Discrete levels: 11/11 (continuum=true, angle_dists=11)
+    Elastic angular dist: 28 energies, CM=true
+    URR: 21 energies, 20 bands, 6000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 11 levels, CDF=17.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0726 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 14836 energy pts × 7 channels = 811.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd110.h5 (rank=15)...
+    AWR = 108.959 (6 temps, 22257 energy pts)
+    Discrete levels: 15/15 (continuum=true, angle_dists=15)
+    Elastic angular dist: 27 energies, CM=true
+    URR: 20 energies, 20 bands, 7000–100000 eV
+    Total XS: summed 28 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 15 levels, CDF=23.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0589 b
+    Total XS: summed 28 leaf reactions (no MT=3 available)
+    Pointwise XS: 22257 energy pts × 7 channels = 1217.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd111.h5 (rank=15)...
+    AWR = 109.951 (6 temps, 32717 energy pts)
+    Discrete levels: 12/12 (continuum=true, angle_dists=12)
+    Elastic angular dist: 58 energies, CM=true
+    URR: 23 energies, 20 bands, 2300–100000 eV
+    Total XS: summed 23 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 12 levels, CDF=18.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.1131 b
+    Total XS: summed 23 leaf reactions (no MT=3 available)
+    Pointwise XS: 32717 energy pts × 7 channels = 1789.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd112.h5 (rank=15)...
+    AWR = 110.942 (6 temps, 28368 energy pts)
+    Discrete levels: 9/9 (continuum=true, angle_dists=9)
+    Elastic angular dist: 35 energies, CM=true
+    URR: 16 energies, 20 bands, 11500–100000 eV
+    Total XS: summed 22 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 9 levels, CDF=14.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0659 b
+    Total XS: summed 22 leaf reactions (no MT=3 available)
+    Pointwise XS: 28368 energy pts × 7 channels = 1551.4 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd113.h5 (rank=15)...
+    AWR = 111.930 (6 temps, 45608 energy pts)
+    Discrete levels: 22/22 (continuum=true, angle_dists=22)
+    Elastic angular dist: 101 energies, CM=true
+    URR: 21 energies, 20 bands, 5000–100000 eV
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 22 levels, CDF=34.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0475 b
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    Pointwise XS: 45608 energy pts × 7 channels = 2494.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd114.h5 (rank=15)...
+    AWR = 112.925 (6 temps, 21462 energy pts)
+    Discrete levels: 11/11 (continuum=true, angle_dists=11)
+    Elastic angular dist: 35 energies, CM=true
+    URR: 18 energies, 20 bands, 8000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 11 levels, CDF=17.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0258 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 21462 energy pts × 7 channels = 1173.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Cd116.h5 (rank=15)...
+    AWR = 114.909 (6 temps, 13643 energy pts)
+    Discrete levels: 7/7 (continuum=true, angle_dists=7)
+    Elastic angular dist: 28 energies, CM=true
+    URR: 18 energies, 20 bands, 9500–100000 eV
+    Total XS: summed 20 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 7 levels, CDF=11.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0196 b
+    Total XS: summed 20 leaf reactions (no MT=3 available)
+    Pointwise XS: 13643 energy pts × 7 channels = 746.1 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Co59.h5 (rank=15)...
+    AWR = 58.427 (6 temps, 25154 energy pts)
+    Discrete levels: 20/20 (continuum=true, angle_dists=20)
+    Elastic angular dist: 35 energies, CM=true
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 20 levels, CDF=31.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0830 b
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 25154 energy pts × 7 channels = 1375.6 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\K39.h5 (rank=15)...
+    AWR = 38.629 (6 temps, 28206 energy pts)
+    Discrete levels: 5/5 (continuum=true, angle_dists=5)
+    Elastic angular dist: 45 energies, CM=true
+    Total XS: summed 12 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 5 levels, CDF=7.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.6647 b
+    Total XS: summed 12 leaf reactions (no MT=3 available)
+    Pointwise XS: 28206 energy pts × 7 channels = 1542.5 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\K40.h5 (rank=15)...
+    AWR = 39.621 (6 temps, 835 energy pts)
+    Discrete levels: 6/6 (continuum=true, angle_dists=6)
+    Elastic angular dist: 46 energies, CM=true
+    Total XS: summed 13 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 6 levels, CDF=9.4 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=288.7812 b
+    Total XS: summed 13 leaf reactions (no MT=3 available)
+    Pointwise XS: 835 energy pts × 7 channels = 45.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\K41.h5 (rank=15)...
+    AWR = 40.610 (6 temps, 31840 energy pts)
+    Discrete levels: 3/3 (continuum=true, angle_dists=3)
+    Elastic angular dist: 43 energies, CM=true
+    Total XS: summed 10 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 3 levels, CDF=4.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.1102 b
+    Total XS: summed 10 leaf reactions (no MT=3 available)
+    Pointwise XS: 31840 energy pts × 7 channels = 1741.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Li6.h5 (rank=15)...
+    AWR = 5.963 (6 temps, 841 energy pts)
+    Discrete levels: 31/31 (continuum=false, angle_dists=31)
+    Elastic angular dist: 165 energies, CM=true
+    Total XS: summed 36 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 31 levels, CDF=48.6 KB)
+    MT=102 (capture) rank=15
+    MT=24 (n,2nα)   rank=15
+    Missing channels: max=47207.4800 b
+    Total XS: summed 36 leaf reactions (no MT=3 available)
+    Pointwise XS: 841 energy pts × 7 channels = 46.0 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Li7.h5 (rank=15)...
+    AWR = 6.956 (6 temps, 708 energy pts)
+    Discrete levels: 32/32 (continuum=false, angle_dists=32)
+    Elastic angular dist: 75 energies, CM=true
+    Total XS: summed 38 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 32 levels, CDF=50.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    MT=24 (n,2nα)   rank=15
+    Missing channels: max=0.0198 b
+    Total XS: summed 38 leaf reactions (no MT=3 available)
+    Pointwise XS: 708 energy pts × 7 channels = 38.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Na23.h5 (rank=15)...
+    AWR = 22.792 (6 temps, 3727 energy pts)
+    Discrete levels: 19/19 (continuum=true, angle_dists=19)
+    Elastic angular dist: 479 energies, CM=true
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 19 levels, CDF=29.8 KB)
+    MT=16 (n,2n)     rank=15
+    MT=102 (capture) rank=15
+    Missing channels: max=0.2267 b
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 3727 energy pts × 7 channels = 203.8 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sb121.h5 (rank=15)...
+    AWR = 119.870 (6 temps, 45889 energy pts)
+    Discrete levels: 9/9 (continuum=true, angle_dists=9)
+    Elastic angular dist: 84 energies, CM=true
+    URR: 18 energies, 20 bands, 5400–100000 eV
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 9 levels, CDF=14.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0670 b
+    Total XS: summed 19 leaf reactions (no MT=3 available)
+    Pointwise XS: 45889 energy pts × 7 channels = 2509.6 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sb123.h5 (rank=15)...
+    AWR = 121.850 (6 temps, 42573 energy pts)
+    Discrete levels: 7/7 (continuum=true, angle_dists=7)
+    Elastic angular dist: 81 energies, CM=true
+    URR: 18 energies, 20 bands, 5400–100000 eV
+    Total XS: summed 17 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 7 levels, CDF=11.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0611 b
+    Total XS: summed 17 leaf reactions (no MT=3 available)
+    Pointwise XS: 42573 energy pts × 7 channels = 2328.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Br79.h5 (rank=15)...
+    AWR = 78.240 (6 temps, 36461 energy pts)
+    Discrete levels: 30/30 (continuum=true, angle_dists=30)
+    Elastic angular dist: 76 energies, CM=true
+    URR: 19 energies, 20 bands, 5500–100000 eV
+    Total XS: summed 44 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 30 levels, CDF=47.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0611 b
+    Total XS: summed 44 leaf reactions (no MT=3 available)
+    Pointwise XS: 36461 energy pts × 7 channels = 1994.0 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Br81.h5 (rank=15)...
+    AWR = 80.221 (6 temps, 37378 energy pts)
+    Discrete levels: 27/27 (continuum=true, angle_dists=27)
+    Elastic angular dist: 73 energies, CM=true
+    URR: 14 energies, 20 bands, 16000–100000 eV
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 27 levels, CDF=42.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0494 b
+    Total XS: summed 39 leaf reactions (no MT=3 available)
+    Pointwise XS: 37378 energy pts × 7 channels = 2044.1 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy156.h5 (rank=15)...
+    AWR = 154.585 (6 temps, 5997 energy pts)
+    Discrete levels: 11/11 (continuum=true, angle_dists=10)
+    Elastic angular dist: 51 energies, CM=true
+    URR: 78 energies, 20 bands, 91–138722 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 11 levels, CDF=17.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0477 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 5997 energy pts × 7 channels = 328.0 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy158.h5 (rank=15)...
+    AWR = 156.568 (6 temps, 1897 energy pts)
+    Discrete levels: 24/24 (continuum=true, angle_dists=23)
+    Elastic angular dist: 51 energies, CM=true
+    URR: 55 energies, 20 bands, 86–99552 eV
+    Total XS: summed 34 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 24 levels, CDF=37.6 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0494 b
+    Total XS: summed 34 leaf reactions (no MT=3 available)
+    Pointwise XS: 1897 energy pts × 7 channels = 103.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy160.h5 (rank=15)...
+    AWR = 158.551 (6 temps, 24077 energy pts)
+    Discrete levels: 25/25 (continuum=true, angle_dists=24)
+    Elastic angular dist: 51 energies, CM=true
+    URR: 23 energies, 20 bands, 2008–87336 eV
+    Total XS: summed 35 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 25 levels, CDF=39.2 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0358 b
+    Total XS: summed 35 leaf reactions (no MT=3 available)
+    Pointwise XS: 24077 energy pts × 7 channels = 1316.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy161.h5 (rank=15)...
+    AWR = 159.544 (6 temps, 46298 energy pts)
+    Discrete levels: 20/20 (continuum=true, angle_dists=19)
+    Elastic angular dist: 53 energies, CM=true
+    URR: 22 energies, 20 bands, 996–25812 eV
+    Total XS: summed 30 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 20 levels, CDF=31.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0310 b
+    Total XS: summed 30 leaf reactions (no MT=3 available)
+    Pointwise XS: 46298 energy pts × 7 channels = 2531.9 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy162.h5 (rank=15)...
+    AWR = 160.536 (6 temps, 25196 energy pts)
+    Discrete levels: 33/33 (continuum=true, angle_dists=32)
+    Elastic angular dist: 53 energies, CM=true
+    URR: 22 energies, 20 bands, 4845–81162 eV
+    Total XS: summed 43 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 33 levels, CDF=51.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0190 b
+    Total XS: summed 43 leaf reactions (no MT=3 available)
+    Pointwise XS: 25196 energy pts × 7 channels = 1377.9 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy163.h5 (rank=15)...
+    AWR = 161.529 (6 temps, 31153 energy pts)
+    Discrete levels: 27/27 (continuum=true, angle_dists=26)
+    Elastic angular dist: 53 energies, CM=true
+    URR: 25 energies, 20 bands, 997–73895 eV
+    Total XS: summed 37 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 27 levels, CDF=42.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0124 b
+    Total XS: summed 37 leaf reactions (no MT=3 available)
+    Pointwise XS: 31153 energy pts × 7 channels = 1703.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Dy164.h5 (rank=15)...
+    AWR = 162.521 (6 temps, 20255 energy pts)
+    Discrete levels: 33/33 (continuum=true, angle_dists=32)
+    Elastic angular dist: 53 energies, CM=true
+    URR: 14 energies, 20 bands, 6998–73844 eV
+    Total XS: summed 43 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 33 levels, CDF=51.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0158 b
+    Total XS: summed 43 leaf reactions (no MT=3 available)
+    Pointwise XS: 20255 energy pts × 7 channels = 1107.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd152.h5 (rank=15)...
+    AWR = 150.615 (6 temps, 41463 energy pts)
+    Discrete levels: 34/34 (continuum=true, angle_dists=33)
+    Elastic angular dist: 70 energies, CM=true
+    URR: 56 energies, 20 bands, 2658–346000 eV
+    Total XS: summed 44 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 34 levels, CDF=53.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.2612 b
+    Total XS: summed 44 leaf reactions (no MT=3 available)
+    Pointwise XS: 41463 energy pts × 7 channels = 2267.5 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd154.h5 (rank=15)...
+    AWR = 152.599 (6 temps, 47053 energy pts)
+    Discrete levels: 27/27 (continuum=true, angle_dists=26)
+    Elastic angular dist: 83 energies, CM=true
+    URR: 29 energies, 20 bands, 2760–123000 eV
+    Total XS: summed 37 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 27 levels, CDF=42.3 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0198 b
+    Total XS: summed 37 leaf reactions (no MT=3 available)
+    Pointwise XS: 47053 energy pts × 7 channels = 2573.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd155.h5 (rank=15)...
+    AWR = 153.592 (6 temps, 15017 energy pts)
+    Discrete levels: 39/39 (continuum=true, angle_dists=38)
+    Elastic angular dist: 68 energies, CM=true
+    URR: 44 energies, 20 bands, 183–60400 eV
+    Total XS: summed 49 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 39 levels, CDF=61.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0193 b
+    Total XS: summed 49 leaf reactions (no MT=3 available)
+    Pointwise XS: 15017 energy pts × 7 channels = 821.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd156.h5 (rank=15)...
+    AWR = 154.583 (6 temps, 25348 energy pts)
+    Discrete levels: 26/26 (continuum=true, angle_dists=25)
+    Elastic angular dist: 70 energies, CM=true
+    URR: 24 energies, 20 bands, 2227–90000 eV
+    Total XS: summed 36 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 26 levels, CDF=40.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0205 b
+    Total XS: summed 36 leaf reactions (no MT=3 available)
+    Pointwise XS: 25348 energy pts × 7 channels = 1386.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd157.h5 (rank=15)...
+    AWR = 155.576 (6 temps, 15808 energy pts)
+    Discrete levels: 40/40 (continuum=true, angle_dists=39)
+    Elastic angular dist: 76 energies, CM=true
+    URR: 32 energies, 20 bands, 307–54881 eV
+    Total XS: summed 50 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 40 levels, CDF=62.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0182 b
+    Total XS: summed 50 leaf reactions (no MT=3 available)
+    Pointwise XS: 15808 energy pts × 7 channels = 864.5 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd158.h5 (rank=15)...
+    AWR = 156.567 (6 temps, 28330 energy pts)
+    Discrete levels: 28/28 (continuum=true, angle_dists=27)
+    Elastic angular dist: 72 energies, CM=true
+    URR: 37 energies, 20 bands, 9980–80000 eV
+    Total XS: summed 38 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 28 levels, CDF=43.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0178 b
+    Total XS: summed 38 leaf reactions (no MT=3 available)
+    Pointwise XS: 28330 energy pts × 7 channels = 1549.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Gd160.h5 (rank=15)...
+    AWR = 158.553 (6 temps, 17256 energy pts)
+    Discrete levels: 28/28 (continuum=true, angle_dists=27)
+    Elastic angular dist: 70 energies, CM=true
+    URR: 33 energies, 20 bands, 9663–75000 eV
+    Total XS: summed 38 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 28 levels, CDF=43.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0185 b
+    Total XS: summed 38 leaf reactions (no MT=3 available)
+    Pointwise XS: 17256 energy pts × 7 channels = 943.7 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm144.h5 (rank=15)...
+    AWR = 142.676 (6 temps, 14705 energy pts)
+    Discrete levels: 16/16 (continuum=true, angle_dists=15)
+    Elastic angular dist: 57 energies, CM=true
+    URR: 55 energies, 20 bands, 11925–536000 eV
+    Total XS: summed 26 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 16 levels, CDF=25.1 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0716 b
+    Total XS: summed 26 leaf reactions (no MT=3 available)
+    Pointwise XS: 14705 energy pts × 7 channels = 804.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm147.h5 (rank=15)...
+    AWR = 145.653 (6 temps, 51223 energy pts)
+    Discrete levels: 38/38 (continuum=true, angle_dists=37)
+    Elastic angular dist: 50 energies, CM=true
+    URR: 46 energies, 20 bands, 1988–122052 eV
+    Total XS: summed 48 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 38 levels, CDF=59.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0342 b
+    Total XS: summed 48 leaf reactions (no MT=3 available)
+    Pointwise XS: 51223 energy pts × 7 channels = 2801.3 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm148.h5 (rank=15)...
+    AWR = 146.644 (6 temps, 5373 energy pts)
+    Discrete levels: 14/14 (continuum=true, angle_dists=13)
+    Elastic angular dist: 52 energies, CM=true
+    URR: 61 energies, 20 bands, 914–427000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 14 levels, CDF=21.9 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0270 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 5373 energy pts × 7 channels = 293.8 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm149.h5 (rank=15)...
+    AWR = 147.638 (6 temps, 32811 energy pts)
+    Discrete levels: 22/22 (continuum=true, angle_dists=21)
+    Elastic angular dist: 49 energies, CM=true
+    URR: 33 energies, 20 bands, 520–22662 eV
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 22 levels, CDF=34.5 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=1.0641 b
+    Total XS: summed 32 leaf reactions (no MT=3 available)
+    Pointwise XS: 32811 energy pts × 7 channels = 1794.4 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm150.h5 (rank=15)...
+    AWR = 148.629 (6 temps, 10536 energy pts)
+    Discrete levels: 30/30 (continuum=true, angle_dists=29)
+    Elastic angular dist: 49 energies, CM=true
+    URR: 58 energies, 20 bands, 1570–336106 eV
+    Total XS: summed 40 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 30 levels, CDF=47.0 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0407 b
+    Total XS: summed 40 leaf reactions (no MT=3 available)
+    Pointwise XS: 10536 energy pts × 7 channels = 576.2 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm152.h5 (rank=15)...
+    AWR = 150.615 (6 temps, 29327 energy pts)
+    Discrete levels: 40/40 (continuum=true, angle_dists=39)
+    Elastic angular dist: 50 energies, CM=true
+    URR: 50 energies, 20 bands, 5150–122589 eV
+    Total XS: summed 50 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 40 levels, CDF=62.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0278 b
+    Total XS: summed 50 leaf reactions (no MT=3 available)
+    Pointwise XS: 29327 energy pts × 7 channels = 1603.8 KB
+  Loading C:\Users\fog\madman_svd_experiment\data\endfb-vii.1-hdf5\neutron\Sm154.h5 (rank=15)...
+    AWR = 152.600 (6 temps, 13364 energy pts)
+    Discrete levels: 26/26 (continuum=true, angle_dists=25)
+    Elastic angular dist: 49 energies, CM=true
+    URR: 47 energies, 20 bands, 5200–82517 eV
+    Total XS: summed 36 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=15
+    MT=4  (inelastic) synthetic rank=15 (sum + CDF over 26 levels, CDF=40.7 KB)
+    MT=16 (n,2n)     rank=15
+    MT=17 (n,3n)     rank=15
+    MT=102 (capture) rank=15
+    MT=22 (n,nα)    rank=15
+    MT=24 (n,2nα)   rank=15
+    MT=28 (n,np)    rank=15
+    Missing channels: max=0.0213 b
+    Total XS: summed 36 leaf reactions (no MT=3 available)
+    Pointwise XS: 13364 energy pts × 7 channels = 730.8 KB
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU transport kernels compiled (8 kernels)
+Traceback (most recent call last):
+  File "C:\Users\fog\madman_svd_experiment\rust_prototype\bindings\python\examples\icsbep_run.py", line 94, in <module>
+    sys.exit(main(case, runner_label))
+             ~~~~^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\fog\madman_svd_experiment\rust_prototype\bindings\python\examples\icsbep_run.py", line 50, in main
+    result = run_icsbep_case(
+        case_json=case_json,
+    ...<3 lines>...
+        rank=15,
+    )
+ValueError: GPU upload nuclides: DriverError(CUDA_ERROR_OUT_OF_MEMORY, "out of memory")

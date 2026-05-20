@@ -11,9 +11,9 @@ Deferred specs:
   time-dependent kinetics, real continuous-energy adjoint MC, and
   validated full-PWR depletion bench land first.
 
-`origin/main` at `43b3236`. Lib tests **260 / 260 green** on the
-default profile; `cargo check --features cuda` clean; Python
-bindings (`-p open-rust-mc-py`) clean.
+`origin/main` at `b2270c7`. Lib tests **438 / 438 green** on the
+default profile and on `--features cuda`; Python bindings
+(`-p open-rust-mc-py`) clean.
 
 ## What's on main
 
@@ -432,11 +432,18 @@ bindings (`-p open-rust-mc-py`) clean.
   is degenerate). 322/322 lib tests green on default and
   `--features cuda`. `outputs/gpu_photon_validate.txt` now
   records cascade rows alongside the existing PE-phase1 ones.
-- **Event-based GPU transport.** Current `transport_recursive`
-  is history-based (one particle birth-to-death per thread).
-  Tramm 2024 reports event-based is ~6× faster on GPU;
-  prerequisite is a particle-sort-by-(material, energy) phase
-  before XS lookup.
+- **Event-based GPU transport.** Implemented on
+  `feat/gpu-perf-and-per-nuclide-tally` (7-stage pipeline
+  trace_and_sample → scan_offsets → partition → 4 reaction
+  kernels). Tramm et al., PHYSOR 2022 ("Toward Portable GPU
+  Acceleration of the OpenMC Monte Carlo Particle Transport Code")
+  reports event-based far outperforms history-based on A100 once
+  ≥ ~100 k particles are in flight (saturation point ≈ 8 M),
+  and identifies sort-by-energy + microscopic XS cache removal as
+  the dominant optimizations after the basic event-based switch.
+  Open question on small GPUs (RTX A1000 4 GB laptop): launch
+  overhead × outer-step count makes event-based slower per case
+  than the persistent kernel; expected to flip on the 3080.
 - **Photon depletion / activation transport.** Separate from
   neutron depletion — would track activation products and their
   decay photons over time.

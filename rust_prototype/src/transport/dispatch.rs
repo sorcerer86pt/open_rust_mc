@@ -121,6 +121,20 @@ impl<'a, XS: crate::transport::simulate::XsProvider> EigenvalueRunner for CpuRun
 /// per-batch source-bank management, k_eff active-mean aggregation,
 /// and statepoint hook all live here so binaries don't reproduce
 /// that loop themselves.
+///
+/// **Recommended `particles_per_batch` for the event-based pipeline.**
+/// Tramm et al., "Toward Portable GPU Acceleration of the OpenMC
+/// Monte Carlo Particle Transport Code" (PHYSOR 2022), report that
+/// on an A100 the event-based mode continues to gain performance up
+/// to **8 million particles in-flight** before exhausting device
+/// memory — i.e. saturation is two orders of magnitude beyond what
+/// is conventional for CPU MC runs. A reasonable target on a 3080
+/// with 10 GB VRAM is **100k–1M particles per batch**; on the 4 GB
+/// RTX A1000 laptop, 50 k is the practical ceiling. Smaller batches
+/// (≤5 k) leave most of the per-kernel-launch and per-step PCIe
+/// overhead unamortised. ncu profiling of the previous persistent
+/// kernel showed active_threads_per_warp = 6.2/32 on PWR-17×17 and
+/// every other scene where reaction-type dispatch diverged warps.
 #[cfg(feature = "cuda")]
 pub struct CudaRunner<'a> {
     pub recursive: &'a crate::gpu_recursive::GpuRecursiveContext,
@@ -137,6 +151,12 @@ pub struct CudaRunner<'a> {
     /// Lazily built on first batch, reused across batches. `RefCell`
     /// for `&self`-on-run; CudaRunner is !Sync anyway.
     pub buffers: std::cell::RefCell<Option<crate::gpu_recursive::TransportBuffers>>,
+    /// PHYSOR 2022 Optimization F refill pool, allocated lazily when
+    /// `config.gpu_refill_pool_factor` is `Some(_)` on the first
+    /// batch. Sized for the *overflow* beyond the in-flight slots —
+    /// i.e. `n * (factor - 1)` particles, capped at the per-batch
+    /// (factor * n) total bank size.
+    pub refill: std::cell::RefCell<Option<crate::gpu_recursive::RefillBuffers>>,
 }
 
 #[cfg(feature = "cuda")]
@@ -151,17 +171,24 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
         use rust_mc_sim::Pcg64;
 
         let n = config.particles_per_batch as usize;
-        // Honour a caller-supplied initial source bank the same way
-        // `simulate::run_eigenvalue_with_geometry` does. The Python
-        // ICSBEP path pre-seeds this via the fissionability-aware
-        // `try_initial_source_in_materials` so any cell whose material
-        // has zero ν̄ is excluded from the batch-1 source; without
-        // honouring that here, the GPU dispatch silently fell back to
-        // the per-runner closure (which is material-agnostic).
-        let mut source: Vec<(f64, f64, f64, f64)> = match config.initial_source_bank.as_ref() {
+        // PHYSOR 2022 Optimization F refill. When `gpu_refill_pool_factor`
+        // is `Some(f)`, the source bank is sized to `n * f` and the
+        // overflow goes into the device-side RefillBuffers. The kernel
+        // refills dead slots between event steps until the bank drains.
+        // `f = 1.0` is equivalent to disabled (no overflow). `n_overflow`
+        // is the per-batch refill capacity.
+        let refill_factor = config.gpu_refill_pool_factor.unwrap_or(1.0).max(1.0);
+        let total_bank = ((n as f64) * refill_factor).round() as usize;
+        let n_overflow = total_bank.saturating_sub(n);
+        let use_refill = n_overflow > 0;
+
+        // Build the full bank (size = n + n_overflow). First `n`
+        // entries seed the active slots, the rest are uploaded to the
+        // RefillBuffers below.
+        let full_bank: Vec<(f64, f64, f64, f64)> = match config.initial_source_bank.as_ref() {
             Some(bank) if !bank.is_empty() => {
                 let mut rng = Rng::new(config.seed * 100_000, 1);
-                (0..n)
+                (0..total_bank)
                     .map(|_| {
                         let idx = (rng.uniform() * bank.len() as f64) as usize;
                         let s = &bank[idx.min(bank.len() - 1)];
@@ -169,11 +196,24 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                     })
                     .collect()
             }
-            _ => (self.initial_source)(n, config.seed),
+            _ => (self.initial_source)(total_bank, config.seed),
         };
+        let mut source: Vec<(f64, f64, f64, f64)> = full_bank[..n].to_vec();
         let mut batches: Vec<BatchResult> = Vec::with_capacity(config.batches as usize);
         let mut k_sum = 0.0_f64;
         let mut k_count = 0_u32;
+
+        // When refill is active the fission bank has to fit
+        // `total_bank * nu_max` daughters per batch, not just `n * nu`.
+        // Scale fis_capacity by the refill factor (ceil for safety
+        // margin); without this the bank silently caps at fis_capacity
+        // and k_eff is reported as `capped_count / total_histories`,
+        // which is biased low (-7000 pcm on Godiva with factor=2.0).
+        let effective_fis_capacity = if use_refill {
+            ((self.fis_capacity as f64) * refill_factor).ceil() as usize
+        } else {
+            self.fis_capacity
+        };
 
         for batch in 1..=config.batches {
             let batch_seed = config.seed * 100_000 + batch as u64 * 1_000;
@@ -199,7 +239,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 let pool = crate::gpu_recursive::TransportBuffers::new(
                     &self.recursive.stream,
                     n,
-                    self.fis_capacity,
+                    effective_fis_capacity,
                     self.mat_k_t.len(),
                     self.recursive.n_lattices(),
                     params_len,
@@ -209,23 +249,120 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
             }
             let buffers = buffers_guard.as_mut().expect("buffers init above");
 
-            let result = self
-                .recursive
-                .transport_recursive_with_buffers(
-                    buffers,
-                    self.transport,
-                    self.nuc_data,
-                    self.mat_data,
-                    self.sab_data,
-                    self.wmp_data,
-                    &source,
-                    &rng_seeds,
-                    self.mat_k_t,
-                    self.sab_nuc_idx,
-                    self.max_events_per_history,
-                    self.fis_capacity,
+            // Lazy-allocate the refill pool on the first batch that
+            // requests it. Reuse across subsequent batches so the
+            // device allocations don't churn — the capacity is fixed
+            // by the first observed `n_overflow` and the loop calls
+            // RefillBuffers::reset() before each transport call.
+            let mut refill_guard = self.refill.borrow_mut();
+            if use_refill && refill_guard.is_none() {
+                let refill = crate::gpu_recursive::RefillBuffers::new(
+                    &self.recursive.stream,
+                    n_overflow,
                 )
-                .expect("transport_recursive_with_buffers failed");
+                .expect("RefillBuffers::new failed");
+                *refill_guard = Some(refill);
+            }
+
+            // Build the per-batch overflow bank from the SAME
+            // distribution as `source` (the active slots). For batch 1
+            // this is the initial source; for batch 2+ it must come
+            // from the just-converged fission bank, not the stale
+            // initial-source `full_bank` we built before the loop. If
+            // we use full_bank[n..] for batch 2+, the refilled
+            // particles inherit the initial source's spatial
+            // distribution (lower importance for converged scenes) and
+            // bias k_eff down ~700 pcm on Godiva (measured).
+            let overflow_bank: Vec<(f64, f64, f64, f64)> = if !use_refill {
+                Vec::new()
+            } else if batch == 1 {
+                full_bank[n..].to_vec()
+            } else {
+                // Resample n_overflow particles from the same fission
+                // bank that produced `source` for this batch. Uses a
+                // distinct RNG stream so the overflow draws don't
+                // collide with the active-slot resampling done in
+                // normalize_gpu_bank.
+                let mut rng = Rng::new(
+                    batch_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                    1,
+                );
+                (0..n_overflow)
+                    .map(|_| {
+                        let bank = &source;
+                        let idx = (rng.uniform() * bank.len() as f64) as usize;
+                        bank[idx.min(bank.len() - 1)]
+                    })
+                    .collect()
+            };
+
+            // Upload the overflow source into the refill bank if
+            // active. Per-particle PCG seeds derive from the batch
+            // seed mirroring the same scheme as the active slots, but
+            // with offset `n..total_bank` so they don't collide.
+            let result = if let (true, Some(refill)) = (use_refill, refill_guard.as_mut()) {
+                let stream = &self.recursive.stream;
+                let mut rx = Vec::with_capacity(n_overflow);
+                let mut ry = Vec::with_capacity(n_overflow);
+                let mut rz = Vec::with_capacity(n_overflow);
+                let mut re = Vec::with_capacity(n_overflow);
+                let mut rrs = Vec::with_capacity(n_overflow);
+                let mut rri = Vec::with_capacity(n_overflow);
+                for i in 0..n_overflow {
+                    let s = &overflow_bank[i];
+                    rx.push(s.0);
+                    ry.push(s.1);
+                    rz.push(s.2);
+                    re.push(s.3);
+                    let p = Pcg64::for_particle(batch_seed, (n + i) as u64);
+                    rrs.push(p.state());
+                    rri.push(p.stream());
+                }
+                stream.memcpy_htod(&rx, &mut refill.d_refill_pos_x).expect("htod refill x");
+                stream.memcpy_htod(&ry, &mut refill.d_refill_pos_y).expect("htod refill y");
+                stream.memcpy_htod(&rz, &mut refill.d_refill_pos_z).expect("htod refill z");
+                stream.memcpy_htod(&re, &mut refill.d_refill_energy).expect("htod refill e");
+                stream.memcpy_htod(&rrs, &mut refill.d_refill_rng_state).expect("htod refill rs");
+                stream.memcpy_htod(&rri, &mut refill.d_refill_rng_inc).expect("htod refill ri");
+
+                let r = self
+                    .recursive
+                    .transport_recursive_with_buffers(
+                        buffers,
+                        self.transport,
+                        self.nuc_data,
+                        self.mat_data,
+                        self.sab_data,
+                        self.wmp_data,
+                        &source,
+                        &rng_seeds,
+                        self.mat_k_t,
+                        self.sab_nuc_idx,
+                        self.max_events_per_history,
+                        effective_fis_capacity,
+                        Some(refill),
+                    )
+                    .expect("transport_recursive_with_buffers (refill) failed");
+                r
+            } else {
+                self.recursive
+                    .transport_recursive_with_buffers(
+                        buffers,
+                        self.transport,
+                        self.nuc_data,
+                        self.mat_data,
+                        self.sab_data,
+                        self.wmp_data,
+                        &source,
+                        &rng_seeds,
+                        self.mat_k_t,
+                        self.sab_nuc_idx,
+                        self.max_events_per_history,
+                        effective_fis_capacity,
+                        None,
+                    )
+                    .expect("transport_recursive_with_buffers failed")
+            };
 
             let active = batch > config.inactive;
             if active {

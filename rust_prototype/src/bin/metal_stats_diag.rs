@@ -12,6 +12,8 @@
 //! Usage:
 //!   cargo run --release --features cuda --bin metal_stats_diag
 
+#![allow(dead_code)]
+
 use std::path::PathBuf;
 
 use open_rust_mc::geometry::scene_io;
@@ -359,6 +361,7 @@ fn main() {
                     .collect()
             }),
             buffers: std::cell::RefCell::new(None),
+        refill: std::cell::RefCell::new(None),
         };
         let gpu_outcome = runner.run(&cfg);
         let mut gpu_act = Active::default();

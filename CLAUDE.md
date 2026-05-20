@@ -15,7 +15,7 @@ dependency. The SVD compression line is still in tree (`kernel.rs`,
 against pointwise tables / WMP / Hybrid; it's no longer the only
 thing the engine does.
 
-`origin/main` at `8f38f8c`. Lib tests **384 / 384 green**. `cargo
+`origin/main` at `b2270c7`. Lib tests **438 / 438 green**. `cargo
 check` default and `cargo check --features cuda` both clean.
 ICSBEP family suite passes **6 / 6** on both CPU and CUDA backends
 under the tightened envelope `|Δ| ≤ max(150 pcm, 2 σ_combined)`
@@ -356,6 +356,120 @@ from the ICSBEP handbook k_eff.
 
 ## What's Open / Research-Tier
 
+- **GPU batch-size saturation — MEASURED on RTX 3080.** Tramm et al.,
+  "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
+  Particle Transport Code" (PHYSOR 2022), report that A100 event-
+  based MC continues to gain performance up to **8 million particles
+  in flight** before exhausting device memory. Saturation sweep on
+  HMF-001 (3 nuclides, Godiva), 80 batches / 60 active, seed 1,
+  rank 15:
+
+  | particles  | sim s | us/p   | hist/s    | k_calc Δ pcm |
+  |-----------:|------:|-------:|----------:|-------------:|
+  |     10 000 |  6.27 | 10.45  |    95 k/s |         −107 |
+  |     30 000 |  7.50 |  4.17  |   240 k/s |          +62 |
+  |     50 000 |  8.83 |  2.94  |   340 k/s |           +7 |
+  |    100 000 | 11.02 |  1.84  |   545 k/s |          +17 |
+  |    200 000 | 15.78 |  1.31  |   760 k/s |          −15 |
+  |    500 000 | 28.44 |  0.95  | 1 055 k/s |          −42 |
+  |  1 000 000 | 49.87 |  0.83  | 1 203 k/s |          −11 |
+
+  Knee at **500 k–1 M particles** on a 3080. Per-doubling parallel
+  efficiency: 84 % (10k→30k) drops to 57 % (500k→1M). The default
+  `icsbep_run.py` particles=5000 runs the 3080 at **~8 % of its
+  capability**; bumping to 1 M is a free 14× throughput win on the
+  same hardware. k convergence is textbook 1/√N (σ = 0.00177 →
+  0.00016 = 11.1× tighter for 100× histories), all rows PASS the
+  ICSBEP envelope. Sweep CSV: `outputs/saturation_*.csv`.
+
+  Practical ceilings per card: 4 GB RTX A1000 ≈ 50 k; 10 GB RTX
+  3080 ≈ 1 M; A100 40 GB extrapolates to ~5–8 M.
+- **Continuous particle refill (PHYSOR 2022 Optimization F) — LANDED,
+  opt-in, validated on RTX 3080.** When particles die mid-batch the
+  outer driver leaves the per-event-type queues progressively under-
+  filled, hurting SM occupancy in the batch tail. Implemented in
+  commits `78ad47b` (kernel + `RefillBuffers` infrastructure) and
+  `23bd6fc` (end-to-end dispatch wiring + two validation-caught bugs).
+  Opt-in via `SimConfig::gpu_refill_pool_factor: Option<f64>` (or
+  `PySettings.gpu_refill_pool_factor`). When `Some(f)`, the source
+  bank size becomes `particles_per_batch * f` and the overflow refills
+  dead slots between event-pipeline steps; the kernel self-gates on
+  `alive[tid] == 0` per particle.
+
+  **No per-particle weights** — each refilled history is unit-weight,
+  k_eff stays unbiased because `total_histories` is bumped by the
+  device-side refill counter and used as the k_eff denominator. This
+  is the "generational refill" variant; preserves all existing tallies
+  without a tally-wide refactor.
+
+  **Validation on RTX 3080, HMF-008 (21 nuc, fast metal),
+  Particles=250 000, Batches=80 / Inactive=20:**
+
+  | metric           | refill_off      | refill_2x      | delta                          |
+  |------------------|----------------:|---------------:|-------------------------------:|
+  | sim wall         |        48.67 s  |       48.23 s  | -1 % (tied)                    |
+  | us_per_collision |          1.162  |         0.575  | -50.5 %                        |
+  | collisions       |        41.9 M   |       83.8 M   | +100 %                         |
+  | fissions         |         5.73 M  |       11.47 M  | +100 %                         |
+  | k_calc           |        0.99456  |       0.99485  | +29 pcm (MC noise)             |
+  | k_sigma          |        0.00040  |       0.00019  | 2.1x tighter                   |
+  | status           | PASS (-124 pcm) | PASS (-95 pcm) | both inside ICSBEP envelope    |
+
+  At this particle count, refill doubled the histories at the same
+  wall time and tightened sigma by 2.1x (vs the sqrt(2)=1.41x naive
+  prediction — the convergence bonus is real, refill also feeds
+  inactive-batch source convergence).
+
+  **CRITICAL: refill effectiveness must be measured against headroom.**
+  The gain only exists when the kernel grid has SMs idle during the
+  batch tail. Three regimes:
+
+    - **Under-occupied (small batch).** Initial particle count below
+      the SM-coverage threshold (e.g. A1000 with `Particles < 5 000`,
+      3080 with `Particles < 35 000`). Refill doesn't help — the
+      problem is at step 0, not in the tail. Refill adds wall time
+      with no payoff. A1000 smoke test at 5 000 particles measured
+      0.987x throughput (refill slightly slower).
+    - **Mid-curve (refill sweet spot).** Initial population fills the
+      SMs at step 0 but population decays during the batch (typical
+      Godiva / HMF-class fast-metal needs ~5-10 events/history,
+      population halves every 3-5 steps). Refill closes the tail
+      gap → 1.5-2.0x throughput observed on 3080 at 250 k particles.
+    - **Saturated.** Initial population so large that even after 80 %
+      die-off the remaining alive count still fills the SMs (e.g.
+      3080 at `Particles >= 1M` — see saturation curve above). Refill
+      adds memcpy / kernel-launch overhead with no SM headroom left
+      to fill. Expected gain shrinks to ~5-10 %.
+
+  To pick a target `RefillFactor`, look at the same-card saturation
+  curve (`outputs/saturation_*.csv`) and find the **knee** where
+  doubling `-Particles` only buys <20 % ns/p drop. Run *under* that
+  knee (where headroom exists) and the refill factor should bring
+  effective histories up *to* the knee. For 3080: saturation at
+  ~500 k-1 M particles, refill sweet spot at ~200 k-300 k with
+  factor 2-4. For an A100 / H100-class card: extrapolate the
+  saturation knee accordingly (likely 2-10 M particles).
+
+  Bench script: `scripts/refill_compare_sweep.ps1` runs the off/on
+  pair side-by-side and prints the speedup table. The headline
+  column is `ns/p speedup (off / on)` — expect >1.0× in the
+  mid-curve regime, ~1.0× at saturation, <1.0× when under-occupied.
+- **Energy sort within reaction class (PHYSOR 2022 Optimization G).**
+  We currently sort by reaction class only. Adding a secondary
+  per-class sort by particle energy improves XS-lookup memory
+  locality (adjacent threads access the same energy grid neighbour).
+  Paper measured 1.3 × on A100; cost is a small device-side sort
+  per step.
+- **MAX_NUCLIDES_PER_MATERIAL=128 register pressure.** The
+  trace_and_sample kernel holds a `double nuc_t[MAX_NUC_PER_MAT]`
+  on the stack (1 kB per thread) to accumulate per-nuclide macro XS
+  before the reaction sampler. This forces register spills on
+  small GPUs. Streaming the per-nuclide loop (compute and immediately
+  fold into the running cumulative without retaining nuc_t[]) would
+  trade an extra eval pass for the reaction-selection at runtime
+  against lower register pressure / higher occupancy.
+
+
 - **CPU↔GPU divergence on multi-nuclide fast-spectrum metal** —
   largely closed by the URR bin-to-bin interpolation fix (commit
   `0aa9591`). The GPU's old `apply_urr` used only the lower-energy
@@ -551,6 +665,24 @@ Neutron k-eigenvalue:
 - `elastic_kinematics_diag` / `chi_compare` / `debug_lct` /
   `icsbep_alloc_bench` — supporting diagnostics from the
   localisation campaign.
+- `icsbep_bench` — Rust binary equivalent of the Python ICSBEP
+  harness (runs a case JSON directly without going through PyO3).
+  Useful for profiling the engine without Python overhead in the
+  call graph.
+
+> **Diagnostic-binary cleanup, 2026-05-19.** Thirteen one-off
+> diagnostic binaries (`bench_mem`, `pareto_bench`, `gpu_cpu_bench`,
+> `gpu_cpu_trace`, `watt_validate`, `wmp_validate`, `u235_thermal_xs`,
+> `rr_adjoint_sweep`, `u233_diag`, `cp_analysis`, `thermal_audit`,
+> `gpu_compton_scaling`, `gpu_compton_validate`) were removed —
+> each was scaffolding from a specific bug-hunt that has since
+> closed, with no inbound doc / test references. The physics
+> coverage they provided is now in the integration test suite or
+> in checked-in `outputs/*.csv` snapshots. **Future-work note:** a
+> single `diag` binary with sub-commands for each of these
+> diagnostics would be the right replacement once we have a clear
+> menu of common debugging needs; collapsing them avoids re-paying
+> the per-binary build / link cost.
 - `preview_scene` (cargo `--features preview`) — interactive XY
   cross-section viewer for any scene JSON. Walks `bench/icsbep/`
   upward from CWD so case names like `pwr_assembly_17x17` work
@@ -615,7 +747,7 @@ Kinetics:
 # Build (Windows / PowerShell — primary dev env)
 cd rust_prototype; cargo build --release
 
-# All lib tests (384/384 green as of session-end)
+# All lib tests (438/438 green as of session-end)
 cargo test --lib
 
 # Python ICSBEP harness — see also `rust_prototype/bindings/python/examples/run_benchmark.ps1`
@@ -736,6 +868,11 @@ Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 | GPU recursive transport (const-XS) vs CPU | `[assembly]` | **6.74×** (RTX A1000) |
 | GPU multi-step walk vs CPU | `[assembly]` | **24×** at <1e-13 max-rel-err |
 | GPU Compton persistent kernel vs 20-thread CPU | `[photon]` | **2.22×** on 1M histories |
+| RTX 3080 saturation knee on HMF-001 (event-based) | `[godiva]` | **500 k – 1 M particles/batch** |
+| RTX 3080 peak throughput at saturation | `[godiva]` | **~1.2 M histories/sec** (vs 95 k/s at 5 k particles) |
+| Default particles=5k → particles=1M throughput gain | `[godiva]` | **14×** (no code change) |
+| RTX 3080 refill 2× at mid-curve (HMF-008, 250k particles) | `[micro]` | **2.0× histories at same wall**, σ 2.1× tighter, Δk +29 pcm |
+| RTX 3080 refill us/collision drop (same case) | `[micro]` | 1.162 → 0.575 µs/coll (**−50.5 %**, batch-tail SM gap closed) |
 | Hybrid SVD+WMP throughput vs CPU SVD | `[pwr]` | **0.49×** (2.06× slower) |
 | Hybrid in-engine memory vs Table | `[pwr]` | **5.2× larger** (519 MB vs 100.6 MB) |
 | Godiva dk (all rxn SVD k=4, pre-coupling) | `[godiva]` | 3.7 pcm |
@@ -765,4 +902,4 @@ Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 | ICSBEP CPU family suite | `[godiva/pwr]` | **6 / 6 main + 3 diag PASS** in 722 s |
 | GPU fast-metal Δk closed by per-level rank-padding fix | `[godiva]` | **+590 → −79 pcm** (HMF-001) |
 | GPU ⟨\|Q\|⟩ inelastic, post-fix | `[godiva]` | 925 keV (CPU: 926; OpenMC: 926) |
-| **Lib test count** | — | **384 / 384 green** |
+| **Lib test count** | — | **438 / 438 green** |

@@ -368,6 +368,7 @@ mod cuda_main {
                 weight_window: None,
                 disable_delayed_neutrons: false,
                 urr_equivalence: None,
+                gpu_refill_pool_factor: None,
             };
 
             if args.seeds > 1 {
@@ -388,6 +389,7 @@ mod cuda_main {
                 fis_capacity: args.particles as usize * 4,
                 initial_source: make_initial_source_factory(args.rings, args.reflective_z),
                 buffers: std::cell::RefCell::new(None),
+        refill: std::cell::RefCell::new(None),
             };
 
             let t_seed = Instant::now();

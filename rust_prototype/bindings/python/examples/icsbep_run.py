@@ -25,6 +25,33 @@ from pathlib import Path
 from open_rust_mc import Runner, Settings, run_icsbep_case
 
 
+def _load_settings(case_json: Path, runner: Runner) -> Settings:
+    """Read benchmark.recommended_settings from the case JSON and pick
+    the right `particles` for the active runner. CPU and GPU saturate
+    at vastly different particle counts (CPU ~5k on an 8-thread laptop,
+    3080 at 500k-1M per outputs/saturation_*.csv) so the JSON ships
+    both — `particles` is the CPU-tuned value, `particles_gpu` is the
+    GPU-tuned override. Fields not in the JSON fall back to old
+    hardcoded defaults so cases without the block still run.
+    """
+    import json as _json
+    rec = {}
+    try:
+        with case_json.open("r", encoding="utf-8") as fp:
+            rec = _json.load(fp).get("benchmark", {}).get("recommended_settings", {}) or {}
+    except Exception:
+        rec = {}
+    particles_cpu = int(rec.get("particles", 5000))
+    particles_gpu = int(rec.get("particles_gpu", particles_cpu))
+    particles = particles_gpu if runner is Runner.GpuCuda else particles_cpu
+    return Settings(
+        batches=int(rec.get("batches", 80)),
+        inactive=int(rec.get("inactive", 20)),
+        particles=particles,
+        seed=1,
+    )
+
+
 def main(case_stem: str, runner_label: str) -> int:
     repo_root = Path(__file__).resolve().parents[4]
     case_json = repo_root / "bench" / "icsbep" / f"{case_stem}.json"
@@ -46,7 +73,8 @@ def main(case_stem: str, runner_label: str) -> int:
         print(f"unknown runner {runner_label!r}; use 'cpu' or 'gpu'", file=sys.stderr)
         return 2
 
-    settings = Settings(batches=80, inactive=20, particles=5000, seed=1)
+    settings = _load_settings(case_json, runner)
+    print(f"  settings      : batches={settings.batches} inactive={settings.inactive} particles={settings.particles} seed={settings.seed}")
     result = run_icsbep_case(
         case_json=case_json,
         data_dir=data_dir,

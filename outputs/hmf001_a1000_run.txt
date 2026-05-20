@@ -1,0 +1,18 @@
+┌─ open_rust_mc — hardware profile ─
+│ RAM 31.7 GB, 14p/20l cores, L1 288 KB / L2 1280 KB / L3 24576 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 20 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 23.8 GB (75%× detected RAM).
+│ GPU bundle cache budget: 3.0 GB (75% of 4.0 GB VRAM).
+└──
+  GPU transport kernels compiled (8 kernels)
+  GPU: WMP payload = 0.0 KB (0 / 5 nuclides covered)
+  case          : heu-met-fast-001_case-1
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.00000 +/- 0.00100
+  acceptance    : k = 1.00000 +/- 0.00100   sigma_combined = 262 pcm
+  k_calc        : 0.99940 +/- 0.00242
+  delta         : -60 pcm   0.23-sigma   bound = +/-523 pcm   [PASS]
+  timing        : load = 1.03 s, sim = 3.73 s, total = 4.77 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 789,632, fis = 114,888, leak = 171,836

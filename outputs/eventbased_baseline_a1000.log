@@ -1,0 +1,777 @@
+# eventbased baseline sweep - 2026-05-20 10:10:01
+    Finished `release` profile [optimized] target(s) in 0.63s
+
+
+============================================================
+particles=10000   wall=60,1s
+============================================================
+=== GPU PWR pin cell — Paper Benchmark ===
+
+Data dir:     data\endfb-vii.1-hdf5\neutron
+Geometry:     PWR pin cell
+SVD rank:     5
+Batches:      50 (10 inactive + 40 active)
+Particles:    10000/batch
+Seeds:        1
+Histories:    400000 per seed
+
+── Loading nuclear data (SVD, rank=5) ──
+  Loading U235.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\U235.h5 (rank=5)...
+    AWR = 233.025 (6 temps, 83114 energy pts)
+    nu-bar(E): 79 pts, 2.437 @ thermal, 2.533 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 20 energies
+    Elastic angular dist: 49 energies, CM=true
+    URR: 19 energies, 20 bands, 2250–25000 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 83114 energy pts × 7 channels = 4545.3 KB
+  Loading U238.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\U238.h5 (rank=5)...
+    AWR = 236.006 (6 temps, 185903 energy pts)
+    nu-bar(E): 10 pts, 2.492 @ thermal, 2.563 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 25 energies
+    Elastic angular dist: 38 energies, CM=true
+    URR: 18 energies, 20 bands, 20000–149029 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 185903 energy pts × 7 channels = 10166.6 KB
+  Loading O16.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loading H1.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\H1.h5 (rank=5)...
+    AWR = 0.999 (6 temps, 590 energy pts)
+    Elastic angular dist: 96 energies, CM=true
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=102 (capture) rank=5
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    Pointwise XS: 590 energy pts × 7 channels = 32.3 KB
+  Loading Zr90.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr90.h5 (rank=5)...
+    AWR = 89.132 (6 temps, 5263 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 66 energies, CM=true
+    URR: 13 energies, 20 bands, 53500–100000 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.1158 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 5263 energy pts × 7 channels = 287.8 KB
+  Loading Zr91.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr91.h5 (rank=5)...
+    AWR = 90.125 (6 temps, 12167 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 63 energies, CM=true
+    URR: 15 energies, 20 bands, 10000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0837 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 12167 energy pts × 7 channels = 665.4 KB
+  Loading Zr92.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr92.h5 (rank=5)...
+    AWR = 91.115 (6 temps, 14161 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 68 energies, CM=true
+    URR: 3 energies, 20 bands, 71000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0532 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 14161 energy pts × 7 channels = 774.4 KB
+  Loading Zr94.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr94.h5 (rank=5)...
+    AWR = 93.100 (6 temps, 13810 energy pts)
+    Discrete levels: 13/13 (continuum=true, angle_dists=12)
+    Elastic angular dist: 62 energies, CM=true
+    URR: 2 energies, 20 bands, 90000–100000 eV
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 13 levels, CDF=20.4 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0376 b
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    Pointwise XS: 13810 energy pts × 7 channels = 755.2 KB
+  Loading O16.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loaded in 43464 ms
+
+── Initializing GPU transport ──
+  GPU transport kernels compiled (8 kernels)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 3): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 3): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 3): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 3): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 3): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 3): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 3): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 3): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 3): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 9 nuclides covered)
+  GPU ready in 2614 ms
+
+── GPU SVD PWR pin cell (1 seed) ──
+  Batch    1: k=1.27800  coll=307657  fiss=5261  leak=0  surf=1592788
+  Batch    2: k=1.35620  coll=295634  fiss=5506  leak=2  surf=1690756
+  Batch    3: k=1.33420  coll=297374  fiss=5410  leak=0  surf=1698814
+  Batch    4: k=1.34420  coll=294959  fiss=5451  leak=1  surf=1688581
+  Batch    5: k=1.31510  coll=296671  fiss=5340  leak=0  surf=1692622
+  Batch    6: k=1.32120  coll=295166  fiss=5393  leak=0  surf=1697670
+  Batch    7: k=1.34740  coll=296957  fiss=5468  leak=1  surf=1694562
+  Batch    8: k=1.34780  coll=295423  fiss=5490  leak=1  surf=1694024
+  Batch    9: k=1.33790  coll=298049  fiss=5428  leak=1  surf=1702025
+  Batch   10: k=1.33000  coll=296462  fiss=5401  leak=1  surf=1697600
+  Batch   11: k=1.31610  coll=296062  fiss=5344  leak=1  surf=1692318 *
+  Batch   12: k=1.33860  coll=297044  fiss=5411  leak=0  surf=1702164 *
+  Batch   13: k=1.30630  coll=294559  fiss=5296  leak=3  surf=1691344 *
+  Batch   14: k=1.33250  coll=294626  fiss=5393  leak=1  surf=1683223 *
+  Batch   15: k=1.33500  coll=295661  fiss=5428  leak=0  surf=1698954 *
+  Batch   16: k=1.33380  coll=297192  fiss=5433  leak=2  surf=1697510 *
+  Batch   17: k=1.34580  coll=299075  fiss=5453  leak=0  surf=1703183 *
+  Batch   18: k=1.34220  coll=292735  fiss=5451  leak=0  surf=1683445 *
+  Batch   19: k=1.33780  coll=294388  fiss=5418  leak=1  surf=1687888 *
+  Batch   20: k=1.34680  coll=296997  fiss=5459  leak=0  surf=1688027 *
+  Batch   21: k=1.32770  coll=295329  fiss=5377  leak=1  surf=1690818 *
+  Batch   22: k=1.31680  coll=294295  fiss=5396  leak=0  surf=1688091 *
+  Batch   23: k=1.32370  coll=295586  fiss=5367  leak=1  surf=1685570 *
+  Batch   24: k=1.33730  coll=295630  fiss=5430  leak=0  surf=1684411 *
+  Batch   25: k=1.33810  coll=295983  fiss=5423  leak=2  surf=1693451 *
+  Batch   26: k=1.31570  coll=294099  fiss=5359  leak=1  surf=1682531 *
+  Batch   27: k=1.32600  coll=293886  fiss=5394  leak=1  surf=1690072 *
+  Batch   28: k=1.32590  coll=294177  fiss=5370  leak=2  surf=1692455 *
+  Batch   29: k=1.33280  coll=294113  fiss=5399  leak=2  surf=1686091 *
+  Batch   30: k=1.32990  coll=293518  fiss=5410  leak=3  surf=1693263 *
+  Batch   31: k=1.33000  coll=294813  fiss=5411  leak=1  surf=1699205 *
+  Batch   32: k=1.33090  coll=295381  fiss=5378  leak=1  surf=1697133 *
+  Batch   33: k=1.33270  coll=295343  fiss=5413  leak=3  surf=1692076 *
+  Batch   34: k=1.33420  coll=294334  fiss=5417  leak=1  surf=1687466 *
+  Batch   35: k=1.34760  coll=298111  fiss=5452  leak=2  surf=1697756 *
+  Batch   36: k=1.33370  coll=295151  fiss=5394  leak=2  surf=1699323 *
+  Batch   37: k=1.31010  coll=295681  fiss=5325  leak=0  surf=1694896 *
+  Batch   38: k=1.34640  coll=296920  fiss=5457  leak=1  surf=1702084 *
+  Batch   39: k=1.30890  coll=294457  fiss=5333  leak=1  surf=1685535 *
+  Batch   40: k=1.32570  coll=294809  fiss=5375  leak=0  surf=1684170 *
+  Batch   41: k=1.33860  coll=294690  fiss=5414  leak=0  surf=1708401 *
+  Batch   42: k=1.32330  coll=293743  fiss=5364  leak=1  surf=1685295 *
+  Batch   43: k=1.31170  coll=292821  fiss=5336  leak=0  surf=1680308 *
+  Batch   44: k=1.32350  coll=294645  fiss=5360  leak=0  surf=1677591 *
+  Batch   45: k=1.31760  coll=294523  fiss=5346  leak=0  surf=1700638 *
+  Batch   46: k=1.31540  coll=295061  fiss=5349  leak=1  surf=1689531 *
+  Batch   47: k=1.33300  coll=293142  fiss=5403  leak=3  surf=1683123 *
+  Batch   48: k=1.32270  coll=293835  fiss=5353  leak=1  surf=1681221 *
+  Batch   49: k=1.34660  coll=296776  fiss=5454  leak=3  surf=1700930 *
+  Batch   50: k=1.34550  coll=294227  fiss=5462  leak=0  surf=1684657 *
+
+============================================================
+BENCHMARK RESULTS - PWR pin cell
+============================================================
+  GPU SVD PWR pin cell:
+    k_inf            = 1.32967
+    ns/particle      = 34703.27
+    Total sim time   = 13881 ms (1 run)
+
+  Load time = 43464 ms (CPU) + 2614 ms (GPU)
+  Physics:  SVD rank=5, S(a,b)=H2O, nu-bar=table, fission=CDF
+
+
+============================================================
+particles=25000   wall=43,6s
+============================================================
+=== GPU PWR pin cell — Paper Benchmark ===
+
+Data dir:     data\endfb-vii.1-hdf5\neutron
+Geometry:     PWR pin cell
+SVD rank:     5
+Batches:      50 (10 inactive + 40 active)
+Particles:    25000/batch
+Seeds:        1
+Histories:    1000000 per seed
+
+── Loading nuclear data (SVD, rank=5) ──
+  Loading U235.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\U235.h5 (rank=5)...
+    AWR = 233.025 (6 temps, 83114 energy pts)
+    nu-bar(E): 79 pts, 2.437 @ thermal, 2.533 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 20 energies
+    Elastic angular dist: 49 energies, CM=true
+    URR: 19 energies, 20 bands, 2250–25000 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 83114 energy pts × 7 channels = 4545.3 KB
+  Loading U238.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\U238.h5 (rank=5)...
+    AWR = 236.006 (6 temps, 185903 energy pts)
+    nu-bar(E): 10 pts, 2.492 @ thermal, 2.563 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 25 energies
+    Elastic angular dist: 38 energies, CM=true
+    URR: 18 energies, 20 bands, 20000–149029 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 185903 energy pts × 7 channels = 10166.6 KB
+  Loading O16.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loading H1.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\H1.h5 (rank=5)...
+    AWR = 0.999 (6 temps, 590 energy pts)
+    Elastic angular dist: 96 energies, CM=true
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=102 (capture) rank=5
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    Pointwise XS: 590 energy pts × 7 channels = 32.3 KB
+  Loading Zr90.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr90.h5 (rank=5)...
+    AWR = 89.132 (6 temps, 5263 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 66 energies, CM=true
+    URR: 13 energies, 20 bands, 53500–100000 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.1158 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 5263 energy pts × 7 channels = 287.8 KB
+  Loading Zr91.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr91.h5 (rank=5)...
+    AWR = 90.125 (6 temps, 12167 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 63 energies, CM=true
+    URR: 15 energies, 20 bands, 10000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0837 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 12167 energy pts × 7 channels = 665.4 KB
+  Loading Zr92.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr92.h5 (rank=5)...
+    AWR = 91.115 (6 temps, 14161 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 68 energies, CM=true
+    URR: 3 energies, 20 bands, 71000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0532 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 14161 energy pts × 7 channels = 774.4 KB
+  Loading Zr94.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr94.h5 (rank=5)...
+    AWR = 93.100 (6 temps, 13810 energy pts)
+    Discrete levels: 13/13 (continuum=true, angle_dists=12)
+    Elastic angular dist: 62 energies, CM=true
+    URR: 2 energies, 20 bands, 90000–100000 eV
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 13 levels, CDF=20.4 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0376 b
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    Pointwise XS: 13810 energy pts × 7 channels = 755.2 KB
+  Loading O16.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loaded in 16360 ms
+
+── Initializing GPU transport ──
+  GPU transport kernels compiled (8 kernels)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 3): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 3): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 3): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 3): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 3): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 3): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 3): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 3): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 3): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 9 nuclides covered)
+  GPU ready in 2818 ms
+
+── GPU SVD PWR pin cell (1 seed) ──
+  Batch    1: k=1.28056  coll=769315  fiss=13104  leak=0  surf=3987344
+  Batch    2: k=1.32796  coll=739414  fiss=13493  leak=2  surf=4224539
+  Batch    3: k=1.32520  coll=737597  fiss=13440  leak=2  surf=4233519
+  Batch    4: k=1.34088  coll=741504  fiss=13623  leak=0  surf=4238021
+  Batch    5: k=1.33128  coll=739543  fiss=13505  leak=3  surf=4245851
+  Batch    6: k=1.32384  coll=734482  fiss=13457  leak=1  surf=4226043
+  Batch    7: k=1.32852  coll=735646  fiss=13519  leak=2  surf=4224822
+  Batch    8: k=1.33760  coll=734656  fiss=13524  leak=0  surf=4245842
+  Batch    9: k=1.32344  coll=740557  fiss=13433  leak=1  surf=4245312
+  Batch   10: k=1.32860  coll=745719  fiss=13503  leak=2  surf=4265376
+  Batch   11: k=1.31900  coll=736388  fiss=13340  leak=0  surf=4240996 *
+  Batch   12: k=1.34276  coll=740764  fiss=13631  leak=1  surf=4227496 *
+  Batch   13: k=1.32016  coll=743375  fiss=13425  leak=1  surf=4262171 *
+  Batch   14: k=1.32128  coll=738319  fiss=13422  leak=2  surf=4230881 *
+  Batch   15: k=1.33492  coll=740733  fiss=13547  leak=3  surf=4231420 *
+  Batch   16: k=1.33564  coll=740668  fiss=13539  leak=1  surf=4244509 *
+  Batch   17: k=1.33048  coll=740096  fiss=13526  leak=4  surf=4257832 *
+  Batch   18: k=1.32072  coll=738694  fiss=13399  leak=2  surf=4236722 *
+  Batch   19: k=1.31628  coll=740746  fiss=13381  leak=1  surf=4254228 *
+  Batch   20: k=1.32796  coll=742842  fiss=13474  leak=5  surf=4257625 *
+  Batch   21: k=1.32080  coll=738411  fiss=13424  leak=4  surf=4218691 *
+  Batch   22: k=1.32792  coll=735827  fiss=13512  leak=4  surf=4217009 *
+  Batch   23: k=1.32584  coll=737463  fiss=13497  leak=1  surf=4227290 *
+  Batch   24: k=1.32996  coll=738585  fiss=13491  leak=0  surf=4241159 *
+  Batch   25: k=1.31804  coll=738221  fiss=13372  leak=0  surf=4231648 *
+  Batch   26: k=1.33660  coll=736865  fiss=13545  leak=3  surf=4252400 *
+  Batch   27: k=1.33284  coll=737184  fiss=13507  leak=3  surf=4234258 *
+  Batch   28: k=1.34080  coll=737124  fiss=13541  leak=2  surf=4236033 *
+  Batch   29: k=1.33012  coll=739693  fiss=13500  leak=2  surf=4225319 *
+  Batch   30: k=1.32888  coll=735668  fiss=13508  leak=2  surf=4236571 *
+  Batch   31: k=1.32748  coll=733677  fiss=13502  leak=1  surf=4212094 *
+  Batch   32: k=1.33480  coll=738639  fiss=13552  leak=0  surf=4233647 *
+  Batch   33: k=1.32684  coll=737754  fiss=13455  leak=4  surf=4227188 *
+  Batch   34: k=1.32736  coll=735000  fiss=13474  leak=3  surf=4229703 *
+  Batch   35: k=1.32236  coll=737286  fiss=13416  leak=0  surf=4242074 *
+  Batch   36: k=1.32092  coll=736690  fiss=13366  leak=3  surf=4225629 *
+  Batch   37: k=1.33004  coll=741405  fiss=13488  leak=1  surf=4241473 *
+  Batch   38: k=1.32128  coll=742735  fiss=13418  leak=1  surf=4248212 *
+  Batch   39: k=1.33004  coll=739101  fiss=13474  leak=3  surf=4243423 *
+  Batch   40: k=1.32920  coll=738122  fiss=13501  leak=2  surf=4219697 *
+  Batch   41: k=1.33796  coll=742366  fiss=13582  leak=2  surf=4261561 *
+  Batch   42: k=1.31788  coll=738571  fiss=13379  leak=1  surf=4235343 *
+  Batch   43: k=1.32808  coll=738675  fiss=13454  leak=2  surf=4228325 *
+  Batch   44: k=1.32440  coll=737914  fiss=13426  leak=2  surf=4221679 *
+  Batch   45: k=1.32084  coll=739738  fiss=13398  leak=0  surf=4250279 *
+  Batch   46: k=1.31876  coll=740494  fiss=13365  leak=5  surf=4249472 *
+  Batch   47: k=1.33708  coll=737771  fiss=13560  leak=1  surf=4237362 *
+  Batch   48: k=1.33032  coll=737843  fiss=13524  leak=2  surf=4243965 *
+  Batch   49: k=1.32040  coll=741669  fiss=13415  leak=2  surf=4240016 *
+  Batch   50: k=1.32392  coll=735226  fiss=13417  leak=2  surf=4216817 *
+
+============================================================
+BENCHMARK RESULTS - PWR pin cell
+============================================================
+  GPU SVD PWR pin cell:
+    k_inf            = 1.32727
+    ns/particle      = 24225.79
+    Total sim time   = 24226 ms (1 run)
+
+  Load time = 16360 ms (CPU) + 2818 ms (GPU)
+  Physics:  SVD rank=5, S(a,b)=H2O, nu-bar=table, fission=CDF
+
+
+============================================================
+particles=50000   wall=80,1s
+============================================================
+=== GPU PWR pin cell — Paper Benchmark ===
+
+Data dir:     data\endfb-vii.1-hdf5\neutron
+Geometry:     PWR pin cell
+SVD rank:     5
+Batches:      50 (10 inactive + 40 active)
+Particles:    50000/batch
+Seeds:        1
+Histories:    2000000 per seed
+
+── Loading nuclear data (SVD, rank=5) ──
+  Loading U235.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\U235.h5 (rank=5)...
+    AWR = 233.025 (6 temps, 83114 energy pts)
+    nu-bar(E): 79 pts, 2.437 @ thermal, 2.533 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 20 energies
+    Elastic angular dist: 49 energies, CM=true
+    URR: 19 energies, 20 bands, 2250–25000 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 83114 energy pts × 7 channels = 4545.3 KB
+  Loading U238.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\U238.h5 (rank=5)...
+    AWR = 236.006 (6 temps, 185903 energy pts)
+    nu-bar(E): 10 pts, 2.492 @ thermal, 2.563 @ 1 MeV
+    Discrete levels: 41/41 (continuum=true, angle_dists=40)
+    Fission spectrum: 25 energies
+    Elastic angular dist: 38 energies, CM=true
+    URR: 18 energies, 20 bands, 20000–149029 eV
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 41 levels, CDF=64.2 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=18 (fission)  rank=5
+    MT=102 (capture) rank=5
+    MT=37 (n,4n)     rank=5
+    Total XS: MT=2 + MT=3 (exact nonelastic from HDF5)
+    Pointwise XS: 185903 energy pts × 7 channels = 10166.6 KB
+  Loading O16.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loading H1.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\H1.h5 (rank=5)...
+    AWR = 0.999 (6 temps, 590 energy pts)
+    Elastic angular dist: 96 energies, CM=true
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=102 (capture) rank=5
+    Total XS: summed 2 leaf reactions (no MT=3 available)
+    Pointwise XS: 590 energy pts × 7 channels = 32.3 KB
+  Loading Zr90.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr90.h5 (rank=5)...
+    AWR = 89.132 (6 temps, 5263 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 66 energies, CM=true
+    URR: 13 energies, 20 bands, 53500–100000 eV
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.1158 b
+    Total XS: summed 21 leaf reactions (no MT=3 available)
+    Pointwise XS: 5263 energy pts × 7 channels = 287.8 KB
+  Loading Zr91.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr91.h5 (rank=5)...
+    AWR = 90.125 (6 temps, 12167 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 63 energies, CM=true
+    URR: 15 energies, 20 bands, 10000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0837 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 12167 energy pts × 7 channels = 665.4 KB
+  Loading Zr92.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr92.h5 (rank=5)...
+    AWR = 91.115 (6 temps, 14161 energy pts)
+    Discrete levels: 10/10 (continuum=true, angle_dists=9)
+    Elastic angular dist: 68 energies, CM=true
+    URR: 3 energies, 20 bands, 71000–100000 eV
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 10 levels, CDF=15.7 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0532 b
+    Total XS: summed 24 leaf reactions (no MT=3 available)
+    Pointwise XS: 14161 energy pts × 7 channels = 774.4 KB
+  Loading Zr94.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\Zr94.h5 (rank=5)...
+    AWR = 93.100 (6 temps, 13810 energy pts)
+    Discrete levels: 13/13 (continuum=true, angle_dists=12)
+    Elastic angular dist: 62 energies, CM=true
+    URR: 2 energies, 20 bands, 90000–100000 eV
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) synthetic rank=5 (sum + CDF over 13 levels, CDF=20.4 KB)
+    MT=16 (n,2n)     rank=5
+    MT=17 (n,3n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=24 (n,2nα)   rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.0376 b
+    Total XS: summed 27 leaf reactions (no MT=3 available)
+    Pointwise XS: 13810 energy pts × 7 channels = 755.2 KB
+  Loading O16.h5...
+  Loading data\endfb-vii.1-hdf5\neutron\O16.h5 (rank=5)...
+    AWR = 15.858 (6 temps, 3063 energy pts)
+    Discrete levels: 8/8 (continuum=true, angle_dists=7)
+    Elastic angular dist: 1175 energies, CM=true
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    MT=2  (elastic)  rank=5
+    MT=4  (inelastic) rank=5
+    MT=16 (n,2n)     rank=5
+    MT=102 (capture) rank=5
+    MT=22 (n,nα)    rank=5
+    MT=28 (n,np)    rank=5
+    Missing channels: max=0.5240 b
+    Total XS: summed 25 leaf reactions (no MT=3 available)
+    Pointwise XS: 3063 energy pts × 7 channels = 167.5 KB
+  Loaded in 36937 ms
+
+── Initializing GPU transport ──
+  GPU transport kernels compiled (8 kernels)
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU S(α,β) slot 0 (nuc 3): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 3): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 3): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 3): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 3): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 3): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 3): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 3): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 3): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 9 nuclides covered)
+  GPU ready in 2735 ms
+
+── GPU SVD PWR pin cell (1 seed) ──
+  Batch    1: k=1.27798  coll=1532191  fiss=26186  leak=0  surf=7957157
+  Batch    2: k=1.32608  coll=1474799  fiss=26931  leak=5  surf=8426636
+  Batch    3: k=1.33246  coll=1482392  fiss=27036  leak=5  surf=8484875
+  Batch    4: k=1.31774  coll=1474009  fiss=26739  leak=6  surf=8464069
+  Batch    5: k=1.33044  coll=1478415  fiss=26966  leak=5  surf=8472470
+  Batch    6: k=1.31844  coll=1478200  fiss=26810  leak=3  surf=8490084
+  Batch    7: k=1.33036  coll=1470896  fiss=26988  leak=5  surf=8425725
+  Batch    8: k=1.32640  coll=1478556  fiss=26909  leak=2  surf=8480805
+  Batch    9: k=1.33012  coll=1486706  fiss=26961  leak=5  surf=8512826
+  Batch   10: k=1.33354  coll=1480541  fiss=27069  leak=2  surf=8488055
+  Batch   11: k=1.33226  coll=1476404  fiss=27056  leak=6  surf=8458872 *
+  Batch   12: k=1.32442  coll=1476550  fiss=26926  leak=3  surf=8484749 *
+  Batch   13: k=1.32018  coll=1474951  fiss=26790  leak=6  surf=8435639 *
+  Batch   14: k=1.32570  coll=1474248  fiss=26927  leak=2  surf=8465934 *
+  Batch   15: k=1.33118  coll=1476546  fiss=26991  leak=9  surf=8460801 *
+  Batch   16: k=1.32934  coll=1485322  fiss=26958  leak=1  surf=8519730 *
+  Batch   17: k=1.33192  coll=1482107  fiss=26988  leak=3  surf=8499786 *
+  Batch   18: k=1.33320  coll=1489791  fiss=27076  leak=3  surf=8500039 *
+  Batch   19: k=1.31994  coll=1476295  fiss=26841  leak=1  surf=8466277 *
+  Batch   20: k=1.32558  coll=1482908  fiss=26950  leak=7  surf=8467400 *
+  Batch   21: k=1.33112  coll=1477760  fiss=26976  leak=5  surf=8495324 *
+  Batch   22: k=1.32630  coll=1474294  fiss=26939  leak=9  surf=8454948 *
+  Batch   23: k=1.33388  coll=1477373  fiss=27070  leak=1  surf=8466884 *
+  Batch   24: k=1.33084  coll=1481947  fiss=27044  leak=4  surf=8472187 *
+  Batch   25: k=1.33042  coll=1480168  fiss=26984  leak=3  surf=8490076 *
+  Batch   26: k=1.32894  coll=1477237  fiss=26930  leak=5  surf=8467639 *
+  Batch   27: k=1.32484  coll=1477327  fiss=26865  leak=6  surf=8479096 *
+  Batch   28: k=1.33110  coll=1473994  fiss=27047  leak=3  surf=8429603 *
+  Batch   29: k=1.33722  coll=1479258  fiss=27188  leak=3  surf=8501962 *
+  Batch   30: k=1.33554  coll=1477877  fiss=27097  leak=10  surf=8472411 *
+  Batch   31: k=1.32578  coll=1477381  fiss=26965  leak=8  surf=8456486 *
+  Batch   32: k=1.32294  coll=1472500  fiss=26896  leak=1  surf=8420416 *
+  Batch   33: k=1.32266  coll=1477157  fiss=26870  leak=4  surf=8459483 *
+  Batch   34: k=1.32888  coll=1482052  fiss=26994  leak=8  surf=8467132 *
+  Batch   35: k=1.33072  coll=1480912  fiss=26972  leak=3  surf=8485430 *
+  Batch   36: k=1.32766  coll=1479669  fiss=26974  leak=3  surf=8485900 *
+  Batch   37: k=1.33222  coll=1475312  fiss=27015  leak=0  surf=8466257 *
+  Batch   38: k=1.31962  coll=1479853  fiss=26757  leak=7  surf=8473566 *
+  Batch   39: k=1.32676  coll=1477645  fiss=26949  leak=6  surf=8442428 *
+  Batch   40: k=1.33098  coll=1486427  fiss=26968  leak=5  surf=8509129 *
+  Batch   41: k=1.32444  coll=1473027  fiss=26920  leak=7  surf=8436023 *
+  Batch   42: k=1.33664  coll=1475287  fiss=27107  leak=6  surf=8446461 *
+  Batch   43: k=1.32576  coll=1478694  fiss=26939  leak=2  surf=8480361 *
+  Batch   44: k=1.33014  coll=1479874  fiss=26978  leak=3  surf=8463173 *
+  Batch   45: k=1.33578  coll=1477518  fiss=27080  leak=3  surf=8471895 *
+  Batch   46: k=1.33184  coll=1471221  fiss=27066  leak=3  surf=8429373 *
+  Batch   47: k=1.32296  coll=1478362  fiss=26881  leak=4  surf=8467218 *
+  Batch   48: k=1.31980  coll=1478714  fiss=26786  leak=4  surf=8478768 *
+  Batch   49: k=1.32254  coll=1481180  fiss=26887  leak=8  surf=8469754 *
+  Batch   50: k=1.32156  coll=1470928  fiss=26875  leak=1  surf=8460476 *
+
+============================================================
+BENCHMARK RESULTS - PWR pin cell
+============================================================
+  GPU SVD PWR pin cell:
+    k_inf            = 1.32809
+    ns/particle      = 20078.50
+    Total sim time   = 40157 ms (1 run)
+
+  Load time = 36937 ms (CPU) + 2735 ms (GPU)
+  Physics:  SVD rank=5, S(a,b)=H2O, nu-bar=table, fission=CDF
+

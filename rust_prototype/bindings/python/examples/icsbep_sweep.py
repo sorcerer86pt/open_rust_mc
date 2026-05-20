@@ -225,10 +225,32 @@ def write_row(writer: csv.DictWriter, fp, row: Row) -> None:
     fp.flush()
 
 
-def case_settings(case_path: Path, args: argparse.Namespace) -> tuple[Settings, int, int, int, int]:
+def case_settings(
+    case_path: Path,
+    args: argparse.Namespace,
+    runner: Runner | None = None,
+) -> tuple[Settings, int, int, int, int]:
     """Per-case settings: JSON `benchmark.recommended_settings` overrides
     CLI args. Returns (Settings, n_seeds, batches, inactive, particles)
-    so the row can record which numbers were actually used."""
+    so the row can record which numbers were actually used.
+
+    Particle count uses a backend-aware override. CPU and GPU saturate
+    at vastly different particle counts (CPU ~5k on an 8-thread laptop,
+    3080 at 500k-1M per the saturation sweep) so a single number is
+    always wrong for one of them. Schema (backward compatible):
+
+        "recommended_settings": {
+            "batches": 150,
+            "inactive": 30,
+            "particles": 20000,        # default / CPU sweet spot
+            "particles_gpu": 500000,   # optional GPU override
+            "seeds": 5
+        }
+
+    When `particles_gpu` is absent, the CPU value is used for both
+    backends — same as today's behaviour. When present and the runner
+    is GPU, it overrides the CPU `particles`.
+    """
     rec: dict = {}
     try:
         with case_path.open("r", encoding="utf-8") as fp:
@@ -238,7 +260,12 @@ def case_settings(case_path: Path, args: argparse.Namespace) -> tuple[Settings, 
         rec = {}
     batches = int(rec.get("batches", args.batches))
     inactive = int(rec.get("inactive", args.inactive))
-    particles = int(rec.get("particles", args.particles))
+    particles_cpu = int(rec.get("particles", args.particles))
+    particles_gpu = int(rec.get("particles_gpu", particles_cpu))
+    if runner is not None and runner is Runner.GpuCuda:
+        particles = particles_gpu
+    else:
+        particles = particles_cpu
     n_seeds = int(rec.get("seeds", args.seeds))
     settings = Settings(
         batches=batches,
@@ -465,7 +492,7 @@ def main() -> int:
                 aborted = True
                 break
 
-            base_settings, n_seeds, batches, inactive, particles = case_settings(case_path, args)
+            base_settings, n_seeds, batches, inactive, particles = case_settings(case_path, args, runner)
             row, _ = run_case_multi_seed(
                 case_path=case_path,
                 data_dir=data_dir,

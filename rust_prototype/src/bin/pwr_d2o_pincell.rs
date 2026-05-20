@@ -366,6 +366,7 @@ fn main() {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
         let runner = CpuRunner {
             geometry: &geometry,

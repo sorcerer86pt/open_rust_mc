@@ -328,6 +328,7 @@ fn main() {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
 
         if args.seeds > 1 {

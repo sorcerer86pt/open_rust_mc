@@ -1,0 +1,2 @@
+==ERROR== Could not open report file 'E:\git\open_rust_mc\outputs\heu-met-fast-069_case-1.ncu-rep'.
+==ERROR== The file does not exist or is not a regular file.

@@ -339,6 +339,27 @@ pub struct GpuRecursiveContext {
     pub k_multi_step_walk: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
     pub k_transport_recursive: CudaFunction,
+    // Event-based pipeline kernels (Tramm et al., PHYSOR 2022 —
+    // "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
+    // Particle Transport Code"; original formulation: Brown & Martin,
+    // Prog. Nucl. Energy 14(3), 1984). Replace the single
+    // persistent history kernel with a 7-stage pipeline that sorts
+    // particles by reaction type between geom steps so each reaction
+    // kernel sees a single code path (no warp divergence).
+    pub k_eb_init_stacks: CudaFunction,
+    /// PHYSOR 2022 Optimization F (continuous particle refill, opt-in).
+    /// Refills dead slots from a pending pool between event steps to
+    /// keep the kernel grid full through the batch tail. Always
+    /// loaded; only launched when the caller passes a `RefillBuffers`
+    /// to `transport_recursive_with_buffers`.
+    pub k_eb_refill_dead: CudaFunction,
+    pub k_eb_trace_and_sample: CudaFunction,
+    pub k_eb_scan_offsets: CudaFunction,
+    pub k_eb_partition: CudaFunction,
+    pub k_eb_elastic: CudaFunction,
+    pub k_eb_inelastic: CudaFunction,
+    pub k_eb_fission: CudaFunction,
+    pub k_eb_multi: CudaFunction,
     // Geometry tables on device.
     surf_type: CudaSlice<i32>,
     surf_params: CudaSlice<f64>,
@@ -384,6 +405,15 @@ const RECURSIVE_KERNELS: &str = include_str!("../gpu/cuda/geom_recursive_kernels
 const CONST_XS_KERNEL: &str = include_str!("../gpu/cuda/transport_recursive_const.cu");
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 const TRANSPORT_RECURSIVE: &str = include_str!("../gpu/cuda/transport_recursive.cu");
+const TRANSPORT_EVENT_BASED: &str = include_str!("../gpu/cuda/transport_event_based.cu");
+
+/// Event-based reaction class count — mirrors `EV_TYPE_COUNT` in
+/// `transport_event_based.cu` (elastic, inelastic, fission, n2n,
+/// n3n). Used by `TransportBuffers` to size the partition arrays.
+pub const EV_TYPE_COUNT: usize = 5;
+/// Energy-bin count in the 3-D partition key. Mirrors `EB_N_EBINS`
+/// in `transport_event_based.cu`.
+pub const EB_N_EBINS: usize = 16;
 
 fn assemble_kernel_source() -> String {
     // NVRTC has no concept of source-include paths — concatenate the
@@ -404,11 +434,12 @@ fn assemble_kernel_source() -> String {
     // come first, then the recursive geometry primitives, then the
     // kernels that consume both.
     format!(
-        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}",
+        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}\n{}",
         strip(TRANSPORT_KERNELS),
         strip(RECURSIVE_KERNELS),
         strip(CONST_XS_KERNEL),
         strip(TRANSPORT_RECURSIVE),
+        strip(TRANSPORT_EVENT_BASED),
     )
 }
 
@@ -486,6 +517,34 @@ impl GpuRecursiveContext {
         let k_transport_recursive = module
             .load_function("transport_recursive_persistent")
             .map_err(|e| format!("kernel load (transport_recursive): {e}"))?;
+        // Event-based pipeline.
+        let k_eb_init_stacks = module
+            .load_function("gr_init_stacks")
+            .map_err(|e| format!("kernel load (gr_init_stacks): {e}"))?;
+        let k_eb_trace_and_sample = module
+            .load_function("gr_trace_and_sample")
+            .map_err(|e| format!("kernel load (gr_trace_and_sample): {e}"))?;
+        let k_eb_scan_offsets = module
+            .load_function("gr_scan_offsets")
+            .map_err(|e| format!("kernel load (gr_scan_offsets): {e}"))?;
+        let k_eb_partition = module
+            .load_function("gr_partition")
+            .map_err(|e| format!("kernel load (gr_partition): {e}"))?;
+        let k_eb_elastic = module
+            .load_function("gr_elastic_event")
+            .map_err(|e| format!("kernel load (gr_elastic_event): {e}"))?;
+        let k_eb_inelastic = module
+            .load_function("gr_inelastic_event")
+            .map_err(|e| format!("kernel load (gr_inelastic_event): {e}"))?;
+        let k_eb_fission = module
+            .load_function("gr_fission_event")
+            .map_err(|e| format!("kernel load (gr_fission_event): {e}"))?;
+        let k_eb_multi = module
+            .load_function("gr_multi_event")
+            .map_err(|e| format!("kernel load (gr_multi_event): {e}"))?;
+        let k_eb_refill_dead = module
+            .load_function("gr_refill_dead")
+            .map_err(|e| format!("kernel load (gr_refill_dead): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
@@ -644,6 +703,15 @@ impl GpuRecursiveContext {
             k_multi_step_walk,
             k_const_xs_transport,
             k_transport_recursive,
+            k_eb_init_stacks,
+            k_eb_trace_and_sample,
+            k_eb_scan_offsets,
+            k_eb_partition,
+            k_eb_elastic,
+            k_eb_inelastic,
+            k_eb_fission,
+            k_eb_multi,
+            k_eb_refill_dead,
             surf_type,
             surf_params,
             surf_bc,
@@ -1483,6 +1551,58 @@ pub struct TransportBuffers {
     pub d_params: CudaSlice<u64>,
     /// `vec![1_i32; n]` lifted out of the per-batch path.
     alive_host_ones: Vec<i32>,
+
+    // ── Event-based pipeline buffers ─────────────────────────────────
+    /// SoA coord stack ─ [n × GR_MAX_DEPTH=4] per field. Replaces the
+    /// per-thread `GrCoord stack[GR_MAX_DEPTH]` register/local-memory
+    /// allocation in the persistent history kernel so the geom kernel
+    /// can hand off state between launches.
+    pub d_stack_universe: CudaSlice<i32>,
+    pub d_stack_cell_idx: CudaSlice<i32>,
+    pub d_stack_has_lattice: CudaSlice<i32>,
+    pub d_stack_lattice_id: CudaSlice<i32>,
+    pub d_stack_lat_ix: CudaSlice<i32>,
+    pub d_stack_lat_iy: CudaSlice<i32>,
+    pub d_stack_lat_iz: CudaSlice<i32>,
+    pub d_stack_offx: CudaSlice<f64>,
+    pub d_stack_offy: CudaSlice<f64>,
+    pub d_stack_offz: CudaSlice<f64>,
+    pub d_depth: CudaSlice<i32>,
+    /// Per-event metadata emitted by `gr_trace_and_sample`, consumed
+    /// by the four reaction kernels.
+    pub d_event_type: CudaSlice<i32>,
+    pub d_event_hit_nuc: CudaSlice<i32>,
+    pub d_event_mat: CudaSlice<i32>,
+    pub d_event_kT: CudaSlice<f64>,
+    pub d_event_hit_Ni: CudaSlice<f64>,
+    pub d_event_urr_xi: CudaSlice<f64>,
+    /// Packed sub-slot (`hit_nuc_local * EB_N_EBINS + ebin`) emitted
+    /// per event by `gr_trace_and_sample`, read by `gr_partition` to
+    /// compute the 3-D (class, nuc_local, energy_bin) write slot.
+    /// Extends PHYSOR 2022 Optimization G — particles in the same
+    /// (class, nuc_local, ebin) end up adjacent in d_sorted_idx so
+    /// reaction kernels see nuclide-AND-energy-clustered workloads
+    /// (warps hit the same SVD basis + same energy region).
+    pub d_event_ebin: CudaSlice<i32>,
+    /// Partitioning. 3-D layout:
+    /// `d_type_count[(class * MAX_NUC_PER_MAT + nuc_local) * 16 + bin]`
+    /// over EB_N_PART_BINS = 5 × 128 × 16 = 10 240 slots (40 KB).
+    /// `d_type_offsets[10241]` is the exclusive prefix sum. Per-class
+    /// totals (for reaction-kernel launch sizing) and per-class
+    /// starting offsets live in `d_type_class_total[5]` /
+    /// `d_type_class_offsets[5]`. Scatter cursor mirrors the count
+    /// layout.
+    pub d_type_count: CudaSlice<i32>,
+    pub d_type_offsets: CudaSlice<i32>,
+    pub d_type_class_total: CudaSlice<i32>,
+    pub d_type_class_offsets: CudaSlice<i32>,
+    pub d_type_scatter: CudaSlice<i32>,
+    pub d_sorted_idx: CudaSlice<i32>,
+    /// Single-int device-side total of all event-type counts. Written
+    /// by `gr_scan_offsets`, used by the host every K=EB_SYNC_EVERY
+    /// outer steps to detect "all particles dead" without forcing a
+    /// PCIe round-trip every step.
+    pub d_type_total: CudaSlice<i32>,
 }
 
 impl TransportBuffers {
@@ -1543,6 +1663,44 @@ impl TransportBuffers {
             d_q_inel: mk_d(1)?,
             d_params: mk_u(params_len)?,
             alive_host_ones: vec![1_i32; n],
+            // Event-based pipeline. GR_MAX_DEPTH = 4 (matches the CUDA
+            // header). Memory ~208 bytes per particle for the stack
+            // arrays — 10.4 MB at n=50k.
+            d_stack_universe: mk_i(n * 4)?,
+            d_stack_cell_idx: mk_i(n * 4)?,
+            d_stack_has_lattice: mk_i(n * 4)?,
+            d_stack_lattice_id: mk_i(n * 4)?,
+            d_stack_lat_ix: mk_i(n * 4)?,
+            d_stack_lat_iy: mk_i(n * 4)?,
+            d_stack_lat_iz: mk_i(n * 4)?,
+            d_stack_offx: mk_d(n * 4)?,
+            d_stack_offy: mk_d(n * 4)?,
+            d_stack_offz: mk_d(n * 4)?,
+            d_depth: mk_i(n)?,
+            d_event_type: mk_i(n)?,
+            d_event_hit_nuc: mk_i(n)?,
+            d_event_mat: mk_i(n)?,
+            d_event_kT: mk_d(n)?,
+            d_event_hit_Ni: mk_d(n)?,
+            d_event_urr_xi: mk_d(n)?,
+            // 3-D partition: 5 classes × MAX_NUCLIDES_PER_MATERIAL
+            // × 16 energy bins = 10 240 slots (40 KB). Sub-slot
+            // (nuc_local * 16 + ebin) is packed into d_event_ebin so
+            // the kernel signatures don't change.
+            d_event_ebin: mk_i(n)?,
+            d_type_count: mk_i(
+                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
+            )?,
+            d_type_offsets: mk_i(
+                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS + 1,
+            )?,
+            d_type_class_total: mk_i(EV_TYPE_COUNT)?,
+            d_type_class_offsets: mk_i(EV_TYPE_COUNT)?,
+            d_type_scatter: mk_i(
+                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
+            )?,
+            d_sorted_idx: mk_i(n)?,
+            d_type_total: mk_i(1)?,
         })
     }
 
@@ -1553,6 +1711,90 @@ impl TransportBuffers {
     #[inline]
     pub fn fis_capacity(&self) -> usize {
         self.fis_cap
+    }
+}
+
+/// Optional refill pool for PHYSOR 2022 Optimization F (continuous
+/// particle refill). When passed to `transport_recursive_with_buffers`,
+/// the outer event loop will keep dead slots topped up from this bank
+/// between geometry steps so the kernel grid stays full through the
+/// batch tail. Disabled by default — the standard transport call uses
+/// `None` and is identical to the historical path.
+///
+/// Sizing: `capacity` is the upper bound on the total number of
+/// histories this refill bank can spawn into the active slots. When
+/// the device-side atomic cursor reaches `capacity` the kernel stops
+/// refilling and the batch winds down naturally as the remaining
+/// active particles die.
+///
+/// Statistical model: no per-particle weights. Each refilled particle
+/// is a full unit-weight history. The batch's `total_histories` count
+/// becomes `initial_in_flight + refilled_count` (both readable by the
+/// host after the loop completes). k_eff = nu_bar * fissions /
+/// total_histories — same expression as today, just with the
+/// denominator inflated by the refill count.
+pub struct RefillBuffers {
+    pub d_refill_pos_x: CudaSlice<f64>,
+    pub d_refill_pos_y: CudaSlice<f64>,
+    pub d_refill_pos_z: CudaSlice<f64>,
+    pub d_refill_energy: CudaSlice<f64>,
+    pub d_refill_rng_state: CudaSlice<u64>,
+    pub d_refill_rng_inc: CudaSlice<u64>,
+    /// Atomic cursor — incremented per refilled slot. After the batch,
+    /// host reads `min(value, capacity)` to know how many additional
+    /// histories the bank fed.
+    pub d_next_refill_idx: CudaSlice<i32>,
+    /// Diagnostic counter — atomic ↑ on each successful refill. Equal
+    /// to `min(d_next_refill_idx, capacity)` minus refills whose
+    /// initial cell-find returned outside-geometry (leakage on spawn).
+    /// Tracked separately because cnt_leak already absorbs that case.
+    pub d_refilled_count: CudaSlice<i32>,
+    /// Upper bound on slots the bank can fill — host-side mirror of
+    /// the size of the refill arrays. Passed to the kernel as the
+    /// `refill_bank_size` arg.
+    pub capacity: usize,
+}
+
+impl RefillBuffers {
+    pub fn new(stream: &Arc<CudaStream>, capacity: usize) -> Result<Self, String> {
+        let mk_d = |len: usize| stream.alloc_zeros::<f64>(len).map_err(|e| e.to_string());
+        let mk_u = |len: usize| stream.alloc_zeros::<u64>(len).map_err(|e| e.to_string());
+        let mk_i = |len: usize| stream.alloc_zeros::<i32>(len).map_err(|e| e.to_string());
+        let cap = capacity.max(1);
+        Ok(Self {
+            d_refill_pos_x: mk_d(cap)?,
+            d_refill_pos_y: mk_d(cap)?,
+            d_refill_pos_z: mk_d(cap)?,
+            d_refill_energy: mk_d(cap)?,
+            d_refill_rng_state: mk_u(cap)?,
+            d_refill_rng_inc: mk_u(cap)?,
+            d_next_refill_idx: mk_i(1)?,
+            d_refilled_count: mk_i(1)?,
+            capacity: cap,
+        })
+    }
+
+    /// Reset the device cursors. Called by the host before each batch
+    /// that opts into refill. Does NOT re-upload the source bank —
+    /// the caller is responsible for filling the refill arrays before
+    /// calling `transport_recursive_with_buffers` with this struct.
+    pub fn reset(&mut self, stream: &Arc<CudaStream>) -> Result<(), String> {
+        stream
+            .memset_zeros(&mut self.d_next_refill_idx)
+            .map_err(|e| e.to_string())?;
+        stream
+            .memset_zeros(&mut self.d_refilled_count)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Read the device-side refilled counter back to the host. Caller
+    /// uses this to bump `total_histories` for the batch.
+    pub fn read_refilled_count(&self, stream: &Arc<CudaStream>) -> Result<usize, String> {
+        let h = stream
+            .clone_dtoh(&self.d_refilled_count)
+            .map_err(|e| e.to_string())?;
+        Ok(h[0].max(0) as usize)
     }
 }
 
@@ -1632,12 +1874,23 @@ impl GpuRecursiveContext {
             sab_nuc_idx,
             max_events_per_history,
             fis_capacity,
+            None,
         )
     }
 
     /// Pooled-buffer entry point. `buffers` must be sized for the same
     /// `n = source_bank.len()` and `fis_capacity` as previous calls;
     /// build a new pool if either changes mid-case.
+    ///
+    /// `refill` enables PHYSOR 2022 Optimization F (continuous particle
+    /// refill). Pass `None` for the historical behaviour. When `Some`,
+    /// the caller must have already uploaded the refill source bank
+    /// into the `RefillBuffers` arrays and called `reset()` to zero the
+    /// device counters. The returned `RecursiveTransportBatch.cnt_coll`
+    /// and friends are summed across both initial-population and
+    /// refilled histories. Read the additional history count via
+    /// `RefillBuffers::read_refilled_count()` afterwards if you need to
+    /// bump `total_histories` for k_eff bookkeeping.
     #[allow(clippy::too_many_arguments, non_snake_case)]
     pub fn transport_recursive_with_buffers(
         &self,
@@ -1653,6 +1906,7 @@ impl GpuRecursiveContext {
         sab_nuc_idx: i32,
         max_events_per_history: i32,
         fis_capacity: usize,
+        refill: Option<&mut RefillBuffers>,
     ) -> Result<RecursiveTransportBatch, String> {
         let n = source_bank.len();
         if n == 0 {
@@ -1746,6 +2000,14 @@ impl GpuRecursiveContext {
         zero_f(&mut buffers.d_e_inel_in_sq)?;
         zero_f(&mut buffers.d_q_inel)?;
 
+        // Reborrow `refill` so the event loop can keep using it across
+        // iterations without consuming the original Option. The `mut`
+        // is needed to let `as_deref_mut()` reborrow per iteration.
+        let mut refill = refill;
+        if let Some(r) = refill.as_deref_mut() {
+            r.reset(stream)?;
+        }
+
         // Packed params hold device pointers that change every time
         // nuc/mat/sab/wmp uploads change; can't cache between batches.
         let params_vec =
@@ -1755,9 +2017,8 @@ impl GpuRecursiveContext {
             .map_err(|e| e.to_string())?;
 
         let block = 128_u32;
-        let grid = (n as u32).div_ceil(block);
-        let cfg = LaunchConfig {
-            grid_dim: (grid, 1, 1),
+        let cfg_n = |n_threads: u32| LaunchConfig {
+            grid_dim: (n_threads.div_ceil(block).max(1), 1, 1),
             block_dim: (block, 1, 1),
             shared_mem_bytes: 0,
         };
@@ -1767,90 +2028,428 @@ impl GpuRecursiveContext {
         let n_lat = n_lat_owned as i32;
         let max_fis_i = fis_capacity as i32;
 
-        let mut launch = stream.launch_builder(&self.k_transport_recursive);
-        launch
-            .arg(&buffers.d_params)
-            .arg(&mut buffers.d_xs)
-            .arg(&mut buffers.d_ys)
-            .arg(&mut buffers.d_zs)
-            .arg(&mut buffers.d_dxs)
-            .arg(&mut buffers.d_dys)
-            .arg(&mut buffers.d_dzs)
-            .arg(&mut buffers.d_e)
-            .arg(&mut buffers.d_alive)
-            .arg(&mut buffers.d_rng_state)
-            .arg(&mut buffers.d_rng_inc)
-            .arg(&n_i32)
-            .arg(&max_events_per_history)
-            .arg(&self.surf_type)
-            .arg(&self.surf_params)
-            .arg(&self.surf_bc)
-            .arg(&n_surf)
-            .arg(&self.cell_region_off)
-            .arg(&self.cell_region_len)
-            .arg(&self.cell_fill_type)
-            .arg(&self.cell_fill_data)
-            .arg(&self.cell_aabb_min)
-            .arg(&self.cell_aabb_max)
-            .arg(&self.region_op)
-            .arg(&self.region_arg)
-            .arg(&self.univ_cells_off)
-            .arg(&self.univ_cells_len)
-            .arg(&self.univ_surfaces_off)
-            .arg(&self.univ_surfaces_len)
-            .arg(&self.univ_cell_indices)
-            .arg(&self.univ_surface_indices)
-            .arg(&root)
-            .arg(&self.lat_origin)
-            .arg(&self.lat_pitch)
-            .arg(&self.lat_shape)
-            .arg(&self.lat_universes_off)
-            .arg(&self.lat_universes)
-            .arg(&n_lat)
-            .arg(&self.hex_center)
-            .arg(&self.hex_pitch_xy)
-            .arg(&self.hex_pitch_z)
-            .arg(&self.hex_n_rings)
-            .arg(&self.hex_n_axial)
-            .arg(&self.hex_orientation)
-            .arg(&self.hex_universes_off)
-            .arg(&self.hex_universes)
-            .arg(&self.n_hex_lattices)
-            .arg(&buffers.d_lat_override_off)
-            .arg(&buffers.d_lat_override_count)
-            .arg(&buffers.d_override_lat_idx)
-            .arg(&buffers.d_override_cell_idx)
-            .arg(&buffers.d_override_mat)
-            .arg(&buffers.d_mat_kt)
-            .arg(&n_materials)
-            .arg(&sab_nuc_idx)
-            .arg(&self.evals_scratch)
-            .arg(&mut buffers.d_fis_x)
-            .arg(&mut buffers.d_fis_y)
-            .arg(&mut buffers.d_fis_z)
-            .arg(&mut buffers.d_fis_e)
-            .arg(&mut buffers.d_fis_w)
-            .arg(&mut buffers.d_fis_count)
-            .arg(&max_fis_i)
-            .arg(&mut buffers.d_cnt_coll)
-            .arg(&mut buffers.d_cnt_fis)
-            .arg(&mut buffers.d_cnt_leak)
-            .arg(&mut buffers.d_cnt_surf)
-            .arg(&mut buffers.d_cnt_el)
-            .arg(&mut buffers.d_cnt_inel)
-            .arg(&mut buffers.d_cnt_cap)
-            .arg(&mut buffers.d_e_fis_in)
-            .arg(&mut buffers.d_e_el_in)
-            .arg(&mut buffers.d_e_inel_in)
-            .arg(&mut buffers.d_e_inel_out)
-            .arg(&mut buffers.d_e_fis_in_sq)
-            .arg(&mut buffers.d_e_el_in_sq)
-            .arg(&mut buffers.d_e_inel_in_sq)
-            .arg(&mut buffers.d_q_inel);
-        // SAFETY: kernel signature matches the argument list above
-        // (transport_recursive_persistent in transport_recursive.cu).
-        unsafe {
-            launch.launch(cfg).map_err(|e| e.to_string())?;
+        // Event-based pipeline (Tramm et al., PHYSOR 2022). Replaces the single
+        // persistent history kernel — the ncu profile showed
+        // active_threads_per_warp = 6.2/32 in the history kernel
+        // because reaction-type dispatch diverged every warp. Sorting
+        // by reaction type between geom steps gives each reaction
+        // kernel a single code path. Affects every scene whose
+        // history kernel saw warp divergence, not just PWR-17×17.
+        //
+        // Step 1: gr_init_stacks (once per batch). Locates each
+        // particle's deepest cell and seeds the SoA stack arrays.
+        {
+            let mut launch = stream.launch_builder(&self.k_eb_init_stacks);
+            launch
+                .arg(&mut buffers.d_xs)
+                .arg(&mut buffers.d_ys)
+                .arg(&mut buffers.d_zs)
+                .arg(&mut buffers.d_alive)
+                .arg(&n_i32)
+                .arg(&self.surf_type)
+                .arg(&self.surf_params)
+                .arg(&self.surf_bc)
+                .arg(&n_surf)
+                .arg(&self.cell_region_off)
+                .arg(&self.cell_region_len)
+                .arg(&self.cell_fill_type)
+                .arg(&self.cell_fill_data)
+                .arg(&self.cell_aabb_min)
+                .arg(&self.cell_aabb_max)
+                .arg(&self.region_op)
+                .arg(&self.region_arg)
+                .arg(&self.univ_cells_off)
+                .arg(&self.univ_cells_len)
+                .arg(&self.univ_surfaces_off)
+                .arg(&self.univ_surfaces_len)
+                .arg(&self.univ_cell_indices)
+                .arg(&self.univ_surface_indices)
+                .arg(&root)
+                .arg(&self.lat_origin)
+                .arg(&self.lat_pitch)
+                .arg(&self.lat_shape)
+                .arg(&self.lat_universes_off)
+                .arg(&self.lat_universes)
+                .arg(&n_lat)
+                .arg(&self.hex_center)
+                .arg(&self.hex_pitch_xy)
+                .arg(&self.hex_pitch_z)
+                .arg(&self.hex_n_rings)
+                .arg(&self.hex_n_axial)
+                .arg(&self.hex_orientation)
+                .arg(&self.hex_universes_off)
+                .arg(&self.hex_universes)
+                .arg(&self.n_hex_lattices)
+                .arg(&self.evals_scratch)
+                .arg(&mut buffers.d_stack_universe)
+                .arg(&mut buffers.d_stack_cell_idx)
+                .arg(&mut buffers.d_stack_has_lattice)
+                .arg(&mut buffers.d_stack_lattice_id)
+                .arg(&mut buffers.d_stack_lat_ix)
+                .arg(&mut buffers.d_stack_lat_iy)
+                .arg(&mut buffers.d_stack_lat_iz)
+                .arg(&mut buffers.d_stack_offx)
+                .arg(&mut buffers.d_stack_offy)
+                .arg(&mut buffers.d_stack_offz)
+                .arg(&mut buffers.d_depth)
+                .arg(&mut buffers.d_cnt_leak);
+            // SAFETY: kernel signature matches the argument list
+            // (gr_init_stacks in transport_event_based.cu).
+            unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+        }
+
+        // Event loop. One iteration = one geom step + one reaction
+        // dispatch round.
+        //
+        // ── PCIe sync trimmed to 1 round-trip per step ───────────────
+        // The original event-based design did two syncs per step (DtoH
+        // the 5 per-type counts, host prefix-sum, HtoD the 6 offsets).
+        // We move the prefix sum onto the device (gr_scan_offsets) so
+        // the HtoD vanishes; what remains is one DtoH of the 5 counts
+        // which the host still needs for variable-size reaction-kernel
+        // launches. Empirically (RTX A1000 sm_86, Godiva @ 20k), going
+        // to batch-size launches with K-step periodic sync was 5x
+        // SLOWER than variable-size launches on this hardware: per-
+        // kernel block-scheduling overhead for 78 mostly-empty blocks
+        // dominates the saved PCIe round-trip. Variable launches keep
+        // empty warps off the SMs entirely.
+        for _step in 0..max_events_per_history {
+            // d_type_count is zeroed in-place by gr_scan_offsets after
+            // it reads each slot — same for d_type_scatter. Buffer is
+            // also alloc_zeros'd so the very first step starts clean.
+            // One fewer host-side launch per step compared to the
+            // previous memset_zeros + scan_offsets sequence.
+
+            // Step 2: gr_trace_and_sample.
+            {
+                let mut launch = stream.launch_builder(&self.k_eb_trace_and_sample);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&mut buffers.d_xs)
+                    .arg(&mut buffers.d_ys)
+                    .arg(&mut buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&n_i32)
+                    .arg(&self.surf_type)
+                    .arg(&self.surf_params)
+                    .arg(&self.surf_bc)
+                    .arg(&n_surf)
+                    .arg(&self.cell_region_off)
+                    .arg(&self.cell_region_len)
+                    .arg(&self.cell_fill_type)
+                    .arg(&self.cell_fill_data)
+                    .arg(&self.cell_aabb_min)
+                    .arg(&self.cell_aabb_max)
+                    .arg(&self.region_op)
+                    .arg(&self.region_arg)
+                    .arg(&self.univ_cells_off)
+                    .arg(&self.univ_cells_len)
+                    .arg(&self.univ_surfaces_off)
+                    .arg(&self.univ_surfaces_len)
+                    .arg(&self.univ_cell_indices)
+                    .arg(&self.univ_surface_indices)
+                    .arg(&root)
+                    .arg(&self.lat_origin)
+                    .arg(&self.lat_pitch)
+                    .arg(&self.lat_shape)
+                    .arg(&self.lat_universes_off)
+                    .arg(&self.lat_universes)
+                    .arg(&n_lat)
+                    .arg(&self.hex_center)
+                    .arg(&self.hex_pitch_xy)
+                    .arg(&self.hex_pitch_z)
+                    .arg(&self.hex_n_rings)
+                    .arg(&self.hex_n_axial)
+                    .arg(&self.hex_orientation)
+                    .arg(&self.hex_universes_off)
+                    .arg(&self.hex_universes)
+                    .arg(&self.n_hex_lattices)
+                    .arg(&buffers.d_lat_override_off)
+                    .arg(&buffers.d_lat_override_count)
+                    .arg(&buffers.d_override_lat_idx)
+                    .arg(&buffers.d_override_cell_idx)
+                    .arg(&buffers.d_override_mat)
+                    .arg(&buffers.d_mat_kt)
+                    .arg(&n_materials)
+                    .arg(&sab_nuc_idx)
+                    .arg(&self.evals_scratch)
+                    .arg(&mut buffers.d_stack_universe)
+                    .arg(&mut buffers.d_stack_cell_idx)
+                    .arg(&mut buffers.d_stack_has_lattice)
+                    .arg(&mut buffers.d_stack_lattice_id)
+                    .arg(&mut buffers.d_stack_lat_ix)
+                    .arg(&mut buffers.d_stack_lat_iy)
+                    .arg(&mut buffers.d_stack_lat_iz)
+                    .arg(&mut buffers.d_stack_offx)
+                    .arg(&mut buffers.d_stack_offy)
+                    .arg(&mut buffers.d_stack_offz)
+                    .arg(&mut buffers.d_depth)
+                    .arg(&mut buffers.d_event_type)
+                    .arg(&mut buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_event_mat)
+                    .arg(&mut buffers.d_event_kT)
+                    .arg(&mut buffers.d_event_hit_Ni)
+                    .arg(&mut buffers.d_event_urr_xi)
+                    .arg(&mut buffers.d_event_ebin)
+                    .arg(&mut buffers.d_type_count)
+                    .arg(&mut buffers.d_cnt_coll)
+                    .arg(&mut buffers.d_cnt_leak)
+                    .arg(&mut buffers.d_cnt_surf)
+                    .arg(&mut buffers.d_cnt_cap)
+                    .arg(&mut buffers.d_e_el_in)
+                    .arg(&mut buffers.d_e_el_in_sq);
+                // SAFETY: kernel signature matches the argument list
+                // (gr_trace_and_sample in transport_event_based.cu).
+                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+            }
+
+            // Step 3: device-side prefix sum over the 80 (class,bin)
+            // slots. Also emits per-class totals + per-class start
+            // offsets so reaction kernels can launch from a single
+            // contiguous range per class. Zeroes d_type_scatter for
+            // partition.
+            {
+                let mut launch = stream.launch_builder(&self.k_eb_scan_offsets);
+                launch
+                    .arg(&buffers.d_type_count)
+                    .arg(&mut buffers.d_type_offsets)
+                    .arg(&mut buffers.d_type_class_total)
+                    .arg(&mut buffers.d_type_class_offsets)
+                    .arg(&mut buffers.d_type_total)
+                    .arg(&mut buffers.d_type_scatter);
+                let one_thread = LaunchConfig {
+                    grid_dim: (1, 1, 1),
+                    block_dim: (1, 1, 1),
+                    shared_mem_bytes: 0,
+                };
+                unsafe { launch.launch(one_thread).map_err(|e| e.to_string())?; }
+            }
+
+            // Step 4: DtoH the 5 per-class totals (20 bytes) for
+            // reaction-kernel launch sizing. The 80-slot per-(class,
+            // bin) counts stay on device.
+            let class_totals: Vec<i32> = stream
+                .clone_dtoh(&buffers.d_type_class_total)
+                .map_err(|e| e.to_string())?;
+            let total: i32 = class_totals.iter().sum();
+            if total == 0 { break; }
+
+            // Step 5: gr_partition — scatter alive indices into
+            // d_sorted_idx by (class, energy_bin), reading
+            // d_event_ebin emitted by trace_and_sample.
+            {
+                let mut launch = stream.launch_builder(&self.k_eb_partition);
+                launch
+                    .arg(&buffers.d_event_type)
+                    .arg(&buffers.d_event_ebin)
+                    .arg(&buffers.d_alive)
+                    .arg(&n_i32)
+                    .arg(&buffers.d_type_offsets)
+                    .arg(&mut buffers.d_type_scatter)
+                    .arg(&mut buffers.d_sorted_idx);
+                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+            }
+
+            let c_el  = class_totals[0];
+            let c_in  = class_totals[1];
+            let c_fis = class_totals[2];
+            let c_n2n = class_totals[3];
+            let c_n3n = class_totals[4];
+            let c_multi = c_n2n + c_n3n;
+
+            // Reaction kernels read d_type_class_total[CLASS] and
+            // d_type_class_offsets[CLASS] from device. Particles
+            // within the class are already bin-sorted by energy in
+            // d_sorted_idx (PHYSOR 2022 Optimization G), so adjacent
+            // threads access nearby XS-table regions.
+            if c_el > 0 {
+                let mut launch = stream.launch_builder(&self.k_eb_elastic);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&buffers.d_type_class_total)
+                    .arg(&buffers.d_type_class_offsets)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&buffers.d_event_kT)
+                    .arg(&buffers.d_event_urr_xi)
+                    .arg(&sab_nuc_idx)
+                    .arg(&mut buffers.d_cnt_el);
+                unsafe { launch.launch(cfg_n(c_el as u32)).map_err(|e| e.to_string())?; }
+            }
+            if c_in > 0 {
+                let mut launch = stream.launch_builder(&self.k_eb_inelastic);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&buffers.d_type_class_total)
+                    .arg(&buffers.d_type_class_offsets)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_cnt_inel)
+                    .arg(&mut buffers.d_e_inel_in)
+                    .arg(&mut buffers.d_e_inel_in_sq)
+                    .arg(&mut buffers.d_e_inel_out)
+                    .arg(&mut buffers.d_q_inel);
+                unsafe { launch.launch(cfg_n(c_in as u32)).map_err(|e| e.to_string())?; }
+            }
+            if c_fis > 0 {
+                let mut launch = stream.launch_builder(&self.k_eb_fission);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&buffers.d_type_class_total)
+                    .arg(&buffers.d_type_class_offsets)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&buffers.d_xs)
+                    .arg(&buffers.d_ys)
+                    .arg(&buffers.d_zs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_fis_x)
+                    .arg(&mut buffers.d_fis_y)
+                    .arg(&mut buffers.d_fis_z)
+                    .arg(&mut buffers.d_fis_e)
+                    .arg(&mut buffers.d_fis_w)
+                    .arg(&mut buffers.d_fis_count)
+                    .arg(&max_fis_i)
+                    .arg(&mut buffers.d_cnt_fis)
+                    .arg(&mut buffers.d_e_fis_in)
+                    .arg(&mut buffers.d_e_fis_in_sq);
+                unsafe { launch.launch(cfg_n(c_fis as u32)).map_err(|e| e.to_string())?; }
+            }
+            if c_multi > 0 {
+                let mut launch = stream.launch_builder(&self.k_eb_multi);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&buffers.d_type_class_total)
+                    .arg(&buffers.d_type_class_offsets)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&buffers.d_xs)
+                    .arg(&buffers.d_ys)
+                    .arg(&buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_type)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_fis_x)
+                    .arg(&mut buffers.d_fis_y)
+                    .arg(&mut buffers.d_fis_z)
+                    .arg(&mut buffers.d_fis_e)
+                    .arg(&mut buffers.d_fis_w)
+                    .arg(&mut buffers.d_fis_count)
+                    .arg(&max_fis_i);
+                unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
+            }
+
+            // PHYSOR 2022 Optimization F (opt-in via the `refill` arg).
+            // Must launch AFTER all event kernels for this step — the
+            // event kernels (fission/multi) read d_event_type[tid] for
+            // particles that the partition picked up earlier. Refilling
+            // a slot mid-step would let gr_multi_event overwrite the
+            // fresh particle's energy/dir with stale n2n/n3n kinematics
+            // and inject a -7000 pcm bias on Godiva (measured here on
+            // the A1000 before the launch was relocated). Refill self-
+            // gates on alive[tid] == 0 per particle.
+            if let Some(refill) = refill.as_deref_mut() {
+                let refill_cap_i = refill.capacity as i32;
+                let mut launch = stream.launch_builder(&self.k_eb_refill_dead);
+                launch
+                    .arg(&n_i32)
+                    .arg(&mut refill.d_next_refill_idx)
+                    .arg(&refill_cap_i)
+                    .arg(&refill.d_refill_pos_x)
+                    .arg(&refill.d_refill_pos_y)
+                    .arg(&refill.d_refill_pos_z)
+                    .arg(&refill.d_refill_energy)
+                    .arg(&refill.d_refill_rng_state)
+                    .arg(&refill.d_refill_rng_inc)
+                    .arg(&mut buffers.d_xs)
+                    .arg(&mut buffers.d_ys)
+                    .arg(&mut buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&mut buffers.d_depth)
+                    .arg(&mut buffers.d_event_type)
+                    .arg(&mut buffers.d_event_ebin)
+                    .arg(&self.surf_type)
+                    .arg(&self.surf_params)
+                    .arg(&self.surf_bc)
+                    .arg(&n_surf)
+                    .arg(&self.cell_region_off)
+                    .arg(&self.cell_region_len)
+                    .arg(&self.cell_fill_type)
+                    .arg(&self.cell_fill_data)
+                    .arg(&self.cell_aabb_min)
+                    .arg(&self.cell_aabb_max)
+                    .arg(&self.region_op)
+                    .arg(&self.region_arg)
+                    .arg(&self.univ_cells_off)
+                    .arg(&self.univ_cells_len)
+                    .arg(&self.univ_surfaces_off)
+                    .arg(&self.univ_surfaces_len)
+                    .arg(&self.univ_cell_indices)
+                    .arg(&self.univ_surface_indices)
+                    .arg(&root)
+                    .arg(&self.lat_origin)
+                    .arg(&self.lat_pitch)
+                    .arg(&self.lat_shape)
+                    .arg(&self.lat_universes_off)
+                    .arg(&self.lat_universes)
+                    .arg(&n_lat)
+                    .arg(&self.hex_center)
+                    .arg(&self.hex_pitch_xy)
+                    .arg(&self.hex_pitch_z)
+                    .arg(&self.hex_n_rings)
+                    .arg(&self.hex_n_axial)
+                    .arg(&self.hex_orientation)
+                    .arg(&self.hex_universes_off)
+                    .arg(&self.hex_universes)
+                    .arg(&self.n_hex_lattices)
+                    .arg(&self.evals_scratch)
+                    .arg(&mut buffers.d_stack_universe)
+                    .arg(&mut buffers.d_stack_cell_idx)
+                    .arg(&mut buffers.d_stack_has_lattice)
+                    .arg(&mut buffers.d_stack_lattice_id)
+                    .arg(&mut buffers.d_stack_lat_ix)
+                    .arg(&mut buffers.d_stack_lat_iy)
+                    .arg(&mut buffers.d_stack_lat_iz)
+                    .arg(&mut buffers.d_stack_offx)
+                    .arg(&mut buffers.d_stack_offy)
+                    .arg(&mut buffers.d_stack_offz)
+                    .arg(&mut buffers.d_cnt_leak)
+                    .arg(&mut refill.d_refilled_count);
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
+            }
         }
 
         let fis_count =
@@ -1880,7 +2479,17 @@ impl GpuRecursiveContext {
         let e_inel_in_sq = stream.clone_dtoh(&buffers.d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
         let q_inel = stream.clone_dtoh(&buffers.d_q_inel).map_err(|e| e.to_string())?[0];
 
-        let k_eff = fission_bank.len() as f64 / n as f64;
+        // k_eff = fission_bank.len() / total_histories. When refill is
+        // active, total_histories = n + refilled_count (host reads the
+        // device-side counter after the event loop). When refill is
+        // off, refilled = 0 and the denominator falls back to n.
+        let refilled = if let Some(r) = refill.as_deref() {
+            r.read_refilled_count(stream)?
+        } else {
+            0
+        };
+        let total_histories = n + refilled;
+        let k_eff = fission_bank.len() as f64 / total_histories as f64;
         Ok(RecursiveTransportBatch {
             fission_bank,
             n_collisions: cnt_coll,

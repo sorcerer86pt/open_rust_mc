@@ -1,0 +1,47 @@
+# CPU saturation probe - 2026-05-20 14:31:25
+# Case: heu-met-fast-001_case-1  Batches: 40  Inactive: 10
+
+============================================================
+particles=5000   wall=20,4s
+============================================================
+┌─ open_rust_mc — hardware profile ─
+│ RAM 31.7 GB, 14p/20l cores, L1 288 KB / L2 2048 KB / L3 24576 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 20 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 23.8 GB (75%× detected RAM).
+│ GPU bundle cache budget: 3.0 GB (75% of 4.0 GB VRAM).
+└──
+  k_calc        : k = 0.99524 +/- 0.00410
+  delta         : -476 pcm
+  timing        : load = 2.79 s, sim = 0.52 s
+  tallies       : coll = 395,267, fis = 57,414, leak = 86,281
+
+
+============================================================
+particles=20000   wall=23,2s
+============================================================
+┌─ open_rust_mc — hardware profile ─
+│ RAM 31.7 GB, 14p/20l cores, L1 288 KB / L2 2048 KB / L3 24576 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 20 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 23.8 GB (75%× detected RAM).
+│ GPU bundle cache budget: 3.0 GB (75% of 4.0 GB VRAM).
+└──
+  k_calc        : k = 0.99719 +/- 0.00187
+  delta         : -281 pcm
+  timing        : load = 2.36 s, sim = 6.09 s
+  tallies       : coll = 1,582,352, fis = 230,274, leak = 344,530
+
+
+============================================================
+particles=100000   wall=31,1s
+============================================================
+┌─ open_rust_mc — hardware profile ─
+│ RAM 31.7 GB, 14p/20l cores, L1 288 KB / L2 2048 KB / L3 24576 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 20 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 23.8 GB (75%× detected RAM).
+│ GPU bundle cache budget: 3.0 GB (75% of 4.0 GB VRAM).
+└──
+  k_calc        : k = 0.99889 +/- 0.00075
+  delta         : -111 pcm
+  timing        : load = 2.49 s, sim = 11.43 s
+  tallies       : coll = 7,917,398, fis = 1,153,434, leak = 1,720,187
+

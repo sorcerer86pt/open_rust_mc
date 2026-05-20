@@ -24,6 +24,8 @@
 //!      formula. Sanity-check both backends produce identical
 //!      mu_lab when A ≤ 1+ε.
 
+#![allow(dead_code)]
+
 use open_rust_mc::transport::rng::Rng;
 
 const PI: f64 = std::f64::consts::PI;
