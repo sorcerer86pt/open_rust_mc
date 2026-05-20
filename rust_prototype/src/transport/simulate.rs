@@ -62,6 +62,14 @@ pub struct SimConfig {
     /// dependent. The CPU path ignores this — refill is meaningless
     /// when rayon threads already saturate at 5 k particles.
     pub gpu_refill_pool_factor: Option<f64>,
+    /// **GPU-only.** When `true` AND `gpu_refill_pool_factor` is
+    /// `None`, the CUDA runner queries the active device's SM count
+    /// and the kernel's compiled register count, computes the
+    /// saturation knee, and picks a refill factor automatically.
+    /// Logs what got picked. Explicit `gpu_refill_pool_factor =
+    /// Some(_)` always wins over auto. See
+    /// `gpu_recursive::recommend_refill_factor` for the heuristic.
+    pub gpu_auto_refill: bool,
 }
 
 /// Implicit-capture + Russian roulette. OpenMC defaults
@@ -99,6 +107,7 @@ impl Default for SimConfig {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         }
     }
 }
@@ -2884,6 +2893,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
 
         let (results, k_final) =
@@ -3015,6 +3025,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -3202,6 +3213,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -3219,6 +3231,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);
@@ -3339,6 +3352,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
         let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
 
@@ -3399,6 +3413,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
         let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
 
@@ -3439,6 +3454,7 @@ mod tests {
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
         let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
 

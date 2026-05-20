@@ -368,18 +368,25 @@ struct PySettings {
     /// the existing behaviour untouched. Ignored on the CPU runner.
     #[pyo3(get, set)]
     gpu_refill_pool_factor: Option<f64>,
+    /// GPU-only — when true, the CUDA runner queries the device's
+    /// SM count + the kernel's compiled register count and picks a
+    /// `gpu_refill_pool_factor` automatically. Explicit
+    /// `gpu_refill_pool_factor` always wins. Ignored on CPU.
+    #[pyo3(get, set)]
+    gpu_auto_refill: bool,
 }
 
 #[pymethods]
 impl PySettings {
     #[new]
-    #[pyo3(signature = (batches=50, inactive=10, particles=5000, seed=1, gpu_refill_pool_factor=None))]
+    #[pyo3(signature = (batches=50, inactive=10, particles=5000, seed=1, gpu_refill_pool_factor=None, gpu_auto_refill=false))]
     fn new(
         batches: u32,
         inactive: u32,
         particles: u32,
         seed: u64,
         gpu_refill_pool_factor: Option<f64>,
+        gpu_auto_refill: bool,
     ) -> Self {
         Self {
             batches,
@@ -387,6 +394,7 @@ impl PySettings {
             particles,
             seed,
             gpu_refill_pool_factor,
+            gpu_auto_refill,
         }
     }
 
@@ -1294,6 +1302,7 @@ fn run_gamma_heating(
         disable_delayed_neutrons: false,
         urr_equivalence: None,
         gpu_refill_pool_factor: None,
+        gpu_auto_refill: false,
     };
     let t_neu = std::time::Instant::now();
     let (batch_results, k_running) = py.allow_threads(|| {
@@ -2114,6 +2123,7 @@ fn run_eigenvalue(
         disable_delayed_neutrons: false,
         urr_equivalence: None,
         gpu_refill_pool_factor: settings.gpu_refill_pool_factor,
+        gpu_auto_refill: settings.gpu_auto_refill,
     };
     let t_sim_start = std::time::Instant::now();
     let (batch_results, _k_running, xs_memory_bytes) = match scene.runner {
@@ -2910,6 +2920,7 @@ fn run_icsbep_case(
         disable_delayed_neutrons: false,
         urr_equivalence: None,
         gpu_refill_pool_factor: settings.gpu_refill_pool_factor,
+        gpu_auto_refill: settings.gpu_auto_refill,
     };
 
     // Some ICSBEP cases (degenerate world AABB, missing fissile region,

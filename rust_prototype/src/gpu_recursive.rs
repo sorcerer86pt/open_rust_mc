@@ -1798,6 +1798,96 @@ impl RefillBuffers {
     }
 }
 
+/// Auto-recommend a `gpu_refill_pool_factor` for the active CUDA
+/// device + the compiled `gr_trace_and_sample` kernel + the user's
+/// `particles_per_batch`. Returns:
+///
+/// * `None`  → don't bother; either the kernel is already saturated
+///             (refill cost > gain) or it's too under-occupied
+///             (raise `particles_per_batch` first).
+/// * `Some(f)` → suggested factor in `[1.0, 8.0]`. Caller should set
+///               `SimConfig::gpu_refill_pool_factor = Some(f)`.
+///
+/// Heuristic. Two pieces:
+///
+/// 1. **Single-wave SM saturation** computed exactly from device +
+///    kernel attributes (SM count, max threads/blocks per SM, the
+///    kernel's actual `num_regs()` after NVRTC, and the launch
+///    block size). No empirical constants here.
+///
+/// 2. **Empirical knee multiplier** (= 20 × single-wave) to account
+///    for population die-off across the batch — calibrated against
+///    the measured RTX 3080 saturation sweep
+///    (`outputs/saturation_*.csv`, ~35 k single-wave → ~700 k
+///    measured knee). The multiplier is conservative for thermal-
+///    spectrum scenes (more collisions per history → longer tail,
+///    higher multiplier) and may overshoot on pure fast-metal cases.
+///    Override `gpu_refill_pool_factor` explicitly if so.
+///
+/// Decision regions for `ratio = particles_per_batch / knee`:
+///
+/// * `ratio >= 1.0`     → at/above saturation; no headroom. Return None.
+/// * `0.5 <= ratio < 1` → slight headroom. Return `1.5`.
+/// * `0.2 <= ratio < 0.5` → mid-curve sweet spot. Return `knee / particles`
+///                          (capped at 8.0).
+/// * `ratio < 0.2`      → under-occupied. Refill is the wrong tool;
+///                        raise `particles_per_batch` instead.
+///                        Return None.
+pub fn recommend_refill_factor(
+    ctx: &Arc<CudaContext>,
+    k_trace_and_sample: &CudaFunction,
+    particles_per_batch: usize,
+    block_size: usize,
+) -> Option<f64> {
+    use cudarc::driver::sys::CUdevice_attribute as Attr;
+
+    let sm_count = ctx.attribute(Attr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).ok()? as usize;
+    let cc_major = ctx.attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR).ok()?;
+    let max_threads_per_sm = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR)
+        .ok()? as usize;
+    let regs_per_thread = k_trace_and_sample.num_regs().ok()? as usize;
+
+    // sm_86 / sm_89 = 16 blocks/SM; sm_90+ = 32. Conservative fallback
+    // 16 for unknown majors (correct for everything in field as of 2026).
+    let max_blocks_per_sm = if cc_major >= 9 { 32 } else { 16 };
+
+    // Register-occupancy ceiling. sm_86 has 65536 regs/SM, sm_89 same,
+    // sm_90 has 65536 too. Older sm_75 has 65536. So 65536 covers our
+    // production targets. (Hopper SMs technically expose more regs in
+    // some configurations but 65536 is the conservative number for our
+    // launch.)
+    const REGS_PER_SM: usize = 65536;
+    let blocks_per_sm_reg = if regs_per_thread == 0 {
+        max_blocks_per_sm
+    } else {
+        (REGS_PER_SM / (regs_per_thread * block_size)).min(max_blocks_per_sm)
+    };
+    // Thread-count ceiling.
+    let blocks_per_sm_threads = max_threads_per_sm / block_size;
+    let blocks_per_sm = blocks_per_sm_reg.min(blocks_per_sm_threads).max(1);
+
+    let sat_oneshot = sm_count * blocks_per_sm * block_size;
+    // Wave multiplier — empirical from 3080 HMF-001 saturation sweep
+    // (single-wave 35 k, measured knee 500 k–1 M → ~14-28× wave factor;
+    // 20 splits the range). Documented in CLAUDE.md.
+    const WAVE_MULTIPLIER: usize = 20;
+    let knee = sat_oneshot.saturating_mul(WAVE_MULTIPLIER);
+    if knee == 0 {
+        return None;
+    }
+
+    let ratio = particles_per_batch as f64 / knee as f64;
+    if ratio >= 1.0 || ratio < 0.2 {
+        return None;
+    }
+    if ratio >= 0.5 {
+        return Some(1.5);
+    }
+    let raw = knee as f64 / particles_per_batch as f64;
+    Some(raw.clamp(1.0, 8.0))
+}
+
 impl GpuRecursiveContext {
     /// Run one batch of full-physics neutron transport on the recursive
     /// geometry. Cross-section data is supplied via the
@@ -2542,6 +2632,16 @@ impl GpuRecursiveContext {
     /// `TransportBuffers::new` to size the override scratch.
     pub fn n_lattices(&self) -> usize {
         self.lat_origin.len() / 3
+    }
+
+    /// Borrow the underlying `CudaContext`. Used by
+    /// `recommend_refill_factor` (and any future device-attribute
+    /// query in dispatch) — the runner-side code needs to read SM
+    /// count / compute capability via the same context the geometry
+    /// was built against, so cudarc thread-local state doesn't
+    /// mismatch between modules.
+    pub fn ctx_ref(&self) -> &Arc<CudaContext> {
+        &self._ctx
     }
 }
 

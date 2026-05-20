@@ -369,6 +369,7 @@ mod cuda_main {
                 disable_delayed_neutrons: false,
                 urr_equivalence: None,
                 gpu_refill_pool_factor: None,
+                gpu_auto_refill: false,
             };
 
             if args.seeds > 1 {

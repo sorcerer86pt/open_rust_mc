@@ -536,6 +536,7 @@ fn main() {
             },
             weight_window: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
 
         if args.seeds > 1 {

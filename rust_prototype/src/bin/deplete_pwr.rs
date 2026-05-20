@@ -485,6 +485,7 @@ fn run_eigenvalue(
         disable_delayed_neutrons: false,
         urr_equivalence: None,
         gpu_refill_pool_factor: None,
+        gpu_auto_refill: false,
     };
 
     let (results, k_eff) = simulate::run_eigenvalue(&cfg, surfaces, cells, materials, provider);
