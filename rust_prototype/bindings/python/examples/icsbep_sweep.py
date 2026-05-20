@@ -124,13 +124,16 @@ class Row:
     batches: int = 0
     inactive: int = 0
     particles: int = 0
+    gpu_refill_pool_factor: float | None = None
+    gpu_auto_refill: bool = False
     error: str = ""
 
 
 CSV_COLUMNS = [
     "case", "status", "k_calc", "k_sigma", "k_ref", "sigma_exp",
     "delta_pcm", "bound_pcm", "sigma_ratio", "ref_source",
-    "runtime_s", "n_seeds", "batches", "inactive", "particles", "error",
+    "runtime_s", "n_seeds", "batches", "inactive", "particles",
+    "gpu_refill_pool_factor", "gpu_auto_refill", "error",
 ]
 
 
@@ -158,6 +161,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--base-seed", type=int, default=42,
                    help="first seed; subsequent seeds are base, base+1, base+2, ...")
     p.add_argument("--rank", type=int, default=15, help="SVD rank")
+    p.add_argument("--gpu-refill-factor", type=float, default=None,
+                   help="PHYSOR 2022 Optimization F — explicit refill pool factor "
+                        "(e.g. 2.0 = source bank is 2x particles per batch). "
+                        "GPU runner only; CPU ignores. Wins over --gpu-auto-refill.")
+    p.add_argument("--gpu-auto-refill", action="store_true",
+                   help="GPU runner only: let the engine pick a refill factor "
+                        "automatically from device SM count + kernel reg count. "
+                        "Ignored if --gpu-refill-factor is set or if runner=cpu.")
     p.add_argument("--csv", type=Path, default=None, help="save results to CSV file (appended row-by-row)")
     p.add_argument("--resume", action="store_true",
                    help="skip cases already present in --csv (case names matched on the `case` column)")
@@ -267,11 +278,32 @@ def case_settings(
     else:
         particles = particles_cpu
     n_seeds = int(rec.get("seeds", args.seeds))
+    # Refill knobs are GPU-only. CPU runner silently ignores both
+    # (kernel doesn't exist; SimConfig fields just sit unused on
+    # the rayon path). Explicit `--gpu-refill-factor` wins over
+    # `--gpu-auto-refill`; the engine's CudaRunner::run announces
+    # what got picked when auto fires.
+    #
+    # Per-case JSON keys (both optional, both backward compatible —
+    # absent keys fall back to the CLI flag value):
+    #   "gpu_refill_pool_factor": 2.0   # explicit factor
+    #   "gpu_auto_refill": true         # let engine pick
+    # Precedence: JSON > CLI for both knobs (matches how particles /
+    # batches / inactive override).
+    is_gpu = runner is not None and runner is Runner.GpuCuda
+    cli_refill = args.gpu_refill_factor if is_gpu else None
+    cli_auto   = bool(args.gpu_auto_refill) if is_gpu else False
+    refill_factor = rec.get("gpu_refill_pool_factor", cli_refill) if is_gpu else None
+    auto_refill   = bool(rec.get("gpu_auto_refill", cli_auto)) if is_gpu else False
+    if refill_factor is not None:
+        refill_factor = float(refill_factor)
     settings = Settings(
         batches=batches,
         inactive=inactive,
         particles=particles,
         seed=args.base_seed,  # overwritten per-seed below
+        gpu_refill_pool_factor=refill_factor,
+        gpu_auto_refill=auto_refill,
     )
     return settings, n_seeds, batches, inactive, particles
 
@@ -305,6 +337,8 @@ def run_case_multi_seed(
             inactive=base_settings.inactive,
             particles=base_settings.particles,
             seed=seed,
+            gpu_refill_pool_factor=base_settings.gpu_refill_pool_factor,
+            gpu_auto_refill=base_settings.gpu_auto_refill,
         )
         try:
             r = run_icsbep_case(
@@ -340,6 +374,8 @@ def run_case_multi_seed(
                 batches=base_settings.batches,
                 inactive=base_settings.inactive,
                 particles=base_settings.particles,
+                gpu_refill_pool_factor=base_settings.gpu_refill_pool_factor,
+                gpu_auto_refill=base_settings.gpu_auto_refill,
                 error=last_error or "no seed produced a result",
             ),
             runtime,
@@ -380,6 +416,8 @@ def run_case_multi_seed(
             batches=base_settings.batches,
             inactive=base_settings.inactive,
             particles=base_settings.particles,
+            gpu_refill_pool_factor=base_settings.gpu_refill_pool_factor,
+            gpu_auto_refill=base_settings.gpu_auto_refill,
         ),
         runtime,
     )

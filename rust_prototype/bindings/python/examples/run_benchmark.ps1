@@ -79,7 +79,16 @@ param(
     [int]   $Rank     = 15,
     [string]$Filter   = "",
     [int]   $Limit    = 0,
-    [switch]$Resume
+    [switch]$Resume,
+    # PHYSOR 2022 Optimization F — GPU only. Use -GpuRefillFactor to
+    # set an explicit factor (e.g. 2.0 = source bank is 2x particles),
+    # or -GpuAutoRefill to let the engine pick from device attributes.
+    # Both passed verbatim through to icsbep_sweep.py; the runner's
+    # CudaRunner::run resolves precedence (explicit > auto > None).
+    # JSON `benchmark.recommended_settings.gpu_refill_pool_factor` /
+    # `.gpu_auto_refill` per-case override these CLI defaults.
+    [double]$GpuRefillFactor = 0.0,
+    [switch]$GpuAutoRefill
 )
 
 $ErrorActionPreference = "Stop"
@@ -169,6 +178,8 @@ $sweepArgs = @(
 if ($Resume)    { $sweepArgs += "--resume" }
 if ($Filter)    { $sweepArgs += @("--filter", $Filter) }
 if ($Limit -gt 0) { $sweepArgs += @("--limit",  $Limit) }
+if ($GpuRefillFactor -gt 1.0) { $sweepArgs += @("--gpu-refill-factor", $GpuRefillFactor) }
+if ($GpuAutoRefill)           { $sweepArgs += "--gpu-auto-refill" }
 
 # ── 5. Run, tee output to log ─────────────────────────────────────────
 $started = Get-Date

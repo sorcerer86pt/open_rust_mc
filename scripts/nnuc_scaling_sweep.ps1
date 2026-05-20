@@ -89,6 +89,12 @@ param(
     # the batch-tail still under-occupies; A100/H100 likely benefit
     # most. CPU runner ignores this entirely.
     [double]$RefillFactor = 0.0,
+    # Device-attribute-driven auto-refill. When set, queries the active
+    # GPU's SM count + the kernel's compiled register count and picks
+    # the refill factor automatically using the saturation-knee heuristic
+    # in gpu_recursive::recommend_refill_factor. Logged to stdout so the
+    # auto-pick is always visible. Explicit -RefillFactor > 0 wins.
+    [switch]$AutoRefill,
     [switch]$Ncu,
     [string]$NcuKernel = 'gr_trace_and_sample',
     [string]$OutputBase = 'nnuc_scaling'
@@ -158,6 +164,9 @@ case_root = Path(sys.argv[7])
 data_dir = Path(sys.argv[8])
 refill_factor_raw = float(sys.argv[9]) if len(sys.argv) > 9 else 0.0
 refill_factor = refill_factor_raw if refill_factor_raw > 1.0 else None
+# argv[10]: gpu_auto_refill flag ("1" / "0"). Explicit refill_factor
+# always wins over auto (engine policy in CudaRunner::run).
+auto_refill = (len(sys.argv) > 10 and sys.argv[10] == "1")
 
 case_json = case_root / f"{case_stem}.json"
 if not case_json.exists():
@@ -173,8 +182,9 @@ settings = Settings(
     particles=particles,
     seed=seed,
     gpu_refill_pool_factor=refill_factor,
+    gpu_auto_refill=auto_refill,
 )
-print(f"  settings      : {settings!r}")
+print(f"  settings      : {settings!r}  gpu_auto_refill={auto_refill}")
 result = run_icsbep_case(
     case_json=case_json,
     data_dir=data_dir,
@@ -235,7 +245,8 @@ function Invoke-Case {
     Write-Host ""
     Write-Host ("== {0} (max_n_nuc={1}, total={2}, n_mats={3}) ==" -f $Case, $nnuc.max, $nnuc.total, $nnuc.n_mats)
 
-    $pyArgs = @($tempHarness, $Case, $Batches, $Inactive, $Particles, $Seed, $Rank, $caseRoot, $dataDir, $RefillFactor)
+    $autoFlag = if ($AutoRefill.IsPresent) { 1 } else { 0 }
+    $pyArgs = @($tempHarness, $Case, $Batches, $Inactive, $Particles, $Seed, $Rank, $caseRoot, $dataDir, $RefillFactor, $autoFlag)
 
     $t0 = Get-Date
     if ($UseNcu) {
