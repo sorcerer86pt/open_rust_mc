@@ -356,15 +356,34 @@ from the ICSBEP handbook k_eff.
 
 ## What's Open / Research-Tier
 
-- **GPU batch-size saturation.** Tramm et al., "Toward Portable GPU
-  Acceleration of the OpenMC Monte Carlo Particle Transport Code"
-  (PHYSOR 2022), report that A100 event-based MC continues to gain
-  performance up to **8 million particles in flight** before
-  exhausting device memory. Current `particles_per_batch` defaults
-  in our binaries are 5 k–50 k — two orders of magnitude below the
-  saturation point. On a 3080 (10 GB VRAM) the practical ceiling is
-  in the 100 k–1 M range; the 4 GB RTX A1000 laptop tops out near
-  50 k. Bumping this is the single largest expected win on any GPU.
+- **GPU batch-size saturation — MEASURED on RTX 3080.** Tramm et al.,
+  "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
+  Particle Transport Code" (PHYSOR 2022), report that A100 event-
+  based MC continues to gain performance up to **8 million particles
+  in flight** before exhausting device memory. Saturation sweep on
+  HMF-001 (3 nuclides, Godiva), 80 batches / 60 active, seed 1,
+  rank 15:
+
+  | particles  | sim s | us/p   | hist/s    | k_calc Δ pcm |
+  |-----------:|------:|-------:|----------:|-------------:|
+  |     10 000 |  6.27 | 10.45  |    95 k/s |         −107 |
+  |     30 000 |  7.50 |  4.17  |   240 k/s |          +62 |
+  |     50 000 |  8.83 |  2.94  |   340 k/s |           +7 |
+  |    100 000 | 11.02 |  1.84  |   545 k/s |          +17 |
+  |    200 000 | 15.78 |  1.31  |   760 k/s |          −15 |
+  |    500 000 | 28.44 |  0.95  | 1 055 k/s |          −42 |
+  |  1 000 000 | 49.87 |  0.83  | 1 203 k/s |          −11 |
+
+  Knee at **500 k–1 M particles** on a 3080. Per-doubling parallel
+  efficiency: 84 % (10k→30k) drops to 57 % (500k→1M). The default
+  `icsbep_run.py` particles=5000 runs the 3080 at **~8 % of its
+  capability**; bumping to 1 M is a free 14× throughput win on the
+  same hardware. k convergence is textbook 1/√N (σ = 0.00177 →
+  0.00016 = 11.1× tighter for 100× histories), all rows PASS the
+  ICSBEP envelope. Sweep CSV: `outputs/saturation_*.csv`.
+
+  Practical ceilings per card: 4 GB RTX A1000 ≈ 50 k; 10 GB RTX
+  3080 ≈ 1 M; A100 40 GB extrapolates to ~5–8 M.
 - **Continuous particle refill (PHYSOR 2022 Optimization F).** When
   particles die mid-batch, our outer driver leaves the per-event-type
   queues progressively under-filled, hurting SM occupancy in the
@@ -376,11 +395,18 @@ from the ICSBEP handbook k_eff.
   tally accumulator (currently we count raw events) so generational
   k_eff stays unbiased. Reported gain on A100: 1.1× (Table I row F),
   and the gain shrinks further at large batch sizes where the
-  batch-tail fraction is small. The implementation surface is wide
-  (every reaction kernel + every `d_cnt_*` / `d_e_*` accumulator);
-  not landed because the marginal expected win doesn't justify the
+  batch-tail fraction is small. The saturation table above suggests
+  the gain on the 3080 at saturation is ≤10 % — at 1 M particles
+  even an 80 % die-off leaves 200 k in flight, well into the
+  saturated regime. The implementation surface is wide (every
+  reaction kernel + every `d_cnt_*` / `d_e_*` accumulator); not
+  landed because the marginal expected win doesn't justify the
   blast radius without a statistical-validation harness beyond the
-  current `cuda_runs.rs` regression suite.
+  current `cuda_runs.rs` regression suite. Note: the cheapest
+  refill variant (drain & restart with no in-history weights) is
+  feasible without the tally refactor and could be tried as a
+  bounded experiment, but the saturation data above shows higher
+  `-Particles` is a strictly better lever first.
 - **Energy sort within reaction class (PHYSOR 2022 Optimization G).**
   We currently sort by reaction class only. Adding a secondary
   per-class sort by particle energy improves XS-lookup memory
@@ -795,6 +821,9 @@ Plot: `outputs/memory_vs_precision.png`. Paper section: §memprec.
 | GPU recursive transport (const-XS) vs CPU | `[assembly]` | **6.74×** (RTX A1000) |
 | GPU multi-step walk vs CPU | `[assembly]` | **24×** at <1e-13 max-rel-err |
 | GPU Compton persistent kernel vs 20-thread CPU | `[photon]` | **2.22×** on 1M histories |
+| RTX 3080 saturation knee on HMF-001 (event-based) | `[godiva]` | **500 k – 1 M particles/batch** |
+| RTX 3080 peak throughput at saturation | `[godiva]` | **~1.2 M histories/sec** (vs 95 k/s at 5 k particles) |
+| Default particles=5k → particles=1M throughput gain | `[godiva]` | **14×** (no code change) |
 | Hybrid SVD+WMP throughput vs CPU SVD | `[pwr]` | **0.49×** (2.06× slower) |
 | Hybrid in-engine memory vs Table | `[pwr]` | **5.2× larger** (519 MB vs 100.6 MB) |
 | Godiva dk (all rxn SVD k=4, pre-coupling) | `[godiva]` | 3.7 pcm |

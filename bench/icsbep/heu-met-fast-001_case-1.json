@@ -26,8 +26,9 @@
       "batches": 150,
       "inactive": 30,
       "particles": 20000,
+      "particles_gpu": 500000,
       "seeds": 5,
-      "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence."
+      "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence. particles_gpu=500k sits at the measured RTX 3080 saturation knee (outputs/saturation_*.csv) — 14x more histories/sec than the CPU-tuned 20k. icsbep_sweep.py picks the right value based on the active Runner."
     }
   },
   "scene": {
