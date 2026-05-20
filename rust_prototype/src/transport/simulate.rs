@@ -49,6 +49,19 @@ pub struct SimConfig {
     pub disable_delayed_neutrons: bool,
     /// `None` → infinite-medium URR.
     pub urr_equivalence: Option<crate::transport::urr_equivalence::UrrEquivalence>,
+    /// **GPU-only.** PHYSOR 2022 Optimization F — continuous particle
+    /// refill. When `Some(factor)`, the CUDA runner builds a source
+    /// bank of `particles_per_batch * factor` particles per batch and
+    /// uses the overflow to refill dead slots between event-pipeline
+    /// steps. `total_histories` reported by the batch is the actual
+    /// count consumed from the (oversampled) bank. `None` (default)
+    /// preserves the historical behaviour.
+    ///
+    /// On the RTX 3080 saturation curve the kernel already runs at
+    /// peak around 1 M particles, so a useful factor is hardware-
+    /// dependent. The CPU path ignores this — refill is meaningless
+    /// when rayon threads already saturate at 5 k particles.
+    pub gpu_refill_pool_factor: Option<f64>,
 }
 
 /// Implicit-capture + Russian roulette. OpenMC defaults
@@ -85,6 +98,7 @@ impl Default for SimConfig {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         }
     }
 }
@@ -2869,6 +2883,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
 
         let (results, k_final) =
@@ -2999,6 +3014,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
         let (results, _k) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs_provider);
 
@@ -3185,6 +3201,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
         let config1 = SimConfig {
             batches: 5,
@@ -3201,6 +3218,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
 
         let (r0, _) = run_eigenvalue(&config0, &surfaces, &cells, &materials, &xs);
@@ -3320,6 +3338,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
         let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
 
@@ -3379,6 +3398,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
         let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
 
@@ -3418,6 +3438,7 @@ mod tests {
             weight_window: None,
             disable_delayed_neutrons: false,
             urr_equivalence: None,
+            gpu_refill_pool_factor: None,
         };
         let (results, _) = run_eigenvalue(&config, &surfaces, &cells, &materials, &xs);
 

@@ -17,6 +17,8 @@
 //! material from a name-derived palette. Pan / zoom / close via the
 //! same controls `pwr_assembly --preview` uses.
 
+#![allow(dead_code)]
+
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};

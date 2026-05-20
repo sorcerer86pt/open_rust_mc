@@ -362,26 +362,45 @@ struct PySettings {
     particles: u32,
     #[pyo3(get, set)]
     seed: u64,
+    /// GPU-only — PHYSOR 2022 Optimization F. Source bank size becomes
+    /// `particles * gpu_refill_pool_factor` per batch; the overflow
+    /// refills dead slots between event steps. `None` (default) leaves
+    /// the existing behaviour untouched. Ignored on the CPU runner.
+    #[pyo3(get, set)]
+    gpu_refill_pool_factor: Option<f64>,
 }
 
 #[pymethods]
 impl PySettings {
     #[new]
-    #[pyo3(signature = (batches=50, inactive=10, particles=5000, seed=1))]
-    fn new(batches: u32, inactive: u32, particles: u32, seed: u64) -> Self {
+    #[pyo3(signature = (batches=50, inactive=10, particles=5000, seed=1, gpu_refill_pool_factor=None))]
+    fn new(
+        batches: u32,
+        inactive: u32,
+        particles: u32,
+        seed: u64,
+        gpu_refill_pool_factor: Option<f64>,
+    ) -> Self {
         Self {
             batches,
             inactive,
             particles,
             seed,
+            gpu_refill_pool_factor,
         }
     }
 
     fn __repr__(&self) -> String {
-        format!(
-            "<Settings batches={} inactive={} particles={} seed={}>",
-            self.batches, self.inactive, self.particles, self.seed
-        )
+        match self.gpu_refill_pool_factor {
+            Some(f) => format!(
+                "<Settings batches={} inactive={} particles={} seed={} gpu_refill_pool_factor={:.2}>",
+                self.batches, self.inactive, self.particles, self.seed, f
+            ),
+            None => format!(
+                "<Settings batches={} inactive={} particles={} seed={}>",
+                self.batches, self.inactive, self.particles, self.seed
+            ),
+        }
     }
 }
 
@@ -1274,6 +1293,7 @@ fn run_gamma_heating(
         weight_window: None,
         disable_delayed_neutrons: false,
         urr_equivalence: None,
+        gpu_refill_pool_factor: None,
     };
     let t_neu = std::time::Instant::now();
     let (batch_results, k_running) = py.allow_threads(|| {
@@ -1856,6 +1876,7 @@ fn run_gpu_eigenvalue(
         fis_capacity: limits.fis_capacity(n),
         initial_source: init_src,
         buffers: std::cell::RefCell::new(None),
+        refill: std::cell::RefCell::new(None),
     };
 
     let _ = py;
@@ -2092,6 +2113,7 @@ fn run_eigenvalue(
         weight_window: None,
         disable_delayed_neutrons: false,
         urr_equivalence: None,
+        gpu_refill_pool_factor: settings.gpu_refill_pool_factor,
     };
     let t_sim_start = std::time::Instant::now();
     let (batch_results, _k_running, xs_memory_bytes) = match scene.runner {
@@ -2887,6 +2909,7 @@ fn run_icsbep_case(
         weight_window: None,
         disable_delayed_neutrons: false,
         urr_equivalence: None,
+        gpu_refill_pool_factor: settings.gpu_refill_pool_factor,
     };
 
     // Some ICSBEP cases (degenerate world AABB, missing fissile region,
@@ -3127,6 +3150,7 @@ fn run_gpu_icsbep(
         fis_capacity: limits.fis_capacity(n),
         initial_source: init_src,
         buffers: std::cell::RefCell::new(None),
+        refill: std::cell::RefCell::new(None),
     };
 
     let outcome = runner.run(config);

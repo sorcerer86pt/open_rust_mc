@@ -5,7 +5,6 @@
 use std::path::PathBuf;
 
 use open_rust_mc::geometry::{Vec3, scene_io};
-use open_rust_mc::geometry::cell::CellFill;
 use open_rust_mc::geometry::ray::find_cell_recursive;
 
 fn main() {

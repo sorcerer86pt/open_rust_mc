@@ -80,6 +80,15 @@ param(
     [int]$Inactive = 20,
     [int]$Seed = 1,
     [int]$Rank = 15,
+    # PHYSOR 2022 Optimization F — continuous particle refill. When > 1.0,
+    # the GPU runner builds a source bank of `Particles * RefillFactor`
+    # per batch and uses the overflow to refill dead slots between event
+    # steps. Default 0 means "use the engine default" (None on the Rust
+    # side -> disabled). Hardware-dependent: A1000 sees no benefit
+    # (saturates at 5k particles); 3080 is at saturation around 1M but
+    # the batch-tail still under-occupies; A100/H100 likely benefit
+    # most. CPU runner ignores this entirely.
+    [double]$RefillFactor = 0.0,
     [switch]$Ncu,
     [string]$NcuKernel = 'gr_trace_and_sample',
     [string]$OutputBase = 'nnuc_scaling'
@@ -147,6 +156,8 @@ seed = int(sys.argv[5])
 rank = int(sys.argv[6])
 case_root = Path(sys.argv[7])
 data_dir = Path(sys.argv[8])
+refill_factor_raw = float(sys.argv[9]) if len(sys.argv) > 9 else 0.0
+refill_factor = refill_factor_raw if refill_factor_raw > 1.0 else None
 
 case_json = case_root / f"{case_stem}.json"
 if not case_json.exists():
@@ -156,7 +167,14 @@ if not data_dir.exists():
     print(f"data dir not found: {data_dir}", file=sys.stderr)
     sys.exit(2)
 
-settings = Settings(batches=batches, inactive=inactive, particles=particles, seed=seed)
+settings = Settings(
+    batches=batches,
+    inactive=inactive,
+    particles=particles,
+    seed=seed,
+    gpu_refill_pool_factor=refill_factor,
+)
+print(f"  settings      : {settings!r}")
 result = run_icsbep_case(
     case_json=case_json,
     data_dir=data_dir,
@@ -217,7 +235,7 @@ function Invoke-Case {
     Write-Host ""
     Write-Host ("== {0} (max_n_nuc={1}, total={2}, n_mats={3}) ==" -f $Case, $nnuc.max, $nnuc.total, $nnuc.n_mats)
 
-    $pyArgs = @($tempHarness, $Case, $Batches, $Inactive, $Particles, $Seed, $Rank, $caseRoot, $dataDir)
+    $pyArgs = @($tempHarness, $Case, $Batches, $Inactive, $Particles, $Seed, $Rank, $caseRoot, $dataDir, $RefillFactor)
 
     $t0 = Get-Date
     if ($UseNcu) {

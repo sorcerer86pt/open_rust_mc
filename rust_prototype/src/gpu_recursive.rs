@@ -2336,10 +2336,43 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_fis_in_sq);
                 unsafe { launch.launch(cfg_n(c_fis as u32)).map_err(|e| e.to_string())?; }
             }
-            // Refill the dead slots before the next outer iteration so
-            // gr_trace_and_sample sees a full grid. Self-gates on
-            // alive[tid] == 0 per particle — no host-side sync needed.
+            if c_multi > 0 {
+                let mut launch = stream.launch_builder(&self.k_eb_multi);
+                launch
+                    .arg(&buffers.d_params)
+                    .arg(&buffers.d_type_class_total)
+                    .arg(&buffers.d_type_class_offsets)
+                    .arg(&buffers.d_sorted_idx)
+                    .arg(&buffers.d_xs)
+                    .arg(&buffers.d_ys)
+                    .arg(&buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&buffers.d_event_type)
+                    .arg(&buffers.d_event_hit_nuc)
+                    .arg(&mut buffers.d_fis_x)
+                    .arg(&mut buffers.d_fis_y)
+                    .arg(&mut buffers.d_fis_z)
+                    .arg(&mut buffers.d_fis_e)
+                    .arg(&mut buffers.d_fis_w)
+                    .arg(&mut buffers.d_fis_count)
+                    .arg(&max_fis_i);
+                unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
+            }
+
             // PHYSOR 2022 Optimization F (opt-in via the `refill` arg).
+            // Must launch AFTER all event kernels for this step — the
+            // event kernels (fission/multi) read d_event_type[tid] for
+            // particles that the partition picked up earlier. Refilling
+            // a slot mid-step would let gr_multi_event overwrite the
+            // fresh particle's energy/dir with stale n2n/n3n kinematics
+            // and inject a -7000 pcm bias on Godiva (measured here on
+            // the A1000 before the launch was relocated). Refill self-
+            // gates on alive[tid] == 0 per particle.
             if let Some(refill) = refill.as_deref_mut() {
                 let refill_cap_i = refill.capacity as i32;
                 let mut launch = stream.launch_builder(&self.k_eb_refill_dead);
@@ -2417,34 +2450,6 @@ impl GpuRecursiveContext {
                     launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
                 }
             }
-
-            if c_multi > 0 {
-                let mut launch = stream.launch_builder(&self.k_eb_multi);
-                launch
-                    .arg(&buffers.d_params)
-                    .arg(&buffers.d_type_class_total)
-                    .arg(&buffers.d_type_class_offsets)
-                    .arg(&buffers.d_sorted_idx)
-                    .arg(&buffers.d_xs)
-                    .arg(&buffers.d_ys)
-                    .arg(&buffers.d_zs)
-                    .arg(&mut buffers.d_dxs)
-                    .arg(&mut buffers.d_dys)
-                    .arg(&mut buffers.d_dzs)
-                    .arg(&mut buffers.d_e)
-                    .arg(&mut buffers.d_rng_state)
-                    .arg(&mut buffers.d_rng_inc)
-                    .arg(&buffers.d_event_type)
-                    .arg(&buffers.d_event_hit_nuc)
-                    .arg(&mut buffers.d_fis_x)
-                    .arg(&mut buffers.d_fis_y)
-                    .arg(&mut buffers.d_fis_z)
-                    .arg(&mut buffers.d_fis_e)
-                    .arg(&mut buffers.d_fis_w)
-                    .arg(&mut buffers.d_fis_count)
-                    .arg(&max_fis_i);
-                unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
-            }
         }
 
         let fis_count =
@@ -2474,7 +2479,17 @@ impl GpuRecursiveContext {
         let e_inel_in_sq = stream.clone_dtoh(&buffers.d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
         let q_inel = stream.clone_dtoh(&buffers.d_q_inel).map_err(|e| e.to_string())?[0];
 
-        let k_eff = fission_bank.len() as f64 / n as f64;
+        // k_eff = fission_bank.len() / total_histories. When refill is
+        // active, total_histories = n + refilled_count (host reads the
+        // device-side counter after the event loop). When refill is
+        // off, refilled = 0 and the denominator falls back to n.
+        let refilled = if let Some(r) = refill.as_deref() {
+            r.read_refilled_count(stream)?
+        } else {
+            0
+        };
+        let total_histories = n + refilled;
+        let k_eff = fission_bank.len() as f64 / total_histories as f64;
         Ok(RecursiveTransportBatch {
             fission_bank,
             n_collisions: cnt_coll,
