@@ -67,7 +67,19 @@ param(
         'pu-sol-therm-009_case-1',   # ~67 nuclides  (may OOM on <8 GB)
         'heu-met-fast-069_case-1'    # ~69 nuclides  (needs ~8 GB+ VRAM)
     ),
+    # Per-batch particle count. icsbep_run.py hardcodes 5000 which on
+    # a 3080 only fills 40 thread blocks (~7.5% achieved occupancy per
+    # ncu). Bumping this to ~35 000 is what actually saturates the SMs
+    # on a 10 GB card. Per-case benchmark.recommended_settings is NOT
+    # consulted — `run_icsbep_case` (the PyO3 binding) uses whatever
+    # `Settings(...)` it's handed verbatim; only `icsbep_sweep.py`
+    # (a different harness) reads recommended_settings. So this flag
+    # is the single source of truth for what gets uploaded.
     [int]$Particles = 5000,
+    [int]$Batches = 80,
+    [int]$Inactive = 20,
+    [int]$Seed = 1,
+    [int]$Rank = 15,
     [switch]$Ncu,
     [string]$NcuKernel = 'gr_trace_and_sample',
     [string]$OutputBase = 'nnuc_scaling'
@@ -86,7 +98,7 @@ $LogPath = Join-Path $OutputsDir ("{0}{1}.log" -f $OutputBase, $Suffix)
 
 'case,max_n_nuc,total_n_nuc,n_mats,sim_s,load_s,collisions,fissions,leaks,us_per_collision,us_per_particle,k_calc,k_sigma,delta_pcm,sigma_ratio,status' | Out-File -Encoding ascii $Csv
 "# n_nuc scaling sweep - $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" | Out-File -Encoding ascii $LogPath
-"# Particles/batch: $Particles" | Add-Content $LogPath
+"# Particles/batch: $Particles  Batches: $Batches  Inactive: $Inactive  Seed: $Seed  Rank: $Rank" | Add-Content $LogPath
 "# Ncu mode: $Ncu" | Add-Content $LogPath
 if ($Ncu) { "# Ncu kernel filter: $NcuKernel" | Add-Content $LogPath }
 
@@ -109,18 +121,71 @@ if ($Ncu) {
     Write-Host "Using ncu: $($ncuCmd.Source)"
 }
 
-$harness = Join-Path $RepoRoot 'rust_prototype\bindings\python\examples\icsbep_run.py'
-if (-not (Test-Path $harness)) {
-    Write-Error "ICSBEP harness not found: $harness"
-    exit 1
-}
-
 # Verify the GPU runner is available
 $probe = & $pythonExe -c "from open_rust_mc import Runner; print(Runner.GpuCuda.name())" 2>&1
 if ($LASTEXITCODE -ne 0) {
     Write-Warning "Could not import Runner.GpuCuda. Did you 'maturin develop --release --features cuda'?"
     Write-Warning "Probe output: $probe"
 }
+
+# Inline Python harness that calls run_icsbep_case directly with our
+# overridden Settings. Replaces icsbep_run.py so we control particles /
+# batches / inactive / seed. The PyO3 binding does NOT honour
+# `benchmark.recommended_settings` in the JSON; it uses Settings(...)
+# verbatim. Output format mirrors icsbep_run.py line-for-line so the
+# regex parsers in Invoke-Case work unchanged.
+$pyHarness = @'
+import sys
+from pathlib import Path
+from open_rust_mc import Runner, Settings, run_icsbep_case
+
+case_stem = sys.argv[1]
+batches = int(sys.argv[2])
+inactive = int(sys.argv[3])
+particles = int(sys.argv[4])
+seed = int(sys.argv[5])
+rank = int(sys.argv[6])
+case_root = Path(sys.argv[7])
+data_dir = Path(sys.argv[8])
+
+case_json = case_root / f"{case_stem}.json"
+if not case_json.exists():
+    print(f"case not found: {case_json}", file=sys.stderr)
+    sys.exit(2)
+if not data_dir.exists():
+    print(f"data dir not found: {data_dir}", file=sys.stderr)
+    sys.exit(2)
+
+settings = Settings(batches=batches, inactive=inactive, particles=particles, seed=seed)
+result = run_icsbep_case(
+    case_json=case_json,
+    data_dir=data_dir,
+    settings=settings,
+    runner=Runner.GpuCuda,
+    rank=rank,
+)
+
+verdict = "PASS" if result.passed else "FAIL"
+print(f"  case          : {result.case}")
+print(f"  runner        : gpu_cuda")
+print(f"  reference     : {result.ref_source}")
+print(f"  handbook      : k = {result.handbook_k:.5f} +/- {result.handbook_sigma:.5f}")
+print(f"  acceptance    : k = {result.k_ref:.5f} +/- {result.sigma_exp:.5f}   sigma_combined = {result.sigma_combined * 1e5:.0f} pcm")
+print(f"  k_calc        : {result.k_eff:.5f} +/- {result.k_sigma:.5f}")
+print(f"  delta         : {result.delta_pcm:+.0f} pcm   {result.sigma_ratio:.2f}-sigma   bound = +/-{result.bound_pcm:.0f} pcm   [{verdict}]")
+print(f"  timing        : load = {result.load_time_seconds:.2f} s, sim = {result.sim_time_seconds:.2f} s, total = {result.runtime_seconds:.2f} s")
+print(f"  active batches: {batches - inactive} (total {(batches - inactive) * particles:,} histories)")
+print(f"  tallies       : coll = {result.total_collisions:,}, fis = {result.total_fissions:,}, leak = {result.total_leakage:,}")
+'@
+
+$caseRoot = Join-Path $RepoRoot 'bench\icsbep'
+$dataDir  = Join-Path $RepoRoot 'data\endfb-vii.1-hdf5\neutron'
+
+# Write the harness to a temp file so ncu can launch python <file>
+# instead of python -c "..." (ncu's -c parsing with the quoting
+# required for the inline string is fragile across pwsh versions).
+$tempHarness = Join-Path ([System.IO.Path]::GetTempPath()) 'nnuc_harness.py'
+Set-Content -Path $tempHarness -Value $pyHarness -Encoding ascii
 
 function Get-CaseNNuc {
     param([string]$JsonPath)
@@ -152,11 +217,12 @@ function Invoke-Case {
     Write-Host ""
     Write-Host ("== {0} (max_n_nuc={1}, total={2}, n_mats={3}) ==" -f $Case, $nnuc.max, $nnuc.total, $nnuc.n_mats)
 
+    $pyArgs = @($tempHarness, $Case, $Batches, $Inactive, $Particles, $Seed, $Rank, $caseRoot, $dataDir)
+
     $t0 = Get-Date
     if ($UseNcu) {
         # ncu wraps the python process. --target-processes all so child
-        # processes spawned by maturin/PyO3 are also profiled. --csv
-        # off because we want the kernel-level breakdown plain-text.
+        # processes spawned by maturin/PyO3 are also profiled.
         $ncuRep = Join-Path $OutputsDir "$Case.ncu-rep"
         $ncuTxt = Join-Path $OutputsDir "$Case`_ncu.txt"
         $raw = & ncu `
@@ -169,13 +235,12 @@ function Invoke-Case {
             --section Occupancy `
             --section WarpStateStats `
             -f -o $ncuRep `
-            $pythonExe $harness $Case gpu 2>&1 | Out-String
-        # Also dump a text-mode summary
+            $pythonExe @pyArgs 2>&1 | Out-String
         & ncu --import $ncuRep --csv 2>&1 | Out-File -Encoding ascii $ncuTxt
         Write-Host "  ncu report: $ncuRep"
         Write-Host "  ncu text:   $ncuTxt"
     } else {
-        $raw = & $pythonExe $harness $Case gpu 2>&1 | Out-String
+        $raw = & $pythonExe @pyArgs 2>&1 | Out-String
     }
     $wall = (Get-Date) - $t0
     Write-Host ("  Wall: {0:N1} s" -f $wall.TotalSeconds)
@@ -237,9 +302,8 @@ function Invoke-Case {
     $usPerColl = if ($collN -gt 0 -and -not [double]::IsNaN($simS)) {
         & $fmt ($simS * 1e6 / $collN) 'F3'
     } else { 'NaN' }
-    # Use total active histories = ($Particles * active_batches). icsbep_run.py
-    # defaults to 80 batches with 20 inactive -> 60 active.
-    $active = $Particles * 60
+    # Total active histories = $Particles * (Batches - Inactive).
+    $active = $Particles * ($Batches - $Inactive)
     $usPerP = if ($active -gt 0 -and -not [double]::IsNaN($simS)) {
         & $fmt ($simS * 1e6 / $active) 'F2'
     } else { 'NaN' }
