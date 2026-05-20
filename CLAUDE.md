@@ -683,18 +683,30 @@ Neutron k-eigenvalue:
 > diagnostics would be the right replacement once we have a clear
 > menu of common debugging needs; collapsing them avoids re-paying
 > the per-binary build / link cost.
-- `preview_scene` (cargo `--features preview`) — interactive XY
-  cross-section viewer for any scene JSON. Walks `bench/icsbep/`
-  upward from CWD so case names like `pwr_assembly_17x17` work
-  without explicit paths. Mirrors `pwr_assembly --preview` plumbing.
-  Headless PNG / PPM output via `--png-out` / `--ppm-out` (no preview
-  feature required). Lattice rendering verified end-to-end:
-  pwr_assembly_17x17 + leu-comp-therm-008 zoom both resolve pin
-  cylinders per-element (no "stretched pin" — the historical bug
-  was already fixed by the lattice-descent rework). Regression test
-  in `tests/preview_lattice_descent.rs` probes
-  `find_cell_recursive` at three distinct lattice elements + at
-  pin-centre vs pin-edge to catch any future descent collapse.
+- `preview_scene` — XY cross-section viewer for any scene JSON.
+  Walks `bench/icsbep/` upward from CWD so case names like
+  `pwr_assembly_17x17` work without explicit paths. Three modes:
+    * **Interactive window** (`cargo --features preview`, default):
+      scroll-wheel zoom around the cursor (Google Maps semantics —
+      world point under the cursor stays put through the zoom),
+      right-click + drag pan, window resize re-zooms keeping world
+      bounds constant. R = reset viewport, L = toggle legend,
+      Esc = quit. Cursor-centered zoom + drag-pan are local
+      changes vs upstream `rust_mc_sim::preview::show_window`
+      which only supports centre-zoom.
+    * **Headless PNG** (`--png-out <PATH>`): single static render,
+      no `preview` feature required. `--resolution` controls pixel
+      count; 4000×4000 gives plenty of detail for any image viewer
+      to zoom on.
+    * **Headless PPM** (`--ppm-out <PATH>`): raw RGB fallback for
+      tooling that needs uncompressed pixels.
+  Lattice rendering verified end-to-end: pwr_assembly_17x17 +
+  leu-comp-therm-008 zoom both resolve pin cylinders per-element
+  (no "stretched pin" — the historical bug was already fixed by the
+  lattice-descent rework). Regression test in
+  `tests/preview_lattice_descent.rs` probes `find_cell_recursive`
+  at three distinct lattice elements + at pin-centre vs pin-edge to
+  catch any future descent collapse.
 
 ICSBEP harness (Python, via `bindings/python/examples/`):
 - `icsbep_run.py <case> {cpu|gpu}` — single-case run with the
