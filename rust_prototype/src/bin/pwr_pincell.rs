@@ -342,6 +342,7 @@ fn run_multi_seed<XS: XsProvider>(
             disable_delayed_neutrons: false,
             urr_equivalence: None,
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
         let t_calib = Instant::now();
         let calib_runner = CpuRunner {
@@ -454,6 +455,7 @@ fn run_multi_seed<XS: XsProvider>(
             disable_delayed_neutrons: args.disable_delayed_neutrons,
             urr_equivalence: urr_eq_cfg.clone(),
             gpu_refill_pool_factor: None,
+            gpu_auto_refill: false,
         };
 
         if args.seeds > 1 {

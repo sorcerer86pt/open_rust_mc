@@ -177,7 +177,44 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
         // refills dead slots between event steps until the bank drains.
         // `f = 1.0` is equivalent to disabled (no overflow). `n_overflow`
         // is the per-batch refill capacity.
-        let refill_factor = config.gpu_refill_pool_factor.unwrap_or(1.0).max(1.0);
+        //
+        // `gpu_auto_refill = true` triggers the device-attribute-driven
+        // recommendation in `gpu_recursive::recommend_refill_factor`
+        // when the user didn't pass an explicit factor. The log line
+        // makes the auto-pick visible — silently changing what the
+        // user asked for would be hostile, so the recommendation is
+        // always announced.
+        let resolved_refill: Option<f64> = match config.gpu_refill_pool_factor {
+            Some(f) => Some(f),
+            None if config.gpu_auto_refill => {
+                let picked = crate::gpu_recursive::recommend_refill_factor(
+                    &self.recursive.ctx_ref(),
+                    &self.recursive.k_eb_trace_and_sample,
+                    n,
+                    128,
+                );
+                match picked {
+                    Some(f) => {
+                        eprintln!(
+                            "  GPU auto-refill: picked factor={:.2} for particles_per_batch={}",
+                            f, n
+                        );
+                        Some(f)
+                    }
+                    None => {
+                        eprintln!(
+                            "  GPU auto-refill: no recommendation for particles_per_batch={} \
+                             (workload is at saturation or too under-occupied — \
+                              raise -Particles or accept no-refill)",
+                            n
+                        );
+                        None
+                    }
+                }
+            }
+            None => None,
+        };
+        let refill_factor = resolved_refill.unwrap_or(1.0).max(1.0);
         let total_bank = ((n as f64) * refill_factor).round() as usize;
         let n_overflow = total_bank.saturating_sub(n);
         let use_refill = n_overflow > 0;
