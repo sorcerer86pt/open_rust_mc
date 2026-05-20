@@ -1,0 +1,47 @@
+┌─ open_rust_mc — hardware profile ─
+│ RAM 31.7 GB, 14p/20l cores, L1 288 KB / L2 1280 KB / L3 24576 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 20 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 23.8 GB (75%× detected RAM).
+│ GPU bundle cache budget: 3.0 GB (75% of 4.0 GB VRAM).
+└──
+  Thermal: c_H_in_H2O  nuclides=[]  energy_max=3.75 eV  AWR=0.999
+  Temperatures: ["294K", "350K", "400K", "450K", "500K", "550K", "600K", "650K", "800K"]
+    Continuous: 106 inc energies, 49101 E_out pts, 785616 mu pts
+    294K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47844 E_out pts, 765504 mu pts
+    350K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 46454 E_out pts, 743264 mu pts
+    400K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47050 E_out pts, 752800 mu pts
+    450K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 47457 E_out pts, 759312 mu pts
+    500K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48400 E_out pts, 774400 mu pts
+    550K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 48212 E_out pts, 771392 mu pts
+    600K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 50176 E_out pts, 802816 mu pts
+    650K inelastic: 106 energies, type=incoherent_inelastic
+    Continuous: 106 inc energies, 53429 E_out pts, 854864 mu pts
+    800K inelastic: 106 energies, type=incoherent_inelastic
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 7): 106 inc energies, 49101 E_out pts, 785616 mu pts
+  GPU S(α,β) slot 1 (nuc 7): 106 inc energies, 47844 E_out pts, 765504 mu pts
+  GPU S(α,β) slot 2 (nuc 7): 106 inc energies, 46454 E_out pts, 743264 mu pts
+  GPU S(α,β) slot 3 (nuc 7): 106 inc energies, 47050 E_out pts, 752800 mu pts
+  GPU S(α,β) slot 4 (nuc 7): 106 inc energies, 47457 E_out pts, 759312 mu pts
+  GPU S(α,β) slot 5 (nuc 7): 106 inc energies, 48400 E_out pts, 774400 mu pts
+  GPU S(α,β) slot 6 (nuc 7): 106 inc energies, 48212 E_out pts, 771392 mu pts
+  GPU S(α,β) slot 7 (nuc 7): 106 inc energies, 50176 E_out pts, 802816 mu pts
+  GPU S(α,β) slot 8 (nuc 7): 106 inc energies, 53429 E_out pts, 854864 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 38 nuclides covered)
+  case          : heu-sol-therm-001_case-1
+  runner        : gpu_cuda
+  reference     : k_eff_reference (ICSBEP handbook)
+  handbook      : k = 1.00040 +/- 0.00600
+  acceptance    : k = 1.00040 +/- 0.00600   sigma_combined = 637 pcm
+  k_calc        : 0.99980 +/- 0.00213
+  delta         : -60 pcm   0.09-sigma   bound = +/-1273 pcm   [PASS]
+  timing        : load = 4.48 s, sim = 31.52 s, total = 36.00 s
+  active batches: 60 (total 300,000 histories)
+  tallies       : coll = 5,834,257, fis = 122,983, leak = 133,919
