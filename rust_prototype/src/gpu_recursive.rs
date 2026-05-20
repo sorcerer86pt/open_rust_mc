@@ -401,6 +401,14 @@ const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 const TRANSPORT_RECURSIVE: &str = include_str!("../gpu/cuda/transport_recursive.cu");
 const TRANSPORT_EVENT_BASED: &str = include_str!("../gpu/cuda/transport_event_based.cu");
 
+/// Event-based reaction class count — mirrors `EV_TYPE_COUNT` in
+/// `transport_event_based.cu` (elastic, inelastic, fission, n2n,
+/// n3n). Used by `TransportBuffers` to size the partition arrays.
+pub const EV_TYPE_COUNT: usize = 5;
+/// Energy-bin count in the 3-D partition key. Mirrors `EB_N_EBINS`
+/// in `transport_event_based.cu`.
+pub const EB_N_EBINS: usize = 16;
+
 fn assemble_kernel_source() -> String {
     // NVRTC has no concept of source-include paths — concatenate the
     // device helpers and the kernel entries into a single string and
@@ -1558,19 +1566,22 @@ pub struct TransportBuffers {
     pub d_event_kT: CudaSlice<f64>,
     pub d_event_hit_Ni: CudaSlice<f64>,
     pub d_event_urr_xi: CudaSlice<f64>,
-    /// Energy bin (0..EB_N_EBINS=16) emitted per event by
-    /// `gr_trace_and_sample`, read by `gr_partition` to compute the
-    /// 2-D (class, energy_bin) write slot. Implements PHYSOR 2022
-    /// Optimization G — particles in the same (class, bin) end up
-    /// adjacent in d_sorted_idx so reaction kernels see energy-
-    /// clustered workloads.
+    /// Packed sub-slot (`hit_nuc_local * EB_N_EBINS + ebin`) emitted
+    /// per event by `gr_trace_and_sample`, read by `gr_partition` to
+    /// compute the 3-D (class, nuc_local, energy_bin) write slot.
+    /// Extends PHYSOR 2022 Optimization G — particles in the same
+    /// (class, nuc_local, ebin) end up adjacent in d_sorted_idx so
+    /// reaction kernels see nuclide-AND-energy-clustered workloads
+    /// (warps hit the same SVD basis + same energy region).
     pub d_event_ebin: CudaSlice<i32>,
-    /// Partitioning. 2-D layout: `d_type_count[class * 16 + bin]`
-    /// over EB_N_PART_BINS = 80 slots. `d_type_offsets[81]` is the
-    /// exclusive prefix sum. Per-class totals (for reaction-kernel
-    /// launch sizing) and per-class starting offsets live in
-    /// `d_type_class_total[5]` / `d_type_class_offsets[5]`. Scatter
-    /// cursor is per-(class,bin) too.
+    /// Partitioning. 3-D layout:
+    /// `d_type_count[(class * MAX_NUC_PER_MAT + nuc_local) * 16 + bin]`
+    /// over EB_N_PART_BINS = 5 × 128 × 16 = 10 240 slots (40 KB).
+    /// `d_type_offsets[10241]` is the exclusive prefix sum. Per-class
+    /// totals (for reaction-kernel launch sizing) and per-class
+    /// starting offsets live in `d_type_class_total[5]` /
+    /// `d_type_class_offsets[5]`. Scatter cursor mirrors the count
+    /// layout.
     pub d_type_count: CudaSlice<i32>,
     pub d_type_offsets: CudaSlice<i32>,
     pub d_type_class_total: CudaSlice<i32>,
@@ -1662,13 +1673,22 @@ impl TransportBuffers {
             d_event_kT: mk_d(n)?,
             d_event_hit_Ni: mk_d(n)?,
             d_event_urr_xi: mk_d(n)?,
-            // 2-D partition: 5 classes × 16 energy bins = 80 slots.
+            // 3-D partition: 5 classes × MAX_NUCLIDES_PER_MATERIAL
+            // × 16 energy bins = 10 240 slots (40 KB). Sub-slot
+            // (nuc_local * 16 + ebin) is packed into d_event_ebin so
+            // the kernel signatures don't change.
             d_event_ebin: mk_i(n)?,
-            d_type_count: mk_i(80)?,
-            d_type_offsets: mk_i(81)?,
-            d_type_class_total: mk_i(5)?,
-            d_type_class_offsets: mk_i(5)?,
-            d_type_scatter: mk_i(80)?,
+            d_type_count: mk_i(
+                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
+            )?,
+            d_type_offsets: mk_i(
+                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS + 1,
+            )?,
+            d_type_class_total: mk_i(EV_TYPE_COUNT)?,
+            d_type_class_offsets: mk_i(EV_TYPE_COUNT)?,
+            d_type_scatter: mk_i(
+                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
+            )?,
             d_sorted_idx: mk_i(n)?,
             d_type_total: mk_i(1)?,
         })

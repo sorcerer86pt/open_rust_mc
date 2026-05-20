@@ -45,14 +45,25 @@
 // Energy binning for the partition (PHYSOR 2022 Optimization G —
 // sort by energy within each reaction class for XS-lookup memory
 // locality). 16 log-spaced bins covering the typical ENDF range
-// [1e-5 eV, 2e7 eV]. Each (class, bin) slot is a separate atomic
-// counter, so adjacent threads in a reaction kernel access
-// neighbouring nuclide-XS energy regions and see L1/L2 reuse.
+// [1e-5 eV, 2e7 eV].
 //
-// Bonus on small GPUs: 80 hot atomic addresses instead of 5
-// reduces contention on the trace_and_sample emit path.
+// 3-D partition (this branch): (class, hit_nuc_local, energy_bin).
+// hit_nuc_local is the 0..n_nuc index of the sampled nuclide WITHIN
+// the material at the collision site. Sorting by this in addition to
+// energy makes a warp inside a reaction kernel hit the same nuclide
+// data block (SVD basis, angular CDF, ν̄ table) AND the same energy
+// region, instead of just the same energy region. The ncu profile
+// of the 2-D (class, ebin) partition on a 3080 showed ~3% memory
+// throughput at 50% compute — latency-bound on scattered per-nuclide
+// loads. The 3-D key targets that directly.
+//
+// Sub-slot index per particle = hit_nuc_local * EB_N_EBINS + ebin,
+// packed into the existing d_event_ebin array. EB_N_SUB_BINS =
+// MAX_NUC_PER_MAT * 16 = 2048 sub-slots per class; 5 classes →
+// EB_N_PART_BINS = 10240 atomic counter slots (40 KB).
 #define EB_N_EBINS     16
-#define EB_N_PART_BINS (EV_TYPE_COUNT * EB_N_EBINS)   // 80
+#define EB_N_SUB_BINS  (MAX_NUC_PER_MAT * EB_N_EBINS)   // 2048
+#define EB_N_PART_BINS (EV_TYPE_COUNT * EB_N_SUB_BINS)  // 10240
 
 // Log-axis: bin = floor(log10(E_eV / 1e-5) / EB_LOG_DECADES_PER_BIN)
 // EB_LOG_DECADES_PER_BIN = log10(2e7 / 1e-5) / 16 ≈ 0.7689
@@ -492,13 +503,17 @@ gr_trace_and_sample(
         kT_out = xs_cell_kT;
         Ni_out = Ni_hit;
         urr_xi_out = urr_xi;
-        // 2-D partition: bucket by (reaction class, energy bin) so
-        // particles in the same bucket end up adjacent in
-        // d_sorted_idx and the reaction kernels see energy-clustered
-        // workloads → improved XS-table cache reuse.
+        // 3-D partition: bucket by (reaction class, hit_nuc_local,
+        // energy_bin). hit_l is the within-material nuclide index
+        // (0..n_nuc-1) sampled above. Packing (nuc_local, ebin) into
+        // d_event_ebin keeps the kernel signatures unchanged — only
+        // the slot arithmetic moves to 3-D. Neighbouring threads in
+        // a reaction kernel now hit the same nuclide's SVD basis +
+        // same energy region.
         int ebin = eb_energy_bin(E);
-        d_event_ebin[tid] = ebin;
-        atomicAdd(&d_type_count[rxn * EB_N_EBINS + ebin], 1);
+        int sub_slot = hit_l * EB_N_EBINS + ebin;
+        d_event_ebin[tid] = sub_slot;
+        atomicAdd(&d_type_count[rxn * EB_N_SUB_BINS + sub_slot], 1);
         break;
     }
 
@@ -567,12 +582,18 @@ extern "C" __global__ void gr_scan_offsets(
     if (threadIdx.x != 0 || blockIdx.x != 0) return;
     int acc = 0;
     d_type_offsets[0] = 0;
+    // Outer: reaction class (5). Inner: (nuc_local, ebin) sub-slot
+    // (EB_N_SUB_BINS = MAX_NUC_PER_MAT * EB_N_EBINS = 2048). Single-
+    // thread serial scan over 10 240 slots ≈ 10 µs at 1 GHz — under
+    // 0.5 % of the typical 5 ms trace_and_sample step. If this grows
+    // into a real fraction (e.g. larger MAX_NUC_PER_MAT) the next
+    // step is a warp-shuffle scan or cub::DeviceScan::ExclusiveSum.
     #pragma unroll
     for (int c = 0; c < EV_TYPE_COUNT; ++c) {
         d_type_class_offsets[c] = acc;
         int class_acc = 0;
-        for (int b = 0; b < EB_N_EBINS; ++b) {
-            int slot = c * EB_N_EBINS + b;
+        for (int sb = 0; sb < EB_N_SUB_BINS; ++sb) {
+            int slot = c * EB_N_SUB_BINS + sb;
             d_type_scatter[slot] = 0;
             int v = d_type_count[slot];
             class_acc += v;
@@ -605,8 +626,10 @@ extern "C" __global__ void gr_partition(
     if (tid >= n_particles) return;
     int t = d_event_type[tid];
     if (t < 0 || !alive[tid]) return;
-    int b = d_event_ebin[tid];
-    int slot = t * EB_N_EBINS + b;
+    // d_event_ebin now carries the packed (nuc_local * EB_N_EBINS + ebin)
+    // sub-slot emitted by gr_trace_and_sample.
+    int sub = d_event_ebin[tid];
+    int slot = t * EB_N_SUB_BINS + sub;
     int pos = atomicAdd(&d_type_scatter[slot], 1);
     d_sorted_idx[d_type_offsets[slot] + pos] = tid;
 }
