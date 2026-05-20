@@ -238,6 +238,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                     self.sab_nuc_idx,
                     self.max_events_per_history,
                     self.fis_capacity,
+                    None,
                 )
                 .expect("transport_recursive_with_buffers failed");
 

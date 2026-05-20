@@ -347,6 +347,12 @@ pub struct GpuRecursiveContext {
     // particles by reaction type between geom steps so each reaction
     // kernel sees a single code path (no warp divergence).
     pub k_eb_init_stacks: CudaFunction,
+    /// PHYSOR 2022 Optimization F (continuous particle refill, opt-in).
+    /// Refills dead slots from a pending pool between event steps to
+    /// keep the kernel grid full through the batch tail. Always
+    /// loaded; only launched when the caller passes a `RefillBuffers`
+    /// to `transport_recursive_with_buffers`.
+    pub k_eb_refill_dead: CudaFunction,
     pub k_eb_trace_and_sample: CudaFunction,
     pub k_eb_scan_offsets: CudaFunction,
     pub k_eb_partition: CudaFunction,
@@ -536,6 +542,9 @@ impl GpuRecursiveContext {
         let k_eb_multi = module
             .load_function("gr_multi_event")
             .map_err(|e| format!("kernel load (gr_multi_event): {e}"))?;
+        let k_eb_refill_dead = module
+            .load_function("gr_refill_dead")
+            .map_err(|e| format!("kernel load (gr_refill_dead): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
@@ -702,6 +711,7 @@ impl GpuRecursiveContext {
             k_eb_inelastic,
             k_eb_fission,
             k_eb_multi,
+            k_eb_refill_dead,
             surf_type,
             surf_params,
             surf_bc,
@@ -1704,6 +1714,90 @@ impl TransportBuffers {
     }
 }
 
+/// Optional refill pool for PHYSOR 2022 Optimization F (continuous
+/// particle refill). When passed to `transport_recursive_with_buffers`,
+/// the outer event loop will keep dead slots topped up from this bank
+/// between geometry steps so the kernel grid stays full through the
+/// batch tail. Disabled by default — the standard transport call uses
+/// `None` and is identical to the historical path.
+///
+/// Sizing: `capacity` is the upper bound on the total number of
+/// histories this refill bank can spawn into the active slots. When
+/// the device-side atomic cursor reaches `capacity` the kernel stops
+/// refilling and the batch winds down naturally as the remaining
+/// active particles die.
+///
+/// Statistical model: no per-particle weights. Each refilled particle
+/// is a full unit-weight history. The batch's `total_histories` count
+/// becomes `initial_in_flight + refilled_count` (both readable by the
+/// host after the loop completes). k_eff = nu_bar * fissions /
+/// total_histories — same expression as today, just with the
+/// denominator inflated by the refill count.
+pub struct RefillBuffers {
+    pub d_refill_pos_x: CudaSlice<f64>,
+    pub d_refill_pos_y: CudaSlice<f64>,
+    pub d_refill_pos_z: CudaSlice<f64>,
+    pub d_refill_energy: CudaSlice<f64>,
+    pub d_refill_rng_state: CudaSlice<u64>,
+    pub d_refill_rng_inc: CudaSlice<u64>,
+    /// Atomic cursor — incremented per refilled slot. After the batch,
+    /// host reads `min(value, capacity)` to know how many additional
+    /// histories the bank fed.
+    pub d_next_refill_idx: CudaSlice<i32>,
+    /// Diagnostic counter — atomic ↑ on each successful refill. Equal
+    /// to `min(d_next_refill_idx, capacity)` minus refills whose
+    /// initial cell-find returned outside-geometry (leakage on spawn).
+    /// Tracked separately because cnt_leak already absorbs that case.
+    pub d_refilled_count: CudaSlice<i32>,
+    /// Upper bound on slots the bank can fill — host-side mirror of
+    /// the size of the refill arrays. Passed to the kernel as the
+    /// `refill_bank_size` arg.
+    pub capacity: usize,
+}
+
+impl RefillBuffers {
+    pub fn new(stream: &Arc<CudaStream>, capacity: usize) -> Result<Self, String> {
+        let mk_d = |len: usize| stream.alloc_zeros::<f64>(len).map_err(|e| e.to_string());
+        let mk_u = |len: usize| stream.alloc_zeros::<u64>(len).map_err(|e| e.to_string());
+        let mk_i = |len: usize| stream.alloc_zeros::<i32>(len).map_err(|e| e.to_string());
+        let cap = capacity.max(1);
+        Ok(Self {
+            d_refill_pos_x: mk_d(cap)?,
+            d_refill_pos_y: mk_d(cap)?,
+            d_refill_pos_z: mk_d(cap)?,
+            d_refill_energy: mk_d(cap)?,
+            d_refill_rng_state: mk_u(cap)?,
+            d_refill_rng_inc: mk_u(cap)?,
+            d_next_refill_idx: mk_i(1)?,
+            d_refilled_count: mk_i(1)?,
+            capacity: cap,
+        })
+    }
+
+    /// Reset the device cursors. Called by the host before each batch
+    /// that opts into refill. Does NOT re-upload the source bank —
+    /// the caller is responsible for filling the refill arrays before
+    /// calling `transport_recursive_with_buffers` with this struct.
+    pub fn reset(&mut self, stream: &Arc<CudaStream>) -> Result<(), String> {
+        stream
+            .memset_zeros(&mut self.d_next_refill_idx)
+            .map_err(|e| e.to_string())?;
+        stream
+            .memset_zeros(&mut self.d_refilled_count)
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Read the device-side refilled counter back to the host. Caller
+    /// uses this to bump `total_histories` for the batch.
+    pub fn read_refilled_count(&self, stream: &Arc<CudaStream>) -> Result<usize, String> {
+        let h = stream
+            .clone_dtoh(&self.d_refilled_count)
+            .map_err(|e| e.to_string())?;
+        Ok(h[0].max(0) as usize)
+    }
+}
+
 impl GpuRecursiveContext {
     /// Run one batch of full-physics neutron transport on the recursive
     /// geometry. Cross-section data is supplied via the
@@ -1780,12 +1874,23 @@ impl GpuRecursiveContext {
             sab_nuc_idx,
             max_events_per_history,
             fis_capacity,
+            None,
         )
     }
 
     /// Pooled-buffer entry point. `buffers` must be sized for the same
     /// `n = source_bank.len()` and `fis_capacity` as previous calls;
     /// build a new pool if either changes mid-case.
+    ///
+    /// `refill` enables PHYSOR 2022 Optimization F (continuous particle
+    /// refill). Pass `None` for the historical behaviour. When `Some`,
+    /// the caller must have already uploaded the refill source bank
+    /// into the `RefillBuffers` arrays and called `reset()` to zero the
+    /// device counters. The returned `RecursiveTransportBatch.cnt_coll`
+    /// and friends are summed across both initial-population and
+    /// refilled histories. Read the additional history count via
+    /// `RefillBuffers::read_refilled_count()` afterwards if you need to
+    /// bump `total_histories` for k_eff bookkeeping.
     #[allow(clippy::too_many_arguments, non_snake_case)]
     pub fn transport_recursive_with_buffers(
         &self,
@@ -1801,6 +1906,7 @@ impl GpuRecursiveContext {
         sab_nuc_idx: i32,
         max_events_per_history: i32,
         fis_capacity: usize,
+        refill: Option<&mut RefillBuffers>,
     ) -> Result<RecursiveTransportBatch, String> {
         let n = source_bank.len();
         if n == 0 {
@@ -1893,6 +1999,14 @@ impl GpuRecursiveContext {
         zero_f(&mut buffers.d_e_el_in_sq)?;
         zero_f(&mut buffers.d_e_inel_in_sq)?;
         zero_f(&mut buffers.d_q_inel)?;
+
+        // Reborrow `refill` so the event loop can keep using it across
+        // iterations without consuming the original Option. The `mut`
+        // is needed to let `as_deref_mut()` reborrow per iteration.
+        let mut refill = refill;
+        if let Some(r) = refill.as_deref_mut() {
+            r.reset(stream)?;
+        }
 
         // Packed params hold device pointers that change every time
         // nuc/mat/sab/wmp uploads change; can't cache between batches.
@@ -2222,6 +2336,88 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_fis_in_sq);
                 unsafe { launch.launch(cfg_n(c_fis as u32)).map_err(|e| e.to_string())?; }
             }
+            // Refill the dead slots before the next outer iteration so
+            // gr_trace_and_sample sees a full grid. Self-gates on
+            // alive[tid] == 0 per particle — no host-side sync needed.
+            // PHYSOR 2022 Optimization F (opt-in via the `refill` arg).
+            if let Some(refill) = refill.as_deref_mut() {
+                let refill_cap_i = refill.capacity as i32;
+                let mut launch = stream.launch_builder(&self.k_eb_refill_dead);
+                launch
+                    .arg(&n_i32)
+                    .arg(&mut refill.d_next_refill_idx)
+                    .arg(&refill_cap_i)
+                    .arg(&refill.d_refill_pos_x)
+                    .arg(&refill.d_refill_pos_y)
+                    .arg(&refill.d_refill_pos_z)
+                    .arg(&refill.d_refill_energy)
+                    .arg(&refill.d_refill_rng_state)
+                    .arg(&refill.d_refill_rng_inc)
+                    .arg(&mut buffers.d_xs)
+                    .arg(&mut buffers.d_ys)
+                    .arg(&mut buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&mut buffers.d_depth)
+                    .arg(&mut buffers.d_event_type)
+                    .arg(&mut buffers.d_event_ebin)
+                    .arg(&self.surf_type)
+                    .arg(&self.surf_params)
+                    .arg(&self.surf_bc)
+                    .arg(&n_surf)
+                    .arg(&self.cell_region_off)
+                    .arg(&self.cell_region_len)
+                    .arg(&self.cell_fill_type)
+                    .arg(&self.cell_fill_data)
+                    .arg(&self.cell_aabb_min)
+                    .arg(&self.cell_aabb_max)
+                    .arg(&self.region_op)
+                    .arg(&self.region_arg)
+                    .arg(&self.univ_cells_off)
+                    .arg(&self.univ_cells_len)
+                    .arg(&self.univ_surfaces_off)
+                    .arg(&self.univ_surfaces_len)
+                    .arg(&self.univ_cell_indices)
+                    .arg(&self.univ_surface_indices)
+                    .arg(&root)
+                    .arg(&self.lat_origin)
+                    .arg(&self.lat_pitch)
+                    .arg(&self.lat_shape)
+                    .arg(&self.lat_universes_off)
+                    .arg(&self.lat_universes)
+                    .arg(&n_lat)
+                    .arg(&self.hex_center)
+                    .arg(&self.hex_pitch_xy)
+                    .arg(&self.hex_pitch_z)
+                    .arg(&self.hex_n_rings)
+                    .arg(&self.hex_n_axial)
+                    .arg(&self.hex_orientation)
+                    .arg(&self.hex_universes_off)
+                    .arg(&self.hex_universes)
+                    .arg(&self.n_hex_lattices)
+                    .arg(&self.evals_scratch)
+                    .arg(&mut buffers.d_stack_universe)
+                    .arg(&mut buffers.d_stack_cell_idx)
+                    .arg(&mut buffers.d_stack_has_lattice)
+                    .arg(&mut buffers.d_stack_lattice_id)
+                    .arg(&mut buffers.d_stack_lat_ix)
+                    .arg(&mut buffers.d_stack_lat_iy)
+                    .arg(&mut buffers.d_stack_lat_iz)
+                    .arg(&mut buffers.d_stack_offx)
+                    .arg(&mut buffers.d_stack_offy)
+                    .arg(&mut buffers.d_stack_offz)
+                    .arg(&mut buffers.d_cnt_leak)
+                    .arg(&mut refill.d_refilled_count);
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
+            }
+
             if c_multi > 0 {
                 let mut launch = stream.launch_builder(&self.k_eb_multi);
                 launch

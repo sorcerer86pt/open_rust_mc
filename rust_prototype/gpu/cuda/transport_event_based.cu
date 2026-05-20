@@ -249,6 +249,150 @@ extern "C" __global__ void gr_init_stacks(
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// Kernel 1b: gr_refill_dead (PHYSOR 2022 Optimization F — continuous
+//             particle refill, opt-in via SimConfig::particle_refill_pool)
+//
+// Walks the alive[] array; for each dead slot, atomically claims a
+// fresh source entry from the pending refill bank, copies its state
+// into the slot, samples an isotropic direction, runs gr_find_cell to
+// build the coord stack, and flips alive[tid] back to 1. Dead slots
+// that find no cell are counted as leakage (same as gr_init_stacks)
+// and stay dead. When the refill bank is exhausted (claim >=
+// refill_bank_size) the slot stays dead — the batch naturally winds
+// down.
+//
+// Tally semantics: `cnt_leak` here counts ONLY the refilled-then-
+// killed-on-spawn (lost-source) population. Histories run per batch =
+// initial in_flight + (atomically observed) refilled_count when the
+// batch finishes. No per-particle weights; each refilled particle is
+// a full unit-weight history. k_eff at batch level uses
+// `nu_bar * fissions / total_histories_this_batch` as today — the
+// total_histories just gets bumped.
+// ═══════════════════════════════════════════════════════════════════════
+
+extern "C" __global__ void gr_refill_dead(
+    int n_particles,
+    // Refill source bank (pending pool — host pre-uploads these into
+    // separate device arrays disjoint from the active slots).
+    int* d_next_refill_idx,           // atomic cursor, init=0
+    int refill_bank_size,             // upper bound on how many refills
+    const double* refill_pos_x, const double* refill_pos_y, const double* refill_pos_z,
+    const double* refill_energy,
+    const unsigned long long* refill_rng_state,
+    const unsigned long long* refill_rng_inc,
+    // Active slots (in/out)
+    double* pos_x, double* pos_y, double* pos_z,
+    double* dir_x, double* dir_y, double* dir_z,
+    double* energy,
+    int* alive,
+    unsigned long long* rng_state, unsigned long long* rng_inc,
+    int* d_depth,
+    int* d_event_type, int* d_event_ebin,
+    // Geometry (same arg list as gr_init_stacks)
+    const int* surf_type, const double* surf_params, const int* surf_bc,
+    int n_surfaces,
+    const int* cell_region_off, const int* cell_region_len,
+    const int* cell_fill_type, const int* cell_fill_data,
+    const double* cell_aabb_min, const double* cell_aabb_max,
+    const int* region_op, const int* region_arg,
+    const int* univ_cells_off, const int* univ_cells_len,
+    const int* univ_surfaces_off, const int* univ_surfaces_len,
+    const int* univ_cell_indices, const int* univ_surface_indices,
+    int root_universe,
+    const double* lat_origin, const double* lat_pitch,
+    const int* lat_shape,
+    const int* lat_universes_off, const int* lat_universes,
+    int n_lattices,
+    const double* hex_center, const double* hex_pitch_xy,
+    const double* hex_pitch_z,
+    const int* hex_n_rings, const int* hex_n_axial,
+    const int* hex_orientation,
+    const int* hex_universes_off, const int* hex_universes,
+    int n_hex_lattices,
+    double* evals_scratch,
+    int* d_stack_universe, int* d_stack_cell_idx, int* d_stack_has_lattice,
+    int* d_stack_lattice_id, int* d_stack_lat_ix, int* d_stack_lat_iy, int* d_stack_lat_iz,
+    double* d_stack_offx, double* d_stack_offy, double* d_stack_offz,
+    int* cnt_leak,
+    int* refilled_count_out)            // diagnostic — atomic ↑ on success
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_particles) return;
+    if (alive[tid]) return;             // live slot — leave alone
+
+    // Claim a refill source index. Use unsigned compare so an
+    // exhausted-counter snapshot doesn't accidentally satisfy a
+    // signed-int range check.
+    int claim = atomicAdd(d_next_refill_idx, 1);
+    if (claim >= refill_bank_size) return;   // bank drained; stay dead
+
+    // Copy source state into the slot.
+    double px = refill_pos_x[claim];
+    double py = refill_pos_y[claim];
+    double pz = refill_pos_z[claim];
+    double E  = refill_energy[claim];
+    unsigned long long rs = refill_rng_state[claim];
+    unsigned long long ri = refill_rng_inc[claim] | 1ULL;
+
+    // Sample isotropic direction with the same convention the host
+    // uses for the initial source bank (transport_recursive_with_buffers
+    // applies an XOR mask + |1 to RNG state; mirror it here).
+    PcgState rng;
+    rng.state = rs ^ 0xA5A5A5A5A5A5A5A5ULL;
+    rng.inc   = ri;
+    double mu  = 2.0 * pcg_uniform(&rng) - 1.0;
+    double phi = 2.0 * PI * pcg_uniform(&rng);
+    double s_th = sqrt(fmax(0.0, 1.0 - mu * mu));
+    double dx = s_th * cos(phi);
+    double dy = s_th * sin(phi);
+    double dz = mu;
+
+    pos_x[tid] = px; pos_y[tid] = py; pos_z[tid] = pz;
+    dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
+    energy[tid] = E;
+    rng_state[tid] = rs;
+    rng_inc[tid]   = ri;
+    d_event_type[tid] = EV_NONE;
+    d_event_ebin[tid] = 0;
+
+    // Initialise coord stack — find the deepest cell at (px, py, pz).
+    GrGeometry g = eb_make_geom(
+        surf_type, surf_params, surf_bc, n_surfaces,
+        cell_region_off, cell_region_len, cell_fill_type, cell_fill_data,
+        cell_aabb_min, cell_aabb_max, region_op, region_arg,
+        univ_cells_off, univ_cells_len,
+        univ_surfaces_off, univ_surfaces_len,
+        univ_cell_indices, univ_surface_indices,
+        root_universe,
+        lat_origin, lat_pitch, lat_shape,
+        lat_universes_off, lat_universes, n_lattices,
+        hex_center, hex_pitch_xy, hex_pitch_z,
+        hex_n_rings, hex_n_axial, hex_orientation,
+        hex_universes_off, hex_universes, n_hex_lattices,
+        evals_scratch + tid * n_surfaces);
+
+    GrCoord stack[GR_MAX_DEPTH];
+    int depth = gr_find_cell(&g, px, py, pz, stack);
+    if (depth == 0) {
+        // Refilled particle is outside the geometry. Count it as a
+        // leakage history — it's a full unit-weight history that was
+        // consumed from the bank and immediately died.
+        d_depth[tid] = 0;
+        atomicAdd(cnt_leak, 1);
+        atomicAdd(refilled_count_out, 1);    // still counts as consumed
+        return;
+    }
+    eb_store_stack(tid, depth,
+        d_stack_universe, d_stack_cell_idx, d_stack_has_lattice,
+        d_stack_lattice_id, d_stack_lat_ix, d_stack_lat_iy, d_stack_lat_iz,
+        d_stack_offx, d_stack_offy, d_stack_offz,
+        n_particles, stack);
+    d_depth[tid] = depth;
+    alive[tid] = 1;
+    atomicAdd(refilled_count_out, 1);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Kernel 2: gr_trace_and_sample
 //
 // Per step. For each alive particle:
