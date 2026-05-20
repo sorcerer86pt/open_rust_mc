@@ -130,6 +130,21 @@ def ealf_for_case(case: str, overrides: dict[str, float]) -> float:
     return CATEGORY_EALF_EV.get(cat, CATEGORY_EALF_EV["unknown"])
 
 
+def ref_marker(ref_source: str) -> str:
+    """Marker shape per CSV `ref_source` column. Distinguishes cases
+    where the engine was compared to the published ICSBEP handbook
+    k_eff from cases where the comparison target is OpenMC running
+    the same scene (`local_validation`). The handbook is the gold
+    standard for benchmark agreement; OpenMC-derived references
+    answer the narrower question "do these two MC codes agree on this
+    geometry?" — both are useful but they're different kinds of
+    validation, so they deserve different markers in the scatter.
+    """
+    if "local_validation" in ref_source.lower() or "openmc" in ref_source.lower():
+        return "^"  # triangle: cross-validated against OpenMC
+    return "o"     # circle: vs ICSBEP handbook
+
+
 def jittered_ealf(case: str, ealf_ev: float) -> float:
     """When all cases in a category fall back to the same EALF (no
     per-case override loaded), the scatter degenerates to vertical
@@ -211,8 +226,8 @@ def main() -> int:
     # Carry the engine + handbook k values straight from the CSV so the
     # plot annotation + sidecar table can show "k_calc vs k_ref" rather
     # than just the delta. Tuple: (case, ealf, dpcm, k_sigma, status,
-    # k_calc, k_ref, sigma_exp).
-    cases: list[tuple[str, float, float, float, str, float, float, float]] = []
+    # k_calc, k_ref, sigma_exp, ref_source).
+    cases: list[tuple[str, float, float, float, str, float, float, float, str]] = []
     with args.csv.open("r", encoding="utf-8", newline="") as fp:
         r = csv.DictReader(fp)
         for row in r:
@@ -240,8 +255,9 @@ def main() -> int:
             else:
                 ealf = ealf_raw
             status = row.get("status") or ""
+            ref_source = row.get("ref_source") or ""
             cases.append((case, ealf, delta_pcm, k_sigma, status,
-                          k_calc, k_ref, sigma_exp))
+                          k_calc, k_ref, sigma_exp, ref_source))
 
     if not cases:
         print("No usable rows found.", file=sys.stderr)
@@ -252,34 +268,74 @@ def main() -> int:
 
     fig, ax = plt.subplots(figsize=(10, 6))
 
+    # Build sub-series keyed by (spectrum_or_category, marker_shape).
+    # Two markers: 'o' = vs ICSBEP handbook, '^' = cross-validated vs
+    # OpenMC (`local_validation`). Plotting them as separate errorbar
+    # calls means matplotlib renders the marker shape per series — a
+    # single errorbar call can only carry one marker.
+    def _key(case: str, ealf: float, ref_source: str) -> tuple[str, str]:
+        spectrum = category_from_case(case) if args.by_category else SPECTRUM_COLORS[spectrum_bucket(ealf)][0]
+        return spectrum, ref_marker(ref_source)
+
+    sub_series: dict[tuple[str, str], list[tuple[float, float, float]]] = defaultdict(list)
+    for case, ealf, dpcm, ksig, _, _kc, _kr, _sx, ref_source in cases:
+        sub_series[_key(case, ealf, ref_source)].append((ealf, dpcm, ksig * 1e5))
+
     if args.by_category:
-        # One point series per category
-        by_cat: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
-        for case, ealf, dpcm, ksig, _, *_extra in cases:
-            by_cat[category_from_case(case)].append((ealf, dpcm, ksig * 1e5))
-        cmap = plt.get_cmap("tab20", len(by_cat))
-        for i, (cat, pts) in enumerate(sorted(by_cat.items())):
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            errs = [p[2] for p in pts]
-            ax.errorbar(xs, ys, yerr=errs, fmt="o", ms=4, color=cmap(i),
-                        label=f"{cat.upper()} ({len(pts)})", alpha=0.7,
-                        elinewidth=0.5, capsize=2)
+        cats = sorted({k[0] for k in sub_series.keys()})
+        cmap = plt.get_cmap("tab20", max(len(cats), 1))
+        color_for = {cat: cmap(i) for i, cat in enumerate(cats)}
     else:
-        # Three series by spectrum bucket
-        buckets: list[list[tuple[float, float, float]]] = [[], [], []]
-        for case, ealf, dpcm, ksig, _, *_extra in cases:
-            buckets[spectrum_bucket(ealf)].append((ealf, dpcm, ksig * 1e5))
-        for i, (label, color) in enumerate(SPECTRUM_COLORS):
-            pts = buckets[i]
-            if not pts:
-                continue
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            errs = [p[2] for p in pts]
-            ax.errorbar(xs, ys, yerr=errs, fmt="o", ms=5, color=color,
-                        label=f"{label} ({len(pts)})", alpha=0.75,
-                        elinewidth=0.7, capsize=2)
+        color_for = {label: color for label, color in SPECTRUM_COLORS}
+
+    # Plot one errorbar per (series, marker). Marker-only ref-source
+    # legend entry is appended at the end so the spectrum legend stays
+    # uncluttered.
+    seen_handbook = seen_openmc = False
+    for (series_label, marker), pts in sorted(sub_series.items()):
+        if not pts:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        errs = [p[2] for p in pts]
+        color = color_for.get(series_label, "#666666")
+        # Only the FIRST sub-series for each spectrum/category puts the
+        # series label into the legend; the marker-specific legend
+        # entries are added separately so we don't end up with
+        # 6 entries (3 spectra × 2 markers).
+        n_in_series = sum(len(v) for k, v in sub_series.items() if k[0] == series_label)
+        label = f"{series_label.upper() if args.by_category else series_label} ({n_in_series})"
+        # Suppress duplicate legend entries: only the first marker per
+        # series adds its label.
+        first_marker_in_series = marker == min(
+            m for s, m in sub_series.keys() if s == series_label
+        )
+        ax.errorbar(
+            xs, ys, yerr=errs, fmt=marker, ms=5 if marker == "o" else 6,
+            color=color, label=label if first_marker_in_series else None,
+            alpha=0.75, elinewidth=0.7, capsize=2,
+            markeredgecolor="black" if marker == "^" else "none",
+            markeredgewidth=0.4,
+        )
+        if marker == "o":
+            seen_handbook = True
+        elif marker == "^":
+            seen_openmc = True
+
+    # Marker legend (separate from the spectrum series). Empty
+    # invisible points just to register a legend handle.
+    from matplotlib.lines import Line2D
+    marker_handles: list[Line2D] = []
+    if seen_handbook:
+        marker_handles.append(Line2D([0], [0], marker="o", linestyle="",
+                                     color="#444", label="vs ICSBEP handbook",
+                                     markersize=6))
+    if seen_openmc:
+        marker_handles.append(Line2D([0], [0], marker="^", linestyle="",
+                                     color="#444",
+                                     markeredgecolor="black", markeredgewidth=0.5,
+                                     label="vs OpenMC (local_validation)",
+                                     markersize=7))
 
     # Per-point labels.
     #   - Small sweeps (≤ 50 cases): label every point with k_calc / k_ref
@@ -289,7 +345,7 @@ def main() -> int:
     #     so the dense centre stays readable, but anything weird is
     #     called out by name.
     label_all = len(cases) <= 50
-    for case, ealf, dpcm, _ksig, status, k_calc, k_ref, _sx in cases:
+    for case, ealf, dpcm, _ksig, status, k_calc, k_ref, _sx, _ref in cases:
         is_outlier = (status == "FAIL") or (abs(dpcm) > 300.0)
         if label_all or is_outlier:
             text = f"{case}\nk={k_calc:.5f} ref={k_ref:.5f}"
@@ -318,7 +374,15 @@ def main() -> int:
     # Format x-axis ticks so the scale is readable across 6+ decades
     ax.xaxis.set_major_locator(LogLocator(base=10, numticks=10))
     ax.xaxis.set_major_formatter(ScalarFormatter())
-    ax.legend(loc="best", fontsize=9, framealpha=0.95)
+    # Compose two legends so the marker-source key stays visually
+    # separated from the spectrum/category key. matplotlib's default
+    # ax.legend() picks up the labelled errorbar series; we then
+    # re-add the figure-level marker key with add_artist().
+    primary_legend = ax.legend(loc="upper right", fontsize=9, framealpha=0.95)
+    if marker_handles:
+        ax.add_artist(primary_legend)
+        ax.legend(handles=marker_handles, loc="lower right",
+                  fontsize=9, framealpha=0.95, title="Reference source")
 
     fig.tight_layout()
     fig.savefig(args.output, dpi=args.dpi)
@@ -335,7 +399,7 @@ def main() -> int:
         fp.write("# Sorted by |delta_pcm| descending — biggest disagreements first.\n")
         fp.write("#\n")
         fp.write(f"# {'case':<40}  {'k_calc':>9}  {'k_ref':>9}  {'sigma_exp':>9}  {'delta_pcm':>10}  status\n")
-        for case, _ealf, dpcm, _ksig, status, k_calc, k_ref, sigma_exp in sorted(
+        for case, _ealf, dpcm, _ksig, status, k_calc, k_ref, sigma_exp, _ref in sorted(
             cases, key=lambda c: abs(c[2]), reverse=True
         ):
             fp.write(
@@ -383,34 +447,45 @@ def write_k_calc_vs_k_ref(
 
     fig, ax = plt.subplots(figsize=(9, 8))
 
-    # Series — same colour conventions as the Δk plot for cross-
-    # readability.
+    # Same series-keying as the Δk plot: split by (spectrum_or_category,
+    # marker) so OpenMC-validated vs handbook cases get distinct shapes.
+    sub_series: dict[tuple[str, str], list[tuple[float, float, float]]] = defaultdict(list)
+    for case, ealf, _dpcm, ksig, _status, k_calc, k_ref, _sx, ref_source in cases:
+        series = (category_from_case(case) if args.by_category
+                  else SPECTRUM_COLORS[spectrum_bucket(ealf)][0])
+        sub_series[(series, ref_marker(ref_source))].append((k_ref, k_calc, ksig))
+
     if args.by_category:
-        by_cat: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
-        for case, _ealf, _dpcm, ksig, _status, k_calc, k_ref, _sx in cases:
-            by_cat[category_from_case(case)].append((k_ref, k_calc, ksig))
-        cmap = plt.get_cmap("tab20", len(by_cat))
-        for i, (cat, pts) in enumerate(sorted(by_cat.items())):
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            errs = [p[2] for p in pts]
-            ax.errorbar(xs, ys, yerr=errs, fmt="o", ms=4, color=cmap(i),
-                        label=f"{cat.upper()} ({len(pts)})", alpha=0.7,
-                        elinewidth=0.5, capsize=2)
+        cats = sorted({k[0] for k in sub_series.keys()})
+        cmap = plt.get_cmap("tab20", max(len(cats), 1))
+        color_for = {cat: cmap(i) for i, cat in enumerate(cats)}
     else:
-        buckets: list[list[tuple[float, float, float]]] = [[], [], []]
-        for case, ealf, _dpcm, ksig, _status, k_calc, k_ref, _sx in cases:
-            buckets[spectrum_bucket(ealf)].append((k_ref, k_calc, ksig))
-        for i, (label, color) in enumerate(SPECTRUM_COLORS):
-            pts = buckets[i]
-            if not pts:
-                continue
-            xs = [p[0] for p in pts]
-            ys = [p[1] for p in pts]
-            errs = [p[2] for p in pts]
-            ax.errorbar(xs, ys, yerr=errs, fmt="o", ms=5, color=color,
-                        label=f"{label} ({len(pts)})", alpha=0.75,
-                        elinewidth=0.7, capsize=2)
+        color_for = {label: color for label, color in SPECTRUM_COLORS}
+
+    seen_handbook = seen_openmc = False
+    for (series_label, marker), pts in sorted(sub_series.items()):
+        if not pts:
+            continue
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        errs = [p[2] for p in pts]
+        color = color_for.get(series_label, "#666666")
+        n_in_series = sum(len(v) for k, v in sub_series.items() if k[0] == series_label)
+        label = f"{series_label.upper() if args.by_category else series_label} ({n_in_series})"
+        first_marker_in_series = marker == min(
+            m for s, m in sub_series.keys() if s == series_label
+        )
+        ax.errorbar(
+            xs, ys, yerr=errs, fmt=marker, ms=5 if marker == "o" else 6,
+            color=color, label=label if first_marker_in_series else None,
+            alpha=0.75, elinewidth=0.7, capsize=2,
+            markeredgecolor="black" if marker == "^" else "none",
+            markeredgewidth=0.4,
+        )
+        if marker == "o":
+            seen_handbook = True
+        elif marker == "^":
+            seen_openmc = True
 
     # 45° identity line + ±150 pcm parallel guides (the regression
     # envelope translated into k space).
@@ -427,7 +502,7 @@ def write_k_calc_vs_k_ref(
 
     # Per-point labels — same rule as the Δk plot.
     label_all = len(cases) <= 50
-    for case, _ealf, dpcm, _ksig, status, k_calc, k_ref, _sx in cases:
+    for case, _ealf, dpcm, _ksig, status, k_calc, k_ref, _sx, _ref in cases:
         is_outlier = (status == "FAIL") or (abs(dpcm) > 300.0)
         if label_all or is_outlier:
             ax.annotate(case, (k_ref, k_calc), xytext=(5, 5),
@@ -448,7 +523,28 @@ def write_k_calc_vs_k_ref(
     )
     ax.set_title(title)
     ax.grid(True, alpha=0.25, linewidth=0.5)
-    ax.legend(loc="best", fontsize=9, framealpha=0.95)
+
+    # Two legends: spectrum / category series (upper left because the
+    # cluster of points usually sits near k=1, top-right is empty) +
+    # the marker-source key (separate so the spectrum legend isn't
+    # padded to 6+ rows).
+    from matplotlib.lines import Line2D
+    marker_handles: list[Line2D] = []
+    if seen_handbook:
+        marker_handles.append(Line2D([0], [0], marker="o", linestyle="",
+                                     color="#444", label="vs ICSBEP handbook",
+                                     markersize=6))
+    if seen_openmc:
+        marker_handles.append(Line2D([0], [0], marker="^", linestyle="",
+                                     color="#444",
+                                     markeredgecolor="black", markeredgewidth=0.5,
+                                     label="vs OpenMC (local_validation)",
+                                     markersize=7))
+    primary_legend = ax.legend(loc="upper left", fontsize=9, framealpha=0.95)
+    if marker_handles:
+        ax.add_artist(primary_legend)
+        ax.legend(handles=marker_handles, loc="lower right",
+                  fontsize=9, framealpha=0.95, title="Reference source")
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=args.dpi)
