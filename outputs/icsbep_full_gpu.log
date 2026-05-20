@@ -6,7 +6,327 @@
 └──
   GPU transport kernels compiled (8 kernels)
   GPU: WMP payload = 0.0 KB (0 / 18 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
   GPU: WMP payload = 0.0 KB (0 / 18 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
   GPU: WMP payload = 0.0 KB (0 / 18 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
   GPU: WMP payload = 0.0 KB (0 / 18 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
   GPU: WMP payload = 0.0 KB (0 / 18 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+Sweeping 375 case(s) on GPU runner
+  CLI defaults: batches=150, inactive=30, particles=50000, seeds=5, base_seed=42, rank=15
+  per-case settings: JSON `benchmark.recommended_settings` overrides CLI defaults
+  preload: 161/161 nuclide weights resolved (3.9s). Top 5: Z=8016@294K*507, Z=26054@294K*480, Z=26056@294K*480, Z=26057@294K*480, Z=26058@294K*480
+  CSV (append, flushed per case): E:\git\open_rust_mc\outputs\icsbep_full_gpu.csv
+  stop-file (create to terminate gracefully): E:\git\open_rust_mc\outputs\STOP
+
+heu-comp-inter-003_case-1: PASS -- k=1.00550+/-0.00006, delta=-122pcm, bound=+/-1140pcm, 0.21sigma, 1424.7s (5seed x 150b x 40i x 500000p) [1/375]
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=2.02 eV  AWR=8.935
+  Temperatures: ["296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 99 inc energies, 50606 E_out pts, 809696 mu pts
+    296K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51147 E_out pts, 818352 mu pts
+    400K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51221 E_out pts, 819536 mu pts
+    500K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51541 E_out pts, 824656 mu pts
+    600K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51585 E_out pts, 825360 mu pts
+    700K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51177 E_out pts, 818832 mu pts
+    800K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51305 E_out pts, 820880 mu pts
+    1000K inelastic: 99 energies, type=incoherent_inelastic
+    Continuous: 99 inc energies, 51424 E_out pts, 822784 mu pts
+    1200K inelastic: 99 energies, type=incoherent_inelastic
+    296K elastic: coherent, 116 Bragg edges
+    400K elastic: coherent, 108 Bragg edges
+    500K elastic: coherent, 100 Bragg edges
+    600K elastic: coherent, 91 Bragg edges
+    700K elastic: coherent, 83 Bragg edges
+    800K elastic: coherent, 79 Bragg edges
+    1000K elastic: coherent, 70 Bragg edges
+    1200K elastic: coherent, 63 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+heu-comp-inter-003_case-2: PASS -- k=1.00540+/-0.00006, delta=+540pcm, bound=+/-1220pcm, 0.88sigma, 1549.8s (5seed x 150b x 40i x 500000p) [2/375]
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+heu-comp-inter-003_case-3: PASS -- k=1.00505+/-0.00007, delta=+505pcm, bound=+/-1120pcm, 0.90sigma, 1551.3s (5seed x 150b x 40i x 500000p) [3/375]
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+  GPU S(α,β) slot 0 (nuc 9): coherent elastic, 116 Bragg edges
+  GPU S(α,β) slot 0 (nuc 9): 99 inc energies, 50606 E_out pts, 809696 mu pts
+  GPU S(α,β) slot 1 (nuc 9): coherent elastic, 108 Bragg edges
+  GPU S(α,β) slot 1 (nuc 9): 99 inc energies, 51147 E_out pts, 818352 mu pts
+  GPU S(α,β) slot 2 (nuc 9): coherent elastic, 100 Bragg edges
+  GPU S(α,β) slot 2 (nuc 9): 99 inc energies, 51221 E_out pts, 819536 mu pts
+  GPU S(α,β) slot 3 (nuc 9): coherent elastic, 91 Bragg edges
+  GPU S(α,β) slot 3 (nuc 9): 99 inc energies, 51541 E_out pts, 824656 mu pts
+  GPU S(α,β) slot 4 (nuc 9): coherent elastic, 83 Bragg edges
+  GPU S(α,β) slot 4 (nuc 9): 99 inc energies, 51585 E_out pts, 825360 mu pts
+  GPU S(α,β) slot 5 (nuc 9): coherent elastic, 79 Bragg edges
+  GPU S(α,β) slot 5 (nuc 9): 99 inc energies, 51177 E_out pts, 818832 mu pts
+  GPU S(α,β) slot 6 (nuc 9): coherent elastic, 70 Bragg edges
+  GPU S(α,β) slot 6 (nuc 9): 99 inc energies, 51305 E_out pts, 820880 mu pts
+  GPU S(α,β) slot 7 (nuc 9): coherent elastic, 63 Bragg edges
+  GPU S(α,β) slot 7 (nuc 9): 99 inc energies, 51424 E_out pts, 822784 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 19 nuclides covered)
+  GPU auto-refill: picked factor=1.50 for particles_per_batch=500000
+heu-comp-inter-003_case-4: PASS -- k=1.00161+/-0.00004, delta=+161pcm, bound=+/-1100pcm, 0.29sigma, 1529.1s (5seed x 150b x 40i x 500000p) [4/375]
+
+  stop file E:\git\open_rust_mc\outputs\STOP detected; exiting after 4 case(s).
+
+  Sweep this session in 6054.9 s (100.9 min) (aborted early)
+  Result: 4 PASS  |  0 FAIL  |  0 ERROR  (4 ran this session)
+
+  CSV: E:\git\open_rust_mc\outputs\icsbep_full_gpu.csv
+  Plot: outputs\icsbep\plots\icsbep_full_gpu_delta_k_vs_ealf.png  (generating in background)
