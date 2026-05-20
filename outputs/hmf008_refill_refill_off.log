@@ -1,0 +1,27 @@
+# n_nuc scaling sweep - 2026-05-20 15:44:28
+# Particles/batch: 250000  Batches: 80  Inactive: 20  Seed: 1  Rank: 15
+# Ncu mode: False
+
+============================================================
+case=heu-met-fast-008  max_n_nuc=21  total_nuc=42  n_mats=4  wall=50,8s
+============================================================
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: 7.5 GB (75% of 10.0 GB VRAM).
+└──
+  GPU transport kernels compiled (8 kernels)
+  GPU: WMP payload = 0.0 KB (0 / 22 nuclides covered)
+  settings      : <Settings batches=80 inactive=20 particles=250000 seed=1>
+  case          : heu-met-fast-008
+  runner        : gpu_cuda
+  reference     : local_validation (OpenMC on this scene)
+  handbook      : k = 0.99890 +/- 0.00160
+  acceptance    : k = 0.99580 +/- 0.00160   sigma_combined = 165 pcm
+  k_calc        : 0.99456 +/- 0.00040
+  delta         : -124 pcm   0.75-sigma   bound = +/-330 pcm   [PASS]
+  timing        : load = 1.51 s, sim = 48.67 s, total = 50.17 s
+  active batches: 60 (total 15,000,000 histories)
+  tallies       : coll = 41,888,254, fis = 5,731,859, leak = 8,570,433
+
