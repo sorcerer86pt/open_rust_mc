@@ -2,290 +2,265 @@
 
 ## What this is
 
-A pure-Rust continuous-energy Monte Carlo radiation-transport engine.
-Started as an SVD cross-section-compression experiment; now also a
-coupled neutron-photon code with depletion (CRAM-16 / CRAM-48),
-variance reduction (weight windows + random-ray FW-CADIS),
-recursive-universe CSG geometry on CPU + CUDA, and a Python (PyO3)
-front-end. Reads OpenMC HDF5 nuclear data directly via `hdf5-pure` —
-no C dependency.
+A pure-Rust continuous-energy Monte Carlo radiation transport engine.
+- Neutron k-eigenvalue and fixed-source, photon transport, coupled
+  neutron-photon γ-heating, depletion (CRAM), time-dependent point
+  kinetics, continuous-energy adjoint MC.
+- CPU backend (rayon, history-based) and CUDA backend (sm_86+,
+  event-batched + recursive-CSG), behind a shared `EigenvalueRunner`
+  trait.
+- Four interchangeable cross-section providers: pointwise `Table`,
+  truncated `Svd`, `HybridSvdWmp`, `HybridTableWmp`.
+- Reads OpenMC HDF5 nuclear data directly (`hdf5-pure` — no C
+  dependency).
+- Python (PyO3) bindings as `open_rust_mc` package.
 
-`origin/main` is at `d80a157` as of this writing. Lib tests
-**438 / 438** green on default features, **443 / 443** with
-`--features cuda`.
+Tests on `origin/main`:
+- `cargo test --lib`: **438 / 438 green**.
+- `cargo test --lib --features cuda`: **443 / 443 green**.
 
-## How to read result numbers
+## How to read results
 
-Every quoted result carries a scope tag:
+Numbers in commit messages, docs, and code comments come with a
+scope tag. Treating them without the tag is a bug pattern.
 
-- `[micro]` — isolated kernel / one-nuclide / one-reaction.
-  Optimistic; does NOT generalise to whole-engine k_eff.
-- `[godiva]` — end-to-end Godiva HEU sphere, 3 nuclides, fast spectrum.
-- `[pwr]` — end-to-end PWR pin cell, 9 nuclides, thermal, S(α,β) on.
-- `[assembly]` — 17×17 PWR depth-3 recursive geometry.
-- `[hex]` — HexLattice mini-core (1- or 2-ring).
-- `[shield]` — photon shielding slab.
+- `[micro]` — isolated kernel / one nuclide / one reaction.
+  Optimistic and does NOT generalise to k_eff.
+- `[godiva]` — end-to-end 3-nuclide HEU sphere, fast spectrum.
+- `[pwr]` — end-to-end 9-nuclide PWR pin cell, thermal, S(α,β) on.
+- `[assembly]` — depth-3 recursive 17×17 PWR lattice.
+- `[hex]` — N-ring hex mini-core.
+- `[shield]` — fixed-source photon slab.
 - `[photon]` — γ-heating / pulse-height / coupled n-γ.
-- `[depletion]` — CRAM transmutation, fresh-corrector predictor.
+- `[depletion]` — CRAM transmutation.
 - `[icsbep]` — multi-case ICSBEP regression substrate.
-- `[projected]` — analytical / extrapolated. Hypothesis until a
+- `[projected]` — analytical or extrapolated; hypothesis until a
   scoped row replaces it.
 
-A number quoted without a scope tag is a bug. Repeated pattern:
-`[micro]` headlines shrink or invert sign under `[pwr]` / `[assembly]`.
+Recurring pattern: `[micro]` headlines shrink or invert under
+`[pwr]` / `[assembly]`.
 
-## Test acceptance envelope (ICSBEP regressions)
+## Build & run
 
-`tests/cuda_runs.rs` and `tests/icsbep_runs.rs` share one envelope:
+Primary dev env is Windows / PowerShell.
+
+```powershell
+cd rust_prototype
+cargo build --release                       # CPU only
+cargo build --release --features cuda       # + CUDA backend
+cargo test --lib                            # 438 / 438
+cargo test --lib --features cuda            # 443 / 443
+
+# Python extension
+cd bindings/python
+maturin develop --release                   # CPU only
+maturin develop --release --features cuda   # adds Runner.GpuCuda
+cd ../../..
+
+# Nuclear data (ENDF/B-VIII.1 is the default)
+.\scripts\setup_nuclear_data.ps1            # VIII.1 only, ~6.5 GB
+.\scripts\setup_nuclear_data.ps1 -All       # VIII.1 + VIII.0 + VII.1 + JEFF-3.3
+.\scripts\setup_nuclear_data.ps1 -Vii1      # legacy VII.1 only
+
+# Single ICSBEP case (auto-discovers VIII.1 → VIII.0 → VII.1)
+python rust_prototype/bindings/python/examples/icsbep_run.py heu-met-fast-001_case-1 gpu
+
+# Full corpus sweep
+.\rust_prototype\bindings\python\examples\run_benchmark.ps1
+
+# Scoped sweep with explicit CLI overrides (CLI > JSON > built-in)
+python rust_prototype/bindings/python/examples/icsbep_sweep.py `
+    --runner cpu --filter heu-comp-inter-003 `
+    --particles 100000 --batches 150 --inactive 40 --seeds 5 `
+    --csv outputs/scoped.csv --stop-file outputs/STOP
+```
+
+## Repository layout
+
+```
+rust_prototype/                 — main crate (workspace root)
+  Cargo.toml                    — features: default = []; cuda; preview
+  src/
+    lib.rs                      — crate root, MAX_NUCLIDES_PER_MATERIAL
+    data_paths.rs               — ENDF library-layout-aware path helpers
+    kernel.rs                   — SVD reconstruction (rank-k FMA)
+    decompose.rs cp_decompose.rs — SVD decomposition
+    hdf5_reader.rs              — pure-Rust HDF5 + thermal loader
+    thermal.rs                  — S(α,β) sampling
+    table.rs wmp.rs             — pointwise + Windowed Multipole providers
+    nuclide.rs loader.rs        — nuclide loading
+    geometry/                   — recursive universes, BVH, hex/rect
+    physics/                    — collision / scatter / kinematics
+    transport/                  — simulate, dispatch, material_resolve,
+                                  xs_provider, hybrid_xs, sim_limits,
+                                  nuclides, thermal_library,
+                                  urr_equivalence, weight_window,
+                                  tally, statepoint, kinetics,
+                                  adjoint_neutron, adjoint_photon
+    photon/                     — Compton, Rayleigh, photoelectric,
+                                  pair, brems, electron, transport, nee
+    random_ray/                 — multigroup TRRM (forward + adjoint +
+                                  immortal), CADIS, adjoint-SVD
+    depletion/                  — cram, chain, predictor-corrector,
+                                  mapping, flux
+    gpu.rs                      — CUDA host wrappers (root)
+    gpu_transport.rs            — `GpuTransportContext`, N_PARAMS=186
+    gpu_recursive.rs            — recursive geometry on device
+    gpu_random_ray.rs           — random-ray persistent kernel host
+    gpu_per_nuclide.rs          — per-nuclide upload + LRU cache
+    bin/                        — 40 binaries (see below)
+  tests/                        — 9 integration tests
+  bindings/python/              — PyO3 wrapper, examples/, run_benchmark.ps1
+  gpu/cuda/                     — NVRTC-compiled .cu sources
+                                  (transport.cu, transport_recursive.cu,
+                                   geom_recursive.cu, ...)
+
+bench/icsbep/                   — 375 scene JSONs
+chains/                         — depletion chain JSONs
+data/                           — ENDF/B HDF5 libraries (gitignored)
+outputs/                        — bench CSV/log (gitignored)
+paper/                          — SVD compression paper (TeX + PDF)
+scripts/                        — setup_nuclear_data.ps1,
+                                  migrate_natural_elements.py,
+                                  analysis pipelines
+
+CLAUDE.md STATUS.md README.md   — top-level docs
+PYTHON.md BENCHMARKS.md ICSBEP.md — domain docs
+```
+
+## Hard invariants (verified 2026-05-21)
+
+These are the ones currently true on `origin/main`. Re-verify before
+changing.
+
+- **`MAX_NUCLIDES_PER_MATERIAL = 128`** at `src/lib.rs:19`. Single
+  source of truth. CPU imports it as `simulate::MAX_NUCLIDES`;
+  GPU receives it via NVRTC `-DMAX_NUC_PER_MAT=N`. Bumping is one
+  line + full rebuild + GPU register-pressure recheck.
+
+- **GPU pinned to sm_86** at `gpu_recursive.rs:489`
+  (`arch: Some("sm_86")`). Needed for `atomicAdd(double*, double)`.
+  NVRTC default is sm_52 which can't do double atomics. SM count is
+  read from device attributes elsewhere for auto-refill (`gpu_recursive.rs:1845`).
+
+- **`N_PARAMS = 186`** matches between `gpu_transport.rs:18` and
+  `gpu/cuda/transport.cu:383`. Adding or removing a slot requires
+  touching both atomically. Earlier inline-vec packing sites that
+  open-coded `vec![dptr!(...)…]` are now delegated to
+  `build_transport_params_vec` (see comment at `gpu_transport.rs:2523`)
+  — don't open-code new sites.
+
+- **`SimLimits` (`src/transport/sim_limits.rs`)** is engine policy
+  separate from per-run intent (`SimConfig`). `default()` reproduces
+  the historical hardcoded values; long-shielding harnesses override
+  via `SimLimits::from_toml_file`. No magic literals at construction
+  sites.
+
+- **`data_paths::resolve_thermal_path(neutron_dir, name)`** is the
+  single layout-aware TSL path resolver. Tries `neutron_dir/name`
+  first (VII.1 layout where TSL files mix into neutron/), then
+  `neutron_dir/../thermal/name` (VIII.0/VIII.1 layout where they're
+  in a sibling dir). All TSL load sites in binaries and Python
+  bindings route through this. New TSL load sites must do the same.
+
+- **`data_paths::discover_neutron_dir(workspace_root)`** probes
+  libraries in priority order `endfb-viii.1-hdf5` → `endfb-viii.0-hdf5`
+  → `endfb-vii.1-hdf5`. Test helpers in `tests/cuda_runs.rs`,
+  `tests/cache_roundtrip.rs`, `tests/icsbep_runs.rs`, and 6 diag
+  binaries call this — they used to hardcode VII.1.
+
+- **Natural-element ZAID fallback.** When a JSON references
+  `zaid: <Z>000` and the natural file isn't on disk (e.g. VIII.x has
+  C-12 + C-13 but no C0.h5), `material_resolve::expand_natural_elements`
+  splits the entry into isotopic siblings using
+  `nuclides::natural_isotopic_split(zaid)` (currently carbon-only).
+  Mirrors OpenMC's `Material.add_element` at resolve time. Zero
+  overhead on VII.1 (early-out via `lib.has_natural_file(zaid)`).
+  Abundance table lives in two places that must stay in sync:
+  `scripts/migrate_natural_elements.py::NATURAL_ABUNDANCES` and
+  `src/transport/nuclides.rs::natural_isotopic_split`.
+
+- **Sweep precedence (Python harness)**: explicit CLI flag wins
+  over JSON `recommended_settings`, which wins over built-in
+  default. `icsbep_sweep.py`'s `_pick` helper drives this. Argparse
+  defaults are `None` sentinels for "not passed" so the resolver
+  can tell. Banner prints `(explicit)` vs `auto (JSON or default)`
+  per knob.
+
+## Test acceptance envelope
+
+`tests/cuda_runs.rs` and `tests/icsbep_runs.rs` share one envelope
+for ICSBEP regressions:
 
 ```
 |Δk_pcm| ≤ max(150 pcm, 2 × σ_combined)
 σ_combined = sqrt(σ_calc² + σ_exp²)
 ```
 
-Multi-seed averaging (3 seeds default) drives `σ_calc` from
-seed-to-seed stderr — single-seed within-batch stderr underestimates
-GPU atomic-ordering nondeterminism. The 150 pcm floor catches small
-systematic biases that wide `σ_exp` would otherwise swallow (HEU-SOL-THERM
-`σ_exp` = 600 pcm); the 2σ clause stays honest when `σ_exp` is tight
-(Godiva `σ_exp` = 100 pcm).
+`σ_calc` from multi-seed averaging (3 seeds default) — single-seed
+within-batch stderr underestimates GPU atomic-ordering nondeterminism.
+The 150 pcm floor catches systematic biases that wide `σ_exp` (e.g.
+HEU-SOL-THERM at 600 pcm) would otherwise swallow. The 2σ clause
+stays honest when `σ_exp` is tight (Godiva σ_exp = 100 pcm).
 
-The optional `local_validation` block on a scene JSON points at an
-OpenMC k_eff measured on the *same* JSON — used as a secondary target
-to grade engine quality apart from any scene-transcription drift from
-the registered ICSBEP handbook.
+Scenes may carry an optional `local_validation` block: an OpenMC
+k_eff measured on the same JSON the engine consumes. Used as a
+secondary target to grade engine quality apart from any scene-
+transcription drift from the registered ICSBEP handbook.
 
-## Hard invariants (don't break these)
+## Binaries (40 in `src/bin/`)
 
-- **`RectLattice::local_position` is element-CENTRE-relative**
-  (OpenMC convention). Lattice tests place pin surfaces at universe-
-  local origin `(0, 0)`, NOT `(pitch/2, pitch/2)`. Same on the GPU.
-  Fixing this unblocked LCT-008.
+Neutron k-eigenvalue: `godiva`, `pwr_pincell`, `pwr_d2o_pincell`,
+`pwr_assembly`, `hex_minicore`, `validate_vs_openmc`.
 
-- **`MAX_NUCLIDES_PER_MATERIAL = 128`** at `src/lib.rs` is the single
-  source of truth. CPU imports it (`simulate.rs::MAX_NUCLIDES`); GPU
-  receives it via NVRTC `-DMAX_NUC_PER_MAT=N` from
-  `gpu_recursive.rs::assemble_kernel_source` and
-  `gpu_transport.rs::transport_kernel_options`. `transport.cu` has no
-  `#define` fallback (`#error`s if the host forgets the flag). Bumping
-  is a one-line change followed by a full rebuild + sm_86 register-
-  pressure recheck.
+Diagnostics: `metal_stats_diag` (three-way CPU / GPU / OpenMC
+tally compare), `nu_lookup_compare`, `level_xs_compare`,
+`elastic_kinematics_diag`, `chi_compare`, `debug_lct`,
+`debug_trace`, `xs_dump`, `xs_dump_godiva`, `xs_provider_diff`,
+`photon_dump`, `icsbep_alloc_bench`.
 
-- **`SimLimits` (`src/transport/sim_limits.rs`)** is engine policy
-  separated from per-run intent (`SimConfig`). Carries
-  `max_events_per_history`, `fis_capacity_factor`,
-  `sab_temperature_tolerance`, `initial_source_max_attempts_factor`.
-  `SimLimits::default()` reproduces the historical magic literals
-  bit-for-bit. Long-shielding harnesses can override via
-  `SimLimits::from_toml_file(path)`.
+ICSBEP harness (Rust): `icsbep_bench` — runs cases without going
+through Python, useful for clean engine profiles.
 
-- **Initial-source sampler is material-aware, not cell-order-aware.**
-  `simulate::try_initial_source_in_materials` walks every cell's
-  region tree via `Region::world_aabb(surfaces)`, filters by
-  `ResolvedMaterials::fissionable_materials()` (any nuclide with
-  `nu_bar_const > 0`), and rejection-samples weighted by per-cell AABB
-  volume. Matches Serpent 2's default; replaces the old "first
-  Material cell" / "smallest-volume material" heuristics that failed
-  on BWR cruciforms, PWR burnable poisons, HFIR plates, CANDU
-  spacers, multi-shell HMF.
+Scene viewer: `preview_scene` — interactive XY cross-section
+viewer (`--features preview`, default). Headless PNG / PPM
+fallbacks via `--png-out` / `--ppm-out`.
 
-- **`N_PARAMS = 136`** on `transport.cu` / `gpu_transport.rs`. Slots
-  123-135 carry the multi-slot S(α,β) tables (slot 129 = `P_SAB_EMAX`)
-  and the Maxwell/Evaporation closed-form χ buffers that fixed
-  U-233 / U-234 / Pu-240 fission outgoing-energy spectra. Adding a
-  new param slot: update both files atomically.
+Photon / shielding: `pwr_gamma_heating`, `cs137_pulse_height`,
+`shield_slab`, `adjoint_photon_cadis_slab`.
 
-- **Per-level SVD basis must be uploaded at the global `P_RANK`
-  stride.** Each discrete-inelastic level kernel has its own
-  `level_rank = min(svd_rank, svd.rank)`. The device kernel has no
-  per-level rank slot — it reads `basis[e_idx × P_RANK + j]` for the
-  full range. Pad each level's basis to `[n_e × global_rank]` with
-  zero columns for `j ∈ [level_rank, global_rank)` and pad coeffs to
-  length `global_rank` with zeros. Skipping this silently reads
-  adjacent levels' bytes and returns ~10⁰ or ~10⁻⁹⁰ XS values.
+Random-ray: `rr_pincell`, `rr_cadis_slab`, `rr_adjoint_svd`.
 
-- **GPU recursive kernel pinned to sm_86** (Ampere / RTX A1000+) for
-  `atomicAdd(double*, double)`. NVRTC arch is hardcoded in
-  `gpu_recursive.rs`.
+Depletion: `deplete_demo`, `deplete_pwr`.
 
-- **CPU transport uses `TransportCtx` worker-local sinks +
-  rayon `fold().reduce()`** (not `par_iter().map().collect()`). Plus
-  `CollisionOutcome::Fission/Multiplicity` use `SmallVec` (typedefs
-  `FissionSites`, `SecondaryList`). Eliminates ~6 MB / batch of
-  per-event Vec churn on PWR and pushes ICSBEP-suite wall time down.
+GPU (`--features cuda`): `gpu_bench`, `gpu_recursive_keff`,
+`gpu_const_xs_keff`, `gpu_assembly_keff`, `gpu_pwr_bench`,
+`gpu_hex_minicore`, `gpu_recursive_parity`, `gpu_photon_features`,
+`gpu_wmp_validate`.
 
-- **ENDF/B-VIII.x layout split.** VIII.0 / VIII.1 moved S(α,β) files
-  into a sibling `thermal/` directory next to `neutron/`. The
-  `data_paths::resolve_thermal_path` helper handles this transparently
-  — call sites pass the `neutron/` directory and the resolver finds
-  the file in `../thermal/` if the same-dir lookup misses. All TSL
-  load sites in binaries and Python bindings route through this.
+Kinetics: `point_kinetics_demo`.
 
-- **Natural-element ZAIDs (`zaid % 1000 == 0`) auto-split when the
-  natural file is missing.** ENDF/B-VIII.x dropped `C0.h5` (and only
-  that — `*0.h5` is unique to carbon in our supported libraries).
-  `material_resolve::expand_natural_elements` mirrors OpenMC's
-  `Material.add_element` behaviour at resolve time: if the natural
-  file isn't on disk and the abundance table knows the element, split
-  on the fly into isotopic siblings. The on-disk JSON corpus is
-  migrated to per-isotope form via `scripts/migrate_natural_elements.py`
-  (137 cases / 291 entries rewritten); the engine fallback covers any
-  future un-migrated JSON.
+Misc: `nuclide_cache_server` (persistent host nuclide cache).
 
-## File layout
+## Python harness
 
-```
-rust_prototype/src/
-  lib.rs / main.rs                — crate roots
-  data_paths.rs                   — library layout-aware path helpers
-                                    (resolve_thermal_path, discover_*)
-  kernel.rs / decompose.rs / cp_decompose.rs
-                                  — SVD reconstruction / decomposition
-  hdf5_reader.rs                  — pure-Rust HDF5 + thermal loader
-  thermal.rs                      — S(α,β) sampling
-  table.rs / wmp.rs               — pointwise / Windowed Multipole providers
-  nuclide.rs / loader.rs          — nuclide data
-  compare.rs / error.rs
-  quadrature.rs / physics_constants.rs
-  gpu.rs / gpu_transport.rs / gpu_recursive.rs / gpu_random_ray.rs
-                                  — CUDA host-side wrappers
+`rust_prototype/bindings/python/examples/`:
 
-  geometry/                       — recursive universe geometry
-    mod.rs surface.rs aabb.rs cell.rs bvh.rs ray.rs
-    universe.rs lattice.rs coord.rs scene.rs shapes.rs
-    recursive_smoke.rs
-
-  physics/                        — collision / scatter / kinematics
-  transport/                      — simulate, dispatch, rng, materials,
-                                    thermal_library, weight_window,
-                                    tally, statepoint, kinetics,
-                                    adjoint_neutron, adjoint_photon
-  photon/                         — Compton, Rayleigh, photoelectric,
-                                    pair, brems, electron, transport
-  random_ray/                     — multigroup TRRM (Tramm 2018,
-                                    immortal Tramm-Siegel 2021),
-                                    forward + adjoint + CADIS
-  depletion/                      — cram, chain, predictor-corrector,
-                                    mapping, flux
-  bin/                            — see "Binaries" below
-
-rust_prototype/tests/             — integration tests (438 lib +
-                                    integration; cuda_runs gated)
-rust_prototype/bindings/python/   — PyO3 wrapper (open_rust_mc package)
-cuda/, cuda_bench/                — NVRTC-compiled .cu source
-paper/                            — TeX manuscript (SVD paper)
-scripts/                          — analysis pipeline + nuclear-data
-                                    setup + JSON migration
-chains/                           — depletion chain JSONs
-bench/icsbep/                     — 375 ICSBEP scene JSONs
-data/                             — ENDF HDF5 libraries (gitignored)
-outputs/                          — bench CSV/log (gitignored; -f to
-                                    commit specific results)
-```
-
-## Binaries
-
-Neutron k-eigenvalue:
-- `godiva` — Godiva HEU sphere, 3 nuclides.
-- `pwr_pincell` — PWR pin cell, 9 nuclides + S(α,β).
-- `pwr_d2o_pincell` — heavy-water variant.
-- `pwr_assembly` — 17×17 (use `--shape N` for 3×3 / 5×5 / 7×7).
-- `hex_minicore` — N-ring hex array with hex reflective boundary.
-- `validate_vs_openmc` — bit-exact validation.
-- `xs_dump` / `xs_dump_godiva` / `xs_provider_diff` / `debug_trace` /
-  `photon_dump` — diagnostics.
-- `metal_stats_diag` / `nu_lookup_compare` / `level_xs_compare` /
-  `elastic_kinematics_diag` / `chi_compare` / `debug_lct` /
-  `icsbep_alloc_bench` — localisation diagnostics.
-- `icsbep_bench` — Rust-only ICSBEP harness (no Python in the call
-  graph, profile the engine cleanly).
-- `preview_scene` — XY cross-section viewer for any scene JSON.
-  Interactive window (`--features preview`, default) supports
-  cursor-centered scroll-zoom and right-click drag-pan. Headless PNG
-  / PPM fallbacks via `--png-out` / `--ppm-out`.
-
-ICSBEP harness (Python, via `bindings/python/examples/`):
-- `icsbep_run.py <case> {cpu|gpu}` — single-case run with auto
-  data-dir discovery (VIII.1 → VIII.0 → VII.1).
-- `icsbep_sweep.py` — full corpus sweep with start / stop / resume,
-  per-case CSV durability, multi-seed averaging. Precedence:
-  **explicit CLI flag > JSON `recommended_settings` > built-in default**.
-- `run_benchmark.ps1` — one-shot wrapper. Picks GPU runner when the
-  CUDA extension is loadable. Writes
+- `icsbep_run.py <case> {cpu|gpu}` — single case, auto data-dir
+  discovery (`_find_data_dir`).
+- `icsbep_sweep.py` — full corpus or filter-scoped sweep with
+  start / stop / resume, per-case CSV durability (`fp.flush()`
+  after each row), multi-seed averaging, graceful termination via
+  `outputs/STOP` marker file or Ctrl-C.
+- `run_benchmark.ps1` — one-shot wrapper. Picks GPU runner when
+  `open_rust_mc.Runner.recommended()` returns `gpu_cuda`. Writes
   `outputs/icsbep_full_<runner>.csv` + matching `.log`.
-
-Photon / shielding / coupled:
-- `pwr_gamma_heating` — PWR γ-heating with full ET + brems.
-- `cs137_pulse_height` — pulse-height validation.
-- `shield_slab` — fixed-source γ slab + WW consumer.
-- `adjoint_photon_cadis_slab` — CE adjoint photon walker.
-
-Random-ray:
-- `rr_pincell` — 2-group UO₂ + water pin cell (forward + adjoint).
-- `rr_cadis_slab` — slab adjoint → CADIS JSON for `shield_slab`.
-
-Depletion:
-- `deplete_demo` — constant-flux Xe equilibrium.
-- `deplete_pwr` — transport-coupled fresh-corrector.
-
-GPU (`--features cuda`):
-- `gpu_bench` — SVD recon kernel sweep.
-- `gpu_cpu_bench` — CPU/GPU head-to-head.
-- `gpu_recursive_keff` — recursive transport k-eigenvalue.
-- `gpu_const_xs_keff` — constant-XS GPU eigenvalue.
-- `gpu_assembly_keff` — full assembly on GPU.
-- `gpu_pwr_bench` — PWR pin cell on GPU.
-- `gpu_hex_minicore` — hex on GPU.
-- `gpu_compton_validate` / `gpu_compton_scaling` /
-  `gpu_photon_features` / `gpu_wmp_validate` — photon GPU validation.
-
-Kinetics:
-- `point_kinetics_demo` — point-kinetics ODE driver.
-
-## Build & run (Windows / PowerShell — primary dev env)
-
-```powershell
-cd rust_prototype
-cargo build --release                       # CPU only
-cargo build --release --features cuda       # + CUDA backend
-cargo test --lib                            # 438 / 438 (default)
-cargo test --lib --features cuda            # 443 / 443
-
-# Python extension (needs maturin)
-cd bindings/python
-maturin develop --release                   # CPU only
-maturin develop --release --features cuda   # adds Runner.GpuCuda
-cd ../../..
-
-# Nuclear data — ENDF/B-VIII.1 by default
-.\scripts\setup_nuclear_data.ps1            # ~6.5 GB VIII.1
-.\scripts\setup_nuclear_data.ps1 -All       # all four supported libs
-.\scripts\setup_nuclear_data.ps1 -Vii1      # legacy VII.1 only
-
-# Single ICSBEP case
-python rust_prototype/bindings/python/examples/icsbep_run.py heu-met-fast-001_case-1 gpu
-
-# Full corpus sweep
-.\rust_prototype\bindings\python\examples\run_benchmark.ps1
-
-# Override JSON recommended_settings from CLI (precedence: CLI > JSON)
-python rust_prototype/bindings/python/examples/icsbep_sweep.py `
-    --runner cpu --filter heu-comp-inter-003 `
-    --particles 100000 --batches 150 --inactive 40 --seeds 5 `
-    --csv outputs/local.csv --stop-file outputs/STOP
-
-# Godiva, real ENDF data
-cargo run --release --bin godiva -- data\endfb-viii.1-hdf5\neutron `
-  --rank 5 --batches 80 --inactive 15 --particles 10000
-```
 
 ## Common operations
 
 ### Add a new natural-element fallback
 
-`scripts/migrate_natural_elements.py` and
-`src/transport/nuclides.rs::natural_isotopic_split` share a table.
-Add the new element to both:
+Two places to update in lockstep:
 
 ```python
 # scripts/migrate_natural_elements.py
@@ -306,90 +281,106 @@ pub fn natural_isotopic_split(zaid: u32) -> Option<&'static [(u32, f64)]> {
 }
 ```
 
-Then re-run the script to migrate any new JSONs.
+Then run `python scripts/migrate_natural_elements.py` to rewrite
+any existing JSONs (idempotent — a second run is a no-op).
 
-### Bump `MAX_NUCLIDES_PER_MATERIAL`
-
-Edit `src/lib.rs`, full rebuild including the Python wheel
-(`maturin develop --release --features cuda`), and confirm GPU
-register pressure stayed within sm_86 budget (`nuc_t[N]` is the
-hot-path stack-allocated array; ~128 bytes per slot at f64).
-
-### Re-run a failing ICSBEP case
+### Re-run a single failing ICSBEP case
 
 ```powershell
-python rust_prototype/bindings/python/examples/icsbep_run.py <case-stem> gpu
+python rust_prototype/bindings/python/examples/icsbep_run.py <case-stem> {cpu|gpu}
 ```
 
-The case stem is the JSON filename without extension. CPU/GPU
-chosen via second positional arg.
+Case stem is the JSON filename without `.json`. Second positional
+arg picks the backend.
 
 ### Diagnose a CPU vs GPU mismatch
 
-Cascade from cheap to expensive:
+Cascade cheap → expensive:
+
 1. `level_xs_compare --nuclide U235 --awr 233.025` — per-level SVD XS
-   bit-A/B at six probe energies.
-2. `nu_lookup_compare` — ν̄(E) CPU-vs-GPU port.
-3. `metal_stats_diag <case>` — three-way CPU / GPU / OpenMC integrated
-   tallies + per-reaction breakdown.
-4. `chi_compare` — fission outgoing-energy spectrum check.
+   bit-A/B at six probe energies. Fastest sanity check.
+2. `nu_lookup_compare` — ν̄(E) CPU vs GPU port. Bit-identical or bug.
+3. `metal_stats_diag <case>` — three-way CPU / GPU / OpenMC
+   integrated tallies + per-reaction breakdown + ⟨E_in/E_out⟩
+   moments.
+4. `chi_compare` — fission outgoing-energy spectrum probe.
 
-## Open / deferred
+### Bump `MAX_NUCLIDES_PER_MATERIAL`
 
-- **GPU device-buffer cache for SAB + material payloads.** Per-nuclide
-  kernels are cached (`Arc::as_ptr`-keyed). `upload_sab_data_multi`
-  and `upload_material_data` rebuild flat arrays + HtoD copy on every
-  seed/case. Across a 5-seed × 7-case sweep that's 35 redundant
-  ~50 MB SAB uploads. Same LRU + bundle_cache_budget pattern as
-  `per_nuclide_cache` should apply.
-- **GPU survival biasing / Russian roulette.** CPU has it (4.5× FOM
-  on PWR); GPU runs analog. Variance-only — k_eff is unbiased.
-- **GPU per-cell `Mat3` rotation.** `GpuRecursiveContext::build` now
-  errors loudly if any cell has `rotation = Some(...)` rather than
-  silently mis-finding. No ICSBEP scene currently sets `rotation`.
-- **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** CPU has it; GPU
-  device sampler is continuous-only. OpenMC's ENDF/B-VII.1 HDF5 ships
-  every TSL as `incoherent_inelastic` (continuous), so zero hits in
-  the 157-case sweep. `upload_sab_data_multi` errors if the host
-  hands it `InelasticDist::Discrete`.
-- **DXTRAN-style continuous splitting** for ≥14 mfp photon
-  penetration. All `(ratio, growth) ∈ {5,10,20} × {0,1,2,3}` at
-  300 cm give 0 transmitted in 500k — `max_split=8` ceiling bounds
-  geometric WW.
-- **Full C5G7** (4 fuel × 7 groups × 17×17) — data plumbing on top
-  of `random_ray::*`, no new solver code.
-- **HexLattice GPU runtime parity** vs CPU (large-volume sweep
-  equivalent to `hex_lattice_descent_and_trace_smoke`).
-- **Per-precursor delayed-neutron groups** — only matters for
-  time-dependent kinetics, not static k-eff.
-- **EADL relaxation cascade on GPU** — long-flagged.
-- **Source-distribution biasing** (sample initial pos from
-  importance CDF) — for the Wagner-Haghighat 50-1000× FOM on
-  volume / angular sources. For `shield_slab`'s monodirectional
-  point beam the importance CDF degenerates.
+Edit `src/lib.rs:19`, full release rebuild including the Python
+wheel (`maturin develop --release --features cuda`), confirm GPU
+register pressure stayed in budget on sm_86.
+
+### Re-run a sweep on a different machine
+
+The CSV format is hardware-agnostic. `outputs/` is gitignored;
+force-add specific files to record results:
+
+```powershell
+git add -f outputs/<sweep-name>.csv outputs/<sweep-name>.log
+git commit -m "bench: <sweep-name> (<machine>, <date>)"
+```
 
 ## Recent session highlights (2026-05-21)
 
-1. **ENDF/B-VIII.1 is now the default library.** `setup_nuclear_data.ps1`
-   downloads VIII.1 by default; legacy VII.1 via `-Vii1`. New
-   `data_paths` module handles the sibling-`thermal/` layout VIII.x
-   uses. 5 new layout tests.
-2. **Natural-element handling.** `scripts/migrate_natural_elements.py`
-   rewrote 137 JSONs (291 natural-carbon entries split into C-12 +
-   C-13 by IUPAC 2021 abundance). Engine-side fallback in
-   `material_resolve::expand_natural_elements` covers any future
-   un-migrated JSON. 4 new tests.
-3. **Sweep precedence inverted.** Explicit CLI flag > JSON
-   `recommended_settings` > built-in. Banner shows which knob came
-   from where. CPU runs print a note that GPU refill keys are
-   ignored (rayon work-stealing already saturates cores).
-4. **HEU-COMP-INTER-003 VIII.1 vs VII.1 A/B (CPU, 100k, 7 cases).**
-   VIII.1 shifts k upward by +762 to +1035 pcm uniformly. Driver
-   localised to CIELO U-235: σ_f at 100 eV grew +5.3%, σ_capture
-   dropped −5.5%, so the capture/fission α dropped −10.2% at the
-   intermediate-spectrum peak. ν̄(E) essentially unchanged. Cases 2-3
-   now FAIL (handbook), cases 5-7 cross zero into PASS.
-5. **Library cache infrastructure verified.** Zero "Loading X.h5"
-   lines across the 7-case CPU sweep after preload — 19 nuclides
-   loaded once and reused (was 125× redundant on the prior baseline
-   per the `material_resolve.rs` cache comment).
+Four commits on top of `547dfcb`:
+
+1. `ac282e6` **data: ENDF/B-VIII.1 default + natural-element migration**.
+   New `data_paths` module with layout-aware resolver + multi-library
+   discovery. `migrate_natural_elements.py` rewrote 137 ICSBEP JSONs
+   (291 natural-C entries split into C-12 + C-13 by IUPAC 2021).
+   Engine fallback `expand_natural_elements` for un-migrated JSONs.
+   `setup_nuclear_data.ps1` defaults to VIII.1. Catalog gained C-12 /
+   C-13 entries. 9 new tests.
+
+2. `7994424` **sweep: explicit CLI flag beats JSON
+   `recommended_settings`**. Previous precedence was inverted, so
+   `--particles 20000` lost to a 500k JSON recommendation. Now CLI >
+   JSON > built-in via `None`-sentinel argparse defaults + `_pick`
+   helper. Banner shows where each knob's value came from.
+
+3. `d80a157` **bench: heu-comp-inter-003 VIII.1 CPU A/B**. 7 cases
+   on this A1000-laptop, 100k particles × 5 seeds × 150 batches /
+   40 inactive. VIII.1 shifts k uniformly upward by +820 ± 153 pcm
+   vs VII.1 baseline. Localised to **CIELO U-235**: σ_f at 100 eV
+   grew +5.3 %, σ_capture dropped −5.5 %, α (capture/fission)
+   dropped −10.2 % at the intermediate-spectrum peak. ν̄(E)
+   essentially unchanged. Cases 2-3 cross VIII.1 envelope → FAIL;
+   cases 5-7 had VII.1 k below 1.000 → +820 pcm pulls them into
+   PASS.
+
+4. `3740ae2` **docs: rewrite CLAUDE.md / STATUS.md / README.md;
+   drop resume.md**. Top-level docs were drifting; wholesale
+   rewrite to reflect current state. Total docs shrink 2469 →
+   1043 lines.
+
+## Open / deferred
+
+- **GPU device-buffer cache for SAB + material payloads.**
+  `upload_nuclide_data` is cached (per-nuclide LRU keyed on
+  `Arc::as_ptr` + rank). `upload_sab_data_multi` and
+  `upload_material_data` rebuild flat arrays + HtoD every seed/case.
+  A 5-seed × 7-case sweep = 35× redundant ~50 MB SAB uploads.
+- **GPU survival biasing / Russian roulette.** CPU has it (4.5×
+  FOM on PWR); GPU runs analog. Variance-only, k_eff stays
+  unbiased.
+- **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** Continuous
+  only on device. OpenMC's HDF5 emits every TSL as
+  `incoherent_inelastic` — zero hits in the 375-case corpus.
+  `upload_sab_data_multi` panics if the host hands it
+  `InelasticDist::Discrete` (silent breakage impossible).
+- **GPU per-cell `Mat3` rotation.** `GpuRecursiveContext::build`
+  errors loudly if any cell sets `rotation = Some(...)`. No ICSBEP
+  scene currently uses it.
+- **DXTRAN-style continuous photon splitting** at ≥14 mfp.
+  Geometric WW (max_split=8) bounds it.
+- **Full C5G7** (4 fuel × 7 groups × 17×17) — data plumbing on
+  top of `random_ray::*`; no new solver code.
+- **HexLattice GPU runtime parity vs CPU** — full sweep
+  equivalent to `hex_lattice_descent_and_trace_smoke`.
+- **Full PWR depletion bench vs OpenMC** (30-50 GWd/MTU).
+  Chain-calibration fix landed (`fd530d0`); the long-burn
+  validation run itself is pending.
+- **Backfill the rest of the 137 migrated ICSBEP JSONs** with
+  VIII.1 A/B numbers once the GPU device-buffer cache lands and
+  the 3080 box is available.
