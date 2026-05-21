@@ -126,21 +126,31 @@ All k_eff numbers carry a scope tag — `[godiva]` means end-to-end
 `[assembly]` is depth-3 recursive 17×17. See `STATUS.md` for the
 full table.
 
-| Metric | Scope | Value |
-|---|---|---|
-| Rust Godiva k_eff (SVD k=5) | `[godiva]` | 1.00079 ± 0.00038 |
-| Δ_ICSBEP HMF-001 | `[godiva]` | +79 pcm (inside σ_exp = 100 pcm) |
-| PWR Table vs OpenMC 0.15.3 | `[pwr]` | 12 pcm |
-| 17×17 assembly k_inf | `[assembly]` | 1.14958 ± 0.00318 |
-| Hex 2-ring k_inf | `[hex]` | 1.36424 ± 0.00399 |
-| Track-length vs collision σ | `[godiva]` | 3.9× lower seed-to-seed |
-| Survival biasing FOM | `[pwr]` | 4.5× (412 → 1842) |
-| RR-CADIS FOM 200 cm water | `[shield]` | 4.32× vs analog |
-| PWR γ-heating fuel share (us / OpenMC) | `[photon]` | 84.1 % / ~85 % |
-| CRAM-16 vs analytical Xe equilibrium | `[depletion]` | 1e-4 relative |
-| GPU recursive transport vs CPU | `[assembly]` | 6.74× (RTX A1000) |
-| Refill 2× at mid-curve (HMF-008, 250k) | `[micro]` | 2.0× histories at same wall |
-| ICSBEP family suite (HMF / PMF / UMF / LCT / HST) | `[icsbep]` | 6 / 6 PASS under `max(150 pcm, 2σ_combined)` |
+Only numbers re-verified against `outputs/` and `results/` this
+audit are shown here. See [`STATUS.md`](STATUS.md) for the full
+audited table including older claims still awaiting re-measurement.
+
+| Metric | Scope | Value | Source |
+|---|---|---|---|
+| Lib tests (default) | — | **438 / 438 green** | `cargo test --lib` |
+| Lib tests (`--features cuda`) | — | **447 / 447 green** | `cargo test --lib --features cuda` |
+| ICSBEP family suite | `[icsbep]` | **6 / 6 PASS** (141 s, `max(150 pcm, 2σ)`) | `outputs/cuda_runs_after_rank_fix.txt` |
+| PWR γ-heating fuel/clad/water | `[photon]` | 84.12 % / 9.81 % / 5.72 % (gap 0 %) | `outputs/pwr_gamma_heating_benchmark.txt` |
+| Saturation knee (HMF-001, RTX 3080) | `[godiva]` | 500k–1M particles per batch | `outputs/saturation_*.csv` |
+| Peak throughput at saturation | `[godiva]` | ~1.2 M histories/sec at 1M particles | `outputs/saturation_1000000.csv` |
+| Refill 2× at mid-curve (HMF-008) | `[micro]` | 2.0× more collisions at same wall; σ 2.1× tighter; µs/coll −50 % | `outputs/hmf008_refill_*.csv` |
+| RR-CADIS shielding gain at 14 mfp (200 cm water) | `[shield]` | **1.18×** analog (RR-CADIS alone); **1.75×** with NEE | `outputs/method_comparison_2026-05-08.txt` |
+| SVD on Godiva vs Table | `[godiva]` | 1.22× faster; 5.14× memory | same |
+| SVD on PWR (9 nuc + S(α,β)) vs Table | `[pwr]` | **1.25× *slower***; 5.12× memory | same |
+| GPU SVD vs 20-core CPU SVD on Godiva | `[godiva]` | **0.77×** (1.3× *slower* — launch + memory penalty dominates) | same |
+
+The headline result of the SVD compression study (the engine's
+original purpose) is in `paper/main.pdf`: SVD beats the pointwise
+table on small fast-spectrum problems by ~22 %, loses by ~25 % on
+realistic thermal-spectrum PWR pin cells, and costs ~5× memory in
+both regimes. The honest reading is in the paper — this engine is
+also a *vehicle* for measuring SVD against realistic baselines,
+not a claim that SVD is universally faster.
 
 ## Architecture
 

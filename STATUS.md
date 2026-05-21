@@ -188,31 +188,35 @@ current headline.
 
 ## Headline numbers (scope-tagged)
 
-| Metric | Scope | Value |
-|---|---|---|
-| Lib test count (default) | — | 438 / 438 green |
-| Lib test count (`--features cuda`) | — | 443 / 443 green |
-| Rust Godiva k_eff (SVD k=5) | `[godiva]` | 1.00079 ± 0.00038 |
-| Δ_ICSBEP HMF-001 | `[godiva]` | +79 pcm (inside σ_exp 100 pcm) |
-| PWR Table vs OpenMC 0.15.3 | `[pwr]` | 12 pcm |
-| PWR SVD k=5 vs OpenMC | `[pwr]` | −67 pcm |
-| 17×17 assembly k_inf (depth-3) | `[assembly]` | 1.14958 ± 0.00318 |
-| Hex 1-ring k_inf | `[hex]` | 1.35829 ± 0.00329 |
-| Hex 2-ring k_inf | `[hex]` | 1.36424 ± 0.00399 |
-| Track-length vs collision σ | `[godiva]` | 3.9× lower seed-to-seed |
-| Survival biasing FOM | `[pwr]` | 4.5× (412 → 1842) |
-| RR-CADIS FOM 100 cm water 1 MeV γ | `[shield]` | 2.19× vs analog |
-| RR-CADIS FOM 200 cm water 1 MeV γ | `[shield]` | 4.32× vs analog |
-| PWR γ-heating fuel share (us / OpenMC) | `[photon]` | 84.1% / ~85% |
-| CRAM-16 vs analytical Xe equilibrium | `[depletion]` | 1e-4 relative |
-| CRAM-48 vs CRAM-16 (non-stiff) | `[depletion]` | 1e-13 relative |
-| GPU recursive transport vs CPU | `[assembly]` | 6.74× (RTX A1000) |
-| GPU multi-step walk vs CPU | `[assembly]` | 24× at ≤1e-13 max-rel-err |
-| GPU Compton persistent vs 20-thread CPU | `[photon]` | 2.22× on 1M histories |
-| RTX 3080 saturation knee (HMF-001) | `[godiva]` | 500k-1M particles |
-| RTX 3080 peak throughput | `[godiva]` | ~1.2M histories/sec |
-| Refill 2× at mid-curve (HMF-008, 250k particles) | `[micro]` | 2.0× histories at same wall, σ 2.1× tighter |
-| ICSBEP CUDA + CPU family suite | `[icsbep]` | 6 / 6 PASS under `max(150, 2σ)` |
+Re-verified against `outputs/` and `results/` 2026-05-21. Each row
+that's directly grounded in a CSV / .txt cites the source.
+Rows tagged *(unverified this audit)* are inherited from older
+sessions and should be re-measured before being quoted in papers.
+
+| Metric | Scope | Value | Source |
+|---|---|---|---|
+| Lib test count (default) | — | **438 / 438 green** | `cargo test --lib` |
+| Lib test count (`--features cuda`) | — | **447 / 447 green** | `cargo test --lib --features cuda` |
+| ICSBEP CUDA + CPU family suite | `[icsbep]` | **6 / 6 PASS** in 141 s under `max(150 pcm, 2σ)` | `outputs/cuda_runs_after_rank_fix.txt` |
+| PWR γ-heating split (us vs OpenMC) | `[photon]` | fuel 84.12% / clad 9.81% / water 5.72% / gap 0% | `outputs/pwr_gamma_heating_benchmark.txt` |
+| Bremsstrahlung firing rate in PWR γ-heat | `[photon]` | 2 312 γ at 7.43e8 eV (0.353 % of source) | same file |
+| Saturation knee (HMF-001, 3 nuclides) | `[godiva]` | 500k-1M particles per batch | `outputs/saturation_*.csv` |
+| Peak throughput at saturation (RTX 3080) | `[godiva]` | **~1.2 M histories/sec** at 1M particles, 0.83 µs/p | `outputs/saturation_1000000.csv` |
+| Refill 2× at mid-curve (HMF-008, GPU) | `[micro]` | **2.0× more collisions at same wall, σ 2.1× tighter** | `outputs/hmf008_refill_*.csv` |
+| µs/collision drop with refill (HMF-008) | `[micro]` | 1.162 → 0.575 µs/coll (−50.5 %) | same |
+| RR-CADIS FOM at 7 mfp (100 cm water 1 MeV γ) | `[shield]` | **1.03× analog** (essentially neutral at this depth) | `outputs/method_comparison_2026-05-08.txt` |
+| RR-CADIS FOM at 14 mfp (200 cm water 1 MeV γ) | `[shield]` | **1.18× analog** | same |
+| RR-CADIS + NEE FOM at 14 mfp | `[shield]` | **1.75× analog** (combination compounds) | same |
+| GPU SVD vs 20-core CPU SVD (Godiva, RTX A1000) | `[godiva]` | **0.77× (1.3× SLOWER)** — launch + memory-access penalty dominates | same |
+| SVD vs Table on PWR pin cell (9 nuc, S(α,β) on) | `[pwr]` | SVD 1.25× *slower* than Table; SVD memory 5.12× larger | same |
+| SVD vs Table on Godiva (3 nuc, fast spectrum) | `[godiva]` | SVD 1.22× faster than Table; SVD memory 5.14× larger | same |
+| Rust Godiva k_eff (SVD k=5) | `[godiva]` | 1.00079 ± 0.00038 *(unverified this audit)* | (claim from prior session) |
+| PWR SVD k=5 vs OpenMC 0.15.3 | `[pwr]` | 12 pcm Table, −67 pcm SVD *(unverified this audit)* | (claim from prior session) |
+| Track-length vs collision σ | `[godiva]` | 3.9× lower seed-to-seed *(unverified this audit)* | (claim from prior session) |
+| Survival biasing FOM on PWR | `[pwr]` | 4.5× *(unverified this audit)* | (claim from prior session) |
+| CRAM-16 vs analytical Xe equilibrium | `[depletion]` | 1e-4 relative *(unverified this audit)* | (claim from prior session) |
+| GPU constant-XS recursive transport (geometry only) | `[assembly]` | 6.74× CPU at MC noise *(microbench, not integration)* | (older const-XS bench) |
+| GPU Compton persistent kernel scaling | `[photon]` | 12.96 ms / 1M @ 1 MeV (free); 312 ms with Doppler | `outputs/gpu_compton_scaling.txt` |
 
 ## ICSBEP A/B against VIII.1 — heu-comp-inter-003 (2026-05-21)
 
