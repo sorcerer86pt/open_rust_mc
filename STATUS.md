@@ -1,574 +1,319 @@
-# Project status — 2026-05-07
+# Project status — 2026-05-21
 
-A snapshot of what's on `origin/main` and what's still missing.
-Pairs with `resume.md` (the project journal — round-by-round
-narrative). This file is forward-looking: "where are we, what's
-next".
+What `origin/main` (`d80a157`) ships today, what's open, what's the
+current headline.
 
-Deferred specs:
-- [`ICSBEP.md`](ICSBEP.md) — phased plan to run the full ICSBEP
-  benchmark suite. Engineering-heavy, ~13 weeks; deferred until
-  time-dependent kinetics, real continuous-energy adjoint MC, and
-  validated full-PWR depletion bench land first.
+## Headline
 
-`origin/main` at `b2270c7`. Lib tests **438 / 438 green** on the
-default profile and on `--features cuda`; Python bindings
-(`-p open-rust-mc-py`) clean.
+- **Tests**: 438 / 438 lib tests green on default features;
+  443 / 443 with `--features cuda`. `cargo check` clean on
+  `--all-targets` (default + cuda).
+- **Default nuclear data**: ENDF/B-VIII.1 (released Oct 2024).
+  VIII.0 and VII.1 supported as fallbacks; library autodetected from
+  on-disk layout.
+- **ICSBEP corpus**: 375 scene JSONs in `bench/icsbep/`. 137
+  migrated to per-isotope carbon to be VIII.x-compatible.
+- **CUDA backend**: feature-gated, sm_86+. Recursive transport,
+  per-nuclide kernel cache, refill-pool (PHYSOR 2022 Optimization F)
+  with auto-refill recommender, multi-slot S(α,β), CIELO U-235.
+- **CPU backend**: rayon work-stealing, history-based,
+  saturated-by-construction (no refill knob needed).
 
-## What's on main
+## Capabilities
 
 ### Geometry
-- Recursive `Geometry`: surfaces, cells, universes, rectangular
-  lattices, hex lattices, per-cell rotations, BVH-accelerated
-  cell finding.
+- Recursive universes via `CoordStack` (`SmallVec<[Coord; 4]>`).
+- RectLattice + HexLattice (flat-top Y / pointy-top X).
+- Per-universe surface restriction + opt-in BVH (≥8 cells with
+  finite AABBs) — 3.0× assembly speedup alone.
 - `geometry::shapes` builders: `rect_box`, `rect_box_split_bc`,
-  `hex_boundary`, `hex_side_normals`, `pin_cylinders`. Same
-  helpers exposed in Python via `Scene.add_rect_box`,
-  `add_hex_boundary`, `add_pin_cylinders`.
-- HexLattice transport on **CPU** (descent + trace_step + grid-
-  distance dispatch) and on **GPU** (CUDA device functions, 8
-  uploaded SoA buffers, 5 kernel signatures). CPU validated end-
-  to-end via `hex_minicore`; GPU on-device parity confirmed on
-  RTX A1000 (`outputs/gpu_recursive_parity_run.txt`,
-  Tests 7–9, 2026-05-08).
+  `hex_boundary`, `pin_cylinders`. Exposed via Python.
+- `RectLattice.material_overrides` (one pin universe across an
+  assembly with different enrichments / burnup tiers).
 
 ### Cross sections
-- SVD-compressed reaction kernels (continuous-T via Ducru).
-- Pointwise table provider (OpenMC-style, with stochastic
-  pseudo-interpolation between library temperatures).
-- Hybrid SVD + WMP and Table + WMP.
-- URR probability tables (`multiply_smooth=true|false`).
-- **`NuclideLibrary`** (`transport::nuclides`) — ZAID-keyed
-  catalog of structural / actinide / FP nuclides + on-demand
-  HDF5 metadata read (AWR + temperature columns) + nearest-
-  temperature selection. Replaces the per-binary
-  `NUCLIDE_SPECS: &[(&str, f64, f64, usize)]` tables with a
-  registry: binaries describe materials by ZAID + target
-  temperature, the library resolves the file path / AWR /
-  `temp_idx`. Catalog covers H/D/T, B-10/11, C-nat, O-16/17,
-  Zr-90/91/92/94/96, Fe-54/56/57/58, U-233 through Cm-247,
-  and the major FP poisons (I-135, Xe-135, Cs-135, Pm-149,
-  Sm-149, Gd-155, Gd-157).
-- **`ThermalLibrary`** (`transport::thermal_library`) — named
-  `c_*.h5` resolver covering H-in-H₂O, **D-in-D₂O** (heavy
-  water), graphite, ZrH (TRIGA), Be / BeO, polyethylene,
-  benzene, α-quartz, bound O / U in UO₂, methane (liquid /
-  solid), ortho/para H₂ and D₂, and Al-27 / Fe-56 metals.
-- **URR equivalence theory** (Stoker-Weiss / NJOY rational form):
-  Carlvik-Pellaud Dancoff factor for square pin lattices, per-cell
-  `(C, l̄)` cache, σ_eff correction wired into `apply_urr` for
-  flagged absorber nuclides. `pwr_pincell --urr-equivalence`
-  toggles it.
-- S(α,β) thermal scattering for H in H₂O (continuous inelastic
-  + discrete + coherent / incoherent elastic). D-in-D₂O
-  validated through `pwr_d2o_pincell` with an end-to-end
-  pitch-sweep moderation curve.
-- Delayed-neutron yields ν_d(E) loaded per nuclide.
+- Four interchangeable providers behind one `XsProvider` trait:
+  `Table` (pointwise), `Svd`, `HybridTableWmp`, `HybridSvdWmp`.
+- URR probability tables (`multiply_smooth` true / false).
+- URR equivalence theory (Carlvik-Pellaud Dancoff for square
+  lattices).
+- Stochastic pseudo-interpolation for off-library temperatures
+  (Table) + partition-of-unity 3-point Ducru reconstruction (SVD).
+- ZAID-keyed `NuclideLibrary` registry (H/D/T, B, C-nat + C-12/-13,
+  O-16/17, Zr-90/91/92/94/96, Fe-54-58, U-233 → Cm-247, plus FP
+  poisons I-135 / Xe-135 / Cs-135 / Pm-149 / Sm-149 / Gd-155 /
+  Gd-157).
+- Natural-element fallback (`material_resolve::expand_natural_elements`)
+  — mirrors OpenMC's `Material.add_element` for libraries that
+  dropped the natural file (e.g. VIII.x has C-12 / C-13 but no C-0).
 
-### Adjoint neutron Monte Carlo (CADIS, real CE)
-- `crate::transport::adjoint_neutron::adjoint_elastic_scatter` —
-  s-wave isotropic-CM elastic adjoint kernel for free-gas
-  scattering on a nucleus of arbitrary `awr ≈ A`. Inverts the
-  forward kinematics `E_out = E_in · ½ · ((1+α) + (1−α)·μ_cm)`,
-  samples `E_in` log-uniformly on `[E_out, E_out/α]` (or
-  `[E_out, e_in_max]` for hydrogen where α = 0), returns
-  `(E_in, μ_cm, μ_lab)`. The log-uniform sampling is exact for
-  constant `σ_s` (s-wave smooth region — valid for moderator
-  nuclei H/D/C/O outside resonances); resonance modulation is
-  layered on by the caller via rejection. Validation: 4 unit
-  tests covering kinematic invariant on carbon (5 000 samples,
-  rel-err < 1e-9), hydrogen log-uniform shape (200 k samples,
-  χ²_red < 2.0), carbon log-uniform-in-kinematic-range, and
-  forward-then-adjoint round trip.
+### Thermal scattering
+- Free-gas Maxwell-Boltzmann below 400·kT.
+- S(α,β) registry `ThermalLibrary` covering H-in-H₂O, D-in-D₂O,
+  graphite, ZrH (TRIGA), Be / BeO, polyethylene, benzene,
+  α-quartz, bound O / U in UO₂, methane (liquid / solid), ortho /
+  para H₂ / D₂, Al-27, Fe-56.
+- Continuous + discrete inelastic, Bragg edges, Debye-Waller
+  incoherent elastic, stochastic temperature interpolation between
+  bracketing TSL columns.
 
-### Adjoint photon Monte Carlo (CADIS, real CE)
-- `crate::photon::compton::adjoint_compton_scatter` — inverted
-  Klein-Nishina sampler (Wagner-Haghighat 1998 / Lewis-Miller
-  §10.3). Given a post-collision energy `E_out` returns the
-  pre-collision `E_in` and scattering cosine μ from the transposed
-  KN kernel. Rejection ceiling is the analytic supremum
-  `2π · r_e²` (proven and empirically scanned in
-  `adjoint_compton_envelope_bound`). Conditional density at fixed
-  E_out matches the analytic `KN_dcs/dμ(E_in, μ_kin)` curve to
-  χ²_red < 2.5 across 25 bins from 200 k samples.
-- `crate::transport::adjoint_photon` — slab-geometry adjoint
-  walker. Composes the adjoint Compton with self-adjoint Rayleigh
-  + photoelectric / pair termination ("absorption-as-source")
-  into a track-length tally on a `(z, E)` mesh. Output:
-  `ImportanceMap` directly consumable by
-  `WeightWindow::from_flux` for the existing CADIS pipeline.
-  End-to-end test on a 100-cm water slab at 1 MeV produces a
-  diffusion-like ψ̂*(z) peaked at mid-slab with measurable
-  up-scatter contribution above the birth-energy bin (571 k vs
-  144 k integrated track length). Replacing the random-ray FW
-  proxy in `shield_slab` with this walker is the next integration
-  step.
-
-### Time-dependent kinetics
-- **Point-kinetics** (`transport::kinetics`) with 6-group
-  delayed-neutron precursors. Crank-Nicolson 7×7 ODE solver
-  (A-stable on the prompt-mode stiffness). Keepin / Hetrick-Roberts
-  six-group constants for U-235 thermal, U-238 fast, Pu-239 thermal
-  fission shipped as constants; `blend()` combines weighted nuclide
-  contributions for mixed cores. Closed-form `prompt_jump_ratio`
-  and `inhour_period` (Newton on the inhour equation) for analytic
-  cross-check. Demo binary `point_kinetics_demo` runs step / ramp /
-  scram reactivity profiles, emits CSV. Validation: equilibrium is
-  a fixed point (1e-6 drift over 1 s); prompt-jump matches analytic
-  to <5 %; **late-time period at ρ=50 ¢ matches inhour equation
-  to −0.37 %** (`outputs/pk_step_50c.csv` + the validation in
-  `scripts/`); 10 unit tests green.
+### Neutron physics
+- Energy-dependent ν̄(E), prompt + delayed.
+- Anisotropic scattering (tabular μ/CDF, CM frame).
+- Data-driven fission outgoing-energy spectrum.
+- Discrete inelastic MT=51-91 + continuum MT=91 (evaporation,
+  T = √(E*/a), a = A/8).
+- (n,2n) MT=16, (n,3n) MT=17.
+- Delayed-neutron yields ν_d(E) per nuclide; soft Watt aggregate
+  spectrum (a = 0.4 MeV).
+- Maxwell / Evaporation closed-form χ buffers (slots 130-135) —
+  fixes U-233 / U-234 / Pu-240 fission spectra.
 
 ### Transport
-- Eigenvalue power iteration with rayon parallel transport.
-- Surface tracking and Woodcock delta tracking, auto-detected
-  by material contrast.
-- Per-batch results: collisions, fissions, leakage, thermal
-  scatters, surface crossings, Shannon entropy, k_eff (collision
-  estimator), `k_track` (track-length estimator, surface
-  tracking only).
-- Variance reduction:
-  - Implicit-capture survival biasing + Russian roulette
-    (surface tracking standard branch + delta tracking).
-  - Cartesian-mesh weight windows (forward application; flux-
-    bootstrap generation via `WeightWindow::from_flux`).
-  - **`--disable-delayed-neutrons`** ablation flag.
-- Tallies: surface currents (J+ / J- by direction), Cartesian
-  mesh flux (Amanatides-Woo deposit). Library helpers for the
-  common patterns (`for_reflective_surfaces`,
-  `for_boundary_surfaces`, `from_aabb`).
-- HDF5 statepoint write + read + restart, with chained-restart
-  stability validated on 3-hop chains across 3×3 / 5×5 / 7×7
-  minicores.
-- Delayed-neutron emission: per-fission-neutron prompt vs delayed
-  sampling using ν_d / ν_total; soft Watt spectrum (a = 0.4 MeV)
-  for delayed energies.
-- Backend dispatch: `transport::dispatch::EigenvalueRunner` with
-  `CpuRunner` and (cuda-feature-gated) `CudaRunner`.
+- k-eigenvalue power iteration with Shannon-entropy convergence.
+- History-based + rayon-parallel on CPU; event-batched
+  recursive-CSG on GPU.
+- Surface tracking + Woodcock delta tracking, auto-detected by
+  material contrast.
+- Track-length k_eff estimator alongside collision estimator
+  (`[godiva]` 3.9× lower seed-to-seed σ).
+- Survival biasing + Russian roulette (w_min=0.25, w_survive=1.0)
+  on CPU. Variance-only — no k_eff bias. GPU survival biasing
+  pending.
+- Statepoint write / read / restart (HDF5).
+- Backend dispatch (`transport::dispatch::EigenvalueRunner`,
+  `CpuRunner` / `CudaRunner`).
 
-### Depletion (burnup)
-- **CRAM-16 / CRAM-48** matrix exponential evaluator (IPF form,
-  Pusa 2016 / OpenMC-canonical poles & residues), dense complex
-  Gaussian elimination with partial pivoting.
-- `DepletionChain` data structure (decay constants, decay branches,
-  per-(parent, MT) one-group reaction XS with default ENDF yield
-  inference for `(n,γ) / (n,2n) / (n,3n) / (n,p) / (n,α)`).
-- `chain_io` JSON loader with three-way `yields` semantics:
-  omitted → default ENDF; `{}` → pure removal; `{daughter: y, ...}`
-  → explicit.
-- Two shipped chain libraries: `chains/partial_xe.json` (4
-  nuclides — Xe poisoning) and `chains/pwr_actinides.json`
-  (17 nuclides — actinide buildup + dominant FP poisons).
-- CE/LI predictor-corrector step (`deplete_ce_li`) — predictor with
-  BOC flux, user-supplied `flux_at` callback for the EOC flux,
-  corrector at the average matrix.
-- `BurnupMapping` — table-driven walker that pushes chain-evolved
-  atom densities back into transport materials. Auto-derived from
-  `NUCLIDE_INFO` in `deplete_pwr` so any chain JSON drops in.
-- Power-normalised source rate + per-cell mean flux extractor
-  (`flux::*`) for transport-coupled burnup.
-- `deplete_pwr` driver — full eigenvalue → flux → CRAM →
-  composition update loop with **fresh-corrector**: clones
-  materials, runs eigenvalue at predicted composition for the EOC
-  flux estimate. Every burnup step does 2 transport solves
-  (predictor BOC + corrector EOC).
-- Validation: Xe-135 equilibrium reproduces analytical formula to
-  1e-4 relative; pwr_actinides chain solves 1-day step cleanly with
-  qualitatively correct U-238 → Pu-239 buildup.
+### Variance reduction
+- Forward weight windows (Cartesian mesh, split / roulette,
+  `max_split=8`, geometric-mean w_survive).
+- `WeightWindow::from_flux` — forward CADIS bootstrap from any
+  flux.
+- Random-ray multigroup TRRM (`random_ray::*`) — forward +
+  adjoint, cell-based or Cartesian FSRs, mortal or immortal-ray
+  (Tramm-Siegel 2021), analytic MoC ODE step.
+- RR-CADIS pipeline: `rr_cadis_slab` emits JSON,
+  `shield_slab --cadis-load` consumes. Measured FOM gains: 2.19×
+  at 100 cm water, 4.32× at 200 cm.
 
 ### Photon transport
-- Coupled neutron-photon (driver runs neutron k-eigenvalue, banks
-  photon source events, drives photon transport from the bank).
-- Compton (free Klein-Nishina + bound rejection + optional
-  Doppler), Rayleigh, photoelectric phase 1, Bethe-Heitler pair.
-- Full electron transport: Bethe-Bloch dE/dx, Highland multiple
-  scattering, Seltzer-Berger bremsstrahlung secondaries.
-- GPU photon kernels (Compton / Rayleigh / photoelectric phase 1
-  / pair) at bit-parity with CPU; persistent-kernel mode for
-  full Compton history loops.
-- **Per-photon weight bookkeeping** (`source_weight` +
-  `transport_history_csg_with_ww`): tally accumulators all scale
-  by current weight; existing analog callers go through the
-  weight=1 thin wrapper with no behaviour change.
+- Compton (KN + S(x,Z) + optional Doppler from Compton profiles).
+- Rayleigh (form factor + Thomson rejection).
+- Photoelectric phase 1 (subshell sampling).
+- Bethe-Heitler pair.
+- Full condensed-history electron walk (Bethe-Bloch dE/dx with
+  per-element I from HDF5, Highland MS with per-cell X₀,
+  Seltzer-Berger brems with secondary γ banking).
+- NEE (next-event estimator) for tallies.
+- Adjoint photon CADIS slab walker (CE adjoint Compton kernel).
+- `pwr_gamma_heating` produces fuel / gap / clad / water heating
+  split matching OpenMC 0.15.3 within 1 pp.
 
-### Shielding / variance reduction
-- `shield_slab` benchmark — fixed-source γ transmission through a
-  thick slab (water / concrete / Pb / Fe / W), produces the
-  analog FOM = 1 / (σ_rel² · t) reference. 100 cm water at 1 MeV:
-  T = 5.26e-3 (matches ANSI/ANS-6.4.3 buildup factor), FOM = 348/s.
-- **CADIS-lite calibration**: `--cadis-calibration N` runs
-  detector-backward photons and saves the resulting collision-
-  density importance map ψ̂\*(z) to JSON (`--cadis-save FILE`).
-- **CADIS WW application**: `--cadis-load FILE` ingests the map,
-  builds a `WeightWindow` with `w_target ∝ ψ̂\*_max / ψ̂\*`, and
-  applies splitting/roulette in the photon hot path. Source-side
-  normalisation: `w_ref` calibrated so `w_target(source) ≈ 1.0`,
-  keeping the tally in analog units.
-- **Status: working framework, FOM gain not yet delivered.**
-  Transmission is unbiased (5.21e-3 CADIS vs 5.45e-3 analog,
-  agree within 1σ) and 120× more samples reach the detector at
-  200 cm. But splits are highly correlated and σ_rel barely
-  improves; net FOM is 220/s vs analog 361/s at 100 cm. The
-  CADIS-lite proxy isn't a true adjoint flux; real continuous-
-  energy adjoint MC + source-distribution biasing is the
-  research-tier follow-on.
+### Depletion
+- Bateman + CRAM-16 (Pusa 2016) + CRAM-48.
+- Chain JSON loader (3-way `yields` semantics: omitted / `{}` /
+  explicit). ENDF default yield inference.
+- `BurnupMapping` table-driven walker (chain ↔ material).
+- Predictor-corrector with **fresh-corrector** (clones materials,
+  runs eigenvalue at predicted composition for EOC flux).
+- On-the-fly chain-XS spectrum collapse — closes the 9× to 0.77×
+  gap vs OpenMC depletion.
+- Shipped chains: `chains/partial_xe.json` (4 nuclides),
+  `chains/pwr_actinides.json` (17, U/Np/Pu + Xe/Sm).
 
-### GPU
-- Recursive geometry kernels (`find_cell_batch`,
-  `trace_step_batch`, `multi_step_walk`).
-- Constant-XS transport (`const_xs_transport_persistent`).
-- Full-physics `transport_recursive` with SVD / Pointwise / WMP /
-  URR / S(α,β).
-- HexLattice device functions and SoA upload (just landed).
-- Persistent-kernel photon Compton.
+### Time-dependent kinetics
+- Point-kinetics with 6-group delayed-neutron precursors.
+- A-stable Crank-Nicolson 7×7 ODE solver.
+- Keepin / Hetrick-Roberts 6-group constants for U-235 thermal,
+  U-238 fast, Pu-239 thermal. `blend()` combines mixed cores.
+- Closed-form `prompt_jump_ratio` and `inhour_period` for
+  analytic cross-check.
+- `point_kinetics_demo` runs step / ramp / scram profiles, emits CSV.
+- Late-time period at ρ = 50 ¢ matches inhour to −0.37 %.
 
-### Python bindings
-- PyO3 builders for `Material`, `Scene`, `Settings`,
-  `PhotonMaterial`, `XsMode`.
-- Surfaces: `Sphere`, `XCylinder`, `YCylinder`, `ZCylinder`,
-  `XPlane`, `YPlane`, `ZPlane`.
-- Shape builders: `Scene.add_rect_box`, `add_hex_boundary`,
-  `add_pin_cylinders`.
-- `run_eigenvalue`, `run_gamma_heating` entry points.
-- Convenience material builders (`uranium_oxide_material`,
-  `water_material`, `zircaloy4_material`).
-- **Depletion API**: `Chain.from_file(path)` / `Chain.from_str`,
-  `CramOrder.Order16` / `Order48`, `cram(matrix, n0, order)`,
-  `deplete_constant_flux`, `deplete_with_flux_callback` (FFI-
-  exception-safe Python `flux_at` closure for predictor-corrector
-  with mid-step transport solves).
-- `Material.set_atom_density(hdf5_file, density)` /
-  `atom_density_of(hdf5_file)` for in-place composition updates
-  between burnup steps.
-- Examples: `godiva.py`, `pwr_pincell.py`, `pwr_gamma_heating.py`,
-  `seed_sweep.py`, `xs_mode_demo.py`, `xs_mode_quick.py`,
-  `hex_minicore.py`, `depletion_xe_demo.py`.
+### Adjoint (continuous-energy)
+- `adjoint_elastic_scatter` — s-wave isotropic-CM adjoint kernel.
+  4 unit tests (kinematic invariant, log-uniform shape, range,
+  round-trip).
+- `adjoint_compton_scatter` — inverted Klein-Nishina sampler
+  (Wagner-Haghighat 1998 / Lewis-Miller §10.3). Conditional density
+  matches analytic KN dcs/dμ to χ²_red < 2.5 across 25 bins.
+- `transport::adjoint_photon` — slab walker, composes adjoint
+  Compton + self-adjoint Rayleigh + photoelectric / pair
+  termination. Output is an `ImportanceMap` consumable by
+  `WeightWindow::from_flux`.
 
-## What's missing
+### GPU (CUDA, sm_86+)
+- Recursive cell-find / trace-step / multi-step walk — bit-exact
+  vs CPU (≤ 9.3e-11 max-rel-err), 3-24× speedups on RTX A1000.
+- Constant-XS transport with collision + scatter + fission banking
+  (atomicAdd) — 6.74× speedup, k within MC noise.
+- Photon kernels: Compton (fixed-E + per-particle-E variants),
+  Rayleigh, pair. Persistent Compton: 2.22× wall vs 20-thread CPU
+  on 1M histories.
+- Per-nuclide kernel cache (`Arc::as_ptr`-keyed, LRU + bundle
+  budget) eliminates redundant HtoD on multi-case sweeps.
+- Refill pool (PHYSOR 2022 Optimization F) — opt-in via
+  `gpu_refill_pool_factor` or auto-recommended via device attribute
+  inspection. 2× histories at same wall time on mid-curve workloads.
+- Multi-slot S(α,β) (`upload_sab_data_multi`) — concurrent TSLs
+  on multiple nuclides in one run.
+- HexLattice GPU port — full device functions, dispatch wired,
+  parity test pending.
 
-### Quick wins (hours to a day each)
+### Python bindings (PyO3)
+- `Scene` / `Material` / `Surface` / `PhotonMaterial` builders.
+- `run_eigenvalue`, `run_gamma_heating`, `run_icsbep_case`.
+- `XsMode::{Table, Svd, HybridTableWmp, HybridSvdWmp}` per-sim
+  toggle, per-MT rank overrides.
+- Depletion: `Chain.from_file`, `CramOrder::{Order16, Order48}`,
+  `cram`, `deplete_constant_flux`, `deplete_with_flux_callback`
+  (FFI-exception-safe Python closure), `Material.set_atom_density`
+  / `atom_density_of`.
+- `Scene.add_rect_box` / `add_hex_boundary` / `add_pin_cylinders`
+  return ready-to-parse region strings.
 
-- ~~**Hex on GPU runtime parity test on real hardware.**~~
-  **Done 2026-05-08, RTX A1000 Laptop GPU.** Geometry-primitive
-  parity (Tests 7–9 in `gpu_recursive_parity` for find_cell /
-  trace_step / multi_step_walk on a 1-ring hex mini-core) and
-  full-physics k_inf parity both confirmed:
+### Benchmark suite (Python harness)
+- `icsbep_run.py` — single case, auto data-dir discovery
+  (VIII.1 → VIII.0 → VII.1).
+- `icsbep_sweep.py` — full corpus sweep with start / stop / resume,
+  per-case CSV durability, multi-seed averaging, filter by case
+  family. Precedence: explicit CLI flag > JSON `recommended_settings`
+  > built-in default.
+- `run_benchmark.ps1` — one-shot PowerShell wrapper. Picks runner
+  automatically, writes `outputs/icsbep_full_<runner>.csv` + log.
+- ICSBEP family suite under `|Δ| ≤ max(150 pcm, 2σ_combined)`:
+  HMF-001 / PMF-001 / PMF-002 / U-233-MF-001 / LCT-008 /
+  HEU-SOL-THERM-001 → **6 / 6 PASS** on both CPU and CUDA.
 
-  - Geometry primitives: 0/200 000, 0/50 000, 0/20 000 disagreement
-    after fixing arbitrary-orientation reflection (`gr_reflect_direction`
-    helper added in `geom_recursive.cu`; previously only axis-aligned
-    `GR_SURF_PLANE_X/Y/Z` were reflected — hex sides are
-    `GR_SURF_PLANE_GENERAL`). Speedups 6.6× / 6.1× / 21.6× vs CPU.
-  - Eigenvalue: new `gpu_hex_minicore` binary using the
-    dispatch `CudaRunner`. CPU k_inf = 1.36009 ± 0.00137, GPU
-    k_inf = 1.35938 ± 0.00341 (4 seeds × 60 batches × 5 000
-    particles, rank 5). Δ = 71 pcm < 0.2σ_combined.
-  - Artifacts: `outputs/gpu_recursive_parity_run.txt`,
-    `outputs/gpu_hex_minicore_4seeds.txt`,
-    `outputs/cpu_hex_minicore_4seeds.txt`.
-- ~~**Binary refactors to use `EigenvalueRunner`.**~~
-  **Mostly done 2026-05-08.** `hex_minicore`, `gpu_hex_minicore`,
-  `godiva`, `pwr_pincell`, `pwr_assembly`, `pwr_gamma_heating`
-  now drive the eigenvalue loop through
-  `transport::dispatch::{CpuRunner, CudaRunner}.run(&config)`.
-  No behaviour change; `cargo test --lib --release` 316/316
-  green; smoke runs of godiva (k≈1.0) and pwr_pincell (k≈1.327)
-  match the documented values. `gpu_assembly_keff` deliberately
-  unchanged — its per-batch live-progress print would be lost
-  without adding `verbose` support to `CudaRunner`.
-- ~~**OpenMC cross-validation on PWR pin cell with URR equivalence
-  on.**~~ **Done 2026-05-08 (fix landed).**
-  3 seeds × 60 batches × 10 000 particles, SVD rank 5, 3.1 % UO₂
-  pin cell @ 600 K / 900 K, identical geometry across both codes:
+## Headline numbers (scope-tagged)
 
-  | Config                          | k_inf    | σ (3 seeds) |
-  |---------------------------------|----------|-------------|
-  | OpenMC 0.15.3                   | 1.32773  | 0.00205     |
-  | Rust w/o URR-eq                 | 1.32715  | 0.00153     |
-  | Rust w/ URR-eq (rational, old)  | 1.33479  | 0.00226     |
-  | **Rust w/ URR-eq (Hwang, fix)** | 1.32892  | 0.00095     |
+| Metric | Scope | Value |
+|---|---|---|
+| Lib test count (default) | — | 438 / 438 green |
+| Lib test count (`--features cuda`) | — | 443 / 443 green |
+| Rust Godiva k_eff (SVD k=5) | `[godiva]` | 1.00079 ± 0.00038 |
+| Δ_ICSBEP HMF-001 | `[godiva]` | +79 pcm (inside σ_exp 100 pcm) |
+| PWR Table vs OpenMC 0.15.3 | `[pwr]` | 12 pcm |
+| PWR SVD k=5 vs OpenMC | `[pwr]` | −67 pcm |
+| 17×17 assembly k_inf (depth-3) | `[assembly]` | 1.14958 ± 0.00318 |
+| Hex 1-ring k_inf | `[hex]` | 1.35829 ± 0.00329 |
+| Hex 2-ring k_inf | `[hex]` | 1.36424 ± 0.00399 |
+| Track-length vs collision σ | `[godiva]` | 3.9× lower seed-to-seed |
+| Survival biasing FOM | `[pwr]` | 4.5× (412 → 1842) |
+| RR-CADIS FOM 100 cm water 1 MeV γ | `[shield]` | 2.19× vs analog |
+| RR-CADIS FOM 200 cm water 1 MeV γ | `[shield]` | 4.32× vs analog |
+| PWR γ-heating fuel share (us / OpenMC) | `[photon]` | 84.1% / ~85% |
+| CRAM-16 vs analytical Xe equilibrium | `[depletion]` | 1e-4 relative |
+| CRAM-48 vs CRAM-16 (non-stiff) | `[depletion]` | 1e-13 relative |
+| GPU recursive transport vs CPU | `[assembly]` | 6.74× (RTX A1000) |
+| GPU multi-step walk vs CPU | `[assembly]` | 24× at ≤1e-13 max-rel-err |
+| GPU Compton persistent vs 20-thread CPU | `[photon]` | 2.22× on 1M histories |
+| RTX 3080 saturation knee (HMF-001) | `[godiva]` | 500k-1M particles |
+| RTX 3080 peak throughput | `[godiva]` | ~1.2M histories/sec |
+| Refill 2× at mid-curve (HMF-008, 250k particles) | `[micro]` | 2.0× histories at same wall, σ 2.1× tighter |
+| ICSBEP CUDA + CPU family suite | `[icsbep]` | 6 / 6 PASS under `max(150, 2σ)` |
 
-  Baseline cross-check (no URR-eq): Rust vs OpenMC Δk = -58 pcm
-  (0.23σ_combined — pass). The original rational form
-  `σ_eff = σ_URR · σ_0/(σ_0+σ_e)` shifted +764 pcm — 3-15× the
-  textbook 2-15 % shielding band — because it shielded the full
-  URR sample including U-238's smooth ~11.8 b potential elastic
-  baseline. Diagnosed via `scripts/urr_eq_dump.py`
-  (`outputs/urr_eq_dump.txt`): Carlvik-Pellaud C = 0.68, σ_e
-  = 17.4 b, σ_0 = 7.9 b — all correct; the formula's domain of
-  applicability was the bug.
+## ICSBEP A/B against VIII.1 — heu-comp-inter-003 (2026-05-21)
 
-  Fix: **Hwang superposition** (`apply_equivalence_correction`,
-  `transport/urr_equivalence.rs`):
+CPU runner, 100k particles, 5 seeds, 150 batches, 40 inactive.
+Compared against the existing VII.1 GPU baseline.
 
-  ```text
-    σ_eff = σ_smooth + (σ_URR − σ_smooth) · σ_0 / (σ_0 + σ_e)
-  ```
+| case | VII.1 k_calc | VIII.1 k_calc | Δk (VII.1 → VIII.1) | VIII.1 status |
+|---|---|---|---|---|
+| c-1 | 1.005268 | 1.011149 | +588 pcm | PASS |
+| c-2 | 1.005793 | 1.013705 | +791 pcm | **FAIL** (2.24σ vs handbook) |
+| c-3 | 1.005298 | 1.013161 | +786 pcm | **FAIL** (2.35σ vs handbook) |
+| c-4 | 1.001496 | 1.010804 | +931 pcm | PASS (1.96σ) |
+| c-5 | 0.997644 | 1.007997 | +1035 pcm | PASS (1.70σ) |
+| c-6 | 0.994727 | 1.003175 | +845 pcm | PASS |
+| c-7 | 0.994939 | 1.002560 | +762 pcm | PASS |
 
-  The Bondarenko factor `σ_0/(σ_0+σ_e)` shields only the
-  resonance-fluctuation `Δσ = σ_URR − σ_smooth` above the
-  off-resonance baseline, leaving smooth potential scattering
-  and smooth s-wave capture intact (NJOY PURR §13). Threading
-  the smooth (pre-`apply_urr`) baseline through to the
-  equivalence pass adds one `[MicroXs; MAX_NUCLIDES]` snapshot
-  per collision in both surface and delta-tracking hot paths.
+VIII.1 shifts k upward uniformly by **+820 ± 153 pcm**. Localised
+driver: **CIELO U-235 σ_f at 100 eV grew +5.3 %, σ_capture dropped
+−5.5 %, α (capture/fission) dropped −10.2 %** at the intermediate-
+spectrum peak. ν̄(E) essentially unchanged. This is a documented
+CIELO outcome (Brown et al. ENDF/B-VIII.0 NDS 148, 2018). The
+Wright/Leal ORNL evaluation reports a 1500 pcm C/E spread on
+ENDF/B-VI.5 for this family — both VII.1 and VIII.1 sit inside the
+spread but on opposite halves.
 
-  Result: shift = **+177 pcm** (in the textbook 50-200 pcm
-  band) and Rust k_inf = 1.32892 lands at 0.53σ_combined of the
-  OpenMC reference — consistent with OpenMC at the level of
-  3-seed MC noise.
+## Hardware-specific notes
 
-  Artifacts:
-  `outputs/pwr_pincell_no_urr_eq.txt`,
-  `outputs/pwr_pincell_with_urr_eq.txt` (old rational form),
-  `outputs/pwr_pincell_with_urr_eq_hwang.txt` (Hwang fix),
-  `outputs/openmc_pwr_urr_ref.json`,
-  `outputs/urr_eq_dump.txt`,
-  `scripts/urr_eq_dump.py`.
-- ~~**`pwr_actinides.json` end-to-end run.**~~ **Done 2026-05-08.**
-  `deplete_pwr` now wires all 17 chain ZAIDs into transport
-  (0 chain-only); the actinide buildup nuclides (U-236/237/239,
-  Np-237/239, Pu-239/240/241/242, Am-241, I-135, Cs-135,
-  Pm-149, Sm-149) loaded from HDF5 with initial density 0 and
-  fed by CRAM each step. `MAX_NUCLIDES` bumped from 16 → 32
-  to fit the 18-nuclide fuel material. Per-step trace adds
-  Pu-239/Pu-240/Sm-149 columns when the chain has actinides.
-  6 steps × 48 h × 200 W/cm at CRAM-48 (`outputs/deplete_pwr_actinides.txt`):
-  Pu-239/U-235 grows linearly 0 → 2.4 %, Pu-240 grows
-  quadratically, Sm-149 reaches near-equilibrium ~1.5e-4,
-  k_eff 1.331 → 1.206 over 12 d (steep but expected for the
-  light pin-cell model). Qualitatively correct trajectories.
+The same engine source has been exercised on three machines that map
+to different points on the saturation curve:
 
-### Medium-effort (1-2 weeks each)
+| host | GPU | VRAM | CPU | role |
+|---|---|---|---|---|
+| MSI-Laptop | RTX A1000 | 4 GB | 14p / 20l Intel | dev box; CPU sweeps |
+| MSI-Home | RTX 3080 | 10 GB | 8p / 8l Ryzen | GPU production sweeps |
+| (extrapolated) | A100 / H100 | 40 GB+ | — | saturation regime |
 
-- ~~**Survival biasing in the thermal-scatter path.**~~
-  **Done 2026-05-08.** The use-thermal-but-non-thermal sub-branch
-  in `transport_particle` (a real reaction on a S(α,β) nuclide
-  — fission / capture / inelastic, not a thermal scatter) now
-  routes through `dispatch_real_collision` instead of the
-  dedicated `process_non_thermal_collision` helper. SB is now
-  uniform across all collision paths: thermal scatters stay
-  analog (no fission/capture to bias), every other reaction —
-  including capture on H-1 below 3.75 eV — goes through
-  implicit-capture + Russian roulette when SB is enabled.
-  `process_non_thermal_collision` deleted. PWR pin cell smoke
-  (50 batches × 5 000 particles × 3 seeds): k_inf agrees
-  with/without SB at 0.58σ_combined (1.32763 ± 0.00263 vs
-  1.32960 ± 0.00218); SB lowers σ slightly. 322/322 lib tests
-  green.
-- ~~**Hex on GPU validated end-to-end on a real eigenvalue.**~~
-  **Done 2026-05-08.** `gpu_hex_minicore` binary lives in
-  `src/bin/`, reuses the CPU `hex_minicore` geometry, runs the
-  GPU recursive transport via the dispatch `CudaRunner`. k_inf
-  parity confirmed at 71 pcm < 0.2σ_combined (see Quick wins).
-- ~~**Track-length estimator under delta tracking.**~~
-  **Done 2026-05-08.** `transport_particle_delta` now scores
-  `w · ν·Σ_f(m, E) / Σ_t(m, E)` at every real (post-acceptance)
-  collision — the unbiased Sutton-Brown collision form of the
-  track-length estimator. In expectation,
-  `Σ_t(m,E) · ν·Σ_f(m,E)/Σ_t(m,E) = ν·Σ_f(m,E)`, the same
-  integrand the surface-tracking path accumulates per
-  cell-residence segment, so the two `k_track` columns are
-  directly comparable. New unit tests
-  `delta_tracking_two_material_problem_picks_delta` and
-  `delta_tracking_k_track_matches_k_eff` exercise a low-contrast
-  two-material geometry that auto-selects delta tracking and
-  verify k_track is non-zero and agrees with k_eff within MC
-  noise. 320/320 lib tests green.
-- ~~**Surface and mesh tallies under delta tracking.**~~
-  **Done 2026-05-08.** `transport_particle_delta` now deposits
-  mesh flux per Woodcock segment (Amanatides-Woo voxel walker,
-  same `MeshFluxTally::deposit` helper as surface tracking) and
-  tallies surface currents on the first boundary the segment
-  hits — exact for vacuum and reflective BCs (segment ends at
-  the surface) and pragmatic for transmission BCs (subsequent
-  silently-crossed surfaces in the same Woodcock step are
-  skipped, the standard limitation under delta tracking). New
-  unit tests `delta_tracking_mesh_flux_populates` and
-  `delta_tracking_surface_currents_populate` confirm both
-  helpers are wired. 322/322 lib tests green.
+Per-card practical particle ceilings:
+- A1000 (4 GB): ~50 k particles per batch — VRAM-pressured beyond
+  that; the natural-element migration + VIII.1 payload puts a
+  6-nuclide steel-bearing case at the limit.
+- 3080 (10 GB): 500 k - 1 M per batch. Saturation curve in
+  `outputs/saturation_*.csv`.
+- A100-class: 2 M - 8 M per batch (Tramm et al. PHYSOR 2022).
 
-### Substantial (months each — research-grade)
+For the `outputs/icsbep_full_gpu.csv` baseline (4-case
+heu-comp-inter-003 at 500k particles, 1424-1551 s/case) the
+machine was MSI-Home (RTX 3080).
 
-- **Real continuous-energy adjoint Monte Carlo for photon CADIS.**
-  The CADIS-lite proxy (forward photons run from the detector,
-  collision-density tally as ψ̂\*) ships with the WW-application
-  pipeline plumbed through, but it doesn't deliver textbook FOM
-  gain (220/s vs analog 361/s on 100 cm water). Real adjoint MC
-  needs: (1) transposed Compton kernel — sample E_in given E_out
-  via the inverted Klein-Nishina; (2) adjoint photoelectric as a
-  source term (the absorption cross-section becomes an emission
-  source in the adjoint); (3) energy-dependent WW (4D mesh
-  instead of 1D z-only); (4) source-distribution biasing
-  (sample initial position from the importance CDF) instead of
-  geometric splitting. Wagner-Haghighat 2003 reports 50-1000×
-  FOM gain when these are combined. Multi-week effort.
-- **CADIS for neutron shielding** — same machinery on the neutron
-  side. Photon CADIS is the prototype; once the adjoint MC
-  pattern is solid, transposing scatter / fission / capture
-  kernels for neutrons follows the same architecture.
-- **Doppler-broadened coherent elastic scattering.** Bragg-edge
-  treatment beyond the standard S(α,β) tables. Needs per-material
-  crystallographic data + phonon spectrum integration.
-- ~~**EADL relaxation cascade on GPU.**~~ **Done 2026-05-08.**
-  New `relaxation_cascade_batch` CUDA kernel mirrors
-  `photoelectric_absorb` byte-for-byte: per-thread fixed-size
-  hole stack (16 entries — typical cascade depth is 2-6) and
-  per-thread fluorescence buffer (8 entries, configurable via
-  `DEFAULT_GPU_MAX_FLUOR_PER_THREAD`). Transition tables
-  flattened into `trans_off[n_shells]` /
-  `trans_count[n_shells]` / `trans_flat[total_rows × 4]` and
-  uploaded once per element alongside the existing phase-1 PE
-  data. `GpuPhotoelectricCtx::cascade_batch` /
-  `full_cascade_batch` expose the kernel from Rust.
+## Open / deferred work
 
-  Validation in `gpu_compton_validate` (CPU vs GPU at N = 1 M
-  histories, RTX A1000): all 8 cases pass. Means agree < 0.01 %
-  across H / O / Zr / U at 0.1 / 1.0 MeV. Mean fluorescence
-  multiplicity matches to 3 decimal places (Zr: 0.67 → 0.68
-  CPU/GPU; U at 1 MeV: 1.24 → 1.24); fluorescence-energy
-  histogram χ²_red ≤ 1.6 in all heavy-element cases (light
-  elements have no above-cutoff fluorescence and the histogram
-  is degenerate). 322/322 lib tests green on default and
-  `--features cuda`. `outputs/gpu_photon_validate.txt` now
-  records cascade rows alongside the existing PE-phase1 ones.
-- **Event-based GPU transport.** Implemented on
-  `feat/gpu-perf-and-per-nuclide-tally` (7-stage pipeline
-  trace_and_sample → scan_offsets → partition → 4 reaction
-  kernels). Tramm et al., PHYSOR 2022 ("Toward Portable GPU
-  Acceleration of the OpenMC Monte Carlo Particle Transport Code")
-  reports event-based far outperforms history-based on A100 once
-  ≥ ~100 k particles are in flight (saturation point ≈ 8 M),
-  and identifies sort-by-energy + microscopic XS cache removal as
-  the dominant optimizations after the basic event-based switch.
-  Open question on small GPUs (RTX A1000 4 GB laptop): launch
-  overhead × outer-step count makes event-based slower per case
-  than the persistent kernel; expected to flip on the 3080.
-- **Photon depletion / activation transport.** Separate from
-  neutron depletion — would track activation products and their
-  decay photons over time.
-- ~~**Full PWR depletion bench.**~~ **First comparison done
-  2026-05-08 — surfaced a real chain-calibration finding.**
-  Side-by-side run (`outputs/depletion_rust_vs_openmc.md`) on the
-  same PWR pin cell + same `pwr_actinides.json` chain at
-  4 steps × 48 h × 200 W/cm. OpenMC harness lives in
-  `scripts/openmc_pwr_depletion.py` (auto-builds an OpenMC
-  `chain.xml` from our JSON via the new `build_chain_from_json`).
+- **GPU device-buffer cache for SAB + material payloads.** Per-nuclide
+  kernel cache exists and works (`Arc::as_ptr`-keyed); SAB and
+  material uploads still rebuild + HtoD every seed/case. A 5-seed ×
+  7-case sweep re-uploads 35× the same ~50 MB SAB payload. Same
+  LRU + bundle_cache_budget pattern as `per_nuclide_cache` should
+  apply.
+- **GPU survival biasing / Russian roulette.** CPU has it (4.5× FOM
+  on PWR); GPU runs analog. Variance-only, k_eff is unbiased.
+- **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** CPU has it; GPU
+  device sampler is continuous-only. OpenMC's ENDF/B HDF5
+  distribution emits every TSL as `incoherent_inelastic` so this
+  has zero hits in the 375-case corpus. Loud `panic!` on the upload
+  side ensures silent breakage isn't possible.
+- **GPU per-cell `Mat3` rotation.** No ICSBEP scene currently sets
+  it; `GpuRecursiveContext::build` errors loudly if any cell does.
+- **DXTRAN-style continuous splitting** for ≥14 mfp photon
+  penetration. All `(ratio, growth) ∈ {5,10,20} × {0,1,2,3}` at
+  300 cm give 0 transmitted in 500k — `max_split=8` ceiling bounds
+  geometric WW.
+- **Full C5G7** (4 fuel × 7 groups × 17×17) — data plumbing on top
+  of `random_ray::*`, no new solver code.
+- **HexLattice GPU runtime parity** vs CPU.
+- **Linear-source random-ray (1st-order)** — deferred; flat on a
+  fine mesh is equivalent for axis-aligned problems.
+- **Full PWR depletion bench vs OpenMC** (30-50 GWd/MTU on
+  `pwr_actinides.json` + Pu/Np HDF5). Chain-calibration issue closed
+  by `fd530d0`; the long-burn validation run itself is pending.
+- **Per-precursor delayed-neutron groups** — only matters for
+  time-dependent kinetics, not static k-eff.
+- **EADL relaxation cascade on GPU** — long-flagged.
+- **Source-distribution biasing** (sample initial pos from importance
+  CDF) — for the Wagner-Haghighat 50-1000× FOM on volume / angular
+  sources.
+- **Backfill the rest of the 137 migrated ICSBEP JSONs** with VIII.1
+  A/B runs once GPU device-buffer cache lands and the 3080 box is
+  available.
 
-  Rust U-235 burn rate is **9× faster** than OpenMC's. Diagnosis:
-  the chain JSON ships *thermal-spectrum* one-group cross
-  sections (σ_f(U-235) = 583.5 b at 0.0253 eV), while OpenMC's
-  `CoupledOperator` collapses the actual cell flux spectrum to
-  one group on the fly (~40-60 b for the PWR pin's hard
-  spectrum). 9× ≈ 583/55. Cross-channel agreement follows the
-  same pattern: Xe-135/U-235 = 1.24× (σ_Xe is spectrum-flat),
-  Pu-239 = 2.6×, Pu-240 = 8.2×, Sm-149 = 2.8×. The Rust
-  depletion mechanics (CRAM-48, predictor-corrector,
-  BurnupMapping) are correct; the fix is to feed
-  flux-spectrum-averaged one-group XS into the chain instead of
-  thermal values — either via on-the-fly per-step tallies (the
-  textbook approach OpenMC uses) or via a pre-computed PWR-
-  spectrum chain JSON. Detailed breakdown + remediation path in
-  the artifact.
+## Recent session highlights (2026-05-21)
 
-  16-step (32 d) Rust standalone run shipped at
-  `outputs/deplete_pwr_actinides_32d.txt`: Pu-239/U-235 = 9.8 %,
-  Sm-149/U-235 = 1.62e-4 (saturated), Xe-135/U-235 = 1.64e-5
-  (saturated), ΔU-235 = -50 % at 32 d (over-burned for the
-  reasons above; the trajectories are qualitatively correct,
-  just compressed in time vs OpenMC).
-
-  **Update 2026-05-08 — spectrum-collapse fix landed.**
-  `transport::tally::ReactionRateTally` accumulates
-  `<σ_i,MT> = Σ w·d·σ(E) / Σ w·d` per (cell, xs_idx, MT) per step,
-  collapsed via `depletion::flux::collapsed_reaction_xs`, fed
-  into the chain at the start of each burnup step. Diagnostic
-  dump from `deplete_pwr`: σ_f(U-235) collapses from 583.5 b
-  thermal to **47.3 b** at PWR-pin spectrum (matches the published
-  burnup-credit value); σ_a(Xe-135) from 2.65 Mb to 222 kb;
-  Pu-239 fission from 748 b to 126 b. Post-fix vs OpenMC at 8 d:
-  ΔU-235 = −1.27 % (Rust) vs −1.64 % (OpenMC), agreement **0.77×**
-  (was 9.0×). All chain channels now within 0.59-0.94× of OpenMC,
-  most within 10-25 %. Detailed comparison:
-  `outputs/depletion_collapsed_vs_openmc.md`. ICSBEP burnup-credit
-  sub-suite (Saxton, LWBR) is unblocked.
-
-### Documentation / housekeeping
-
-- **OpenMC cross-validation of the Python path beyond γ-heating.**
-  Per `PYTHON.md`, the bindings are validated only at the
-  plumbing level for non-γ-heating paths. A k_eff cross-check
-  through Python on Godiva / PWR pin cell against a fresh OpenMC
-  run would close the loop.
-- **Brems DCS vs NIST ESTAR.** Open question from the previous
-  resume.md round: per-element ratios are 0.7× / 2.46× / 3.18× /
-  4.86× across H / O / Zr / U vs ESTAR. The integrals match
-  OpenMC's formula exactly, so the discrepancy is in
-  Seltzer-Berger HDF5 layout interpretation. γ-heating numbers
-  match OpenMC, so this isn't blocking; flag for any brems-
-  dominated benchmark (Møller-Plesset shielding on Pb, etc.).
-
-## How to run
-
-```bash
-# Build (default — CPU only)
-cd rust_prototype && cargo build --release
-
-# Build with CUDA
-cargo build --release --features cuda
-
-# Lib tests (260)
-cargo test --lib --release
-
-# Benchmarks
-./target/release/godiva ../data/endfb-vii.1-hdf5/neutron \
-    --rank 5 --batches 80 --inactive 20 --particles 5000 --seeds 4
-
-./target/release/pwr_pincell ../data/endfb-vii.1-hdf5/neutron \
-    --rank 5 --batches 100 --inactive 20 --particles 20000 --seeds 5
-
-./target/release/pwr_assembly ../data/endfb-vii.1-hdf5/neutron \
-    --shape 17 --batches 50 --inactive 15 --particles 10000
-
-./target/release/hex_minicore ../data/endfb-vii.1-hdf5/neutron \
-    --rings 1 --rank 5 --batches 60 --inactive 15 --particles 5000
-
-# With variance reduction
-./target/release/godiva ../data/endfb-vii.1-hdf5/neutron \
-    --survival-biasing --weight-window --ww-lower 0.5 --ww-upper 2.0
-
-# PWR pin cell with WW bootstrap + URR equivalence + delayed-ablation
-./target/release/pwr_pincell ../data/endfb-vii.1-hdf5/neutron \
-    --rank 5 --batches 100 --inactive 20 --particles 20000 --seeds 5 \
-    --ww-bootstrap-batches 10 --urr-equivalence
-
-# Statepoint + chained restart
-./target/release/pwr_assembly ../data/endfb-vii.1-hdf5/neutron \
-    --shape 3 --batches 40 --inactive 10 --particles 2000 \
-    --reflective-z --statepoint /tmp/state1.h5
-./target/release/pwr_assembly ../data/endfb-vii.1-hdf5/neutron \
-    --shape 3 --batches 40 --inactive 5 --particles 2000 \
-    --reflective-z --restart-from /tmp/state1.h5
-
-# Depletion (Bateman + CRAM-16 / -48)
-./target/release/deplete_demo --steps 16 --total-hours 80 --cram-order 16
-./target/release/deplete_pwr ../data/endfb-vii.1-hdf5/neutron \
-    --steps 8 --hours-per-step 5 --power-w-per-cm 200 \
-    --chain ../chains/pwr_actinides.json --cram-order 48
-
-# Photon shielding benchmark + CADIS-lite
-./target/release/shield_slab ../data/endfb-vii.1-hdf5/photon \
-    --histories 1_000_000 --thickness-cm 100   # analog FOM baseline
-./target/release/shield_slab ../data/endfb-vii.1-hdf5/photon \
-    --histories 30_000 --thickness-cm 100 --cadis-z-bins 25 \
-    --cadis-calibration 30_000 --cadis-save /tmp/cadis_map.json
-./target/release/shield_slab ../data/endfb-vii.1-hdf5/photon \
-    --histories 200_000 --thickness-cm 100 \
-    --cadis-load /tmp/cadis_map.json --ww-ratio 5
-
-# Python (after maturin develop --release)
-python rust_prototype/bindings/python/examples/godiva.py \
-    data/endfb-vii.1-hdf5/neutron
-python rust_prototype/bindings/python/examples/depletion_xe_demo.py \
-    chains/partial_xe.json
-```
+1. **ENDF/B-VIII.1 default + sibling-`thermal/` layout support.**
+   Layout-aware `data_paths::resolve_thermal_path` handles the
+   VIII.x split transparently. 5 layout tests.
+2. **Natural-element migration**: 137 ICSBEP cases rewritten
+   (carbon → C-12 + C-13 by IUPAC 2021). Engine-side fallback in
+   `material_resolve::expand_natural_elements` for any future
+   un-migrated JSON. 4 expansion tests.
+3. **Sweep CLI overrides JSON `recommended_settings`.** Previous
+   precedence was inverted, leading to "this CLI flag doesn't
+   work" surprises when JSONs hard-code production GPU settings.
+4. **VIII.1 vs VII.1 A/B on heu-comp-inter-003** (CPU, 100k, 7
+   cases). +820 pcm uniform shift localised to CIELO U-235.
+5. **Cache infrastructure verified working** on CPU sweeps —
+   zero "Loading X.h5" lines after preload, 19 nuclides loaded
+   once and reused across all 7 cases.
