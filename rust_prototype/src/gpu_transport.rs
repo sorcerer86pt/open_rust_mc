@@ -77,6 +77,12 @@ pub struct GpuTransportContext {
     /// `nuclide_cache::TieredStore::L1MemoryStore`: same nuclide
     /// across cases → same Arc::as_ptr → same cache key.
     per_nuclide_cache: std::sync::Mutex<PerNuclideCache>,
+    /// Per-context SAB device-buffer cache. Keyed on the slot list
+    /// (`Arc::as_ptr(tsl)` + `nuc_idx`, in upload order) + `n_nuc`.
+    /// Shares the bundle-cache byte budget with `per_nuclide_cache`,
+    /// but uses an independent map + LFU adapter so eviction
+    /// decisions stay localised per cache class.
+    sab_buffer_cache: std::sync::Mutex<SabCache>,
     cached_bundle_budget: std::sync::OnceLock<usize>,
 }
 
@@ -127,6 +133,83 @@ impl LfuEntries for PerNuclideCacheAdapter<'_> {
 }
 
 impl LfuEntriesMut for PerNuclideCacheAdapter<'_> {
+    fn set_preload_weight(&mut self, key: &Self::Key, weight: u64) {
+        if let Some((_, stats)) = self.inner.entries.get_mut(key) {
+            stats.preload_weight = weight;
+        }
+    }
+}
+
+// ── SAB buffer cache ─────────────────────────────────────────────────
+//
+// `upload_sab_data_multi` builds ~13 host Vec's (concatenated per-slot
+// inc-E grids, E_out tables, μ tables, coherent Bragg edges, ...) and
+// then HtoD-copies each to a `CudaSlice`. For `c_Be` that totals
+// ~50 MB of host allocation + the same HtoD bandwidth on every call.
+//
+// An ICSBEP sweep at 5 seeds × N cases re-builds the same SAB payload
+// every (case, seed) pair. The `material_resolve::thermal_cache`
+// dedupes on the *host* side so every case gets the same
+// `Arc<ThermalScatteringData>`, but the device-side rebuild was wasted
+// work. The pattern mirrors `per_nuclide_cache`: key on the slot list
+// (pointer identity of each Arc<TSL>, paired with its nuc_idx), value
+// is `Arc<GpuSabData>`, and the LFU+budget machinery from
+// `nuclide_cache::eviction` evicts least-useful entries when the
+// total cached bytes pass the bundle-cache budget.
+//
+// Order matters in the key — the device data layout depends on slot
+// iteration order, so two callers asking for the same logical slots
+// in different orders get different cached buffers (correct behaviour,
+// since the device pointers would differ).
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct SabCacheKey {
+    /// Slot list as `(Arc::as_ptr, nuc_idx)` pairs in upload order.
+    slots: Vec<(usize, usize)>,
+    /// `n_nuc` parameter sizes `slot_per_nuc` / `slot_count_per_nuc`.
+    /// Two callers with identical slots but different `n_nuc` need
+    /// distinct cached buffers because those lookup tables differ.
+    n_nuc: usize,
+}
+
+struct SabCache {
+    entries: std::collections::HashMap<SabCacheKey, (Arc<GpuSabData>, EvictionStats)>,
+    counter: u64,
+    total_bytes: usize,
+}
+
+impl SabCache {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            counter: 0,
+            total_bytes: 0,
+        }
+    }
+}
+
+struct SabCacheAdapter<'a> {
+    inner: &'a mut SabCache,
+}
+
+impl LfuEntries for SabCacheAdapter<'_> {
+    type Key = SabCacheKey;
+    fn total_bytes(&self) -> usize {
+        self.inner.total_bytes
+    }
+    fn len(&self) -> usize {
+        self.inner.entries.len()
+    }
+    fn iter_stats(&self) -> Box<dyn Iterator<Item = (&Self::Key, &EvictionStats)> + '_> {
+        Box::new(self.inner.entries.iter().map(|(k, (_, s))| (k, s)))
+    }
+    fn remove(&mut self, key: &Self::Key) {
+        if let Some((_, stats)) = self.inner.entries.remove(key) {
+            self.inner.total_bytes = self.inner.total_bytes.saturating_sub(stats.bytes);
+        }
+    }
+}
+
+impl LfuEntriesMut for SabCacheAdapter<'_> {
     fn set_preload_weight(&mut self, key: &Self::Key, weight: u64) {
         if let Some((_, stats)) = self.inner.entries.get_mut(key) {
             stats.preload_weight = weight;
@@ -687,6 +770,54 @@ pub struct GpuSabData {
     pub slot_inc_debye_waller: CudaSlice<f64>,
 }
 
+impl GpuSabData {
+    /// Sum of all on-device byte allocations. Used by `sab_buffer_cache`
+    /// to honour the bundle-cache byte budget when deciding whether
+    /// to admit a new SAB payload. Cheap — just `num_bytes()` per
+    /// CudaSlice; no device round-trip.
+    pub fn device_bytes(&self) -> usize {
+        let f64_slices: [&CudaSlice<f64>; 10] = [
+            &self.inc_energies,
+            &self.e_out,
+            &self.cdf_e,
+            &self.pdf_e,
+            &self.mu,
+            &self.cdf_mu,
+            &self.xs,
+            &self.slot_kt,
+            &self.slot_emax,
+            &self.coh_bragg_edges,
+        ];
+        let i32_slices: [&CudaSlice<i32>; 11] = [
+            &self.eout_offsets,
+            &self.eout_sizes,
+            &self.mu_offsets,
+            &self.mu_sizes,
+            &self.slot_per_nuc,
+            &self.slot_count_per_nuc,
+            &self.slot_inc_e_off,
+            &self.slot_n_inc,
+            &self.slot_eout_table_off,
+            &self.slot_mu_table_off,
+            &self.slot_elastic_mode,
+        ];
+        let i32_slices_b: [&CudaSlice<i32>; 2] = [&self.slot_coh_off, &self.slot_coh_n];
+        let f64_slices_b: [&CudaSlice<f64>; 3] = [
+            &self.coh_factors,
+            &self.slot_inc_bound_xs,
+            &self.slot_inc_debye_waller,
+        ];
+        let mut bytes = 0usize;
+        for s in f64_slices.iter().chain(f64_slices_b.iter()) {
+            bytes = bytes.saturating_add(s.num_bytes());
+        }
+        for s in i32_slices.iter().chain(i32_slices_b.iter()) {
+            bytes = bytes.saturating_add(s.num_bytes());
+        }
+        bytes
+    }
+}
+
 /// Append one slot's elastic-S(α,β) entry into the parallel buffers
 /// that `upload_sab_data_multi` accumulates.
 ///
@@ -849,6 +980,7 @@ impl GpuTransportContext {
             k_energy_bin_scatter,
             k_transport_persistent,
             per_nuclide_cache: std::sync::Mutex::new(PerNuclideCache::new()),
+            sab_buffer_cache: std::sync::Mutex::new(SabCache::new()),
             cached_bundle_budget: std::sync::OnceLock::new(),
         })
     }
@@ -2294,6 +2426,127 @@ impl GpuTransportContext {
         })
     }
 
+    /// Cache-aware variant of [`upload_sab_data_multi`]. Takes
+    /// `Arc<ThermalScatteringData>` (not bare references) so the
+    /// `sab_buffer_cache` can use pointer identity for cache keys —
+    /// the only safe way to test "same TSL content" without
+    /// hashing 50+ MB of inelastic tables.
+    ///
+    /// First call for a given `(slots, n_nuc)` builds + uploads the
+    /// `GpuSabData` and inserts an `Arc<GpuSabData>` into the cache.
+    /// Subsequent calls with the same key clone the cached `Arc`,
+    /// skipping ~50 MB of host vec allocation + HtoD bandwidth per
+    /// invocation. On a 5-seed × N-case ICSBEP sweep that closes
+    /// the gap left by the existing `per_nuclide_cache`: nuclide
+    /// kernels were already shared cross-case, but SAB and material
+    /// payloads rebuilt every call.
+    ///
+    /// Eviction shares the bundle-cache byte budget with
+    /// `per_nuclide_cache` (the `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES`
+    /// / `_FRACTION` env vars), with an independent LFU map per cache
+    /// class.
+    pub fn upload_sab_data_multi_cached(
+        &self,
+        slots: &[(Arc<crate::thermal::ThermalScatteringData>, usize)],
+        n_nuc: usize,
+    ) -> Result<Arc<GpuSabData>, Box<dyn std::error::Error>> {
+        // Build the cache key. Slot order matters (the device layout
+        // depends on iteration order), so we preserve input order.
+        let key = SabCacheKey {
+            slots: slots
+                .iter()
+                .map(|(arc, idx)| (Arc::as_ptr(arc) as usize, *idx))
+                .collect(),
+            n_nuc,
+        };
+
+        // Lookup. Bump counter + hit count under the lock so concurrent
+        // hits race-update consistently.
+        {
+            let mut guard = self
+                .sab_buffer_cache
+                .lock()
+                .expect("sab_buffer_cache poisoned");
+            if guard.entries.contains_key(&key) {
+                guard.counter = guard.counter.wrapping_add(1);
+                let now = guard.counter;
+                let (arc, stats) = guard
+                    .entries
+                    .get_mut(&key)
+                    .expect("contains_key just checked");
+                let arc = Arc::clone(arc);
+                stats.hits = stats.hits.wrapping_add(1);
+                stats.last_touch = now;
+                return Ok(arc);
+            }
+        }
+
+        // Miss: do the upload outside the lock. Re-borrow slots as
+        // `&[(&TSL, usize)]` for the existing builder.
+        let borrowed_slots: Vec<(&crate::thermal::ThermalScatteringData, usize)> = slots
+            .iter()
+            .map(|(arc, idx)| (arc.as_ref(), *idx))
+            .collect();
+        let fresh = self.upload_sab_data_multi(&borrowed_slots, n_nuc)?;
+        let bytes = fresh.device_bytes();
+        let arc = Arc::new(fresh);
+
+        // Insert. Race-guard: another caller may have populated the
+        // same key while we were uploading; if so, drop our fresh
+        // upload and clone the existing entry.
+        let budget = self.bundle_cache_budget_bytes();
+        let mut guard = self
+            .sab_buffer_cache
+            .lock()
+            .expect("sab_buffer_cache poisoned");
+        if guard.entries.contains_key(&key) {
+            guard.counter = guard.counter.wrapping_add(1);
+            let now = guard.counter;
+            let (existing, stats) = guard
+                .entries
+                .get_mut(&key)
+                .expect("contains_key just checked");
+            let existing = Arc::clone(existing);
+            stats.hits = stats.hits.wrapping_add(1);
+            stats.last_touch = now;
+            return Ok(existing);
+        }
+        // Trim to budget with the actual upload size.
+        {
+            let now = guard.counter;
+            let mut adapter = SabCacheAdapter { inner: &mut guard };
+            let _ = evict_to_budget(&mut adapter, bytes, budget, now, DEFAULT_AGE_DECAY);
+        }
+        let counter = guard.counter;
+        guard.counter = guard.counter.wrapping_add(1);
+        let stats = EvictionStats::new(bytes, counter);
+        guard.total_bytes = guard.total_bytes.saturating_add(bytes);
+        guard.entries.insert(key, (Arc::clone(&arc), stats));
+        Ok(arc)
+    }
+
+    /// Drop every cached SAB buffer. Test hook + diagnostic — frees
+    /// VRAM that the LFU eviction would otherwise hold against the
+    /// bundle-cache budget. Used by integration tests that need to
+    /// observe miss / hit transitions deterministically.
+    pub fn clear_sab_buffer_cache(&self) {
+        let mut guard = self
+            .sab_buffer_cache
+            .lock()
+            .expect("sab_buffer_cache poisoned");
+        guard.entries.clear();
+        guard.total_bytes = 0;
+    }
+
+    /// Diagnostic: `(n_entries, total_bytes)` of the SAB cache.
+    pub fn sab_buffer_cache_stats(&self) -> (usize, usize) {
+        let guard = self
+            .sab_buffer_cache
+            .lock()
+            .expect("sab_buffer_cache poisoned");
+        (guard.entries.len(), guard.total_bytes)
+    }
+
     /// Create an empty S(α,β) placeholder. `n_nuc` is needed so the
     /// per-nuclide lookup table is sized correctly for the kernel.
     pub fn upload_sab_data_empty(
@@ -3158,5 +3411,62 @@ mod tests {
         assert_eq!(s.bytes, 100);
         assert_eq!(s.last_touch, 0);
         assert_eq!(s.hits, 0);
+    }
+
+    /// `SabCacheKey` distinguishes both (a) different pointer
+    /// identities and (b) different slot orders. Two arrays of TSL
+    /// pointers in different orders MUST produce different keys
+    /// because the device data layout depends on iteration order —
+    /// reusing one buffer for the other would point at the wrong
+    /// per-slot offsets.
+    #[test]
+    fn sab_cache_key_is_order_sensitive() {
+        let k_ab = SabCacheKey {
+            slots: vec![(0x100, 0), (0x200, 1)],
+            n_nuc: 4,
+        };
+        let k_ba = SabCacheKey {
+            slots: vec![(0x200, 1), (0x100, 0)],
+            n_nuc: 4,
+        };
+        assert_ne!(k_ab, k_ba);
+    }
+
+    /// Different `n_nuc` → different key (the device-side
+    /// `slot_per_nuc` table has different size, so the cached
+    /// buffer isn't reusable).
+    #[test]
+    fn sab_cache_key_includes_n_nuc() {
+        let k4 = SabCacheKey {
+            slots: vec![(0x100, 0)],
+            n_nuc: 4,
+        };
+        let k7 = SabCacheKey {
+            slots: vec![(0x100, 0)],
+            n_nuc: 7,
+        };
+        assert_ne!(k4, k7);
+    }
+
+    /// Same slot list + n_nuc → equal keys (cache hit possible).
+    #[test]
+    fn sab_cache_key_equal_inputs_equal_keys() {
+        let k1 = SabCacheKey {
+            slots: vec![(0x100, 0), (0x200, 1)],
+            n_nuc: 4,
+        };
+        let k2 = SabCacheKey {
+            slots: vec![(0x100, 0), (0x200, 1)],
+            n_nuc: 4,
+        };
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn sab_cache_initialises_empty() {
+        let c = SabCache::new();
+        assert_eq!(c.entries.len(), 0);
+        assert_eq!(c.total_bytes, 0);
+        assert_eq!(c.counter, 0);
     }
 }

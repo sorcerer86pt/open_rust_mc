@@ -1821,13 +1821,17 @@ fn run_gpu_eigenvalue(
     // Stochastic-T interpolation: upload the full kT grid for each
     // TSL — `nuclide_specs[i].3` (the precomputed temp_idx) is now
     // unused.
+    // Cached SAB upload — same Arc-identity dedup as in run_gpu_icsbep
+    // (see comments there). On a sweep where every (case, seed) call
+    // hits this path with the same `c_*.h5`, the device buffer is
+    // built once per process and reused thereafter.
     let sab_slots: Vec<(
-        &open_rust_mc::thermal::ThermalScatteringData,
+        std::sync::Arc<open_rust_mc::thermal::ThermalScatteringData>,
         usize,
     )> = thermal
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| t.as_ref().map(|tsl| (tsl.as_ref(), i)))
+        .filter_map(|(i, t)| t.as_ref().map(|tsl| (std::sync::Arc::clone(tsl), i)))
         .collect();
     // sab_nuc_idx is retained for compatibility with the CudaRunner
     // field but is no longer authoritative — the slot table is.
@@ -1836,7 +1840,7 @@ fn run_gpu_eigenvalue(
         .map(|(_, idx)| *idx as i32)
         .unwrap_or(-1);
     let sab_data = gpu
-        .upload_sab_data_multi(&sab_slots, n_nuc)
+        .upload_sab_data_multi_cached(&sab_slots, n_nuc)
         .map_err(|e| gpu_err("upload S(α,β)", e))?;
 
     let wmp_has_any = wmps.iter().any(|w| w.is_some());
@@ -3099,21 +3103,28 @@ fn run_gpu_icsbep(
     // shortcut locked the GPU to materials_rt[0].temperature and
     // mis-sampled cells whose material temp differed.
     let _ = limits.sab_temperature_tolerance; // no longer consulted here
+    // Pass Arc<ThermalScatteringData> to the cached entry point so the
+    // device-side `sab_buffer_cache` can dedupe across (case, seed)
+    // pairs by pointer identity. `provider.thermal` already carries
+    // Arc's that come out of `material_resolve::thermal_cache`, so two
+    // cases sharing `c_Be.h5` upload the SAB payload to the device
+    // exactly once per process — same trick the per-nuclide kernel
+    // cache already plays for the much bigger nuclide payloads.
     let sab_slots: Vec<(
-        &open_rust_mc::thermal::ThermalScatteringData,
+        std::sync::Arc<open_rust_mc::thermal::ThermalScatteringData>,
         usize,
     )> = provider
         .thermal
         .iter()
         .enumerate()
-        .filter_map(|(i, t)| t.as_ref().map(|tsl| (tsl.as_ref(), i)))
+        .filter_map(|(i, t)| t.as_ref().map(|tsl| (std::sync::Arc::clone(tsl), i)))
         .collect();
     let sab_nuc_idx: i32 = sab_slots
         .first()
         .map(|(_, idx)| *idx as i32)
         .unwrap_or(-1);
     let sab_data = gpu
-        .upload_sab_data_multi(&sab_slots, n_nuc)
+        .upload_sab_data_multi_cached(&sab_slots, n_nuc)
         .map_err(|e| gpu_err("upload S(α,β)", e))?;
 
     let wmp_data = gpu
@@ -3154,6 +3165,10 @@ fn run_gpu_icsbep(
         transport: &gpu,
         nuc_data: &nuc_data,
         mat_data: &mat_data,
+        // `sab_data` is `Arc<GpuSabData>` (from the cached upload
+        // path); CudaRunner wants `&GpuSabData` so deref through the
+        // Arc. The Arc itself is kept alive by the binding to
+        // `sab_data` for the duration of the run.
         sab_data: &sab_data,
         wmp_data: &wmp_data,
         mat_k_t: &mat_k_t,
