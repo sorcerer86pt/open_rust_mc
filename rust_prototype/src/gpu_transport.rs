@@ -84,6 +84,10 @@ pub struct GpuTransportContext {
     /// decisions stay localised per cache class.
     sab_buffer_cache: std::sync::Mutex<SabCache>,
     cached_bundle_budget: std::sync::OnceLock<usize>,
+    /// Cached `sm_XXY` arch string the kernels were compiled against
+    /// (`gpu_recursive::device_nvrtc_arch` of the current device).
+    /// Surfaced via `gpu_debug_metrics()` for observability.
+    nvrtc_arch: String,
 }
 
 use crate::transport::nuclide_cache::eviction::{
@@ -944,6 +948,9 @@ impl GpuTransportContext {
         // -warn-spills`) surfaces register usage and spills during JIT
         // for occupancy tuning per NVIDIA BPG §10.2.
         let arch_str = crate::gpu_recursive::device_nvrtc_arch(&ctx)?;
+        // Keep one copy for diagnostics; leak the other so NVRTC's
+        // `Option<&'static str>` can borrow it.
+        let arch_stored = arch_str.clone();
         let opts = nvrtc::CompileOptions {
             arch: Some(Box::leak(arch_str.into_boxed_str())),
             options: vec![
@@ -982,6 +989,7 @@ impl GpuTransportContext {
             per_nuclide_cache: std::sync::Mutex::new(PerNuclideCache::new()),
             sab_buffer_cache: std::sync::Mutex::new(SabCache::new()),
             cached_bundle_budget: std::sync::OnceLock::new(),
+            nvrtc_arch: arch_stored,
         })
     }
 
@@ -2034,6 +2042,28 @@ impl GpuTransportContext {
         self.trim_async_mempool();
     }
 
+    /// Diagnostic snapshot of the per-nuclide cache:
+    /// `(n_entries, total_bytes, total_hits)`. Same shape as
+    /// `sab_buffer_cache_stats` so the `--debug-metrics` dump can
+    /// treat both caches uniformly. `total_hits` is the sum of the
+    /// per-entry `EvictionStats::hits` counters — across a sweep
+    /// this grows monotonically and a per-case delta gives the
+    /// number of cache hits in that case.
+    pub fn per_nuclide_cache_stats(&self) -> (usize, usize, u64) {
+        let guard = self
+            .per_nuclide_cache
+            .lock()
+            .expect("per_nuclide_cache poisoned");
+        let total_hits: u64 = guard.entries.values().map(|(_, s)| s.hits).sum();
+        (guard.entries.len(), guard.total_bytes, total_hits)
+    }
+
+    /// NVRTC architecture string the kernels were compiled against
+    /// (e.g. `"sm_86"`, `"sm_90"`). Cached at `new()`.
+    pub fn nvrtc_arch(&self) -> &str {
+        &self.nvrtc_arch
+    }
+
     /// Resolution order: `_BYTES` env (explicit) → `_FRACTION` env ×
     /// `total_mem` → `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
     /// Fallback floor 1 GiB when `cuDeviceTotalMem` returns zero.
@@ -2538,13 +2568,17 @@ impl GpuTransportContext {
         guard.total_bytes = 0;
     }
 
-    /// Diagnostic: `(n_entries, total_bytes)` of the SAB cache.
-    pub fn sab_buffer_cache_stats(&self) -> (usize, usize) {
+    /// Diagnostic snapshot of the SAB cache:
+    /// `(n_entries, total_bytes, total_hits)`. Symmetric with
+    /// `per_nuclide_cache_stats` so the `--debug-metrics` dump can
+    /// process both uniformly.
+    pub fn sab_buffer_cache_stats(&self) -> (usize, usize, u64) {
         let guard = self
             .sab_buffer_cache
             .lock()
             .expect("sab_buffer_cache poisoned");
-        (guard.entries.len(), guard.total_bytes)
+        let total_hits: u64 = guard.entries.values().map(|(_, s)| s.hits).sum();
+        (guard.entries.len(), guard.total_bytes, total_hits)
     }
 
     /// Create an empty S(α,β) placeholder. `n_nuc` is needed so the

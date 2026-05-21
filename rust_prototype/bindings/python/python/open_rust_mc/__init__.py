@@ -55,6 +55,7 @@ from ._core import (
     preload_nuclide_cache_weights,
     cache_stats,
     cache_stats_reset,
+    gpu_debug_metrics,
 )
 
 # Avogadro's number, exact SI-2019 value.
@@ -250,6 +251,7 @@ __all__ = [
     "preload_nuclide_cache_weights",
     "cache_stats",
     "cache_stats_reset",
+    "gpu_debug_metrics",
     # Helpers
     "NUCLIDE_DATA",
     "atom_density_from_mass_density",

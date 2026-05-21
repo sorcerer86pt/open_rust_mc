@@ -79,6 +79,7 @@ from open_rust_mc import (
     Settings,
     preload_nuclide_cache_weights,
     run_icsbep_case,
+    gpu_debug_metrics,
 )
 
 
@@ -187,6 +188,15 @@ def parse_args() -> argparse.Namespace:
                    help="if this file exists between cases, finish the current case and exit cleanly")
     p.add_argument("--fail-fast", action="store_true",
                    help="stop on first FAIL or ERROR")
+    p.add_argument("--debug-metrics", type=Path, default=None,
+                   help="path to write one JSON line per case with "
+                        "GPU cache + arch + budget snapshots. Use the "
+                        "delta in `sab_cache_hits` / `nuc_cache_hits` "
+                        "across consecutive cases to see how many "
+                        "uploads were avoided. CPU runs still write "
+                        "rows but the GPU fields are null. The file is "
+                        "opened append; pass a fresh path or rm it "
+                        "between runs to avoid mixing telemetry.")
     return p.parse_args()
 
 
@@ -595,9 +605,43 @@ def main() -> int:
     if args.csv:
         csv_fp, csv_writer = open_csv_for_append(args.csv)
 
+    # Optional per-case observability dump. One JSON line per snapshot
+    # (one "init" line before the loop + one "after_case" line per
+    # case) — downstream tools can diff consecutive lines to see how
+    # many SAB / nuclide cache hits each case took.
+    debug_fp = None
+    if args.debug_metrics is not None:
+        args.debug_metrics.parent.mkdir(parents=True, exist_ok=True)
+        debug_fp = open(args.debug_metrics, "a", encoding="utf-8")
+
+    def _emit_debug(phase: str, case: str | None, wall_t: float, extra: dict | None = None) -> None:
+        if debug_fp is None:
+            return
+        snap = gpu_debug_metrics() or {}
+        record = {
+            "ts": time.time(),
+            "phase": phase,
+            "case": case,
+            "wall_t": wall_t,
+            "metrics": snap,
+        }
+        if extra:
+            record.update(extra)
+        debug_fp.write(json.dumps(record) + "\n")
+        debug_fp.flush()
+
     rows: list[Row] = []
     sweep_t0 = time.time()
     aborted = False
+    # Initial-state snapshot — caches start empty; gpu_arch records
+    # the NVRTC arch the kernels were just compiled against (from the
+    # preload pass that ran above).
+    _emit_debug(
+        phase="init",
+        case=None,
+        wall_t=0.0,
+        extra={"runner": args.runner, "n_cases": len(cases)},
+    )
 
     try:
         for idx, case_path in enumerate(cases, 1):
@@ -621,6 +665,13 @@ def main() -> int:
                 base_seed=args.base_seed,
             )
             rows.append(row)
+
+            _emit_debug(
+                phase="after_case",
+                case=row.case,
+                wall_t=row.runtime_s,
+                extra={"status": row.status, "k_calc": row.k_calc, "k_sigma": row.k_sigma},
+            )
 
             if csv_writer is not None:
                 write_row(csv_writer, csv_fp, row)
@@ -659,6 +710,8 @@ def main() -> int:
     finally:
         if csv_fp is not None:
             csv_fp.close()
+        if debug_fp is not None:
+            debug_fp.close()
 
     sweep_dt = time.time() - sweep_t0
 

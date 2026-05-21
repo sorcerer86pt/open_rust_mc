@@ -3283,6 +3283,64 @@ fn cache_stats_reset() {
     open_rust_mc::transport::nuclide_cache::stats().reset();
 }
 
+/// Snapshot GPU-side caches + device info. Returns `None` when the
+/// extension wasn't built with `--features cuda` or when the shared
+/// CUDA context hasn't been initialised yet (no GPU run has happened
+/// in this process).
+///
+/// Schema when GPU is available:
+///
+///     {
+///         "gpu_arch": "sm_86",         # NVRTC arch picked at runtime
+///         "sab_cache_entries": <int>,  # number of distinct SAB
+///                                      # buffers cached
+///         "sab_cache_bytes": <int>,    # total device bytes in
+///                                      # the SAB cache
+///         "sab_cache_hits": <int>,     # cumulative hits across
+///                                      # every cached entry
+///         "nuc_cache_entries": <int>,
+///         "nuc_cache_bytes": <int>,
+///         "nuc_cache_hits": <int>,
+///         "bundle_cache_budget_bytes": <int>,
+///     }
+///
+/// Designed for `icsbep_sweep.py --debug-metrics PATH` to snapshot
+/// before and after each case. The deltas in `*_hits` between
+/// snapshots show how many cache hits the engine took on that case;
+/// flat entries / bytes between two cases proves no rebuild
+/// happened, growing entries proves a new payload was admitted.
+#[cfg(feature = "cuda")]
+#[pyfunction]
+fn gpu_debug_metrics(py: Python<'_>) -> PyResult<Option<PyObject>> {
+    use open_rust_mc::gpu_transport::GpuTransportContext;
+    let gpu = match GpuTransportContext::shared() {
+        Ok(g) => g,
+        Err(_) => return Ok(None),
+    };
+    let (sab_n, sab_b, sab_h) = gpu.sab_buffer_cache_stats();
+    let (nuc_n, nuc_b, nuc_h) = gpu.per_nuclide_cache_stats();
+    let budget = gpu.bundle_cache_budget_bytes();
+    let arch = gpu.nvrtc_arch().to_string();
+    let d = pyo3::types::PyDict::new_bound(py);
+    d.set_item("gpu_arch", arch)?;
+    d.set_item("sab_cache_entries", sab_n)?;
+    d.set_item("sab_cache_bytes", sab_b)?;
+    d.set_item("sab_cache_hits", sab_h)?;
+    d.set_item("nuc_cache_entries", nuc_n)?;
+    d.set_item("nuc_cache_bytes", nuc_b)?;
+    d.set_item("nuc_cache_hits", nuc_h)?;
+    d.set_item("bundle_cache_budget_bytes", budget)?;
+    Ok(Some(d.into()))
+}
+
+/// CPU-only build: GPU metrics are always `None`. Kept so Python
+/// callers don't need to feature-gate their imports.
+#[cfg(not(feature = "cuda"))]
+#[pyfunction]
+fn gpu_debug_metrics(_py: Python<'_>) -> PyResult<Option<PyObject>> {
+    Ok(None)
+}
+
 // ── Module init ───────────────────────────────────────────────────────────
 
 #[pymodule]
@@ -3325,6 +3383,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(preload_nuclide_cache_weights, m)?)?;
     m.add_function(wrap_pyfunction!(cache_stats, m)?)?;
     m.add_function(wrap_pyfunction!(cache_stats_reset, m)?)?;
+    m.add_function(wrap_pyfunction!(gpu_debug_metrics, m)?)?;
 
     Ok(())
 }
