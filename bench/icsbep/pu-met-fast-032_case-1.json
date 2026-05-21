@@ -6,7 +6,7 @@
     "category": "PU-MET-FAST",
     "k_eff_reference": 1.0,
     "k_eff_sigma": 0.002,
-    "source": "ICSBEP Handbook, PU-MET-FAST-032.case-1 \u2014 NEA/NSC/DOC(95)03",
+    "source": "ICSBEP Handbook, PU-MET-FAST-032.case-1 — NEA/NSC/DOC(95)03",
     "data_provenance": {
       "geometry_materials": {
         "repo": "github.com/mit-crpg/benchmarks",
@@ -20,7 +20,7 @@
         "row": "case-1",
         "license": "MIT"
       },
-      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+      "canonical_source": "NEA/OECD ICSBEP Handbook — registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "recommended_settings": {
       "batches": 150,
@@ -268,9 +268,18 @@
             "atom_density": 8.60382e-07
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.001992
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.0019706855999999996,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 2.1314399999999997e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 1001,
@@ -345,9 +354,18 @@
             "atom_density": 7.482587999999999e-07
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0011053
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00109347329,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.182671e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 1001,
@@ -422,9 +440,18 @@
             "atom_density": 8.560391999999999e-07
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0011922
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00117944346,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.275654e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 1001,
@@ -499,9 +526,18 @@
             "atom_density": 8.036999999999999e-07
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0013956
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00138066708,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.493292e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 1001,
@@ -561,9 +597,18 @@
             "atom_density": 0.00022538567999999998
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0011341
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00112196513,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.2134870000000001e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 14028,

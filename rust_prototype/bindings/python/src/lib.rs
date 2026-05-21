@@ -1229,7 +1229,7 @@ fn run_gamma_heating(
         vec![None; nuclide_specs.len()];
     for (i, tf) in thermal_files.iter().enumerate() {
         if let Some(tf) = tf {
-            let path = scene.data_dir.join(tf);
+            let path = open_rust_mc::data_paths::resolve_thermal_path(&scene.data_dir, tf);
             if let Ok(tsl) = open_rust_mc::hdf5_reader::load_thermal_scattering(&path) {
                 thermal[i] = Some(std::sync::Arc::new(tsl));
             }
@@ -2000,7 +2000,7 @@ fn run_eigenvalue(
         vec![None; nuclide_specs.len()];
     for (i, tf) in thermal_files.iter().enumerate() {
         if let Some(tf) = tf {
-            let path = scene.data_dir.join(tf);
+            let path = open_rust_mc::data_paths::resolve_thermal_path(&scene.data_dir, tf);
             if !path.exists() {
                 return Err(PyFileNotFoundError::new_err(format!(
                     "missing thermal scattering file: {}",

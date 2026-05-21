@@ -74,6 +74,27 @@ pub fn default_filename_for_zaid(zaid: u32) -> Option<String> {
     Some(format!("{sym}{a}.h5"))
 }
 
+/// Natural-isotopic-abundance fallback for ZAIDs whose
+/// natural-element evaluation may be missing from the on-disk
+/// library. Only populated where the migration is actually needed —
+/// ENDF/B-VIII.0+ dropped `C0.h5` (natural carbon), so callers that
+/// see `zaid: 6000` and don't find `C0.h5` can use this table to
+/// split the entry into isotopic siblings.
+///
+/// Returned slice is `(A, mole_fraction)` pairs that sum to 1.0
+/// (IUPAC 2021). Matches the table used by
+/// `scripts/migrate_natural_elements.py`. Returns `None` for any
+/// ZAID we don't have a documented natural split for — the engine
+/// then surfaces a `FileMissing` error rather than silently
+/// guessing an abundance.
+pub fn natural_isotopic_split(zaid: u32) -> Option<&'static [(u32, f64)]> {
+    match zaid {
+        // Carbon — VIII.0+ ships only C12 + C13.
+        6000 => Some(&[(12, 0.9893), (13, 0.0107)]),
+        _ => None,
+    }
+}
+
 /// Resolved nuclide entry — everything `xs_provider::load_nuclide`
 /// needs to consume an HDF5 file at a target temperature.
 #[derive(Debug, Clone)]
@@ -200,6 +221,23 @@ const CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         zaid: 6000,
         symbol: "C-nat",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    // Carbon isotopic entries — required by ENDF/B-VIII.0+ libraries
+    // which dropped the natural-C evaluation (no `C0.h5`). Scene
+    // JSONs migrated by `scripts/migrate_natural_elements.py` emit
+    // these ZAIDs directly; older corpora carry `zaid: 6000` and
+    // still resolve via `C0.h5` when the library has it.
+    CatalogEntry {
+        zaid: 6012,
+        symbol: "C-12",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 6013,
+        symbol: "C-13",
         filename_override: None,
         nu_bar_const: 0.0,
     },
@@ -1297,6 +1335,24 @@ impl NuclideLibrary {
     /// True if `zaid` is in the catalog (file existence not checked).
     pub fn knows(&self, zaid: u32) -> bool {
         self.by_zaid.contains_key(&zaid)
+    }
+
+    /// True iff the on-disk file backing a natural-element ZAID
+    /// (`zaid % 1000 == 0`) actually exists. Used by
+    /// `material_resolve` to decide whether to fall back to the
+    /// per-isotope natural-abundance split when a library doesn't
+    /// ship the natural evaluation (ENDF/B-VIII.0+ vs `C0.h5`).
+    ///
+    /// Returns `false` for any non-natural ZAID — callers should
+    /// use [`Self::knows`] + the normal `resolve` flow for those.
+    pub fn has_natural_file(&self, zaid: u32) -> bool {
+        if zaid == 0 || zaid % 1000 != 0 {
+            return false;
+        }
+        match self.by_zaid.get(&zaid) {
+            Some(entry) => self.data_dir.join(entry.filename()).exists(),
+            None => false,
+        }
     }
 
     /// Iterate over all (zaid, symbol) pairs the catalog contains.

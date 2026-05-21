@@ -178,6 +178,23 @@ pub fn resolve_materials_with_data_dir(
     svd_rank: usize,
     thermal_dir: &Path,
 ) -> Result<ResolvedMaterials, ResolveError> {
+    // Pre-pass: when a JSON references a natural-element ZAID
+    // (e.g. `6000` for natural carbon) but the library doesn't ship
+    // the natural file (ENDF/B-VIII.0+ has C12/C13 but no C0.h5),
+    // expand the entry into per-isotope siblings using the natural
+    // abundance table in `nuclides::natural_isotopic_split`. Scene
+    // JSONs migrated via `scripts/migrate_natural_elements.py` are
+    // already isotopic and skip this path. New JSONs that come in
+    // un-migrated stay loadable until they're rewritten.
+    let materials_owned: Vec<MaterialDto>;
+    let materials_view: &[MaterialDto] = if needs_natural_expansion(materials, lib) {
+        materials_owned = expand_natural_elements(materials, lib);
+        &materials_owned
+    } else {
+        materials
+    };
+    let materials = materials_view;
+
     // (zaid, temp_idx) → kernel_idx — share kernels across materials
     // when temperature columns coincide.
     let mut kernel_idx: HashMap<(u32, usize), usize> = HashMap::new();
@@ -351,16 +368,79 @@ pub fn resolve_materials_with_data_dir(
     })
 }
 
-/// Resolve a thermal-file string to an absolute path. If `name` is
-/// already absolute or contains a path separator, use it as-is.
-/// Otherwise join with `thermal_dir`.
+/// Resolve a thermal-file string to an absolute path. Delegates to
+/// the shared [`crate::data_paths::resolve_thermal_path`] so the
+/// VIII.0 / VIII.1 sibling-`thermal/` layout is picked up
+/// automatically when `thermal_dir` is a `…/neutron` directory.
 fn resolve_thermal_path(thermal_dir: &Path, name: &str) -> PathBuf {
-    let as_path = Path::new(name);
-    if as_path.is_absolute() || name.contains('/') || name.contains('\\') {
-        as_path.to_path_buf()
-    } else {
-        thermal_dir.join(name)
+    crate::data_paths::resolve_thermal_path(thermal_dir, name)
+}
+
+/// True if any material has a `zaid: <Z>000` entry whose natural
+/// file is absent from the library AND for which we have a
+/// documented natural-abundance split. Used as a cheap predicate
+/// to avoid cloning the materials vector when no expansion is
+/// needed (the common path on VII.1, or on VIII.x for already-
+/// migrated JSONs).
+fn needs_natural_expansion(materials: &[MaterialDto], lib: &NuclideLibrary) -> bool {
+    materials.iter().any(|m| {
+        m.nuclides.iter().any(|n| {
+            n.zaid
+                .map(|z| {
+                    z > 0
+                        && z % 1000 == 0
+                        && !lib.has_natural_file(z)
+                        && crate::transport::nuclides::natural_isotopic_split(z).is_some()
+                })
+                .unwrap_or(false)
+        })
+    })
+}
+
+/// Rewrite every natural-element nuclide whose natural file is
+/// missing into per-isotope siblings, scaling `atom_density` by
+/// natural abundance. Mirrors OpenMC's `Material.add_element` →
+/// materials.xml expansion at the resolve layer instead of the
+/// scene-export layer. Leaves all other fields (`thermal_file`
+/// etc.) intact on each clone — a per-nuclide `thermal_file`
+/// binding propagates to every isotope produced by the split.
+fn expand_natural_elements(materials: &[MaterialDto], lib: &NuclideLibrary) -> Vec<MaterialDto> {
+    let mut out: Vec<MaterialDto> = Vec::with_capacity(materials.len());
+    for m in materials {
+        let mut new_nuclides: Vec<NuclideEntryDto> = Vec::with_capacity(m.nuclides.len() + 4);
+        for n in &m.nuclides {
+            let should_split = n
+                .zaid
+                .filter(|z| *z > 0 && z % 1000 == 0)
+                .filter(|z| !lib.has_natural_file(*z))
+                .and_then(crate::transport::nuclides::natural_isotopic_split);
+            if let Some(split) = should_split {
+                // SAFETY: `should_split` only returns Some when zaid
+                // is set; unwrap is unconditional here.
+                let nat_zaid = n.zaid.unwrap();
+                let z = nat_zaid / 1000;
+                let symbol = crate::transport::nuclides::symbol_for_z(z).unwrap_or("?");
+                for &(iso_a, fraction) in split {
+                    let mut copy = n.clone();
+                    copy.zaid = Some(nat_zaid + iso_a);
+                    copy.label = Some(format!("{symbol}-{iso_a}"));
+                    copy.atom_density = n.atom_density * fraction;
+                    // Force ZAID-based resolution — the natural
+                    // file path the original entry may have carried
+                    // (e.g. `"C0.h5"`) won't be available on a
+                    // VIII.x install.
+                    copy.hdf5_file = None;
+                    new_nuclides.push(copy);
+                }
+            } else {
+                new_nuclides.push(n.clone());
+            }
+        }
+        let mut new_mat = m.clone();
+        new_mat.nuclides = new_nuclides;
+        out.push(new_mat);
     }
+    out
 }
 
 /// Parse a thermal-scattering filename into the `(Z, optional A)` of
@@ -741,5 +821,112 @@ mod tests {
         // requires it, and falling through to a generic parser would
         // silently mis-attach data.
         assert_eq!(parse_thermal_target("H_in_H2O.h5"), None);
+    }
+
+    // ── Natural-element expansion pre-pass ──────────────────────────
+    //
+    // Mirrors what OpenMC's `Material.add_element` does at
+    // materials.xml-export time: when the configured library lacks
+    // a natural-element evaluation but ships the isotopic ones,
+    // split the entry by natural abundance. Engine-side analog
+    // covers benchmark JSONs that haven't yet been migrated by
+    // `scripts/migrate_natural_elements.py`.
+
+    fn empty_lib_dir(tag: &str) -> std::path::PathBuf {
+        // Tests own their dir; no file means "natural file missing".
+        // Per-test `tag` keeps parallel test runs from racing on the
+        // same path — tests in the same module share `cargo test`'s
+        // thread pool, and a previous failure pinned a global path
+        // because `passes_through` (alphabetically earlier) was
+        // creating `C0.h5` before `splits_when` ran.
+        let dir = std::env::temp_dir().join(format!(
+            "orm_nat_expand_{}_{tag}",
+            std::process::id(),
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn make_nat_carbon(atom_density: f64) -> NuclideEntryDto {
+        NuclideEntryDto {
+            hdf5_file: None,
+            zaid: Some(6000),
+            label: Some("C-0".into()),
+            atom_density,
+            thermal_file: None,
+        }
+    }
+
+    fn make_material(name: &str, nuclides: Vec<NuclideEntryDto>) -> MaterialDto {
+        MaterialDto {
+            name: name.into(),
+            comment: None,
+            temperature: 294.0,
+            nuclides,
+            thermal_files: Vec::new(),
+        }
+    }
+
+    /// Library with no `C0.h5` → carbon-natural ZAIDs get split.
+    /// Atom-density conservation: C-12 + C-13 = original.
+    #[test]
+    fn natural_carbon_splits_when_natural_file_missing() {
+        let lib = NuclideLibrary::from_data_dir(empty_lib_dir("split"));
+        let mat = make_material("steel", vec![make_nat_carbon(0.00054977)]);
+        assert!(needs_natural_expansion(std::slice::from_ref(&mat), &lib));
+        let expanded = expand_natural_elements(std::slice::from_ref(&mat), &lib);
+        assert_eq!(expanded.len(), 1);
+        let nuclides = &expanded[0].nuclides;
+        assert_eq!(nuclides.len(), 2);
+        assert_eq!(nuclides[0].zaid, Some(6012));
+        assert_eq!(nuclides[1].zaid, Some(6013));
+        let sum = nuclides[0].atom_density + nuclides[1].atom_density;
+        assert!((sum - 0.00054977).abs() < 1e-12, "split must conserve atom density (sum = {sum})");
+    }
+
+    /// Library WITH `C0.h5` (VII.1 layout) → expansion skipped.
+    /// `needs_natural_expansion` returns false; the original
+    /// material flows through unchanged so the existing VII.1
+    /// resolve path stays bit-identical.
+    #[test]
+    fn natural_carbon_passes_through_when_natural_file_exists() {
+        let dir = empty_lib_dir("passthru");
+        std::fs::write(dir.join("C0.h5"), b"").unwrap(); // placeholder, existence-only check
+        let lib = NuclideLibrary::from_data_dir(&dir);
+        let mat = make_material("steel", vec![make_nat_carbon(0.00054977)]);
+        assert!(!needs_natural_expansion(std::slice::from_ref(&mat), &lib));
+    }
+
+    /// Non-natural ZAIDs (e.g. U-235) are never touched, regardless
+    /// of whether the corresponding file exists.
+    #[test]
+    fn isotopic_zaids_never_split() {
+        let lib = NuclideLibrary::from_data_dir(empty_lib_dir("isotopic"));
+        let u235 = NuclideEntryDto {
+            hdf5_file: None,
+            zaid: Some(92235),
+            label: Some("U-235".into()),
+            atom_density: 0.045,
+            thermal_file: None,
+        };
+        let mat = make_material("HEU", vec![u235]);
+        assert!(!needs_natural_expansion(std::slice::from_ref(&mat), &lib));
+    }
+
+    /// Per-nuclide `thermal_file` bindings propagate to every
+    /// isotope produced by the split. If a future material specifies
+    /// `c_Graphite.h5` against natural carbon, both C-12 and C-13
+    /// inherit that S(α,β) binding.
+    #[test]
+    fn thermal_file_propagates_to_split_isotopes() {
+        let lib = NuclideLibrary::from_data_dir(empty_lib_dir("thermal"));
+        let mut nuc = make_nat_carbon(1.0);
+        nuc.thermal_file = Some("c_Graphite.h5".into());
+        let mat = make_material("graphite", vec![nuc]);
+        let expanded = expand_natural_elements(std::slice::from_ref(&mat), &lib);
+        for n in &expanded[0].nuclides {
+            assert_eq!(n.thermal_file.as_deref(), Some("c_Graphite.h5"));
+        }
     }
 }

@@ -6,7 +6,7 @@
     "category": "PU-SOL-THERM",
     "k_eff_reference": 1.0,
     "k_eff_sigma": 0.0043,
-    "source": "ICSBEP Handbook, PU-SOL-THERM-012.case-19 \u2014 NEA/NSC/DOC(95)03",
+    "source": "ICSBEP Handbook, PU-SOL-THERM-012.case-19 — NEA/NSC/DOC(95)03",
     "data_provenance": {
       "geometry_materials": {
         "repo": "github.com/mit-crpg/benchmarks",
@@ -20,7 +20,7 @@
         "row": "case-19",
         "license": "MIT"
       },
-      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+      "canonical_source": "NEA/OECD ICSBEP Handbook — registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "recommended_settings": {
       "batches": 150,
@@ -2412,9 +2412,18 @@
         "temperature": 293.6,
         "nuclides": [
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.027365
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.0270721945,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 0.0002928055,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 1001,
@@ -2483,9 +2492,18 @@
             "atom_density": 0.00023989176000000002
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.00055545
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.0005495066849999999,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 5.943315e-06,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           }
         ],
         "thermal_files": []

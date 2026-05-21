@@ -48,10 +48,9 @@ fn data_dir() -> PathBuf {
     if let Ok(p) = std::env::var("ICSBEP_DATA_DIR") {
         return PathBuf::from(p);
     }
-    workspace_root()
-        .join("data")
-        .join("endfb-vii.1-hdf5")
-        .join("neutron")
+    let root = workspace_root();
+    open_rust_mc::data_paths::discover_neutron_dir(&root)
+        .unwrap_or_else(|| root.join("data/endfb-viii.1-hdf5/neutron"))
 }
 
 #[derive(Default)]

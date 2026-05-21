@@ -53,16 +53,31 @@ def _load_settings(case_json: Path, runner: Runner) -> Settings:
     )
 
 
+def _find_data_dir(repo_root: Path) -> Path | None:
+    # Highest-priority library first. VIII.1 is the current default
+    # download (`scripts/setup_nuclear_data.ps1`); the older libraries
+    # remain valid fallbacks for partial installs.
+    for lib in ("endfb-viii.1-hdf5", "endfb-viii.0-hdf5", "endfb-vii.1-hdf5"):
+        candidate = repo_root / "data" / lib / "neutron"
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def main(case_stem: str, runner_label: str) -> int:
     repo_root = Path(__file__).resolve().parents[4]
     case_json = repo_root / "bench" / "icsbep" / f"{case_stem}.json"
-    data_dir = repo_root / "data" / "endfb-vii.1-hdf5" / "neutron"
+    data_dir = _find_data_dir(repo_root)
 
     if not case_json.exists():
         print(f"case not found: {case_json}", file=sys.stderr)
         return 2
-    if not data_dir.exists():
-        print(f"data directory not found: {data_dir}", file=sys.stderr)
+    if data_dir is None:
+        print(
+            "no nuclear data library found under data/ "
+            "(tried endfb-viii.1-hdf5, endfb-viii.0-hdf5, endfb-vii.1-hdf5)",
+            file=sys.stderr,
+        )
         return 2
 
     runner = {

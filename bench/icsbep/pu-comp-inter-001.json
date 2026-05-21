@@ -6,7 +6,7 @@
     "category": "PU-COMP-INTER",
     "k_eff_reference": 1.0,
     "k_eff_sigma": 0.011,
-    "source": "ICSBEP Handbook, PU-COMP-INTER-001 \u2014 NEA/NSC/DOC(95)03",
+    "source": "ICSBEP Handbook, PU-COMP-INTER-001 — NEA/NSC/DOC(95)03",
     "data_provenance": {
       "geometry_materials": {
         "repo": "github.com/mit-crpg/benchmarks",
@@ -20,7 +20,7 @@
         "row": "(top-level)",
         "license": "MIT"
       },
-      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+      "canonical_source": "NEA/OECD ICSBEP Handbook — registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "recommended_settings": {
       "batches": 150,
@@ -109,9 +109,18 @@
             "atom_density": 0.00040859
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0709
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.07014137000000001,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 0.00075863,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 8016,

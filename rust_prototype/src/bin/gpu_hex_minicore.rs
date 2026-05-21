@@ -312,7 +312,8 @@ mod cuda_main {
 
         // S(α,β) on H-1 (water at 600 K). NUCLIDE_SPECS index 3.
         let n_nuc = NUCLIDE_SPECS.len();
-        let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
+        let h2o_path =
+            open_rust_mc::data_paths::resolve_thermal_path(&args.data_dir, "c_H_in_H2O.h5");
         let sab_data = if h2o_path.exists() {
             match hdf5_reader::load_thermal_scattering(&h2o_path) {
                 Ok(tsl) => {

@@ -472,7 +472,8 @@ mod cuda_main {
         // c_H_in_H2O.h5 TSL gets bound. Godiva has no H-bearing
         // moderator, so the slot table stays empty.
         let n_nuc = nuclide_specs.len();
-        let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
+        let h2o_path =
+            open_rust_mc::data_paths::resolve_thermal_path(&args.data_dir, "c_H_in_H2O.h5");
         let sab_data = if args.no_sab {
             println!("  S(a,b): disabled by --no-sab flag");
             gpu.upload_sab_data_empty(n_nuc).expect("empty S(a,b)")

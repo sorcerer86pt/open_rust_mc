@@ -32,11 +32,10 @@ fn data_dir() -> PathBuf {
     if let Ok(v) = std::env::var("ICSBEP_DATA_DIR") {
         return PathBuf::from(v);
     }
-    let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-    while p.parent().is_some() && !p.join("data/endfb-vii.1-hdf5/neutron").is_dir() {
-        p = p.parent().unwrap().to_path_buf();
-    }
-    p.join("data/endfb-vii.1-hdf5/neutron")
+    let start: PathBuf = env!("CARGO_MANIFEST_DIR").into();
+    // VIII.1 first (current default), then VIII.0, then legacy VII.1.
+    open_rust_mc::data_paths::discover_neutron_dir(&start)
+        .unwrap_or_else(|| start.join("data/endfb-viii.1-hdf5/neutron"))
 }
 
 fn run_case_cuda(

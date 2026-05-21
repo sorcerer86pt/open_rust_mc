@@ -719,7 +719,7 @@ fn load_table_xs(data_dir: &Path) -> Result<TableXsProvider, String> {
 
 fn load_thermal(data_dir: &Path) -> Vec<Option<Arc<ThermalScatteringData>>> {
     let mut thermal: Vec<Option<Arc<ThermalScatteringData>>> = vec![None; NUCLIDE_SPECS.len()];
-    let h2o_path = data_dir.join("c_H_in_H2O.h5");
+    let h2o_path = open_rust_mc::data_paths::resolve_thermal_path(data_dir, "c_H_in_H2O.h5");
     if h2o_path.exists()
         && let Ok(tsl) = hdf5_reader::load_thermal_scattering(&h2o_path)
     {

@@ -98,7 +98,11 @@ impl ThermalLibrary {
     }
 
     pub fn path(&self, binding: ThermalBinding) -> PathBuf {
-        self.data_dir.join(binding.filename())
+        // VIII.0 / VIII.1 layouts split S(α,β) files out into a
+        // sibling `thermal/` directory next to `neutron/`. The
+        // shared resolver handles VII.1 (same dir) and VIII.x
+        // (sibling) transparently.
+        crate::data_paths::resolve_thermal_path(&self.data_dir, binding.filename())
     }
 
     pub fn has(&self, binding: ThermalBinding) -> bool {

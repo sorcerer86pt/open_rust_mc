@@ -235,11 +235,10 @@ fn main() {
 fn run_real_u235_angular_ab(e_in: f64, n: usize) {
     use open_rust_mc::hdf5_reader::read_angular_distribution;
 
-    let path = workspace_root()
-        .join("data")
-        .join("endfb-vii.1-hdf5")
-        .join("neutron")
-        .join("U235.h5");
+    let root = workspace_root();
+    let neutron = open_rust_mc::data_paths::discover_neutron_dir(&root)
+        .unwrap_or_else(|| root.join("data/endfb-viii.1-hdf5/neutron"));
+    let path = neutron.join("U235.h5");
     let ang = match read_angular_distribution(&path, 2_u32).expect("read MT=2 angular") {
         Some(a) => a,
         None => {

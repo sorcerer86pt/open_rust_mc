@@ -4,6 +4,7 @@
 
 pub mod compare;
 pub mod cp_decompose;
+pub mod data_paths;
 pub mod decompose;
 pub mod depletion;
 pub mod error;

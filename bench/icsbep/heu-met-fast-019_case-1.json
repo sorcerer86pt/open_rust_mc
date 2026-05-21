@@ -6,7 +6,7 @@
     "category": "HEU-MET-FAST",
     "k_eff_reference": 1.0,
     "k_eff_sigma": 0.0028,
-    "source": "ICSBEP Handbook, HEU-MET-FAST-019.case-1 \u2014 NEA/NSC/DOC(95)03",
+    "source": "ICSBEP Handbook, HEU-MET-FAST-019.case-1 — NEA/NSC/DOC(95)03",
     "data_provenance": {
       "geometry_materials": {
         "repo": "github.com/mit-crpg/benchmarks",
@@ -20,7 +20,7 @@
         "row": "case-1",
         "license": "MIT"
       },
-      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+      "canonical_source": "NEA/OECD ICSBEP Handbook — registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "recommended_settings": {
       "batches": 150,
@@ -344,9 +344,18 @@
             "atom_density": 0.0045054
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0011058
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00109396794,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.183206e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -416,9 +425,18 @@
             "atom_density": 0.0045313
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0012895
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00127570235,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.379765e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -488,9 +506,18 @@
             "atom_density": 0.0043476
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0010214
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00101047102,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.092898e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -560,9 +587,18 @@
             "atom_density": 0.0043676
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0012074
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00119448082,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.2919179999999999e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -632,9 +668,18 @@
             "atom_density": 0.0043006
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.00083383
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.000824908019,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 8.921981e-06,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -704,9 +749,18 @@
             "atom_density": 0.0043843
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.00092736
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.000917437248,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 9.922752e-06,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -776,9 +830,18 @@
             "atom_density": 0.0043869
           },
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.0013005
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.00128658465,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 1.3915349999999999e-05,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           },
           {
             "zaid": 26054,
@@ -833,9 +896,18 @@
         "temperature": 293.6,
         "nuclides": [
           {
-            "zaid": 6000,
-            "label": "C-0",
-            "atom_density": 0.076716
+            "zaid": 6012,
+            "label": "C-12",
+            "atom_density": 0.0758951388,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.9893
+          },
+          {
+            "zaid": 6013,
+            "label": "C-13",
+            "atom_density": 0.0008208612000000001,
+            "_split_from_zaid": 6000,
+            "_split_abundance": 0.0107
           }
         ],
         "thermal_files": [

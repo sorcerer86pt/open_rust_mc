@@ -39,12 +39,9 @@ fn data_dir() -> Option<PathBuf> {
     if let Ok(v) = std::env::var("ICSBEP_DATA_DIR") {
         return Some(PathBuf::from(v));
     }
-    let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-    while p.parent().is_some() && !p.join("data/endfb-vii.1-hdf5/neutron").is_dir() {
-        p = p.parent().unwrap().to_path_buf();
-    }
-    let neutron = p.join("data/endfb-vii.1-hdf5/neutron");
-    neutron.is_dir().then_some(neutron)
+    let start: PathBuf = env!("CARGO_MANIFEST_DIR").into();
+    // VIII.1 first (current default), then VIII.0, then legacy VII.1.
+    open_rust_mc::data_paths::discover_neutron_dir(&start)
 }
 
 fn byte_exact_roundtrip(file: &str, awr_fb: f64, nu_bar_fb: f64) {

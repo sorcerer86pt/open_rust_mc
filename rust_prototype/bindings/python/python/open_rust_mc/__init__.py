@@ -12,7 +12,7 @@ Example
     ...     .add_nuclide("U234.h5", atom_density=0.000483, awr=232.029, nubar=2.49)
     ...     .add_nuclide("U235.h5", atom_density=0.04509,  awr=233.025, nubar=2.43)
     ...     .add_nuclide("U238.h5", atom_density=0.00265,  awr=236.006, nubar=2.49))
-    >>> scene = (Scene("data/endfb-vii.1-hdf5/neutron")
+    >>> scene = (Scene("data/endfb-viii.1-hdf5/neutron")
     ...     .add_material("heu", fuel)
     ...     .add_surface("boundary", Sphere(r=8.7407, bc="vacuum"))
     ...     .add_cell("fuel", region="-boundary", fill="heu", temperature=294.0)

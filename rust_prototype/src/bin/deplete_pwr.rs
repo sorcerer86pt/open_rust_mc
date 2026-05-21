@@ -368,7 +368,8 @@ fn load_xs(args: &Args) -> xs_provider::SvdXsProvider {
             kernels.push(xs_provider::NuclideKernels::empty(awr, nu_bar));
         }
     }
-    let h2o_path = args.data_dir.join("c_H_in_H2O.h5");
+    let h2o_path =
+        open_rust_mc::data_paths::resolve_thermal_path(&args.data_dir, "c_H_in_H2O.h5");
     let mut thermal: Vec<Option<Arc<ThermalScatteringData>>> = vec![None; NUCLIDE_SPECS.len()];
     if h2o_path.exists()
         && let Ok(tsl) = hdf5_reader::load_thermal_scattering(&h2o_path)

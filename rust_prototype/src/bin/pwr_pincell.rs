@@ -623,7 +623,7 @@ fn setup_materials() -> Vec<Material> {
 ///
 /// H1 (xs_kernel_idx=3) gets c_H_in_H2O thermal data if available.
 fn load_thermal(data_dir: &std::path::Path) -> Vec<Option<Arc<ThermalScatteringData>>> {
-    let h2o_path = data_dir.join("c_H_in_H2O.h5");
+    let h2o_path = open_rust_mc::data_paths::resolve_thermal_path(data_dir, "c_H_in_H2O.h5");
     let h2o_thermal: Option<Arc<ThermalScatteringData>> = if h2o_path.exists() {
         match hdf5_reader::load_thermal_scattering(&h2o_path) {
             Ok(tsl) => {
