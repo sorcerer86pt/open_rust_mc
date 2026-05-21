@@ -71,6 +71,7 @@ needs $\geq 3$ singular components.}
 \label{fig:mem_prec_pareto}
 \end{figure*}
 
+\IfFileExists{../outputs/sweep_svd_wins_godiva_fresh.png}{%
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.95\textwidth]{../outputs/sweep_svd_wins_godiva_fresh.png}
@@ -83,7 +84,9 @@ both axes; values $>1$ mean SVD wins. Off-library $450$~K
 than ACE+WMP at every rank up to $5$.}
 \label{fig:sweep_godiva}
 \end{figure*}
+}{\label{fig:sweep_godiva}}
 
+\IfFileExists{../outputs/sweep_svd_wins_pwr.png}{%
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.95\textwidth]{../outputs/sweep_svd_wins_pwr.png}
@@ -101,6 +104,7 @@ deployable PWR sweet spot is the off-library + rank-$5$ corner
 of this plot.}
 \label{fig:sweep_pwr}
 \end{figure*}
+}{\label{fig:sweep_pwr}}
 
 \begin{table*}[t]
 \centering

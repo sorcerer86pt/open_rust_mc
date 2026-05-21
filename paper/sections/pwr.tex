@@ -54,6 +54,7 @@ $2.09\times$ of Table~\ref{tab:xs_pareto}.
 
 Figure~\ref{fig:pareto_pwr} summarises the rank sweep.
 
+\IfFileExists{../outputs/pareto/pareto_pwr.png}{%
 \begin{figure*}[t]
 \centering
 \includegraphics[width=0.99\textwidth]{../outputs/pareto/pareto_pwr.png}
@@ -63,6 +64,7 @@ for CPU and GPU. Horizontal bands: OpenMC $0.15.3$, CPU
 pointwise, GPU pointwise. SEM error bars over five seeds.}
 \label{fig:pareto_pwr}
 \end{figure*}
+}{\label{fig:pareto_pwr}}
 
 \subsection{Large-L3 high-statistics benchmark}
 \label{sec:pwr_desktop}
