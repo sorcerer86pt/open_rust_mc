@@ -40,21 +40,22 @@ either --- \texttt{hdf5-pure} reads the ENDF/B nuclear data
 directly, and the same \texttt{Scene} JSON corpus drives both
 backends.
 
-\paragraph{Why CUDA at all.} The SVD compression paper's PWR result
-already shows that GPU SVD is slower than CPU SVD on this code base
-for a 9-nuclide pin cell. We continued GPU work anyway for three
-reasons. First, problem-class scaling: ICSBEP cases reach
-$\sim$70 nuclides (HMF-069) and 17$\times$17 PWR assembly at depth
-3 has $\sim$300 universe cells; rayon's cache pressure on a
-20-thread laptop becomes the dominant cost long before
-algorithmic complexity does. Second, hardware extrapolation: an
-RTX 3080 at saturation reaches $1.2\,$M~histories/s on Godiva
-(measured, §\ref{sec:refill}); an A100 / H100 extrapolates
-linearly with SM count and VRAM, and the same binary now targets
-all of them. Third, photon shielding via persistent-kernel Compton
-walks does survive integration ($2.22\,\times$ over 20-thread
-rayon CPU on $10^6$~histories) --- the photon side of the engine
-makes the GPU investment pay off cleanly.
+\paragraph{Why CUDA.} Two reasons, in this order. (1) The amount
+of available parallelism on a single device dwarfs what any
+realistic host CPU offers. A consumer-tier RTX 3080 carries
+$8\,704$ CUDA cores against the $20$ logical threads of the
+workstation Intel mobile we ran on; a datacenter H100 carries
+$16\,896$. Even after the launch-overhead and divergent-memory
+penalties documented in §\ref{sec:honest} cut the effective ratio
+by an order of magnitude, the device-side compute headroom is
+where every scaled-up problem lives. (2) The vendor-specific
+choice of CUDA over alternatives (HIP, SYCL, oneAPI) follows from
+the deployment target: essentially all datacenter Monte Carlo
+runs on NVIDIA hardware --- the clusters, the cloud spot pools,
+the published OpenMC / Shift / MC21 GPU work. A portable layer
+would be the right answer if the engine were targeting a
+heterogeneous fleet. The engine targets the fleet it can
+actually land on.
 
 \paragraph{What this paper covers.} §\ref{sec:architecture}
 describes the shared dispatch trait that lets CPU and GPU paths run
