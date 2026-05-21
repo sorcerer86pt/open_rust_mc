@@ -1,0 +1,105 @@
+\section{Observability via \texttt{-{}-debug-metrics}}
+\label{sec:observability}
+
+\subsection{The problem we kept solving by hand}
+
+While developing the per-nuclide cache and (later) the SAB cache,
+we repeatedly wanted to answer: \emph{did the cache actually fire
+this case?} The engine prints diagnostic lines for cache misses
+(per-slot SAB upload prints from \texttt{pack\_sab\_elastic},
+nuclide-load progress lines from
+\texttt{NuclideLibrary::load\_or\_get}), so a cache hit shows up
+as the \emph{absence} of expected log lines.
+
+This works on the CPU path because the engine's stdout flows
+straight to the operator's terminal. On the Python sweep path
+it does not: \texttt{icsbep\_sweep.py} captures the engine's
+stdout internally and emits only per-case summary lines. The
+diagnostic lines from inside the cache miss never reach the log
+file, and the operator cannot tell from the log whether the cache
+fired or whether the engine just happens to print less per call.
+
+\subsection{The fix}
+
+We exposed three accessors on the shared GPU context:
+
+\begin{itemize}
+    \item \texttt{per\_nuclide\_cache\_stats()} returns
+        \texttt{(n\_entries, total\_bytes, total\_hits)}.
+        \texttt{total\_hits} is the sum of per-entry
+        \texttt{EvictionStats::hits}, which counts how often the
+        cache served from an existing entry rather than uploading.
+    \item \texttt{sab\_buffer\_cache\_stats()} returns the same
+        triple for the SAB cache.
+    \item \texttt{nvrtc\_arch()} returns the
+        \texttt{sm\_\{major\}\{minor\}} string the kernels were
+        compiled against, cached at \texttt{new()}.
+\end{itemize}
+
+These flow to Python via a new module-level
+\texttt{gpu\_debug\_metrics()} PyO3 function that returns a dict:
+
+\begin{verbatim}
+{
+  "gpu_arch": "sm_86",
+  "sab_cache_entries": <int>,
+  "sab_cache_bytes":   <int>,
+  "sab_cache_hits":    <int>,
+  "nuc_cache_entries": <int>,
+  "nuc_cache_bytes":   <int>,
+  "nuc_cache_hits":    <int>,
+  "bundle_cache_budget_bytes": <int>,
+}
+\end{verbatim}
+
+The CPU-only build of the same function returns \texttt{None} so
+Python callers do not need to feature-gate their imports.
+
+The sweep driver gets a single new flag,
+\texttt{-{}-debug-metrics PATH}, that opens the file append and
+writes one JSON line per snapshot: an \texttt{init} line before
+the per-case loop (empty caches, current device arch, runner
+type, total case count) and an \texttt{after\_case} line per
+case (case name, wall time, status, $k_\text{calc}$, $\sigma_k$,
+and the full metrics dict). The per-case delta in
+\texttt{*\_hits} between consecutive lines gives the number of
+cache hits that case took.
+
+\subsection{Smoke verification}
+
+To convince ourselves the new \texttt{sab\_buffer\_cache} actually
+fires at runtime, we ran the 2-seed smoke on
+heu-comp-inter-003\_case-1 (the same case the natural-element
+migration ran against in the data-library transition) with
+\texttt{-{}-debug-metrics outputs/sab\_cache\_smoke.debug.jsonl}.
+The init line showed all-zero cache state. The
+\texttt{after\_case} line showed
+\texttt{sab\_cache\_entries=1, sab\_cache\_hits=1,
+nuc\_cache\_entries=19, nuc\_cache\_hits=19}.
+
+The pattern (\texttt{entries = hits = N}) is the textbook ``N
+first-seed misses + N second-seed hits'' trace --- the first seed
+populated the cache, the second seed hit every entry. Without the
+cache the second seed would have re-uploaded all 19 nuclide
+payloads ($2.47\,$GB) and the one SAB slot. Without
+\texttt{-{}-debug-metrics} we could not have proven this from the
+sweep log alone.
+
+\subsection{Beyond cache validation}
+
+The same path is the foundation for any future GPU-side
+telemetry we want surfaced in sweeps:
+
+\begin{itemize}
+    \item Per-case GPU memory peak, queried via
+        \texttt{cudarc::driver::result::device::total\_mem} +
+        the kernel's \texttt{stream}'s allocator.
+    \item Per-case kernel launch counts and µs-per-launch
+        averages.
+    \item Refill-pool factor selected by
+        \texttt{recommend\_refill\_factor} (currently logged to
+        stdout; future work to surface as a metric).
+\end{itemize}
+
+The PyO3 wrapper is a $\sim$30-line addition per metric category;
+the cache-stat work proves the shape.

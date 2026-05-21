@@ -1,0 +1,54 @@
+\section{Adaptive architecture targeting}
+\label{sec:adaptive_arch}
+
+The original NVRTC compile sites hardcoded
+\texttt{arch: Some("sm\_86")} --- the Ampere compute capability of
+the development RTX A1000 / RTX 3080. This made the binary
+device-specific. Running on a cluster H100 (sm\_90), an L40
+(sm\_89), or a Blackwell RTX 5090 (sm\_120) required either an
+explicit rebuild for that target or accepting that NVRTC would
+back-target sm\_86 PTX and emit a runtime warning about
+deprecated PTX features.
+
+\subsection{Implementation}
+
+We added \texttt{gpu\_recursive::device\_nvrtc\_arch} that queries
+the device's CC at runtime via the existing
+\texttt{CU\_DEVICE\_ATTRIBUTE\_COMPUTE\_CAPABILITY\_\{MAJOR,MINOR\}}
+attribute pattern, builds the \texttt{sm\_\{major\}\{minor\}}
+string, and passes it to both NVRTC compile sites
+(\texttt{GpuRecursiveContext::new} for recursive kernels,
+\texttt{GpuTransportContext::new} for flat transport).
+
+The minimum supported compute capability is CC 6.0 / sm\_60
+(Pascal). Below that the helper returns an explicit error
+naming the detected capability and explaining that
+\texttt{atomicAdd(double*, double)} is unavailable. Falling
+through silently would compile a kernel that synthesises the
+atomic via lock-cmpxchg and corrupts the spectrum-hardening
+tallies under contention.
+
+The helper is \texttt{pub} (not \texttt{pub(crate)}) so binding
+crates and external benchmarks can target the detected device
+without re-implementing the query. \texttt{GpuTransportContext}
+caches the arch string at construction time, exposed via
+\texttt{nvrtc\_arch()}, so observability paths can surface what
+arch the kernels were actually compiled against.
+
+\subsection{Cost}
+
+One bounded $\sim$6-byte \texttt{Box::leak} per process per
+context (NVRTC's \texttt{CompileOptions.arch} is
+\texttt{Option<\&'static str>}; the leaked string lives for the
+process lifetime, which matches when the GPU context is
+released anyway). The \texttt{OnceLock}-based shared context
+means this leak happens at most once per process even across
+ICSBEP sweep cases.
+
+\subsection{What this unblocks}
+
+A cluster operator running the engine across a heterogeneous
+fleet can deploy one binary; each node compiles its own PTX at
+startup against its own hardware. The same applies to cloud
+GPUs that come and go: an H100 spot instance does not need a
+custom build, just the binary and the data.

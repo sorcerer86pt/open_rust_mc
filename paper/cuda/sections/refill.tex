@@ -1,0 +1,123 @@
+\section{Refill pool and saturation}
+\label{sec:refill}
+
+\subsection{The problem refill solves}
+
+Within an active batch the GPU pipeline starts with $N$ particles
+and walks them forward in lock-step. Particles die at different
+times --- some leak immediately, some live for $\mathcal{O}(10)$
+collisions. The kernel keeps a per-particle ``alive'' flag that
+each step gates on; when many particles die, the SM lanes
+allocated to them sit idle for the rest of the batch. Population
+decay over a typical Godiva history halves the live count every
+$\sim$3--5 steps, so by the tail of the batch the SMs are running
+at a small fraction of nominal occupancy.
+
+The fix from Tramm et al.~\cite{tramm2024} (and earlier
+PHYSOR 2022 ``Toward Portable GPU Acceleration of OpenMC'')
+is a refill pool: oversize the source bank by a factor $f$,
+and refill dead slots from the overflow between event-pipeline
+steps. The kernel self-gates on
+\texttt{alive[tid] == 0} per particle and picks a refill from a
+device-side counter.
+
+\subsection{Saturation curve on RTX 3080}
+
+Before instrumenting the refill, we measured the device's
+saturation curve on \mbox{HMF-001 Godiva} (3 nuclides, fast
+spectrum), 80 batches / 60 active, seed 1, rank 15
+(\texttt{outputs/saturation\_*.csv}):
+
+\noindent\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}rrrr@{}}
+\toprule
+particles & sim wall (s) & $\mu$s / p & hist / s \\
+\midrule
+$10\,000$   & $6.27$ & $10.45$  & $\sim$95\,k \\
+$30\,000$   & $7.50$ &  $4.17$  & $\sim$240\,k \\
+$50\,000$   & $8.83$ &  $2.94$  & $\sim$340\,k \\
+$100\,000$  & $11.02$ & $1.84$  & $\sim$545\,k \\
+$200\,000$  & $15.78$ & $1.31$  & $\sim$760\,k \\
+$500\,000$  & $28.44$ & $0.95$  & $\sim$1\,055\,k \\
+$1\,000\,000$ & $49.87$ & $0.83$ & $\sim$1\,203\,k \\
+\bottomrule
+\end{tabular}}
+
+\noindent
+Knee at $500\,$k--$1\,$M particles per batch. Per-doubling
+parallel efficiency: $84\,\%$ from $10\to30$\,k, drops to $57\,\%$
+between $500\,$k$\to$$1\,$M. The default
+\texttt{icsbep\_run.py particles=5\,000} runs the 3080 at
+$\sim 8\,\%$ of capability; bumping to $1\,$M is a free
+$14\,\times$ throughput win on the same hardware.
+
+\subsection{Measured refill gain on mid-curve workload}
+
+We then validated the refill instrumentation on HMF-008
+(21 nuclides, fast metal), 250\,k particles per batch, 80 batches
+/ 20 inactive (\texttt{outputs/hmf008\_refill\_*.csv}):
+
+\noindent\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lrr@{}}
+\toprule
+metric              & refill off       & refill\,$2\times$ \\
+\midrule
+sim wall (s)        & $48.67$          & $48.23$ \\
+collisions          & $41.9\,\text{M}$ & $83.8\,\text{M}$ \\
+fissions            & $5.73\,\text{M}$ & $11.47\,\text{M}$ \\
+$\mu$s / collision  & $1.162$          & $0.575$ \\
+$k_\text{calc}$     & $0.99456$        & $0.99485$ \\
+$\sigma_k$          & $0.00040$        & $0.00019$ \\
+$\Delta k$ vs.\ ref & $-124$\,pcm      & $-95$\,pcm \\
+status              & PASS             & PASS \\
+\bottomrule
+\end{tabular}}
+
+\noindent
+Refill at $f=2$ doubled the collisions in the same wall time,
+tightened $\sigma_k$ by $2.1\,\times$ (vs.\ the
+$\sqrt{2}\approx 1.41\,\times$ naive prediction --- the
+inactive-batch source convergence also benefits), and dropped
+$\mu$s/collision by $50.5\,\%$. The $+29$~pcm shift in
+$k_\text{calc}$ is MC noise; both rows pass the ICSBEP envelope.
+
+\subsection{The three refill regimes}
+
+The above is one point on the curve. The full pattern, from
+sweeps at varying initial particle counts, is:
+
+\begin{description}
+    \item[Under-occupied] (Particles $\lesssim$ 5\,000 on RTX A1000,
+        $\lesssim$ 35\,000 on RTX 3080). The initial population
+        does not fill the SMs at step zero. Refill cannot help ---
+        the problem is at step zero, not in the tail. Refill
+        adds wall time with no payoff. A1000 smoke at 5\,000
+        particles measured $0.987\,\times$ throughput.
+    \item[Mid-curve] (Initial population fills the SMs at step
+        zero but decays over $\sim$5--10 events --- typical Godiva
+        / HMF-class fast-metal). Refill closes the tail gap.
+        Measured $1.5\,\times$--$2.0\,\times$ throughput at
+        $f=2$.
+    \item[Saturated] (Initial population so large that even
+        after $80\,\%$ die-off the surviving alive count still
+        fills the SMs --- RTX 3080 at $\geq 1\,$M particles per
+        batch per the saturation table above). Refill adds
+        memcpy / kernel-launch overhead with no SM headroom left
+        to fill. Expected gain shrinks to $\sim$5--10\,\%.
+\end{description}
+
+\subsection{The auto-refill recommender}
+
+Picking $f$ by hand requires the operator to know the device's
+saturation knee for the current geometry. We added a device-
+attribute-driven recommender, \texttt{recommend\_refill\_factor},
+that queries SM count, max threads per SM, and the per-thread
+register count of the trace-and-sample kernel, then returns the
+factor that fills available SM lanes given the particle count the
+sweep is about to launch. It returns \texttt{None} when the
+workload is either under-occupied or already at saturation ---
+``no recommendation, accept analog''. The sweep harness prints
+\texttt{GPU auto-refill: picked factor=1.50} or
+\texttt{GPU auto-refill: no recommendation for
+particles\_per\_batch=500000} so the operator sees the choice
+without setting a flag.

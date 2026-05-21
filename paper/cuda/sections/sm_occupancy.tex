@@ -1,0 +1,106 @@
+\section{SM occupancy and register pressure}
+\label{sec:sm_occupancy}
+
+\subsection{The \texttt{nuc\_t[MAX\_NUC\_PER\_MAT]} stack array}
+
+The hottest CUDA kernel, \texttt{trace\_and\_sample}, walks each
+particle to its next interaction. The macroscopic cross section
+at the particle's energy is the sum of every microscopic cross
+section in the material, weighted by atom density:
+\[
+\Sigma_t(E)
+= \sum_{i \in \text{material}} N_i \,\sigma_t^{(i)}(E).
+\]
+The kernel evaluates every term as it computes the sum, and
+\emph{also} retains each $N_i \sigma_t^{(i)}(E)$ in a per-thread
+stack array \texttt{nuc\_t[MAX\_NUC\_PER\_MAT]} because the
+reaction-selection sampler that runs after the sum needs to draw a
+nuclide proportional to the per-nuclide contribution. The
+straightforward implementation stores all of those contributions,
+then samples on a second pass.
+
+\texttt{MAX\_NUC\_PER\_MAT} is the single source-of-truth constant
+\texttt{crate::MAX\_NUCLIDES\_PER\_MATERIAL = 128} that we bumped
+from 32 last year to accommodate HMF-069 (69 nuclides) and Pu
+solution cases (67). The CPU side imports the constant; the GPU
+side receives it via NVRTC \texttt{-DMAX\_NUC\_PER\_MAT=N} so
+\texttt{transport.cu} sizes the stack array correctly. The header
+\texttt{\#error}s out if NVRTC forgets the flag --- silent
+breakage was an early hazard.
+
+The cost: $128 \times 8\,\text{B} = 1\,\text{KB}$ of per-thread
+stack on Ampere. On sm\_86 each SM has 65\,536 32-bit registers
+total; with $1\,\text{KB}$ of stack array allocated, plus the
+other live registers in the trace-and-sample body (energy bin
+index, sampled cumulative, RNG state, particle vector, surface /
+cell descent stacks), the compiler often promotes the array
+into stack-frame memory (local memory in CUDA terminology), which
+serializes to L1 / L2 instead of staying in registers.
+
+We considered streaming the per-nuclide loop, computing each
+$N_i \sigma_t^{(i)}(E)$ and immediately folding it into a running
+cumulative without retaining \texttt{nuc\_t[]}, then evaluating
+the cross sections a second time during reaction selection. This
+doubles the XS evaluation cost but eliminates the register
+spill. We did not commit to either branch: the trade-off depends
+heavily on whether the per-nuclide loop is bound on register
+pressure (favouring streaming) or on XS evaluation cost
+(favouring caching). Both are documented in the source comments
+as future work and are part of the agenda when we get a
+representative sweep on H100-class hardware where the larger
+register file changes the trade-off.
+
+\subsection{Compute-capability-specific tuning constants}
+
+A handful of magic numbers in the kernel-launch heuristics depend
+on the device:
+
+\begin{itemize}
+    \item \textbf{Blocks per SM.} sm\_86 (Ampere RTX A1000 / 3080)
+        and sm\_89 (Ada L40 / RTX 4090) limit to 16 blocks per SM;
+        sm\_90+ (Hopper, Blackwell) raises this to 32. Our
+        \texttt{recommend\_refill\_factor} function reads the
+        compute capability via cudarc's
+        \texttt{CU\_DEVICE\_ATTRIBUTE\_COMPUTE\_CAPABILITY\_MAJOR}
+        and routes both branches.
+    \item \textbf{Register file size.} sm\_75 (Turing T4), sm\_86,
+        sm\_90 all carry 65\,536 registers per SM. We use a
+        conservative ceiling that does not need to fork on this
+        constant.
+    \item \textbf{atomicAdd(double*, double) availability.}
+        Introduced in CC 6.0 (Pascal GP100). We reject earlier
+        compute capabilities explicitly at NVRTC compile time
+        with a named error message --- silent fallback would have
+        meant the kernel compiles but produces wrong tallies on
+        any device that synthesises the atomic via lock-cmpxchg.
+\end{itemize}
+
+\subsection{What we believed vs.\ what we measured}
+
+Two priors we revised after measurement:
+
+\paragraph{The SM-coverage threshold for refill is geometry-dependent.}
+Our first refill-pool experiment assumed that any time the
+batch's particle population dropped below the
+``$\text{SM count} \times \text{max threads per SM}$'' threshold,
+refilling would help. Measurement (§\ref{sec:refill}) showed the
+threshold is not a single number: under-occupied initial
+populations don't benefit (the problem is at step 0, not in the
+tail), and over-occupied initial populations also don't benefit
+(no SM headroom for refilled work). Refill wins in the mid-curve
+where the initial population fills the SMs but the population
+decays over $\sim$5--10 events. The right tuning constant is the
+saturation \emph{knee} of the device, not the SM count.
+
+\paragraph{Memory-bandwidth limits do not show up where we expected.}
+We expected SVD reconstruction to be compute-bound (one rank-$k$
+FMA chain per lookup). Profiling showed the bottleneck is not
+the FMA but the divergent loads --- $32$ threads in a warp each
+indexing into per-nuclide \texttt{basis} and
+\texttt{coeffs} arrays at different offsets and energy bins, a
+pattern the Monte-Carlo XS literature catalogues as the
+classical memory-bottleneck regime~\cite{tramm2014xsbench}.
+The basis and coefficient arrays are cache-blocked (per-nuclide
+pointer arrays since \texttt{gpu\_per\_nuclide.rs}'s pointer-table
+work), but the \emph{access pattern} across a warp is the
+limiter, not the arrays' aggregate bandwidth.

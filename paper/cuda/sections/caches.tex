@@ -1,0 +1,165 @@
+\section{Why we cache, and what it weighs}
+\label{sec:caches}
+
+\subsection{The structure of redundant work}
+
+A continuous-energy Monte Carlo case loads $\mathcal{O}(20)$
+nuclides at $\mathcal{O}(10^5)$ energy points per nuclide; each
+nuclide carries multiple reaction-channel SVD bases / pointwise
+tables, an elastic angular distribution, fission outgoing-energy
+distributions, optional URR probability tables, and (for
+moderators) a separately-loaded S($\alpha$,$\beta$) thermal-scattering
+library with $\mathcal{O}(10^2)$ incident energies, $\mathcal{O}(10^4)$
+outgoing-energy bins, and $\mathcal{O}(10^5)$ angle bins per temperature.
+The host parses these from HDF5; the device wants them in
+flat-pack form ready for kernel pointer arithmetic. Both layers cost
+real time.
+
+An ICSBEP corpus sweep does not load $N$ distinct nuclides; it loads
+the same $\sim$25 nuclides over and over. Every PWR pin cell uses
+H-1, O-16, U-235, U-238, Zr-90 through Zr-96; every Be-reflected
+fast-metal case uses Be-9 plus its \texttt{c\_Be} TSL; every HEU
+solution case uses the same actinide block. A 375-case corpus at
+5 seeds per case will, naively, parse \texttt{U235.h5} from disk
+\textbf{1\,875 times} and HtoD-copy its SVD basis the same number
+of times.
+
+We measured this on the \texttt{origin/main} state immediately
+before this paper's work landed. On a 73-case sub-sweep,
+\texttt{c\_Be} was parsed from disk \textbf{125 times} and re-uploaded
+to the GPU the same number of times --- roughly 8\,GB of redundant
+HtoD copies for one TSL file alone.
+
+\subsection{Host-side: \texttt{thermal\_cache} + \texttt{TieredStore}}
+
+The fix on the host side is straightforward and has been in the
+engine for a while:
+
+\begin{itemize}
+    \item \texttt{material\_resolve::thermal\_cache} is a
+        process-wide \texttt{RwLock<HashMap<PathBuf,
+        Arc<ThermalScatteringData>>>}. Keyed on the canonical
+        absolute path of the TSL HDF5 file. First parse populates
+        the entry; every subsequent \texttt{resolve\_materials} call
+        for the same TSL hands back an \texttt{Arc::clone}. No
+        size cap --- TSL inventory per data dir is bounded
+        ($\leq$ 20 distinct files) and the bytes are immutable.
+    \item \texttt{transport::nuclide\_cache::TieredStore} is the
+        analogous structure for nuclide kernels, with an L1
+        in-memory tier (\texttt{Arc<NuclideKernels>}-keyed) and an
+        eviction policy combining LFU and recency
+        (\texttt{LfuEntries::evict\_to\_budget}).
+\end{itemize}
+
+The host caches use \texttt{Arc::as\_ptr} (or canonical paths) as
+identity keys. The \texttt{Arc::as\_ptr} approach matters because
+the underlying \texttt{NuclideKernels} or
+\texttt{ThermalScatteringData} structs are large
+($\mathcal{O}(50)$-MB) and content-hashing them every cache lookup
+would defeat the cache's purpose; pointer identity is a safe proxy
+for content identity \emph{provided} every consumer goes through the
+same upstream loader. The loader's job is to return the same
+\texttt{Arc} for the same logical request --- a contract we enforce
+by funnelling every consumer through \texttt{TieredStore::get\_or\_load}
+or \texttt{thermal\_cache::load\_or\_get}.
+
+\subsection{Device-side: \texttt{per\_nuclide\_cache} and \texttt{sab\_buffer\_cache}}
+
+The device side needs a parallel cache structure because Arc
+pointer identity does not give you the device buffer; it gives you
+the host data the device buffer was once derived from. The first
+call has to upload; subsequent calls have to find the cached upload
+again. Our pattern, identical between the two caches:
+
+\begin{enumerate}
+    \item \textbf{Key} is the \texttt{Arc::as\_ptr} of the host
+        \texttt{NuclideKernels} or \texttt{ThermalScatteringData},
+        cast to \texttt{usize}, plus any structural parameters
+        the kernel ABI bakes in: SVD rank for nuclides;
+        \texttt{n\_nuc} (sizes the per-nuclide lookup table) plus
+        the full slot list for SAB.
+    \item \textbf{Value} is an \texttt{Arc<GpuNuclideData>} (or
+        \texttt{Arc<GpuSabData>}). Returning an Arc means a cache
+        hit is one atomic refcount bump --- no device traffic and
+        no host-side rebuild of flat-pack arrays.
+    \item \textbf{Eviction} is LFU-with-recency from
+        \texttt{nuclide\_cache::eviction::evict\_to\_budget}.
+        Both caches share the same \texttt{bundle\_cache\_budget}
+        ($75\,\%$ of detected VRAM, env-var overridable as
+        \texttt{OPEN\_RUST\_MC\_GPU\_BUNDLE\_CACHE\_BYTES} or
+        \texttt{\_FRACTION}). The map / adapter is per-cache so an
+        eviction in one does not perturb the other.
+    \item \textbf{Race handling} is the usual ``check, compute
+        outside the lock, then re-check on insert'' three-phase
+        protocol. If two threads race the same key during a sweep
+        preload, the loser drops its upload and clones the winner's
+        \texttt{Arc}. Both buffers being byte-identical (same
+        upstream Arc, same upload pipeline) means the dropped
+        upload is wasted work, not wasted correctness.
+\end{enumerate}
+
+\subsection{Order-sensitivity in the SAB key}
+
+S($\alpha$,$\beta$) takes one extra design decision the per-nuclide
+cache did not need. The \texttt{upload\_sab\_data\_multi} routine
+packs $N$ TSLs into a single flat layout, with per-slot offset
+arrays (\texttt{slot\_inc\_e\_off},
+\texttt{slot\_eout\_table\_off}, $\ldots$) that index into the
+concatenated buffers. The slot order is the iteration order of the
+input slice. Two callers asking for the same logical slots in
+different orders produce different per-slot offset arrays, which
+means different cached device buffers.
+
+We make the cache key order-sensitive: it stores
+\texttt{Vec<(arc\_ptr, nuc\_idx)>} in the upload order, not a
+sorted set. Two callers can construct the slot list however they
+like, but a sweep that consistently iterates
+\texttt{provider.thermal} in slot-index order (which is what every
+production caller does) gets clean cache hits. A future caller
+that wants order-independence can sort upstream of the call site.
+
+\subsection{What it weighs (measured)}
+
+We ran the smoke-verification sweep on heu-comp-inter-003\_case-1
+with 2 seeds, 30 batches, 5\,000 particles, ENDF/B-VIII.1
+nuclear data, on the dev-box RTX~A1000 (4~GB), and snapshotted
+the GPU caches before and after the case via the new
+\texttt{-{}-debug-metrics} path (§\ref{sec:observability}).
+
+\noindent\resizebox{\columnwidth}{!}{%
+\begin{tabular}{@{}lrr@{}}
+\toprule
+phase                            & before     & after      \\
+\midrule
+\texttt{sab\_cache\_entries}     & $0$        & $1$        \\
+\texttt{sab\_cache\_hits}        & $0$        & $1$        \\
+\texttt{nuc\_cache\_entries}     & $0$        & $19$       \\
+\texttt{nuc\_cache\_hits}        & $0$        & $19$       \\
+\texttt{nuc\_cache\_bytes}       & $0$        & $2{,}468{,}534{,}728$\,B\\
+\texttt{sab\_cache\_bytes}       & $0$        & $300$\,B   \\
+\texttt{bundle\_cache\_budget}   & $3{,}220{,}881{,}408$\,B & (same)\\
+\bottomrule
+\end{tabular}}
+
+\noindent
+Reading: $2.47\,$GB of per-nuclide device buffers cached --- 19
+distinct nuclides for one HEU-COMP-INTER case, under the
+3.0\,GB budget. The 19 hits across one case correspond to one
+hit per nuclide from the second seed; without the cache, the second
+seed would have re-uploaded all 19 nuclide payloads. The
+\texttt{sab\_cache} weighs only 300\,B for this case because the
+case's TSL binding is narrow; a Godiva or pure-Be case with a
+heavily-bound \texttt{c\_Be} TSL pushes that into the tens of MB.
+
+\subsection{Why we did not yet add \texttt{material\_data} caching}
+
+The material-composition upload
+(\texttt{upload\_material\_data}: per-material nuclide indices,
+atom densities, AWR table, $\bar{\nu}$ constants) is the third
+production GPU upload. It also rebuilds on every call. We did not
+cache it. The payload is in the low hundreds of KB for a
+realistic ICSBEP case, roughly three orders of magnitude smaller
+than the SAB payload it sits next to. The wasted bandwidth across
+a sweep is dominated by the SAB payload by the same factor. We
+chose to leave the engineering surface smaller until profile data
+shows the material-data path is non-trivial.

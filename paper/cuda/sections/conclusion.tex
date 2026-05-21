@@ -1,0 +1,79 @@
+\section{Conclusion and future work}
+\label{sec:conclusion}
+
+\subsection{What landed}
+
+\begin{itemize}
+    \item Process-wide per-nuclide and S($\alpha$,$\beta$) device-
+        buffer caches keyed on \texttt{Arc::as\_ptr}, sharing one
+        bundle-cache byte budget. Measured: $2.47\,$GB of
+        per-nuclide buffers + N-MB SAB buffers cached after one
+        case, $19+1$ cache hits on the second seed of the same
+        case.
+    \item Refill pool (PHYSOR 2022 Optimization F) with device-
+        attribute-driven auto-recommender. Measured saturation
+        curve on RTX 3080 (5k$\to$1M particles, $1.2\,$M\,h/s
+        peak) and mid-curve refill gain ($2.0\,\times$ histories
+        at the same wall on HMF-008 at 250k particles).
+    \item Adaptive NVRTC arch detection. One binary now targets
+        RTX A1000 (sm\_86), A100 (sm\_80), H100 (sm\_90), RTX
+        5090 (sm\_120). CC $\geq$ 6.0 enforced; below that the
+        helper returns a named error rather than silently
+        compiling unsafe atomics.
+    \item Structured observability via \texttt{-{}-debug-metrics
+        PATH} + new \texttt{gpu\_debug\_metrics()} PyO3 function.
+        One JSON line per case captures cache entry counts, hit
+        totals, byte usage, and the detected compute capability.
+\end{itemize}
+
+\subsection{What is queued}
+
+\begin{itemize}
+    \item GPU survival biasing / Russian roulette. CPU FOM
+        on PWR is $4.5\,\times$. The GPU runs analog. Variance-
+        only --- not a $k_\text{eff}$ bias --- but a known
+        throughput gap.
+    \item GPU material-payload cache. Pattern identical to the
+        SAB cache; payload is $\sim$3 orders of magnitude
+        smaller per call. Defer until profile data shows it is
+        worth the code surface.
+    \item Energy-bin sort within reaction class (PHYSOR~2022
+        Optimization~G). The reaction-sort already exists; a
+        secondary per-class energy sort would improve XS-lookup
+        memory locality at the cost of one small device-side sort
+        per step. Paper measured $1.3\,\times$ on A100; we have
+        not measured on our hardware yet.
+    \item \texttt{nuc\_t[]} streaming. Eliminating the per-thread
+        stack array trades an extra XS evaluation pass for
+        improved register occupancy. Worth re-evaluating on
+        H100-class hardware where the larger register file
+        changes the trade-off.
+    \item HexLattice GPU runtime parity sweep. The device-side
+        \texttt{gr\_hex\_*} functions are wired but a full
+        large-volume CPU vs.\ GPU parity test (equivalent to the
+        existing CPU \texttt{hex\_lattice\_descent\_and\_trace\_smoke})
+        is pending.
+\end{itemize}
+
+\subsection{Where this leaves us}
+
+The engineering theme of this work is that GPU-accelerating a
+Monte Carlo transport code is at least as much about data-flow
+discipline (don't re-upload the same payload N times) and runtime
+device awareness (target the device you actually have, with the
+refill regime that actually helps) as it is about kernel-level
+arithmetic. The CPU backend in this engine, running on a 20-thread
+laptop, beats the GPU SVD path on Godiva and is competitive
+through PWR. The GPU wins start showing up at problem scales
+where rayon's cache contention dominates --- larger assemblies,
+multi-case ICSBEP sweeps, photon shielding with $10^6+$
+histories.
+
+The honest reading of where this engine stands today is in the
+companion SVD paper's results and in \texttt{STATUS.md}: GPU
+recursive transport at $6.74\,\times$ over CPU on a const-XS
+geometry microbench, GPU Compton at $2.22\,\times$ over 20-thread
+rayon CPU on $10^6$~photon histories, RR-CADIS shielding gain at
+$1.18\,\times$--$1.75\,\times$ analog at 14~mfp depending on
+combination. ``Hardware is faster than ours'' is true; ``our GPU
+backend is universally faster than our CPU backend'' is not.

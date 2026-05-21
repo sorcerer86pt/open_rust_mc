@@ -1,0 +1,72 @@
+\section{Architecture}
+\label{sec:architecture}
+
+The CPU backend is history-based and rayon-parallel: each worker
+thread pulls a fresh particle from a shared source bank, walks it
+to death, accumulates per-batch tallies in a worker-local sink, and
+publishes the sinks back to the eigenvalue driver via a
+\texttt{fold().reduce()} reduction. The GPU backend is event-batched:
+particles live as Structures-of-Arrays in device memory, advance
+through a fixed pipeline of kernels (\texttt{find\_cell\_batch},
+\texttt{trace\_step\_batch}, \texttt{multi\_step\_walk}, then the
+collision-sampling stages), and write tallies via
+\texttt{atomicAdd(double*, double)} on Ampere-or-newer hardware.
+
+Both paths consume the same data structures upstream of the
+runner: the recursive \texttt{Geometry} (universes, hexagonal and
+rectangular lattices, BVH per universe), the \texttt{XsProvider}
+trait (one of \texttt{Table}, \texttt{Svd}, \texttt{HybridSvdWmp},
+\texttt{HybridTableWmp}), the \texttt{ThermalScatteringData}
+registry, and the per-material atom-density tables. They diverge
+at the \texttt{EigenvalueRunner} trait, which has two
+implementations: \texttt{CpuRunner} (rayon) and \texttt{CudaRunner}
+(cudarc + NVRTC).
+
+\paragraph{The shared trait.} \texttt{EigenvalueRunner} exposes a
+single method \texttt{run(\&self, config: SimConfig) ->
+OutcomeResult}. Every benchmark, every test, and every Python
+entry point routes through this method; the choice of backend is a
+runtime variable, and the scene JSON corpus does not branch on it.
+This is how we run the same 7-case heu-comp-inter-003 family
+through CPU and GPU back-to-back with one CLI flag flip, and how
+\texttt{tests/cuda\_runs.rs} runs the ICSBEP regression substrate
+under \texttt{-\,-features cuda} without duplicating any scene
+setup code.
+
+\paragraph{Where the GPU diverges in physics.} A handful of
+features are not yet on the device:
+
+\begin{itemize}
+    \item GPU survival biasing and Russian roulette. The CPU path
+        runs both ($w_\text{min}=0.25$, $w_\text{survive}=1.0$);
+        the measured FOM gain on PWR is $4.5\,\times$. The GPU
+        runs analog. This is variance-only, not a $k$-eff bias.
+    \item GPU discrete S($\alpha$,$\beta$) inelastic (NJOY iwt
+        modes 0 and 1). The OpenMC HDF5 distribution emits every
+        TSL as \texttt{incoherent\_inelastic} (continuous),
+        which is exactly what the device sampler consumes; the
+        upload path \texttt{panic!}s if the host hands it
+        \texttt{InelasticDist::Discrete} so silent breakage is
+        impossible.
+    \item Per-cell \texttt{Mat3} rotation. \texttt{GpuRecursiveContext::build}
+        errors out loudly if any cell sets
+        \texttt{rotation = Some(...)}. No ICSBEP scene currently
+        uses it, but the rejection is explicit rather than
+        silent.
+\end{itemize}
+
+\paragraph{Process-wide shared context.}
+\texttt{GpuTransportContext::shared()} returns an
+\texttt{Arc<GpuTransportContext>} from a process-wide
+\texttt{OnceLock}. First call pays the
+NVRTC compile $+$ CUDA init cost ($\sim$30--150~ms on
+RTX~A1000); every subsequent caller --- across cases in an ICSBEP
+sweep, across PyO3 entry points, across rayon worker threads ---
+gets the same Arc. This is the foundation the device-buffer
+caches sit on; a fresh context per case (the prior pattern) had
+empty caches on every entry. The shared context is also what
+makes the \texttt{Arc::as\_ptr}-keyed caches work across cases:
+when \texttt{material\_resolve::thermal\_cache} on the host side
+returns the same \texttt{Arc<ThermalScatteringData>} to two
+different cases, the GPU side gets the same pointer and the cache
+hits.

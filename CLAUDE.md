@@ -360,11 +360,14 @@ Four commits on top of `547dfcb`:
 
 ## Open / deferred
 
-- **GPU device-buffer cache for SAB + material payloads.**
-  `upload_nuclide_data` is cached (per-nuclide LRU keyed on
-  `Arc::as_ptr` + rank). `upload_sab_data_multi` and
-  `upload_material_data` rebuild flat arrays + HtoD every seed/case.
-  A 5-seed × 7-case sweep = 35× redundant ~50 MB SAB uploads.
+- **GPU material-payload cache.** Per-nuclide kernels are cached
+  (`per_nuclide_cache`, `Arc::as_ptr` + rank-keyed); SAB is cached
+  as of `db067dd` (`sab_buffer_cache`, same `Arc::as_ptr`-on-each-TSL
+  pattern, exposed via `upload_sab_data_multi_cached`).
+  `upload_material_data` still rebuilds + HtoD-copies per call,
+  but materials are ~few hundred KB total vs ~50 MB for SAB — three
+  orders of magnitude smaller. Defer until profile data shows it's
+  worth the code surface.
 - **GPU survival biasing / Russian roulette.** CPU has it (4.5×
   FOM on PWR); GPU runs analog. Variance-only, k_eff stays
   unbiased.

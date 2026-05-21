@@ -1,0 +1,83 @@
+\section{Introduction}
+\label{sec:intro}
+
+This paper is a companion to the SVD cross-section compression paper.
+The headline of that paper is a physics-and-correctness result; this
+one is the engineering note that goes with it. After we shipped GPU
+backends for SVD reconstruction, recursive-CSG geometry, photon
+transport, and a multigroup random-ray solver, we found ourselves
+re-learning a small set of lessons that the literature broadcasts but
+that one only believes after living through them:
+
+\begin{enumerate}
+    \item Kernel-level optimisation matters less than data-flow
+        amortisation. A per-XS-lookup speedup of $8$--$13\,\times$ on
+        the SVD reconstruction microbench does not survive full
+        transport on a 9-nuclide PWR pin cell; what does survive is
+        whether the per-nuclide payloads (hundreds of MB, sometimes
+        GB on actinide-heavy cases) are uploaded once or once per
+        case.
+    \item ``GPU is faster than CPU'' is a measurement-specific claim,
+        not an architectural one. Our recursive-transport kernel
+        runs $6.74\,\times$ faster than CPU \emph{on the constant-XS
+        geometry-traversal microbench}; on full Godiva SVD transport
+        with 20 rayon worker threads on a workstation Intel mobile,
+        the same GPU kernel is $1.3\,\times$ \emph{slower}.
+    \item Observability needs to be in the loop. We spent meaningful
+        sessions trying to confirm by reading stdout that a cache
+        ``actually fired''. The fix was a $\sim$200-line debug-metrics
+        path that exposes cache entry counts, hit totals, byte
+        usage, and the detected compute capability via PyO3, with a
+        single CLI flag on the ICSBEP sweep driver that dumps one
+        JSON line per case. Per-case deltas in the hit counter make
+        cache behaviour falsifiable.
+\end{enumerate}
+
+The code is written in pure Rust against \texttt{cudarc} for the
+CUDA driver and runtime APIs, and against NVRTC for at-startup
+PTX compilation. There is no C dependency on the host side
+either --- \texttt{hdf5-pure} reads the ENDF/B nuclear data
+directly, and the same \texttt{Scene} JSON corpus drives both
+backends.
+
+\paragraph{Why CUDA at all.} The SVD compression paper's PWR result
+already shows that GPU SVD is slower than CPU SVD on this code base
+for a 9-nuclide pin cell. We continued GPU work anyway for three
+reasons. First, problem-class scaling: ICSBEP cases reach
+$\sim$70 nuclides (HMF-069) and 17$\times$17 PWR assembly at depth
+3 has $\sim$300 universe cells; rayon's cache pressure on a
+20-thread laptop becomes the dominant cost long before
+algorithmic complexity does. Second, hardware extrapolation: an
+RTX 3080 at saturation reaches $1.2\,$M~histories/s on Godiva
+(measured, §\ref{sec:refill}); an A100 / H100 extrapolates
+linearly with SM count and VRAM, and the same binary now targets
+all of them. Third, photon shielding via persistent-kernel Compton
+walks does survive integration ($2.22\,\times$ over 20-thread
+rayon CPU on $10^6$~histories) --- the photon side of the engine
+makes the GPU investment pay off cleanly.
+
+\paragraph{What this paper covers.} §\ref{sec:architecture}
+describes the shared dispatch trait that lets CPU and GPU paths run
+the same scene. §\ref{sec:caches} is the engineering core:
+per-nuclide kernels, the new S($\alpha$,$\beta$) buffer cache, the
+\texttt{Arc::as\_ptr} trick that makes both work, and what they
+weigh in practice. §\ref{sec:sm_occupancy} catalogues the SM
+occupancy and register-pressure findings, including the
+\texttt{nuc\_t[128]} per-thread stack array that pins our PTX to
+spillage on small cards. §\ref{sec:refill} reports the
+PHYSOR~2022 Optimization~F refill-pool work with measured
+saturation curves on RTX A1000 / RTX 3080.
+§\ref{sec:adaptive_arch} describes the runtime
+compute-capability detection that ended the
+``rebuild-per-card'' tax. §\ref{sec:observability} introduces
+\texttt{-{}-debug-metrics}. §\ref{sec:honest} consolidates the
+``what we thought vs.\ reality'' findings; §\ref{sec:conclusion}
+closes.
+
+\paragraph{What this paper does \emph{not} cover.} The kernel-level
+SVD reconstruction algorithm and its arithmetic-intensity tradeoffs
+are documented in the companion SVD paper. Algorithm-level
+correctness against ICSBEP handbook values, OpenMC cross-validation,
+and the ENDF/B-VII.1 vs.\ VIII.1 library transition are documented
+in the project's \texttt{STATUS.md} and benchmark CSVs; we cite a
+few headline numbers but do not re-derive them here.
