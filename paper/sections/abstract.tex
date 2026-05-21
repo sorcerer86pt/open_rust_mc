@@ -1,8 +1,7 @@
 \title{SVD-Compressed Cross Sections in Monte Carlo
 Neutron Transport\\[0.3em]
-\normalsize An implementation-led benchmark with a
-partition-of-unity fix for off-library temperature
-interpolation}
+\normalsize An implementation-led benchmark, what
+worked, what did not, and where compression actually pays}
 
 \author{F.~Rodrigues\\
 \small\texttt{sorcerer86pt@gmail.com}}
@@ -10,70 +9,92 @@ interpolation}
 \maketitle
 
 \begin{abstract}
-A pure-Rust Monte Carlo neutron transport engine
-implements four cross-section providers behind a common
-interface --- pointwise table, truncated SVD of
-$\log_{10}\sigma(E,T)$, ACE+WMP, and SVD+WMP hybrid ---
-and is used to characterise SVD compression as an
-alternative to pointwise tables, with a partition-of-unity
-variant of Ducru's kernel reconstruction~\cite{ducru2017}
-for off-library operating temperatures. On the Godiva
-HEU-MET-FAST-$001$ fast critical
-benchmark~\cite{icsbep_hmf001} the engine's rank-$5$ SVD
-provider reproduces the measured $k_\text{eff} = 1.0000
-\pm 100$~pcm ($1\sigma$) to $\Delta_\text{exp} = +79
-\pm 38$~pcm, inside the experimental uncertainty band;
-OpenMC~$0.15.3$ on the same ENDF/B-VII.1 HDF5 files sits
-at $-99$~pcm, also inside the band, with the two codes
-straddling experiment from opposite sides. On a
-$9$-nuclide PWR pin cell (no physical benchmark exists;
-OpenMC $0.15.3$ is used as an independent code-to-code
-reference) all four in-engine providers agree with OpenMC
-to $|\Delta k|\le 51$~pcm at $10$-seed $\times\,150$-batch
-$\times\,50\,000$-particle statistics. A single-seed
-four-way comparison on the same problem (Table / SVD /
-Hybrid SVD+WMP / ACE+WMP) puts every gap below
-$1\sigma_\text{seed}$: SVD-vs-WMP $-4$~pcm,
-Hybrid-vs-WMP $-26$~pcm, Table-vs-WMP $+82$~pcm, all at
-$\sigma_\text{seed}\approx 100$~pcm. $43$ of $47$ non-redundant $^{235}$U reaction
-channels are rank-one to machine precision, and rank-$5$
-SVD with discrete-level rank-$1$ recovers engine-wide
-$k_\text{eff}$ within $\sim\!50$~pcm of the in-engine
-pointwise baseline on both benchmarks at
-$1.37\times$--$1.90\times$ the CPU throughput. At a
-realistic off-library operating point ($+150$~K above every
-nuclide's library column, fuel $900\!\to\!1050$~K,
-moderator $600\!\to\!750$~K), a partition-of-unity $3$-point
-Ducru scheme reproduces $k_\infty$ within $213$~pcm
-($\sim\!3.6\sigma$) of the ACE+WMP industry baseline while
-using $22\%$ less memory and matching its transport speed
---- a $10\times$ reduction over a naive $2$-point
-bracketing variant that leaves a $2094$~pcm
-kernel-approximation bias.
+A pure-Rust Monte Carlo neutron transport engine implements
+four cross-section providers behind a common interface ---
+pointwise table, truncated SVD of $\log_{10}\sigma(E,T)$,
+ACE$+$WMP, and an SVD$+$WMP hybrid --- and a matching CUDA
+path for the pointwise and SVD providers. The question this
+paper sets out to answer is whether truncated SVD is a
+viable drop-in replacement for pointwise tables in
+continuous-energy MC; the answer, on the measurements
+collected in this engine, is \emph{only in a narrow regime,
+and not the one the representation-byte literature points to}.
 
-The hybrid memory picture in the engine is now measured end
-to end: a smooth-only SVD rebuild outside each WMP window
-(MT$=2$, $18$, $102$) drops the live working set from
-$519.0$~MB to $487.6$~MB, a $1.06\times$ reduction. The
-$132.9\times$ representation-byte ratio against a
-four-channel pointwise table reported in the literature is
-correct on its own terms but is not the engine-scale
-reduction; this paper documents both numbers and explains
-why they differ.
+\paragraph{What we measured and what it actually does.}
+At the operating point most production codes run --- a
+single library temperature column per nuclide, full transport
+physics including S($\alpha,\beta$) and URR --- the SVD
+representation is monotonically \emph{larger} than the
+pointwise table at every rank measured ($1$, $2$, $3$, $5$,
+$7$). On the $9$-nuclide PWR pin cell at rank $5$, the
+in-engine SVD working set is $527$~MB against $103$~MB for the
+table ($5.12\times$ larger) and $100$~MB for ACE$+$WMP. CPU
+throughput on the same problem favours the table by
+$1.25\times$: the per-XS-lookup speedup that SVD shows in a
+micro-benchmark ($8$--$13\times$ on a single nuclide at a
+fixed energy) does not survive integration on a realistic
+thermal pin cell. On Godiva ($3$ nuclides, fast spectrum)
+the verdict is reversed --- SVD runs $1.22\times$ faster than
+the table at the same $5.14\times$ memory penalty --- but
+this is a small-problem win, not a general one. $k$-eigenvalue
+fidelity is not the bottleneck: every provider lands inside
+combined seed $\sigma$ of every other on both benchmarks, and
+the engine reproduces the ICSBEP HMF-001 handbook value to
+$+79 \pm 38$~pcm (inside the $\pm 100$~pcm experimental band).
 
-Three limitations are reported quantitatively: GPU SVD is
-$1.3\times$ slower than GPU pointwise on PWR because four
-clad nuclides require summing $13$ discrete-level SVD
-kernels per lookup; the WMP+SVD hybrid is $2\times$ slower
-than CPU SVD because Faddeeva evaluation is $\sim\!15\times$
-more expensive than the SVD FMA; and a simplex-projected
-QP variant of Ducru (clip negative weights, renormalize)
-degrades U-$238$ capture reconstruction from $0.84\%$ to
-$5\%$ L2 error because the projection is optimal in weight
-space rather than in the Doppler-kernel norm. The
-kernel-Gram QP from~\cite{ducru2017}~§4 wins at rank~$3$
-($0.60\%$ L2) but loses at production rank~$5$ ($2.06\%$);
-signed three-point unity is the default at rank~$5$.
+\paragraph{Where SVD pays.}
+The unambiguous SVD win in this engine is off-library
+temperature operation. At a uniform $+150$~K offset on PWR,
+SVD's three-point unity-normalised Ducru
+reconstruction~\cite{ducru2017} produces $\sigma(E,T)$ from a
+single basis at one library column; the pointwise table must
+hold both bracketing library columns resident and
+stochastically interpolate between them per
+nuclide-collision. Memory inverts: SVD $156$~MB vs table
+$206$~MB ($1.32\times$ smaller for SVD), CPU throughput
+matches within $0.07\,\%$, and $k_\infty$ trails ACE$+$WMP by
+$213$~pcm (about $3.6\sigma_\text{seed}$). The off-library
+memory win is the one regime where SVD's reconstruction
+discipline cleanly beats interpolation.
+
+\paragraph{The representation-vs-engine memory gap.}
+The literature reports SVD compression headlines as large as
+$132.9\times$ vs.\ pointwise tables. That figure is correct as
+a per-reaction, representation-only byte count. The
+in-engine working set is a different quantity: it includes
+overhead from discrete-level data (MT$=51$--$91$), URR
+probability tables, S($\alpha,\beta$) inelastic distributions,
+angular distributions, the geometry, and the BVH. Once those
+are included, the SVD live-memory cost in our engine is
+$5.12\times$ \emph{larger} than the pointwise baseline at
+on-library $T$, not $132.9\times$ smaller. We document both
+numbers and the reason they differ.
+
+\paragraph{GPU is not the win either.}
+On Godiva, GPU SVD on an RTX A1000 runs $1.3\times$ slower
+than the same SVD code on a $20$-thread CPU rayon loop, and
+the same factor slower than GPU pointwise on the same
+benchmark. The kernel-level per-lookup advantage is
+swamped by launch overhead and divergent memory access in
+event-batched transport at this problem scale. GPU SVD
+becomes competitive on photon-shielding workloads
+($10^6$+ histories per case) and on per-nuclide
+microbenches; it is not a Godiva or PWR k-eff win.
+
+\paragraph{What we suggest reading from this.}
+SVD compression of $\log_{10}\sigma(E,T)$ is interesting
+research and is unambiguously useful in one operationally
+common regime: off-library temperature operation in
+multi-temp libraries. It is not, on the measurements
+reported here, a general drop-in win against pointwise tables
+or against ACE$+$WMP. The contribution of the paper is the
+side-by-side measurement of the trade-offs, not a claim that
+one provider should replace the others. The four-provider
+interface remains live in the engine so future work --- on
+problem classes we have not yet measured, on GPU hardware
+we have not yet had access to, on multi-temp library setups
+where the table baseline scales linearly in $T$ --- can run
+its own A/B without re-doing the plumbing.
 \end{abstract}
 
 \vspace{0.3em}
