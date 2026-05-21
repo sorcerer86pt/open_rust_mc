@@ -2,15 +2,17 @@
 """Sweep every ICSBEP benchmark JSON in `bench/icsbep/`.
 
 Runs each `*.json` through `run_icsbep_case`, optionally averaged over
-N seeds, with per-case settings either taken from the JSON's
-`benchmark.recommended_settings` block (when present) or from the CLI
-defaults. Appends one CSV row per case so a partial run is always
-recoverable; supports `--resume` and a `--stop-file` for graceful
-termination of multi-hour production runs.
+N seeds. Per-case settings are taken from the JSON's
+`benchmark.recommended_settings` block when present, but explicit CLI
+flags always win — pass `--particles 20000` to force a light A1000
+re-run regardless of what the JSON recommends for a 3080-class box.
+Appends one CSV row per case so a partial run is always recoverable;
+supports `--resume` and a `--stop-file` for graceful termination of
+multi-hour production runs.
 
-Per-case settings precedence (highest → lowest):
-    1. `benchmark.recommended_settings.{batches, inactive, particles, seeds}` in the JSON
-    2. CLI flags (--batches, --inactive, --particles, --seeds)
+Per-case settings precedence (highest first):
+    1. Explicit CLI flag (--batches, --inactive, --particles, --seeds)
+    2. JSON `benchmark.recommended_settings.{batches,inactive,particles[,particles_gpu],seeds}`
     3. Built-in defaults (80, 20, 5000, 1)
 
 The schema for the JSON override:
@@ -150,15 +152,23 @@ def parse_args() -> argparse.Namespace:
                    help="cap the number of cases run after filtering")
     p.add_argument("--runner", choices=["cpu", "gpu"], default="cpu",
                    help="execution backend (default: cpu)")
-    p.add_argument("--batches", type=int, default=80,
-                   help="CLI default; overridden by JSON benchmark.recommended_settings.batches")
-    p.add_argument("--inactive", type=int, default=20,
-                   help="CLI default; overridden by JSON recommended_settings.inactive")
-    p.add_argument("--particles", type=int, default=5000,
-                   help="CLI default; overridden by JSON recommended_settings.particles")
-    p.add_argument("--seeds", type=int, default=1,
-                   help="number of seeds per case (mean ± seed-to-seed stderr); "
-                        "CLI default, overridden by JSON recommended_settings.seeds")
+    # Precedence (highest → lowest): explicit CLI flag > JSON
+    # `benchmark.recommended_settings.<key>` > built-in default below.
+    # CLI args default to ``None`` as a sentinel for "not passed"; the
+    # built-in fallback is applied at use-time so it doesn't swallow
+    # the JSON recommendation when the user didn't override.
+    p.add_argument("--batches", type=int, default=None,
+                   help="active+inactive batches per seed. CLI flag wins over "
+                        "JSON benchmark.recommended_settings.batches; built-in default 80.")
+    p.add_argument("--inactive", type=int, default=None,
+                   help="inactive batches per seed. CLI wins over JSON; "
+                        "built-in default 20.")
+    p.add_argument("--particles", type=int, default=None,
+                   help="particles per batch. CLI wins over JSON "
+                        "(both `particles` and `particles_gpu`); built-in default 5000.")
+    p.add_argument("--seeds", type=int, default=None,
+                   help="number of seeds per case (mean ± seed-to-seed stderr). "
+                        "CLI wins over JSON; built-in default 1.")
     p.add_argument("--base-seed", type=int, default=42,
                    help="first seed; subsequent seeds are base, base+1, base+2, ...")
     p.add_argument("--rank", type=int, default=15, help="SVD rank")
@@ -242,14 +252,19 @@ def case_settings(
     args: argparse.Namespace,
     runner: Runner | None = None,
 ) -> tuple[Settings, int, int, int, int]:
-    """Per-case settings: JSON `benchmark.recommended_settings` overrides
-    CLI args. Returns (Settings, n_seeds, batches, inactive, particles)
-    so the row can record which numbers were actually used.
+    """Per-case settings. Precedence per knob (highest first):
 
-    Particle count uses a backend-aware override. CPU and GPU saturate
+        1. explicit CLI flag (e.g. ``--particles 20000``)
+        2. JSON ``benchmark.recommended_settings.<key>``
+        3. built-in default
+
+    Returns (Settings, n_seeds, batches, inactive, particles) so the
+    CSV row can record which numbers were actually used.
+
+    Particle count uses a backend-aware fallback. CPU and GPU saturate
     at vastly different particle counts (CPU ~5k on an 8-thread laptop,
     3080 at 500k-1M per the saturation sweep) so a single number is
-    always wrong for one of them. Schema (backward compatible):
+    always wrong for one of them. JSON schema (backward compatible):
 
         "recommended_settings": {
             "batches": 150,
@@ -259,9 +274,10 @@ def case_settings(
             "seeds": 5
         }
 
-    When `particles_gpu` is absent, the CPU value is used for both
-    backends — same as today's behaviour. When present and the runner
-    is GPU, it overrides the CPU `particles`.
+    When ``particles_gpu`` is absent, the CPU value is used for both
+    backends. When present and the runner is GPU, it overrides the
+    CPU ``particles`` — but only when the CLI didn't pin
+    ``--particles`` explicitly.
     """
     rec: dict = {}
     try:
@@ -270,34 +286,60 @@ def case_settings(
         rec = j.get("benchmark", {}).get("recommended_settings", {}) or {}
     except Exception:
         rec = {}
-    batches = int(rec.get("batches", args.batches))
-    inactive = int(rec.get("inactive", args.inactive))
-    particles_cpu = int(rec.get("particles", args.particles))
-    particles_gpu = int(rec.get("particles_gpu", particles_cpu))
-    if runner is not None and runner is Runner.GpuCuda:
-        particles = particles_gpu
+
+    def _pick(cli_val, json_key: str, builtin: int) -> int:
+        """CLI > JSON > built-in default."""
+        if cli_val is not None:
+            return int(cli_val)
+        if json_key in rec:
+            return int(rec[json_key])
+        return builtin
+
+    batches = _pick(args.batches, "batches", 80)
+    inactive = _pick(args.inactive, "inactive", 20)
+    n_seeds = _pick(args.seeds, "seeds", 1)
+
+    # Particles: explicit `--particles` always wins for both backends.
+    # When not passed, GPU runs prefer JSON `particles_gpu` then fall
+    # back to `particles` then to the built-in default; CPU goes
+    # straight to `particles` → built-in.
+    if args.particles is not None:
+        particles = int(args.particles)
     else:
-        particles = particles_cpu
-    n_seeds = int(rec.get("seeds", args.seeds))
+        particles_cpu = int(rec.get("particles", 5000))
+        particles_gpu = int(rec.get("particles_gpu", particles_cpu))
+        particles = particles_gpu if (runner is not None and runner is Runner.GpuCuda) else particles_cpu
     # Refill knobs are GPU-only. CPU runner silently ignores both
     # (kernel doesn't exist; SimConfig fields just sit unused on
     # the rayon path). Explicit `--gpu-refill-factor` wins over
     # `--gpu-auto-refill`; the engine's CudaRunner::run announces
     # what got picked when auto fires.
     #
-    # Per-case JSON keys (both optional, both backward compatible —
-    # absent keys fall back to the CLI flag value):
+    # Per-case JSON keys (both optional):
     #   "gpu_refill_pool_factor": 2.0   # explicit factor
     #   "gpu_auto_refill": true         # let engine pick
-    # Precedence: JSON > CLI for both knobs (matches how particles /
-    # batches / inactive override).
+    # Precedence: explicit CLI flag > JSON > unset. The CLI sentinel
+    # for `--gpu-refill-factor` is `None` (default), and
+    # `--gpu-auto-refill` only flips the auto-refill bit when the
+    # flag is present.
     is_gpu = runner is not None and runner is Runner.GpuCuda
-    cli_refill = args.gpu_refill_factor if is_gpu else None
-    cli_auto   = bool(args.gpu_auto_refill) if is_gpu else False
-    refill_factor = rec.get("gpu_refill_pool_factor", cli_refill) if is_gpu else None
-    auto_refill   = bool(rec.get("gpu_auto_refill", cli_auto)) if is_gpu else False
-    if refill_factor is not None:
-        refill_factor = float(refill_factor)
+    if not is_gpu:
+        refill_factor = None
+        auto_refill = False
+    else:
+        # Explicit CLI refill factor wins.
+        if args.gpu_refill_factor is not None:
+            refill_factor = float(args.gpu_refill_factor)
+        elif "gpu_refill_pool_factor" in rec:
+            refill_factor = float(rec["gpu_refill_pool_factor"])
+        else:
+            refill_factor = None
+        # `store_true` flags can't distinguish "user passed --flag" from
+        # "default False", so the CLI overrides JSON only when set.
+        if args.gpu_auto_refill:
+            auto_refill = True
+        else:
+            auto_refill = bool(rec.get("gpu_auto_refill", False))
     settings = Settings(
         batches=batches,
         inactive=inactive,
@@ -424,17 +466,33 @@ def run_case_multi_seed(
     )
 
 
+def _find_data_dir(repo_root: Path) -> Path | None:
+    # VIII.1 is the current default download
+    # (`scripts/setup_nuclear_data.ps1`). Fall back to older libraries
+    # only when VIII.1 isn't installed, so partial installs keep
+    # working without flag tweaks.
+    for lib in ("endfb-viii.1-hdf5", "endfb-viii.0-hdf5", "endfb-vii.1-hdf5"):
+        candidate = repo_root / "data" / lib / "neutron"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def main() -> int:
     args = parse_args()
     repo_root = find_repo_root(Path(__file__).resolve())
     bench_dir = args.bench_dir or repo_root / "bench" / "icsbep"
-    data_dir = args.data_dir or repo_root / "data" / "endfb-vii.1-hdf5" / "neutron"
+    data_dir = args.data_dir or _find_data_dir(repo_root)
 
     if not bench_dir.is_dir():
         print(f"bench dir not found: {bench_dir}", file=sys.stderr)
         return 2
-    if not data_dir.is_dir():
-        print(f"data dir not found: {data_dir}", file=sys.stderr)
+    if data_dir is None or not data_dir.is_dir():
+        print(
+            f"data dir not found (looked under {repo_root / 'data'} for "
+            "endfb-viii.1-hdf5 / endfb-viii.0-hdf5 / endfb-vii.1-hdf5)",
+            file=sys.stderr,
+        )
         return 2
 
     runner = Runner.GpuCuda if args.runner == "gpu" else Runner.Cpu
@@ -476,12 +534,33 @@ def main() -> int:
         pass
 
     print(f"Sweeping {len(cases)} case(s) on {args.runner.upper()} runner")
+    # ``None`` here means "no explicit CLI flag passed" — display "auto"
+    # so the user can see at a glance which knobs will fall through to
+    # the JSON recommended_settings vs the built-in defaults.
+    def _show(v, builtin):
+        return f"{v} (explicit)" if v is not None else f"auto (JSON or {builtin})"
     print(
-        f"  CLI defaults: batches={args.batches}, inactive={args.inactive}, "
-        f"particles={args.particles}, seeds={args.seeds}, base_seed={args.base_seed}, "
-        f"rank={args.rank}"
+        f"  CLI overrides: batches={_show(args.batches, 80)}, "
+        f"inactive={_show(args.inactive, 20)}, "
+        f"particles={_show(args.particles, 5000)}, "
+        f"seeds={_show(args.seeds, 1)}, "
+        f"base_seed={args.base_seed}, rank={args.rank}"
     )
-    print("  per-case settings: JSON `benchmark.recommended_settings` overrides CLI defaults")
+    print("  per-case settings: explicit CLI flag > JSON `benchmark.recommended_settings` > built-in default")
+    # Backend-equivalence note: GPU has a refill-pool knob to keep SM
+    # lanes filled during the batch tail (PHYSOR 2022 Optimization F).
+    # CPU runs don't need it — rayon's work-stealing already grabs a
+    # new history the instant any thread's current one dies, so the
+    # batch-tail concern doesn't exist. JSONs that set
+    # `gpu_auto_refill` / `gpu_refill_pool_factor` flow through to the
+    # CSV column for traceability but have no CPU-side effect. State
+    # it explicitly so a CPU-vs-GPU A/B reader knows the column isn't
+    # silently broken.
+    if args.runner == "cpu":
+        print(
+            "  CPU runner: any `gpu_auto_refill` / `gpu_refill_pool_factor` in JSON "
+            "is ignored (no analog needed; rayon work-stealing saturates cores)."
+        )
 
     # ── L1 nuclide-cache warm-start ────────────────────────────────
     # Walk the manifest once, count nuclide appearances, hand the
