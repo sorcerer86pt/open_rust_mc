@@ -9,92 +9,24 @@ worked, what did not, and where compression actually pays}
 \maketitle
 
 \begin{abstract}
-A pure-Rust Monte Carlo neutron transport engine implements
-four cross-section providers behind a common interface ---
-pointwise table, truncated SVD of $\log_{10}\sigma(E,T)$,
-ACE$+$WMP, and an SVD$+$WMP hybrid --- and a matching CUDA
-path for the pointwise and SVD providers. The question this
-paper sets out to answer is whether truncated SVD is a
-viable drop-in replacement for pointwise tables in
-continuous-energy MC; the answer, on the measurements
-collected in this engine, is \emph{only in a narrow regime,
-and not the one the representation-byte literature points to}.
-
-\paragraph{What we measured and what it actually does.}
-At the operating point most production codes run --- a
-single library temperature column per nuclide, full transport
-physics including S($\alpha,\beta$) and URR --- the SVD
-representation is monotonically \emph{larger} than the
-pointwise table at every rank measured ($1$, $2$, $3$, $5$,
-$7$). On the $9$-nuclide PWR pin cell at rank $5$, the
-in-engine SVD working set is $527$~MB against $103$~MB for the
-table ($5.12\times$ larger) and $100$~MB for ACE$+$WMP. CPU
-throughput on the same problem favours the table by
-$1.25\times$: the per-XS-lookup speedup that SVD shows in a
-micro-benchmark ($8$--$13\times$ on a single nuclide at a
-fixed energy) does not survive integration on a realistic
-thermal pin cell. On Godiva ($3$ nuclides, fast spectrum)
-the verdict is reversed --- SVD runs $1.22\times$ faster than
-the table at the same $5.14\times$ memory penalty --- but
-this is a small-problem win, not a general one. $k$-eigenvalue
-fidelity is not the bottleneck: every provider lands inside
-combined seed $\sigma$ of every other on both benchmarks, and
-the engine reproduces the ICSBEP HMF-001 handbook value to
-$+79 \pm 38$~pcm (inside the $\pm 100$~pcm experimental band).
-
-\paragraph{Where SVD pays.}
-The unambiguous SVD win in this engine is off-library
-temperature operation. At a uniform $+150$~K offset on PWR,
-SVD's three-point unity-normalised Ducru
-reconstruction~\cite{ducru2017} produces $\sigma(E,T)$ from a
-single basis at one library column; the pointwise table must
-hold both bracketing library columns resident and
-stochastically interpolate between them per
-nuclide-collision. Memory inverts: SVD $156$~MB vs table
-$206$~MB ($1.32\times$ smaller for SVD), CPU throughput
-matches within $0.07\,\%$, and $k_\infty$ trails ACE$+$WMP by
-$213$~pcm (about $3.6\sigma_\text{seed}$). The off-library
-memory win is the one regime where SVD's reconstruction
-discipline cleanly beats interpolation.
-
-\paragraph{The representation-vs-engine memory gap.}
-The literature reports SVD compression headlines as large as
-$132.9\times$ vs.\ pointwise tables. That figure is correct as
-a per-reaction, representation-only byte count. The
-in-engine working set is a different quantity: it includes
-overhead from discrete-level data (MT$=51$--$91$), URR
-probability tables, S($\alpha,\beta$) inelastic distributions,
-angular distributions, the geometry, and the BVH. Once those
-are included, the SVD live-memory cost in our engine is
-$5.12\times$ \emph{larger} than the pointwise baseline at
-on-library $T$, not $132.9\times$ smaller. We document both
-numbers and the reason they differ.
-
-\paragraph{GPU is not the win either.}
-On Godiva, GPU SVD on an RTX A1000 runs $1.3\times$ slower
-than the same SVD code on a $20$-thread CPU rayon loop, and
-the same factor slower than GPU pointwise on the same
-benchmark. The kernel-level per-lookup advantage is
-swamped by launch overhead and divergent memory access in
-event-batched transport at this problem scale. GPU SVD
-becomes competitive on photon-shielding workloads
-($10^6$+ histories per case) and on per-nuclide
-microbenches; it is not a Godiva or PWR k-eff win.
-
-\paragraph{What we suggest reading from this.}
-SVD compression of $\log_{10}\sigma(E,T)$ is interesting
-research and is unambiguously useful in one operationally
-common regime: off-library temperature operation in
-multi-temp libraries. It is not, on the measurements
-reported here, a general drop-in win against pointwise tables
-or against ACE$+$WMP. The contribution of the paper is the
-side-by-side measurement of the trade-offs, not a claim that
-one provider should replace the others. The four-provider
-interface remains live in the engine so future work --- on
-problem classes we have not yet measured, on GPU hardware
-we have not yet had access to, on multi-temp library setups
-where the table baseline scales linearly in $T$ --- can run
-its own A/B without re-doing the plumbing.
+This paper measures truncated singular value decomposition
+of $\log_{10}\sigma(E,T)$ as a cross-section representation
+in continuous-energy Monte Carlo neutron transport. A
+pure-Rust engine implements four interchangeable providers
+--- pointwise table, SVD, ACE$+$WMP, and an SVD$+$WMP
+hybrid --- behind a common trait, with a matching CUDA path
+for the pointwise and SVD providers, so the same scene JSON,
+nuclear data, and acceptance envelope drive every A/B. We
+report memory, throughput, and $k$-eigenvalue fidelity for
+each provider on Godiva and on a $9$-nuclide PWR pin cell,
+in both on-library and off-library temperature regimes; we
+introduce a partition-of-unity three-point variant of Ducru's
+kernel reconstruction~\cite{ducru2017} for off-library $T$
+that retains numerical stability where the naive bracketing
+variant does not; and we measure the gap between the
+representation-byte compression headlines reported in the
+literature and the live in-engine working set, which differs
+by an order of magnitude.
 \end{abstract}
 
 \vspace{0.3em}
