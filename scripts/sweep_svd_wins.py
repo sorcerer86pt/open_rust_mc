@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 import re
 import subprocess
 import sys
@@ -36,6 +37,32 @@ BIN_PWR = REPO / "rust_prototype" / "target" / "release" / "pwr_pincell.exe"
 DATA = REPO / "data" / "endfb-vii.1-hdf5" / "neutron"
 OUT_DIR = REPO / "outputs"
 OUT_DIR.mkdir(exist_ok=True)
+
+
+def _to_native(path: Path) -> str:
+    """Return a path string the Windows .exe can resolve.
+
+    Under WSL, `pathlib.Path` produces `/mnt/c/...` Unix-style paths.
+    The Windows binaries launched via WSL interop receive those as
+    literal arguments and silently fail to resolve them (they see
+    e.g. `/mnt/c/.../data/...` and fall through to default values,
+    so the engine reports zero load time, zero memory, and zero
+    k_eff — a symptom that looks like a parser bug but is
+    actually a path-passing bug). Convert via `wslpath -w` when we
+    detect we're inside WSL.
+    """
+    s = str(path)
+    if sys.platform == "linux" and (
+        "microsoft" in os.uname().release.lower() if hasattr(os, "uname") else False
+    ):
+        try:
+            return subprocess.run(
+                ["wslpath", "-w", s],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            return s
+    return s
 
 
 @dataclass
@@ -53,9 +80,17 @@ class Point:
 _RE_BLOCK = re.compile(
     r"^\s{2}(SVD[^:]*|Pointwise Table|ACE\+WMP):\s*$", re.MULTILINE
 )
-_RE_K = re.compile(r"k_(?:eff|inf)\s*=\s*([0-9.]+)")
+# Allow the engine's optional `(collision)` / `(track-len)` /
+# similar label between `k_eff` and `=`, used by godiva (PWR
+# prints `k_inf` without the suffix).
+_RE_K = re.compile(r"k_(?:eff|inf)(?:\s*\([^)]+\))?\s*=\s*([0-9.]+)")
 _RE_NS = re.compile(r"ns/particle\s*=\s*([0-9.]+)")
 _RE_MEM = re.compile(r"XS memory\s*=\s*([0-9.]+)\s*KB")
+
+# Strip CSI / OSC ANSI escape sequences (`\x1b[...m`, `\x1b]...\x07`).
+# Plus a few common Rust-tinted variants. Pattern grabs the standard
+# CSI form (`\x1b\[` ... letter) which covers reverse-video and colour.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
 
 
 def _parse_block(block: str) -> tuple[float, float, float]:
@@ -92,9 +127,15 @@ def parse_output(text: str) -> dict[str, tuple[float, float, float]]:
 def run_one(rank: int, *, geometry: str, target_temp: float | None, batches: int,
             inactive: int, particles: int, seeds: int) -> dict[str, tuple[float, float, float]]:
     binary = BIN_PWR if geometry == "pwr" else BIN_GODIVA
+    # The .exe path must stay in the calling shell's native form so
+    # Python's subprocess can locate it (under WSL: keep `/mnt/c/...`
+    # — Python launches it via WSL interop). Arguments the .exe
+    # receives must be in the binary's NATIVE form (Windows
+    # `C:\...` under WSL) because the .exe itself can't translate
+    # `/mnt/c/...` paths it gets handed.
     cmd = [
         str(binary),
-        str(DATA),
+        _to_native(DATA),
         "--mode", "all",
         "--rank", str(rank),
         "--batches", str(batches),
@@ -114,8 +155,26 @@ def run_one(rank: int, *, geometry: str, target_temp: float | None, batches: int
         if target_temp is not None:
             cmd += ["--target-temp-offset", str(target_temp)]
     print(f"  > [{geometry}] rank={rank}  target_temp={target_temp} ...", flush=True)
-    proc = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return parse_output(proc.stdout)
+    # The engine emits ANSI colour escapes (reverse-video on labels)
+    # that break the per-block regex parser. We try to suppress them
+    # via NO_COLOR / CLICOLOR; under WSL those env vars do not always
+    # forward to Windows .exe processes (depends on WSLENV) so we
+    # also strip any surviving escape sequences from stdout before
+    # parsing. Either path alone would suffice on its supported
+    # backend; together they are robust across WSL + native Windows
+    # + Linux invocations.
+    env = dict(os.environ)
+    env["NO_COLOR"] = "1"
+    env["CLICOLOR"] = "0"
+    proc = subprocess.run(
+        cmd, capture_output=True, text=True, check=True, env=env,
+    )
+    # Windows .exe writes `\r\n`; under WSL Python's `text=True`
+    # leaves the `\r` in place, and `re.MULTILINE`'s `^` anchor
+    # matches AFTER `\n` but the next char is then `\r` not space,
+    # so `_RE_BLOCK`'s `^\s{2}(SVD…)` fails on every block.
+    text = _ANSI_RE.sub("", proc.stdout)
+    return parse_output(text)
 
 
 def run_scan(*, geometry, scenarios, ranks, batches, inactive, particles, seeds) -> list[Point]:
@@ -198,6 +257,11 @@ def plot(points: list[Point], out_path: Path, geometry: str = "godiva") -> None:
             wmp = next((p for p in points if p.scenario == scen
                        and p.rank == r and p.label == "ACE+WMP"), None)
             if svd is None or wmp is None:
+                continue
+            # Skip ratio when an engine pathology (e.g. rank-1 SVD on
+            # PWR with too few particles) gave zero memory or speed —
+            # the divide is nonsense and the plot would crash.
+            if svd.mem_kb <= 0 or svd.ns_per_p <= 0:
                 continue
             xs.append(r)
             mem_r.append(wmp.mem_kb / svd.mem_kb)
