@@ -138,10 +138,14 @@ changing.
   GPU receives it via NVRTC `-DMAX_NUC_PER_MAT=N`. Bumping is one
   line + full rebuild + GPU register-pressure recheck.
 
-- **GPU pinned to sm_86** at `gpu_recursive.rs:489`
-  (`arch: Some("sm_86")`). Needed for `atomicAdd(double*, double)`.
-  NVRTC default is sm_52 which can't do double atomics. SM count is
-  read from device attributes elsewhere for auto-refill (`gpu_recursive.rs:1845`).
+- **GPU arch adapts to the detected device.** `gpu_recursive::device_nvrtc_arch(ctx)`
+  queries CC_MAJOR / CC_MINOR via cudarc device attributes and builds
+  the `sm_{major}{minor}` string passed to NVRTC. Both compile sites
+  (`gpu_recursive.rs::new()` and `gpu_transport.rs::new()`) route
+  through the helper. Minimum is CC 6.0 / sm_60 (Pascal — needed for
+  `atomicAdd(double*, double)`); the helper returns an explicit error
+  below that. Same binary now targets A1000 (sm_86), A100 (sm_80),
+  H100 (sm_90), RTX 5090 (sm_120), etc. without rebuild.
 
 - **`N_PARAMS = 186`** matches between `gpu_transport.rs:18` and
   `gpu/cuda/transport.cu:383`. Adding or removing a slot requires

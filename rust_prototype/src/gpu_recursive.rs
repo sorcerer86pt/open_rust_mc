@@ -22,6 +22,42 @@ use crate::geometry::cell::{CellFill, Region};
 use crate::geometry::surface::{BoundaryCondition, Surface};
 use crate::geometry::{Geometry, Vec3};
 
+/// Query the device's compute capability and return the NVRTC
+/// `--gpu-architecture` argument value (e.g. `"sm_86"`, `"sm_90"`,
+/// `"sm_120"`) so kernel compilation matches whatever GPU the host
+/// has. Lets the same binary run on an RTX A1000 laptop, an A100,
+/// an H100, and a 5090 without rebuilding.
+///
+/// Minimum supported compute capability is **6.0** (Pascal) — that's
+/// when `atomicAdd(double*, double)` was introduced; the recursive
+/// transport kernel uses it for spectrum-hardening diagnostic
+/// tallies. Devices below 6.0 are rejected with an explicit error.
+///
+/// Defaults to `sm_86` (this dev box's Ampere) if the attribute
+/// query fails — strictly more permissive than panicking and lets
+/// older drivers limp through.
+pub fn device_nvrtc_arch(
+    ctx: &Arc<CudaContext>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    use cudarc::driver::sys::CUdevice_attribute as Attr;
+    let major = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .map_err(|e| format!("CC_MAJOR query: {e}"))?;
+    let minor = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .map_err(|e| format!("CC_MINOR query: {e}"))?;
+    if major < 6 {
+        return Err(format!(
+            "GPU compute capability {major}.{minor} too old — \
+             open_rust_mc needs atomicAdd(double*, double) which \
+             requires CC ≥ 6.0 (Pascal, GTX 10xx). \
+             Detected device too old to run."
+        )
+        .into());
+    }
+    Ok(format!("sm_{major}{minor}"))
+}
+
 // ── Tag constants — must match `gpu/cuda/geom_recursive.cu` ─────────
 
 const SURF_PLANE_X: i32 = 0;
@@ -478,15 +514,17 @@ impl GpuRecursiveContext {
 
         // Compile recursive kernels.
         let source = assemble_kernel_source();
-        // Pin sm_86 (Ampere / RTX A1000) so the kernel can use
-        // `atomicAdd(double*, double)` — required for the spectrum-
-        // hardening diagnostic tallies (e_fis_in_sum etc.). The default
-        // NVRTC arch is sm_52, which lacks double-add atomics.
+        // Target the detected device's compute capability so the same
+        // binary runs on A1000 (sm_86), A100 (sm_80), H100 (sm_90),
+        // RTX 5090 (sm_120 Blackwell), etc. Minimum is sm_60 for
+        // `atomicAdd(double*, double)` used by the spectrum-hardening
+        // diagnostic tallies (e_fis_in_sum, ...).
+        let arch_str = device_nvrtc_arch(&ctx).map_err(|e| format!("device arch: {e}"))?;
         let ptx = nvrtc::compile_ptx_with_opts(
             &source,
             nvrtc::CompileOptions {
                 use_fast_math: Some(false),
-                arch: Some("sm_86"),
+                arch: Some(Box::leak(arch_str.into_boxed_str())),
                 // Single source of truth for the per-material nuclide
                 // cap — see `crate::MAX_NUCLIDES_PER_MATERIAL`. The
                 // recursive transport kernel inherits `transport.cu`

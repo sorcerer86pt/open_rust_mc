@@ -806,15 +806,15 @@ impl GpuTransportContext {
     /// Compile all CUDA kernels and initialize GPU context.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let ctx = CudaContext::new(0)?;
-        // Tune nvrtc/ptxas for our target hardware (Ampere: RTX 3080,
-        // RTX A1000 laptop — both sm_86). Verbose ptxas output
-        // (`--ptxas-options=-v -warn-spills`) surfaces register usage
-        // and spills during JIT for occupancy tuning per NVIDIA BPG §10.2.
-        // If cudarc returns a compile error the log is attached; on
-        // success the driver may still print to stderr if
-        // `CUDA_CACHE_DISABLE=1` + `CUDA_CACHE_LOG=1` are set.
+        // Tune nvrtc/ptxas for the detected GPU. Compute capability is
+        // queried at runtime so the same binary targets A1000 (sm_86),
+        // A100 (sm_80), H100 (sm_90), RTX 5090 (sm_120), etc. without
+        // a rebuild. Verbose ptxas output (`--ptxas-options=-v
+        // -warn-spills`) surfaces register usage and spills during JIT
+        // for occupancy tuning per NVIDIA BPG §10.2.
+        let arch_str = crate::gpu_recursive::device_nvrtc_arch(&ctx)?;
         let opts = nvrtc::CompileOptions {
-            arch: Some("sm_86"),
+            arch: Some(Box::leak(arch_str.into_boxed_str())),
             options: vec![
                 // Single source of truth for the per-material nuclide
                 // cap — matches `simulate.rs::MAX_NUCLIDES` and the
