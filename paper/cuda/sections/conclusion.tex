@@ -57,23 +57,29 @@
 
 \subsection{Where this leaves us}
 
-The engineering theme of this work is that GPU-accelerating a
-Monte Carlo transport code is at least as much about data-flow
-discipline (don't re-upload the same payload N times) and runtime
-device awareness (target the device you actually have, with the
-refill regime that actually helps) as it is about kernel-level
-arithmetic. The CPU backend in this engine, running on a 20-thread
-laptop, beats the GPU SVD path on Godiva and is competitive
-through PWR. The GPU wins start showing up at problem scales
-where rayon's cache contention dominates --- larger assemblies,
-multi-case ICSBEP sweeps, photon shielding with $10^6+$
-histories.
+The honest reading is that most of these problems were already
+defined and known in the literature. The XS-lookup memory-
+bandwidth regime is in Tramm \& Siegel
+2014~\cite{tramm2014xsbench}; the GPU saturation curve and
+refill-pool optimisation are in the PHYSOR 2022 / EPJ 2024 work
+from the OpenMC group~\cite{tramm2024}; the per-warp shared-memory
+$(n, E_\text{idx})$ cache idea was a published optimisation that
+the SVD-paper companion text already documents as a falsified
+hypothesis on this geometry. We did not discover new performance
+mechanisms in this engine's CUDA port. We took our time hitting
+known ones.
 
-The honest reading of where this engine stands today is in the
-companion SVD paper's results and in \texttt{STATUS.md}: GPU
-recursive transport at $6.74\,\times$ over CPU on a const-XS
-geometry microbench, GPU Compton at $2.22\,\times$ over 20-thread
-rayon CPU on $10^6$~photon histories, RR-CADIS shielding gain at
-$1.18\,\times$--$1.75\,\times$ analog at 14~mfp depending on
-combination. ``Hardware is faster than ours'' is true; ``our GPU
-backend is universally faster than our CPU backend'' is not.
+What this paper documents is the implementation pace and the
+order in which the lessons arrived: where the per-XS-lookup
+microbench misled us into expecting an integration win, how long
+it took to notice that the SAB upload was the missing peer of
+the per-nuclide cache, why ``GPU is 6.74$\,\times$'' was carried
+across sessions without its scope tag, how many sessions were
+spent reading code to convince ourselves the cache fired before
+we added the observability~(§\ref{sec:observability}). The CPU
+backend on a 20-thread laptop beats GPU SVD on Godiva and is
+competitive through PWR; the GPU wins materialise at problem
+scales where rayon's cache contention dominates (large
+assemblies, multi-case ICSBEP sweeps, photon shielding with
+$10^6+$ histories), which is also what the source literature
+predicts.

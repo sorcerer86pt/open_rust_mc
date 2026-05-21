@@ -7,49 +7,47 @@ believed that wasn't true}
 \maketitle
 
 \begin{abstract}
-We report the engineering, observability, and honest performance
-findings of porting \texttt{open\_rust\_mc} --- a pure-Rust
-continuous-energy neutron / photon Monte Carlo transport code with
-recursive-CSG geometry, SVD-compressed cross sections, and ICSBEP
-regression substrate --- to NVIDIA CUDA via the \texttt{cudarc}
-crate and NVRTC. The CPU and GPU backends share a single
-\texttt{EigenvalueRunner} trait so any benchmark runs through either
-path with the same scene JSON, the same nuclear data, and the same
-acceptance envelope.
+We report the engineering pace and honest performance findings of
+porting \texttt{open\_rust\_mc} --- a pure-Rust continuous-energy
+neutron / photon Monte Carlo transport code with recursive-CSG
+geometry, SVD-compressed cross sections, and ICSBEP regression
+substrate --- to NVIDIA CUDA via the \texttt{cudarc} crate and
+NVRTC. The CPU and GPU backends share a single
+\texttt{EigenvalueRunner} trait so any benchmark runs through
+either path with the same scene JSON, the same nuclear data, and
+the same acceptance envelope.
 
-The paper documents three engineering decisions that turned out to
-matter more than the kernel-level optimisation we initially
-prioritised: \textbf{(i)} a process-wide per-nuclide device-buffer
-cache keyed on \texttt{Arc::as\_ptr} that amortises 50\,$\times$
-+ 50~MB-class HtoD copies across a multi-case sweep; \textbf{(ii)}
-a parallel cache for S($\alpha$,$\beta$) thermal-scattering payloads
-whose absence quietly wasted tens of seconds per case on benchmarks
-that share moderators (every PWR pin cell using
-\texttt{c\_H\_in\_H2O}, every Be-reflected fast-metal case using
-\texttt{c\_Be}); \textbf{(iii)} adaptive NVRTC arch detection so a
-single binary targets RTX A1000 / RTX 3080 / A100 / H100 / RTX 5090
-without rebuilds.
+The framing of this paper is not ``what we discovered''.
+The Monte Carlo XS-lookup memory-bandwidth regime is documented
+in Tramm \& Siegel 2014; the GPU saturation curve and refill-pool
+optimisation are in the PHYSOR~2022 / EPJ~2024 line of work from
+the OpenMC group; the per-warp shared-memory $(n, E_\text{idx})$
+cache idea has been a published optimisation for years. We hit
+these problems in roughly the order the literature predicts;
+we just took our time hitting them. The interesting content is the
+\emph{pace} and the \emph{order}: where the per-XS-lookup
+microbench misled us into expecting an integration win, how long
+it took to notice that the S($\alpha$,$\beta$) upload was the
+missing peer of the per-nuclide cache, why a ``GPU is
+6.74$\,\times$'' headline was carried across sessions without its
+scope tag of ``const-XS geometry-traversal microbench'', how many
+sessions were spent reading code to convince ourselves the cache
+fired before we added the observability path that just answered
+the question.
 
-Three findings we did not expect: GPU SVD reconstruction, despite a
-$2.6$--$2.8\,\times$ \emph{per-XS-lookup} micro-speedup over a
-single-threaded CPU loop, is $1.3\,\times$ \emph{slower} than the
-20-core rayon-parallel CPU SVD at full transport integration on
-Godiva (and slower still vs.\ GPU pointwise table on PWR until a
-synthesised MT$=4$ + per-level CDF closed the gap). The ``GPU
-recursive transport 6.74$\,\times$ CPU'' headline that propagated
-through earlier sessions is a microbenchmark of constant-XS
-geometry traversal, not a measurement of integrated transport.
-Refill-pool occupancy gains (PHYSOR 2022 Optimization~F) only
-appear in the mid-curve regime where the device is under-occupied
-but not yet saturated; both extremes give no measurable benefit.
-
-We outline a structured observability path
-(\texttt{-{}-debug-metrics}, exposed via a new
-\texttt{gpu\_debug\_metrics()} PyO3 entry point that snapshots cache
-entries, hit counts, byte usage, and the detected
-compute-capability) that lets a sweep harness verify the cache
-machinery actually fires at runtime rather than relying on
-engineering belief.
+What landed in this round: a process-wide per-nuclide device-buffer
+cache keyed on \texttt{Arc::as\_ptr}, a parallel cache for
+S($\alpha$,$\beta$) thermal-scattering payloads, adaptive NVRTC
+arch detection so one binary targets RTX A1000 through Blackwell
+RTX 5090 without rebuilds, the PHYSOR Optimization~F refill pool
+with a device-attribute-driven auto-recommender, and a
+\texttt{-{}-debug-metrics} JSON-lines path that snapshots cache
+entries, hit counts, byte usage, and the detected compute
+capability per case. The CPU backend on a 20-thread laptop still
+beats the GPU SVD path on Godiva and is competitive through PWR;
+the GPU wins start showing up where the literature said they
+would --- $10^6+$-history photon shielding and multi-case ICSBEP
+sweeps where rayon's cache contention dominates the host.
 
 \textbf{Code:}
 \href{https://github.com/sorcerer86pt/open_rust_mc}%
