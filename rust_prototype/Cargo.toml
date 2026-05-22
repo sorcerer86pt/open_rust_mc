@@ -95,7 +95,12 @@ png = "0.17"
 # feature flags, GPU vendor / VRAM. Used at engine init to size
 # caches (l1_memory + gpu bundle) and tune rayon pool defaults.
 # One query at startup; runtime cost is negligible.
-hardware-query = "0.2.1"
+# Vendored at vendor/hardware-query-0.2.1 because 0.2.1 ships with
+# three stricter-Rust regressions (missing `use std::fs;` in cpu.rs,
+# two typo'd TPU driver-method names, and a non-mut binding) that
+# break the build on Rust 1.95+. Minimal patches applied; functionality
+# unchanged for our use (CPU/GPU/memory introspection at engine init).
+hardware-query = { path = "vendor/hardware-query-0.2.1", version = "0.2.1" }
 # raw-cpuid (workspace dep above) is used for L2 / L3 cache topology:
 # on AMD X3D chips WMI returns one CCX entry (8 MB) instead of the full
 # stacked total (96 MB on 9800X3D). raw-cpuid enumerates the CPUID

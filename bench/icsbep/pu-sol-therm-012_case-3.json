@@ -30,6 +30,18 @@
       "_doc": "Solution thermal: thermal MFP large vs tank size, slowest source convergence.",
       "particles_gpu": 500000,
       "gpu_auto_refill": true
+    },
+    "local_validation": {
+      "viii1": {
+        "_what_this_is": "Published reference k_eff under ENDF/B-VIII.1 from LANL MCNP validation (Nobre et al. 2025, Nuclear Data Sheets — Table LIX, arxiv:2511.03564). Used as the secondary grading target so the engine isn't punished for library bias it inherits from VIII.1.",
+        "lanl_k_eff": 1.00339,
+        "lanl_sigma": 8e-05,
+        "lanl_ce_ratio": 1.00339,
+        "lanl_table_lix_key": "PU-SOL-THERM-012-003",
+        "k_exp_table": 1.0,
+        "sigma_exp_table": 0.0058,
+        "source": "Nobre et al. 2025/2026, Nuclear Data Sheets, Table LIX (LANL MCNP, arxiv:2511.03564)"
+      }
     }
   },
   "scene": {
