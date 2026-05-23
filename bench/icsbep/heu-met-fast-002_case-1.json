@@ -6,7 +6,7 @@
     "category": "HEU-MET-FAST",
     "k_eff_reference": 1.0,
     "k_eff_sigma": 0.003,
-    "source": "ICSBEP Handbook, HEU-MET-FAST-002.case-1 \u2014 NEA/NSC/DOC(95)03",
+    "source": "ICSBEP Handbook, HEU-MET-FAST-002.case-1 — NEA/NSC/DOC(95)03",
     "data_provenance": {
       "geometry_materials": {
         "repo": "github.com/mit-crpg/benchmarks",
@@ -20,7 +20,7 @@
         "row": "case-1",
         "license": "MIT"
       },
-      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+      "canonical_source": "NEA/OECD ICSBEP Handbook — registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "recommended_settings": {
       "batches": 150,
@@ -30,6 +30,20 @@
       "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence.",
       "particles_gpu": 1000000,
       "gpu_auto_refill": true
+    },
+    "local_validation": {
+      "viii1": {
+        "_what_this_is": "OpenMC-on-this-same-JSON reference k_eff under ENDF/B-VIII.1. Filled by scripts/openmc_orphans_viii1.py because Nobre et al. 2025 Table LIX does not include this benchmark case. Used as the secondary grading target so the engine isn't punished for library bias it inherits from VIII.1.",
+        "openmc_k_eff": 0.9992404541495281,
+        "openmc_sigma_seeds": 0.0009256393541049013,
+        "openmc_library_path": "/mnt/c/Users/fog/madman_svd_experiment/data/endfb-viii.1-hdf5/cross_sections.xml",
+        "openmc_run_date": "2026-05-22",
+        "openmc_seed_count": 3,
+        "openmc_particles_per_seed": 20000,
+        "openmc_batches": 100,
+        "openmc_inactive": 20,
+        "openmc_wallclock_s": 150.7
+      }
     }
   },
   "scene": {

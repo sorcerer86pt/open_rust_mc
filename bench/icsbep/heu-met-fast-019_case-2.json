@@ -30,6 +30,20 @@
       "_doc": "Fast-metal bucket: tight sigma_exp (~100 pcm), fast source convergence.",
       "particles_gpu": 500000,
       "gpu_auto_refill": true
+    },
+    "local_validation": {
+      "viii1": {
+        "_what_this_is": "OpenMC-on-this-same-JSON reference k_eff under ENDF/B-VIII.1. Filled by scripts/openmc_orphans_viii1.py because Nobre et al. 2025 Table LIX does not include this benchmark case. Used as the secondary grading target so the engine isn't punished for library bias it inherits from VIII.1.",
+        "openmc_k_eff": 1.0057552556018494,
+        "openmc_sigma_seeds": 0.0009984798262213498,
+        "openmc_library_path": "/mnt/c/Users/fog/madman_svd_experiment/data/endfb-viii.1-hdf5/cross_sections.xml",
+        "openmc_run_date": "2026-05-22",
+        "openmc_seed_count": 3,
+        "openmc_particles_per_seed": 20000,
+        "openmc_batches": 100,
+        "openmc_inactive": 20,
+        "openmc_wallclock_s": 306.9
+      }
     }
   },
   "scene": {

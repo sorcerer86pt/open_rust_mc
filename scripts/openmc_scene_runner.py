@@ -208,10 +208,13 @@ def build_materials(dtos: list[dict]) -> list[openmc.Material]:
         mat.set_density("atom/b-cm", total_ad)
         if "temperature" in m:
             mat.temperature = m["temperature"]
-        # Per-nuclide thermal-file metadata isn't loaded here — every
-        # ICSBEP case we're cross-checking is fast-spectrum metal where
-        # S(α,β) is irrelevant. Extend if/when LCT or HEU-SOL is run
-        # through this script.
+        # Material-level S(α,β) libraries. Our JSON stores them in
+        # `thermal_files` as e.g. "c_H_in_H2O.h5" — OpenMC's
+        # add_s_alpha_beta wants the stem "c_H_in_H2O", and the matching
+        # file must be present in the cross_sections.xml the runner is
+        # pointed at. Covers the LCT / HEU-SOL / PU-SOL orphans.
+        for tf in m.get("thermal_files", []) or []:
+            mat.add_s_alpha_beta(tf.rsplit("/", 1)[-1].removesuffix(".h5"))
         out.append(mat)
     return out
 

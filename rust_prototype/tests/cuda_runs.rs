@@ -38,6 +38,48 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|| start.join("data/endfb-viii.1-hdf5/neutron"))
 }
 
+/// Resolve the acceptance target for an engine `k_calc`.
+///
+/// Priority (highest wins):
+///   1. `benchmark.local_validation.viii1.lanl_k_eff` — published LANL MCNP
+///      validation under ENDF/B-VIII.1 (Nobre et al. 2025 Table LIX).
+///   2. `benchmark.local_validation.viii1.openmc_k_eff` — local OpenMC run
+///      on this same JSON under VIII.1, filled for the 85 orphans not in
+///      Table LIX by `scripts/openmc_orphans_viii1.py`.
+///   3. `benchmark.local_validation.openmc_k_eff` — legacy VII.1 OpenMC
+///      block (still present on a few cases like HCI-003 case-1 for
+///      historical comparison).
+///   4. `benchmark.k_eff_reference` — handbook experimental k_eff.
+///
+/// When (1) or (2) is used, σ is `max(σ_pub_or_omc, handbook_sigma)` so the
+/// envelope never under-states uncertainty even if the published / local
+/// statistical σ is artificially tight relative to experimental σ_exp.
+fn resolve_acceptance_target(
+    benchmark: &serde_json::Value,
+    handbook_k: f64,
+    handbook_sigma: f64,
+) -> (f64, f64, &'static str) {
+    let lv = match benchmark.get("local_validation") {
+        Some(v) => v,
+        None => return (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)"),
+    };
+    if let Some(v8) = lv.get("viii1") {
+        if let Some(k) = v8.get("lanl_k_eff").and_then(|v| v.as_f64()) {
+            let s = v8.get("lanl_sigma").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            return (k, s.max(handbook_sigma), "local_validation.viii1 (LANL Table LIX)");
+        }
+        if let Some(k) = v8.get("openmc_k_eff").and_then(|v| v.as_f64()) {
+            let s = v8.get("openmc_sigma_seeds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            return (k, s.max(handbook_sigma), "local_validation.viii1 (OpenMC on this scene)");
+        }
+    }
+    if let Some(k) = lv.get("openmc_k_eff").and_then(|v| v.as_f64()) {
+        let s = lv.get("openmc_k_sigma_seeds").and_then(|v| v.as_f64()).unwrap_or(0.001);
+        return (k, s.max(handbook_sigma), "local_validation (legacy OpenMC)");
+    }
+    (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)")
+}
+
 fn run_case_cuda(
     case_file: &Path,
     batches: u32,
@@ -88,14 +130,7 @@ fn run_case_cuda(
     // OpenMC were ever measured at low statistics.
     let handbook_k = benchmark["k_eff_reference"].as_f64().unwrap();
     let handbook_sigma = benchmark["k_eff_sigma"].as_f64().unwrap();
-    let (k_ref, sigma_exp, ref_source) = match benchmark.get("local_validation") {
-        Some(lv) if lv.get("openmc_k_eff").and_then(|v| v.as_f64()).is_some() => {
-            let k = lv["openmc_k_eff"].as_f64().unwrap();
-            let s_omc = lv["openmc_k_sigma_seeds"].as_f64().unwrap_or(0.001);
-            (k, s_omc.max(handbook_sigma), "local_validation (OpenMC on this scene)")
-        }
-        _ => (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)"),
-    };
+    let (k_ref, sigma_exp, ref_source) = resolve_acceptance_target(benchmark, handbook_k, handbook_sigma);
     // `ref_source` is documented inline above (PRIMARY / SECONDARY)
     // and printed when this run logs (see further below).  Held in a
     // sink to avoid an unused-warning while keeping the variable for

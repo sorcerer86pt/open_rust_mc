@@ -38,7 +38,17 @@
       "openmc_batches": 100,
       "openmc_inactive": 20,
       "handbook_minus_openmc_pcm": 310,
-      "handbook_minus_openmc_note": "Scene-JSON transcription drift from canonical ICSBEP/NEA handbook. Closing requires the registered NEA/OECD handbook spec; the open-source MIT-CRPG/benchmarks proxy is geometrically close but not bit-identical."
+      "handbook_minus_openmc_note": "Scene-JSON transcription drift from canonical ICSBEP/NEA handbook. Closing requires the registered NEA/OECD handbook spec; the open-source MIT-CRPG/benchmarks proxy is geometrically close but not bit-identical.",
+      "viii1": {
+        "_what_this_is": "Published reference k_eff under ENDF/B-VIII.1 from LANL MCNP validation (Nobre et al. 2025, Nuclear Data Sheets — Table LIX, arxiv:2511.03564). Used as the secondary grading target so the engine isn't punished for library bias it inherits from VIII.1.",
+        "lanl_k_eff": 0.99567,
+        "lanl_sigma": 9e-05,
+        "lanl_ce_ratio": 0.99676,
+        "lanl_table_lix_key": "HEU-MET-FAST-008-001",
+        "k_exp_table": 0.9989,
+        "sigma_exp_table": 0.0016,
+        "source": "Nobre et al. 2025/2026, Nuclear Data Sheets, Table LIX (LANL MCNP, arxiv:2511.03564)"
+      }
     },
     "recommended_settings": {
       "batches": 150,

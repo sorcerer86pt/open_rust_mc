@@ -6,7 +6,7 @@
     "category": "HEU-SOL-THERM",
     "k_eff_reference": 1.0008,
     "k_eff_sigma": 0.0054,
-    "source": "ICSBEP Handbook, HEU-SOL-THERM-001.case-9 \u2014 NEA/NSC/DOC(95)03",
+    "source": "ICSBEP Handbook, HEU-SOL-THERM-001.case-9 — NEA/NSC/DOC(95)03",
     "data_provenance": {
       "geometry_materials": {
         "repo": "github.com/mit-crpg/benchmarks",
@@ -20,7 +20,7 @@
         "row": "case-9",
         "license": "MIT"
       },
-      "canonical_source": "NEA/OECD ICSBEP Handbook \u2014 registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
+      "canonical_source": "NEA/OECD ICSBEP Handbook — registration required at https://www.oecd-nea.org/science/wpncs/icsbep/order.html. Open-source proxies are industry-standard derivatives but not the canonical specifications."
     },
     "recommended_settings": {
       "batches": 150,
@@ -30,6 +30,18 @@
       "_doc": "Solution thermal: thermal MFP large vs tank size, slowest source convergence.",
       "particles_gpu": 1000000,
       "gpu_auto_refill": true
+    },
+    "local_validation": {
+      "viii1": {
+        "_what_this_is": "Published reference k_eff under ENDF/B-VIII.1 from LANL MCNP validation (Nobre et al. 2025, Nuclear Data Sheets — Table LIX, arxiv:2511.03564). Used as the secondary grading target so the engine isn't punished for library bias it inherits from VIII.1.",
+        "lanl_k_eff": 0.99486,
+        "lanl_sigma": 0.00015,
+        "lanl_ce_ratio": 0.99406,
+        "lanl_table_lix_key": "HEU-SOL-THERM-001-009",
+        "k_exp_table": 1.0008,
+        "sigma_exp_table": 0.0054,
+        "source": "Nobre et al. 2025/2026, Nuclear Data Sheets, Table LIX (LANL MCNP, arxiv:2511.03564)"
+      }
     }
   },
   "scene": {
