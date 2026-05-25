@@ -62,16 +62,51 @@ pub struct TabularEdistSlicesGpu {
     /// (starts at 0 per nuclide).
     pub dist_local_off: Vec<i32>,
     pub dist_sz: Vec<i32>,
+    // ── MT=91 Law 61 (KalbachMann) correlated mu coupling ──
+    //
+    // Only populated when this edist carries a `CorrelatedAngleEnergy`
+    // (real Law 61) — currently uranium MT=91 in ENDF/B-VIII.x. When
+    // absent, all three are `None`; the device kernel falls back to
+    // isotropic-in-CM mu sampling.
+    //
+    // Layout (mirrors CPU `CorrelatedAngleEnergy::sample_mu_at`):
+    //   * `mu_data`  : flat (mu, pdf, cdf) triples across all
+    //     (E_in_bin, E_out_bin) mu tables, f64.
+    //   * `mu_offsets` : cumulative offsets in *triple count* (NOT f64
+    //     count) per (E_in_bin, E_out_bin) table, length
+    //     `Σ_ie n_eout(ie) + 1`. Last entry is the sentinel (total
+    //     triple count). Size of table at table-index `t` is
+    //     `mu_offsets[t+1] - mu_offsets[t]`.
+    //   * `mu_e_in_starts` : per E_in_bin start into `mu_offsets`,
+    //     length `n_inc + 1`. Table at (ie, k) lives at
+    //     `mu_offsets[mu_e_in_starts[ie] + k]`.
+    /// Flat (mu, pdf, cdf) triples for Law 61 mu coupling.
+    pub mu_data: Option<CudaSlice<f64>>,
+    /// Cumulative triple-count offsets per (E_in_bin, E_out_bin) mu
+    /// table. Length = `Σ_ie n_eout(ie) + 1`.
+    pub mu_offsets: Option<CudaSlice<i32>>,
+    /// Per E_in_bin start into `mu_offsets`. Length = `n_inc + 1`.
+    pub mu_e_in_starts: Option<CudaSlice<i32>>,
 }
 
 impl TabularEdistSlicesGpu {
     pub fn device_bytes(&self) -> usize {
-        self.inc_energies.num_bytes()
+        let mut t = self.inc_energies.num_bytes()
             + self.e_out.num_bytes()
             + self.cdf.num_bytes()
             + self.pdf.num_bytes()
             + (self.dist_local_off.len() + self.dist_sz.len())
-                * std::mem::size_of::<i32>()
+                * std::mem::size_of::<i32>();
+        if let Some(s) = &self.mu_data {
+            t += s.num_bytes();
+        }
+        if let Some(s) = &self.mu_offsets {
+            t += s.num_bytes();
+        }
+        if let Some(s) = &self.mu_e_in_starts {
+            t += s.num_bytes();
+        }
+        t
     }
 }
 
@@ -578,9 +613,18 @@ pub fn upload_one_nuclide(
     let fission_edist = build_fission_edist(stream, nuc.fission_energy_dist.as_ref())?;
 
     // Category A.6 — MT=91 continuum inelastic outgoing-energy.
+    // When the evaluation ships Law 61 KalbachMann mu coupling
+    // (`edist.mu_dist`), `build_tabular_edist` also packs the per-(
+    // E_in_bin, E_out_bin) mu tables; the device kernel then samples
+    // mu correlated with E_out instead of falling back to isotropic.
     let inel91 = match nuc.inelastic_continuum_edist.as_ref() {
         Some(edist) if !edist.energies.is_empty() && !edist.distributions.is_empty() => {
-            Some(build_tabular_edist(stream, &edist.energies, &edist.distributions)?)
+            Some(build_tabular_edist(
+                stream,
+                &edist.energies,
+                &edist.distributions,
+                edist.mu_dist.as_ref(),
+            )?)
         }
         _ => None,
     };
@@ -1311,6 +1355,19 @@ pub struct AssembledBundleA6Cat {
     pub inel91_pdf: CudaSlice<f64>,
     pub inel91_nuc_offsets_vec: Vec<i32>,
     pub inel91_nuc_n_inc_vec: Vec<i32>,
+    /// Law 61 mu-coupling presence flag per nuclide: `1` when the
+    /// nuclide ships `CorrelatedAngleEnergy` on its MT=91 edist, `0`
+    /// otherwise. Drives the device kernel's branch between Law 61
+    /// correlated sampling and isotropic-in-CM fallback.
+    pub inel91_mu_has_vec: Vec<i32>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's
+    /// `TabularEdistSlicesGpu::mu_data`, or `0` when absent. Kernel
+    /// gates on `inel91_mu_has_vec[hit_nuc]`.
+    pub inel91_mu_data_ptrs_vec: Vec<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's `mu_offsets`, or `0`.
+    pub inel91_mu_offsets_ptrs_vec: Vec<u64>,
+    /// `[n_nuc]` — `CUdeviceptr` of each nuclide's `mu_e_in_starts`, or `0`.
+    pub inel91_mu_e_in_starts_ptrs_vec: Vec<u64>,
 }
 
 pub fn assemble_a6_cat(
@@ -1346,6 +1403,15 @@ pub fn assemble_a6_cat(
     let mut inel91_nuc_offsets_vec = vec![0_i32; n_nuc];
     let mut inel91_nuc_n_inc_vec = vec![0_i32; n_nuc];
 
+    // Law 61 mu coupling — per-nuclide pointer arrays. `0`-entry per
+    // nuc when the nuclide carries no mu_dist; the device kernel
+    // gates on `inel91_mu_has_vec[hit_nuc]` before dereferencing.
+    let n_nuc_max = n_nuc.max(1);
+    let mut inel91_mu_has_vec = vec![0_i32; n_nuc_max];
+    let mut inel91_mu_data_ptrs_vec = vec![0_u64; n_nuc_max];
+    let mut inel91_mu_offsets_ptrs_vec = vec![0_u64; n_nuc_max];
+    let mut inel91_mu_e_in_starts_ptrs_vec = vec![0_u64; n_nuc_max];
+
     let mut run_inc = 0_usize;
     let mut run_eout = 0_usize;
     for (nuc_idx, p) in per_nucs.iter().enumerate() {
@@ -1373,6 +1439,23 @@ pub fn assemble_a6_cat(
         }
         run_inc += ni;
         run_eout += elen;
+
+        // Law 61 mu-coupling pointer wiring — point at the per-nuclide
+        // slabs owned by `TabularEdistSlicesGpu`. The per-nuclide
+        // CudaSlices are kept alive by `GpuNuclideData::per_nucs`
+        // (Arc-owned PerNuclideGpu), so these raw device pointers
+        // stay valid for the bundle's lifetime.
+        if let (Some(md), Some(mo), Some(ms)) =
+            (t.mu_data.as_ref(), t.mu_offsets.as_ref(), t.mu_e_in_starts.as_ref())
+        {
+            let (md_ptr, _g1) = md.device_ptr(stream);
+            let (mo_ptr, _g2) = mo.device_ptr(stream);
+            let (ms_ptr, _g3) = ms.device_ptr(stream);
+            inel91_mu_has_vec[nuc_idx] = 1;
+            inel91_mu_data_ptrs_vec[nuc_idx] = md_ptr;
+            inel91_mu_offsets_ptrs_vec[nuc_idx] = mo_ptr;
+            inel91_mu_e_in_starts_ptrs_vec[nuc_idx] = ms_ptr;
+        }
     }
 
     if inel91_dist_offsets_vec.is_empty() {
@@ -1391,6 +1474,10 @@ pub fn assemble_a6_cat(
         inel91_pdf,
         inel91_nuc_offsets_vec,
         inel91_nuc_n_inc_vec,
+        inel91_mu_has_vec,
+        inel91_mu_data_ptrs_vec,
+        inel91_mu_offsets_ptrs_vec,
+        inel91_mu_e_in_starts_ptrs_vec,
     })
 }
 
@@ -1889,10 +1976,15 @@ fn build_urr_slices(
 /// outgoing-energy CDF) into per-nuclide layout. Used for both
 /// fission χ (Tabular branch) and MT=91 continuum inelastic. Per-inc
 /// `dist_local_off` is nuclide-local; bundle assembly shifts.
+///
+/// When `mu_dist` is `Some`, also packs the Law 61 (KalbachMann)
+/// correlated mu coupling onto the same nuclide. See the doc on
+/// `TabularEdistSlicesGpu::mu_data` for the exact device layout.
 fn build_tabular_edist(
     stream: &Arc<CudaStream>,
     inc_energies: &[f64],
     distributions: &[crate::hdf5_reader::TabularEnergyDist],
+    mu_dist: Option<&crate::hdf5_reader::CorrelatedAngleEnergy>,
 ) -> Result<TabularEdistSlicesGpu, Box<dyn std::error::Error>> {
     let mut e_out_buf: Vec<f64> = Vec::new();
     let mut cdf_buf: Vec<f64> = Vec::new();
@@ -1923,6 +2015,77 @@ fn build_tabular_edist(
         dist_local_off.push(0);
         dist_sz.push(0);
     }
+
+    // ── Law 61 mu coupling — three optional slabs. ──
+    //
+    // Build only when the CPU `EnergyDistribution` ships
+    // `mu_dist: Some(...)` AND there is at least one non-empty mu
+    // table. Otherwise leave all three fields `None`; the device's
+    // `sample_inel91_mu_at` falls back to isotropic-in-CM.
+    let (mu_data_dev, mu_offsets_dev, mu_e_in_starts_dev) = {
+        let mut have_mu = false;
+        if let Some(m) = mu_dist {
+            for row in &m.mu_dists {
+                for t in row {
+                    if !t.mu.is_empty() {
+                        have_mu = true;
+                        break;
+                    }
+                }
+                if have_mu {
+                    break;
+                }
+            }
+        }
+        if have_mu {
+            // Safe to unwrap — `have_mu` came from `mu_dist`.
+            let m = mu_dist.unwrap();
+            let mut mu_data_buf: Vec<f64> = Vec::new();
+            let mut mu_offsets_buf: Vec<i32> = Vec::new();
+            let mut mu_e_in_starts_buf: Vec<i32> = Vec::with_capacity(inc_energies.len() + 1);
+            let mut triple_count: i32 = 0;
+            for ie in 0..inc_energies.len() {
+                mu_e_in_starts_buf.push(mu_offsets_buf.len() as i32);
+                let row = m.mu_dists.get(ie);
+                let n_eout = row.map(|r| r.len()).unwrap_or(0);
+                for k in 0..n_eout {
+                    mu_offsets_buf.push(triple_count);
+                    let tab = &row.unwrap()[k];
+                    // Each triple is (mu, pdf, cdf) — pad / truncate
+                    // pdf and cdf to mu.len() defensively (CPU loader
+                    // always supplies length-matched arrays, but the
+                    // device layout cannot tolerate desyncs).
+                    let n_mu = tab.mu.len();
+                    for j in 0..n_mu {
+                        mu_data_buf.push(tab.mu[j]);
+                        let p = if j < tab.pdf.len() { tab.pdf[j] } else { 0.0 };
+                        let c = if j < tab.cdf.len() { tab.cdf[j] } else { 0.0 };
+                        mu_data_buf.push(p);
+                        mu_data_buf.push(c);
+                    }
+                    triple_count += n_mu as i32;
+                }
+            }
+            // Sentinel for n_inc-th E_in_bin start AND closing offset
+            // so callers can compute table size as
+            // `mu_offsets[t+1] - mu_offsets[t]` for every valid `t`.
+            mu_e_in_starts_buf.push(mu_offsets_buf.len() as i32);
+            mu_offsets_buf.push(triple_count);
+            if mu_data_buf.is_empty() {
+                // Defensive: should never happen since `have_mu` is true,
+                // but keep the device pointer non-null for safety.
+                mu_data_buf.push(0.0);
+            }
+            (
+                Some(stream.clone_htod(&mu_data_buf)?),
+                Some(stream.clone_htod(&mu_offsets_buf)?),
+                Some(stream.clone_htod(&mu_e_in_starts_buf)?),
+            )
+        } else {
+            (None, None, None)
+        }
+    };
+
     Ok(TabularEdistSlicesGpu {
         n_inc: inc_energies.len() as i32,
         inc_energies: stream.clone_htod(inc_energies)?,
@@ -1931,6 +2094,9 @@ fn build_tabular_edist(
         pdf: stream.clone_htod(&pdf_buf)?,
         dist_local_off,
         dist_sz,
+        mu_data: mu_data_dev,
+        mu_offsets: mu_offsets_dev,
+        mu_e_in_starts: mu_e_in_starts_dev,
     })
 }
 
@@ -1951,10 +2117,14 @@ fn build_fission_edist(
             if edist.energies.is_empty() || edist.distributions.is_empty() {
                 return Ok(FissionEdistGpu::None);
             }
+            // Fission χ never carries Law 61 mu coupling on the GPU
+            // — the secondary cosine for fission neutrons is isotropic
+            // in LAB; pass `None`.
             Ok(FissionEdistGpu::Tabular(build_tabular_edist(
                 stream,
                 &edist.energies,
                 &edist.distributions,
+                None,
             )?))
         }
         Some(FissionEnergyLaw::Watt(w)) => {

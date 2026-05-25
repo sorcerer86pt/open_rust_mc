@@ -15,7 +15,14 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 188;
+///
+/// 188 → 192: slots 188-191 carry the MT=91 Law 61 (KalbachMann)
+/// correlated mu coupling — per-nuc `mu_has` flag + three pointer
+/// arrays into the per-nuclide `TabularEdistSlicesGpu::mu_data /
+/// mu_offsets / mu_e_in_starts` slabs. Drives `sample_inel91_mu_at`
+/// in `transport.cu`, replacing the isotropic-CM fallback that was
+/// the last ~50 pcm of Godiva CPU ↔ GPU bias.
+const N_PARAMS: usize = 192;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -343,6 +350,24 @@ pub struct GpuNuclideData {
     pub inel91_cdf_ptrs: CudaSlice<u64>,
     pub inel91_pdf_ptrs: CudaSlice<u64>,
     pub inel91_dist_local_off: CudaSlice<i32>,
+    // ── MT=91 Law 61 (KalbachMann) correlated mu coupling ──
+    //
+    // `inel91_mu_has[nuc] == 1` means the nuclide ships per-(E_in_bin,
+    // E_out_bin) tabular mu distributions (currently uranium MT=91 in
+    // ENDF/B-VIII.x). The device kernel uses the matching pointer
+    // arrays to invert a mu CDF correlated with the E_out the
+    // outgoing-energy sampler picked, instead of falling back to
+    // isotropic-in-CM. Closes the residual ~50 pcm CPU↔GPU bias on
+    // Godiva (see `docs/engine-vs-openmc-bias-investigation.md`).
+    //
+    // The per-nuc f64/i32 slabs themselves are kept alive by
+    // `per_nucs[nuc].inel91.{mu_data, mu_offsets, mu_e_in_starts}`;
+    // dropping `per_nucs` would invalidate the device addresses these
+    // pointer arrays hold.
+    pub inel91_mu_has: CudaSlice<i32>,
+    pub inel91_mu_data_ptrs: CudaSlice<u64>,
+    pub inel91_mu_offsets_ptrs: CudaSlice<u64>,
+    pub inel91_mu_e_in_start_ptrs: CudaSlice<u64>,
 
     // SVD basis data
     pub all_basis: CudaSlice<f64>,
@@ -680,7 +705,14 @@ impl GpuNuclideData {
             + self.inel91_e_out_ptrs.num_bytes()
             + self.inel91_cdf_ptrs.num_bytes()
             + self.inel91_pdf_ptrs.num_bytes()
-            + self.inel91_dist_local_off.num_bytes();
+            + self.inel91_dist_local_off.num_bytes()
+            // MT=91 Law 61 mu coupling pointer / flag buffers. The
+            // f64 / i32 mu slabs themselves are owned per-nuclide
+            // (in `PerNuclideGpu::inel91`) and accounted there.
+            + self.inel91_mu_has.num_bytes()
+            + self.inel91_mu_data_ptrs.num_bytes()
+            + self.inel91_mu_offsets_ptrs.num_bytes()
+            + self.inel91_mu_e_in_start_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1572,6 +1604,16 @@ impl GpuTransportContext {
             // `gr_multi_event` kernel call site.
             dptr!(&mat_data.q_n2n_table),
             dptr!(&mat_data.q_n3n_table),
+            // MT=91 Law 61 (KalbachMann) correlated mu coupling —
+            // slots 188-191. See `P_INEL91_MU_*` defines in
+            // transport.cu and `sample_inel91_mu_at`. The pointer
+            // arrays reference per-nuclide slabs owned by
+            // `per_nucs[...].inel91.{mu_data, mu_offsets,
+            // mu_e_in_starts}` (kept alive by `per_nucs`).
+            dptr!(&nuc_data.inel91_mu_has),
+            dptr!(&nuc_data.inel91_mu_data_ptrs),
+            dptr!(&nuc_data.inel91_mu_offsets_ptrs),
+            dptr!(&nuc_data.inel91_mu_e_in_start_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1920,6 +1962,20 @@ impl GpuTransportContext {
         )?;
         let inel91_dist_local_off =
             self.stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
+        // MT=91 Law 61 mu coupling — host-side vecs assembled in
+        // `assemble_a6_cat`; upload the three pointer arrays + the
+        // mu_has flag to the device. The per-nuclide mu_data /
+        // mu_offsets / mu_e_in_starts slabs the pointers reference
+        // live in `per_nucs[...]::inel91` and are kept alive by
+        // `per_nucs` (see the doc on `GpuNuclideData::inel91_mu_has`).
+        let inel91_mu_has =
+            self.stream.clone_htod(&a6.inel91_mu_has_vec)?;
+        let inel91_mu_data_ptrs =
+            self.stream.clone_htod(&a6.inel91_mu_data_ptrs_vec)?;
+        let inel91_mu_offsets_ptrs =
+            self.stream.clone_htod(&a6.inel91_mu_offsets_ptrs_vec)?;
+        let inel91_mu_e_in_start_ptrs =
+            self.stream.clone_htod(&a6.inel91_mu_e_in_starts_ptrs_vec)?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -1963,6 +2019,10 @@ impl GpuTransportContext {
             inel91_cdf_ptrs,
             inel91_pdf_ptrs,
             inel91_dist_local_off,
+            inel91_mu_has,
+            inel91_mu_data_ptrs,
+            inel91_mu_offsets_ptrs,
+            inel91_mu_e_in_start_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
