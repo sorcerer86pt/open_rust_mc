@@ -1,8 +1,0 @@
-case,status,k_calc,k_sigma,k_ref,sigma_exp,delta_pcm,bound_pcm,sigma_ratio,ref_source,runtime_s,n_seeds,batches,inactive,particles,gpu_refill_pool_factor,gpu_auto_refill,error
-heu-comp-inter-003_case-1,PASS,1.011149,0.000354,1.006720,0.005700,442.9,1142.2,0.776,local_validation (OpenMC on this scene),723.74,5,150,40,100000,,False,
-heu-comp-inter-003_case-2,FAIL,1.013705,0.000247,1.000000,0.006100,1370.5,1221.0,2.245,k_eff_reference (ICSBEP handbook),762.38,5,150,40,100000,,False,
-heu-comp-inter-003_case-3,FAIL,1.013161,0.000167,1.000000,0.005600,1316.1,1120.5,2.349,k_eff_reference (ICSBEP handbook),757.80,5,150,40,100000,,False,
-heu-comp-inter-003_case-4,PASS,1.010804,0.000190,1.000000,0.005500,1080.4,1100.7,1.963,k_eff_reference (ICSBEP handbook),767.80,5,150,40,100000,,False,
-heu-comp-inter-003_case-5,PASS,1.007997,0.000121,1.000000,0.004700,799.7,940.3,1.701,k_eff_reference (ICSBEP handbook),614.95,5,150,40,100000,,False,
-heu-comp-inter-003_case-6,PASS,1.003175,0.000210,1.000000,0.004700,317.5,940.9,0.675,k_eff_reference (ICSBEP handbook),738.24,5,150,40,100000,,False,
-heu-comp-inter-003_case-7,PASS,1.002556,0.000102,1.000000,0.005000,255.6,1000.2,0.511,k_eff_reference (ICSBEP handbook),858.86,5,150,40,100000,,False,
