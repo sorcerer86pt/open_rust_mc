@@ -186,7 +186,7 @@ pub fn process_collision(
     // Inelastic scattering
     cum += xs.inelastic;
     if xi < cum {
-        let (q_value, level_idx) = sample_inelastic_level(
+        let (q_value, level_idx, mu_override) = sample_inelastic_level(
             particle.energy,
             xs.awr,
             inelastic_data,
@@ -200,12 +200,13 @@ pub fn process_collision(
                 .and_then(|d| d.level_angles.get(i))
                 .and_then(|o| o.as_ref())
         });
-        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
+        let (new_energy, new_dir) = super::scatter::inelastic_scatter_with_mu(
             particle.energy,
             particle.dir,
             xs.awr,
             q_value,
             angle,
+            mu_override,
             rng,
         );
         particle.energy = new_energy;
@@ -505,7 +506,7 @@ pub fn process_scatter_only(
 
     cum += xs.inelastic;
     if xi < cum {
-        let (q_value, level_idx) = sample_inelastic_level(
+        let (q_value, level_idx, mu_override) = sample_inelastic_level(
             particle.energy,
             xs.awr,
             inelastic_data,
@@ -517,12 +518,13 @@ pub fn process_scatter_only(
                 .and_then(|d| d.level_angles.get(i))
                 .and_then(|o| o.as_ref())
         });
-        let (new_energy, new_dir) = super::scatter::inelastic_scatter(
+        let (new_energy, new_dir) = super::scatter::inelastic_scatter_with_mu(
             particle.energy,
             particle.dir,
             xs.awr,
             q_value,
             angle,
+            mu_override,
             rng,
         );
         particle.energy = new_energy;
@@ -607,16 +609,24 @@ pub fn process_scatter_only(
 /// ENDF outgoing-energy distribution is available (`continuum_edist`), sample
 /// the outgoing energy from it (OpenMC convention). Otherwise fall back to
 /// the evaporation approximation.
+/// Returns `(q_eff, level_idx, mu_cm_override)`:
+///   - `q_eff`: effective Q-value to feed `inelastic_scatter` so the
+///     two-body partition produces the desired neutron CM energy.
+///   - `level_idx`: discrete-level index sampled, or `None` for the
+///     MT=91 continuum / fallback path.
+///   - `mu_cm_override`: explicit CM-frame cosine sampled from Law 61
+///     mu coupling when present; `None` lets `inelastic_scatter` pick
+///     a level-angular-distribution or isotropic mu as appropriate.
 fn sample_inelastic_level(
     energy: f64,
     awr: f64,
     inelastic_data: Option<&InelasticData<'_>>,
     continuum_edist: Option<&EnergyDistribution>,
     rng: &mut Rng,
-) -> (f64, Option<usize>) {
+) -> (f64, Option<usize>, Option<f64>) {
     let data = match inelastic_data {
         Some(d) if !d.levels.is_empty() && !d.level_xs.is_empty() => d,
-        _ => return (-45_000.0, None), // fallback: ~45 keV excitation
+        _ => return (-45_000.0, None, None), // fallback: ~45 keV excitation
     };
 
     // Sum cross-sections for levels that are energetically accessible
@@ -630,7 +640,7 @@ fn sample_inelastic_level(
     }
 
     if accessible.is_empty() || xs_sum <= 0.0 {
-        return (-45_000.0, None); // fallback
+        return (-45_000.0, None, None); // fallback
     }
 
     // Sample proportionally to cross-section
@@ -650,20 +660,24 @@ fn sample_inelastic_level(
                 // the tabulation. Fall back to an evaporation
                 // approximation with an A/8 MeV^-1 level-density
                 // parameter when the distribution isn't available.
+                //
+                // When the evaluation ships Law 61 mu coupling (OpenMC
+                // CorrelatedAngleEnergy), `sample_with_mu` returns the
+                // correlated CM-frame cosine alongside E_out; otherwise
+                // mu_override stays `None` and `inelastic_scatter` falls
+                // through to isotropic-in-CM sampling.
                 let e_cm = energy * awr / (awr + 1.0); // CM kinetic energy of relative motion (eV)
-                let e_neutron_cm = if let Some(dist) = continuum_edist {
-                    // Sampled E_out is already the neutron's CM kinetic
-                    // energy. Clamp to physically accessible range
-                    // (below the CM energy of relative motion).
-                    let e_out_ev = dist.sample(energy, rng);
-                    e_out_ev.min(e_cm * 0.99).max(1e-5)
+                let (e_neutron_cm, mu_override) = if let Some(dist) = continuum_edist {
+                    let (e_out_ev, mu) = dist.sample_with_mu(energy, rng);
+                    (e_out_ev.min(e_cm * 0.99).max(1e-5), mu)
                 } else {
                     let e_cm_mev = e_cm / 1.0e6;
                     let a_param = awr / 8.0;
                     let e_excitation = e_cm_mev.max(0.1);
                     let temp_mev = (e_excitation / a_param).sqrt();
                     let e_out_mev = -temp_mev * (rng.uniform() * rng.uniform()).ln();
-                    e_out_mev.min(e_cm_mev * 0.9).max(1e-11) * 1.0e6
+                    let e_out = e_out_mev.min(e_cm_mev * 0.9).max(1e-11) * 1.0e6;
+                    (e_out, None)
                 };
                 // `inelastic_scatter` treats `q_value` via the two-body
                 // partition: e_cm_out = e_cm + q, then neutron's share is
@@ -673,15 +687,14 @@ fn sample_inelastic_level(
                 //   e_cm_out * A/(A+1) = e_neutron_cm
                 //   q_eff = e_cm_out - e_cm = e_neutron_cm * (A+1)/A − e_cm
                 let q_eff = e_neutron_cm * (awr + 1.0) / awr - e_cm;
-                // Continuum: no discrete angular distribution — isotropic.
-                return (q_eff, None);
+                return (q_eff, None, mu_override);
             }
-            return (level.q_value, Some(idx));
+            return (level.q_value, Some(idx), None);
         }
     }
 
     let last = accessible.last().map_or(0, |&(i, _)| i);
-    (data.levels[last].q_value, Some(last))
+    (data.levels[last].q_value, Some(last), None)
 }
 
 /// Determine the number of fission neutrons to bank.

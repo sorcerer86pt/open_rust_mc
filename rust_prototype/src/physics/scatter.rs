@@ -156,6 +156,24 @@ pub fn inelastic_scatter(
     angle: Option<&crate::hdf5_reader::AngularDistribution>,
     rng: &mut Rng,
 ) -> (f64, Vec3) {
+    inelastic_scatter_with_mu(energy, dir, awr, q_value, angle, None, rng)
+}
+
+/// Variant of `inelastic_scatter` that accepts an explicit CM-frame
+/// scattering cosine override. Used for MT=91 Law 61 KalbachMann where
+/// the mu is sampled correlated with the outgoing energy. When
+/// `mu_override` is `None`, behaviour matches `inelastic_scatter`
+/// exactly (uncorrelated `angle` tabulation if present, else isotropic
+/// CM).
+pub fn inelastic_scatter_with_mu(
+    energy: f64,
+    dir: Vec3,
+    awr: f64,
+    q_value: f64,
+    angle: Option<&crate::hdf5_reader::AngularDistribution>,
+    mu_override: Option<f64>,
+    rng: &mut Rng,
+) -> (f64, Vec3) {
     // Threshold check: inelastic is only possible if E > |Q|*(A+1)/A
     let threshold = if q_value < 0.0 {
         (-q_value) * (awr + 1.0) / awr
@@ -177,12 +195,19 @@ pub fn inelastic_scatter(
         return elastic_scatter(energy, dir, awr, rng);
     }
 
-    // CM-frame scattering cosine: prefer the ENDF tabulated angular
-    // distribution (OpenMC UncorrelatedAngleEnergy); fall back to isotropic
-    // when the nuclide's evaluation does not store one for this level.
-    let mu_cm = match angle {
-        Some(dist) => dist.sample_mu(energy, rng),
-        None => 2.0 * rng.uniform() - 1.0,
+    // CM-frame scattering cosine. Precedence:
+    //   1. Explicit `mu_override` from Law 61 / CorrelatedAngleEnergy
+    //      (MT=91 with KalbachMann mu coupling) — sampled in the same
+    //      stochastic bin as E_out.
+    //   2. ENDF tabulated angular distribution (UncorrelatedAngleEnergy)
+    //      for the discrete level, when present.
+    //   3. Isotropic CM fallback (older evaluations without mu data).
+    let mu_cm = match mu_override {
+        Some(m) => m.clamp(-1.0, 1.0),
+        None => match angle {
+            Some(dist) => dist.sample_mu(energy, rng),
+            None => 2.0 * rng.uniform() - 1.0,
+        },
     };
 
     // CM velocity of the system (in sqrt-energy units)
