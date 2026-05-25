@@ -152,7 +152,7 @@ name = "gpu_const_xs_keff"
 required-features = ["cuda"]
 
 [[bin]]
-name = "gpu_recursive_keff"
+name = "gpu_godiva_keff"
 required-features = ["cuda"]
 
 [[bin]]

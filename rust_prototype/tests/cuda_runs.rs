@@ -180,8 +180,10 @@ fn run_case_cuda(
     let nuc_data = gpu
         .upload_nuclide_data(&resolved.provider.nuclides, rank)
         .expect("upload nuclides");
+    let q_n2ns: Vec<f64> = resolved.provider.nuclides.iter().map(|n| n.q_n2n).collect();
+    let q_n3ns: Vec<f64> = resolved.provider.nuclides.iter().map(|n| n.q_n3n).collect();
     let mat_data = gpu
-        .upload_material_data(&resolved.materials, &awrs, &nu_bars)
+        .upload_material_data(&resolved.materials, &awrs, &nu_bars, &q_n2ns, &q_n3ns)
         .expect("upload materials");
     let n_nuc = resolved.provider.nuclides.len();
     let sab_data = if sab_nuc_idx >= 0 {

@@ -134,8 +134,10 @@ mod cuda_main {
         let materials = vec![heu];
         let awrs: Vec<f64> = nuclide_specs.iter().map(|s| s.1).collect();
         let nu_bars: Vec<f64> = nuclide_specs.iter().map(|s| s.2).collect();
+        let q_n2ns: Vec<f64> = kernels.iter().map(|k| k.q_n2n).collect();
+        let q_n3ns: Vec<f64> = kernels.iter().map(|k| k.q_n3n).collect();
         let mat_data = gpu
-            .upload_material_data(&materials, &awrs, &nu_bars)
+            .upload_material_data(&materials, &awrs, &nu_bars, &q_n2ns, &q_n3ns)
             .expect("upload material data");
         let sab_data = gpu
             .upload_sab_data_empty(nuclide_specs.len())

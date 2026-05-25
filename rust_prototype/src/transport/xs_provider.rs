@@ -133,6 +133,17 @@ pub struct NuclideKernels {
     pub n_np: Option<ReactionKernel>,
     pub n_np_edist: Option<EnergyDistribution>,
     pub q_n_np: f64,
+    /// MT=16 (n,2n) ENDF Q-value (eV, negative). Used by the GPU's
+    /// `gr_multi_event` kernel to convert the incident CM energy to
+    /// the secondary kinematics. Without this the kernel falls back
+    /// to `Q ≈ −0.1 × E_inc`, which on Be (real Q = −1.665 MeV) made
+    /// fast neutrons produce secondaries with ~15× too much energy
+    /// — the +800–1280 pcm bias on Be-reflected benchmarks.
+    /// `0.0` when MT=16 isn't evaluated in this nuclide's HDF5.
+    pub q_n2n: f64,
+    /// MT=17 (n,3n) ENDF Q-value (eV, negative). Same role as
+    /// `q_n2n` for the three-neutron emission channel.
+    pub q_n3n: f64,
     /// URR probability tables.
     pub urr_tables: Option<UrrProbabilityTables>,
     /// Photon products keyed by ENDF MT. Populated from HDF5
@@ -364,6 +375,8 @@ impl NuclideKernels {
             n_np: None,
             n_np_edist: None,
             q_n_np: 0.0,
+            q_n2n: 0.0,
+            q_n3n: 0.0,
         }
     }
 
@@ -1450,6 +1463,8 @@ pub fn load_nuclide_with_policy(
                 n_np: None,
                 n_np_edist: None,
                 q_n_np: 0.0,
+                q_n2n: 0.0,
+                q_n3n: 0.0,
             };
         }
     };
@@ -1629,10 +1644,26 @@ pub fn load_nuclide_with_policy(
     if n2n.is_some() {
         println!("    MT=16 (n,2n)     rank={}", policy.rank_for(16));
     }
+    // Real ENDF Q-value for MT=16 (n,2n). The GPU's `gr_multi_event`
+    // uses this for the secondary kinematics; without it the kernel
+    // defaulted to `Q ≈ −0.1 × E_inc`. Light isotopes commonly carry
+    // MT=16 with sharply negative Q (Be-9: −1.665 MeV, C-12: −20 MeV);
+    // actinides have shallower Q (~−6 MeV). Fall back to the generic
+    // actinide order-of-magnitude when the file lacks the attribute.
+    let q_n2n = if n2n.is_some() {
+        reader.reaction_q_value(16).unwrap_or(-6.0e6)
+    } else {
+        0.0
+    };
     let n3n = build_kernel_from_reader(&reader, 17, policy.rank_for(17), temp_idx, &shared_grid);
     if n3n.is_some() {
         println!("    MT=17 (n,3n)     rank={}", policy.rank_for(17));
     }
+    let q_n3n = if n3n.is_some() {
+        reader.reaction_q_value(17).unwrap_or(-12.0e6)
+    } else {
+        0.0
+    };
     let fission =
         build_kernel_from_reader(&reader, 18, policy.rank_for(18), temp_idx, &shared_grid);
     if fission.is_some() {
@@ -1802,6 +1833,8 @@ pub fn load_nuclide_with_policy(
         n_np,
         n_np_edist,
         q_n_np,
+        q_n2n,
+        q_n3n,
         n4n,
         n4n_edist,
     }
@@ -2679,6 +2712,8 @@ pub fn load_nuclide_at_temp(
                 n_np: None,
                 n_np_edist: None,
                 q_n_np: 0.0,
+                q_n2n: 0.0,
+                q_n3n: 0.0,
             };
         }
     };
@@ -2791,7 +2826,17 @@ pub fn load_nuclide_at_temp(
             None => (None, None),
         };
     let n2n = build_kernel_at_temp(&reader, 16, svd_rank, target_temp, &shared_grid);
+    let q_n2n = if n2n.is_some() {
+        reader.reaction_q_value(16).unwrap_or(-6.0e6)
+    } else {
+        0.0
+    };
     let n3n = build_kernel_at_temp(&reader, 17, svd_rank, target_temp, &shared_grid);
+    let q_n3n = if n3n.is_some() {
+        reader.reaction_q_value(17).unwrap_or(-12.0e6)
+    } else {
+        0.0
+    };
     let fission = build_kernel_at_temp(&reader, 18, svd_rank, target_temp, &shared_grid);
     let capture = build_kernel_at_temp(&reader, 102, svd_rank, target_temp, &shared_grid);
 
@@ -2915,6 +2960,8 @@ pub fn load_nuclide_at_temp(
         n_np,
         n_np_edist,
         q_n_np,
+        q_n2n,
+        q_n3n,
         n4n,
         n4n_edist,
     }

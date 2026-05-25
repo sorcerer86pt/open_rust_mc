@@ -15,7 +15,7 @@ use cudarc::nvrtc;
 
 /// Number of u64 fields in the packed TransportParams buffer.
 /// Must match N_PARAMS in transport.cu.
-const N_PARAMS: usize = 186;
+const N_PARAMS: usize = 188;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -905,6 +905,15 @@ pub struct GpuMaterialData {
     pub mat_atom_density: CudaSlice<f64>,
     pub awr_table: CudaSlice<f64>,
     pub nu_bar_const: CudaSlice<f64>,
+    /// `[n_nuc]` — ENDF Q-value for MT=16 (n,2n) per nuclide, eV.
+    /// Read by `gr_multi_event` for secondary kinematics; without it
+    /// the kernel falls back to `Q ≈ −0.1 × E_inc`, which on Be
+    /// (real Q = −1.665 MeV) made fast neutrons produce secondaries
+    /// with ~15× too much energy. `0.0` when the nuclide has no MT=16.
+    pub q_n2n_table: CudaSlice<f64>,
+    /// `[n_nuc]` — ENDF Q-value for MT=17 (n,3n) per nuclide, eV.
+    /// Same role as `q_n2n_table` for the three-neutron emission channel.
+    pub q_n3n_table: CudaSlice<f64>,
 }
 
 /// Windowed-Multipole data on GPU, keyed by nuclide index. Empty (all
@@ -1558,6 +1567,11 @@ impl GpuTransportContext {
             dptr!(&sab_data.slot_kt),
             // URR bin-to-bin interpolation code — slot 185.
             dptr!(&nuc_data.urr_interpolation),
+            // Per-nuclide ENDF Q-values for (n,2n) / (n,3n) — slots
+            // 186-187. See `GpuMaterialData::q_n2n_table` doc and the
+            // `gr_multi_event` kernel call site.
+            dptr!(&mat_data.q_n2n_table),
+            dptr!(&mat_data.q_n3n_table),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -2234,11 +2248,19 @@ impl GpuTransportContext {
     }
 
     /// Upload material composition data to GPU.
+    ///
+    /// `nuclide_q_n2n` and `nuclide_q_n3n` are the per-nuclide ENDF
+    /// Q-values for (n,2n) and (n,3n) (eV, negative; `0.0` when the
+    /// nuclide doesn't carry the reaction). The GPU's `gr_multi_event`
+    /// kernel reads them for secondary kinematics; see
+    /// `GpuMaterialData::q_n2n_table` doc.
     pub fn upload_material_data(
         &self,
         materials: &[crate::transport::material::Material],
         nuclide_awrs: &[f64],
         nuclide_nu_bars: &[f64],
+        nuclide_q_n2n: &[f64],
+        nuclide_q_n3n: &[f64],
     ) -> Result<GpuMaterialData, Box<dyn std::error::Error>> {
         // Single source of truth: `crate::MAX_NUCLIDES_PER_MATERIAL`.
         // The GPU sees the same value via the NVRTC `-DMAX_NUC_PER_MAT`
@@ -2272,6 +2294,8 @@ impl GpuTransportContext {
             mat_atom_density: self.stream.clone_htod(&atom_dens)?,
             awr_table: self.stream.clone_htod(nuclide_awrs)?,
             nu_bar_const: self.stream.clone_htod(nuclide_nu_bars)?,
+            q_n2n_table: self.stream.clone_htod(nuclide_q_n2n)?,
+            q_n3n_table: self.stream.clone_htod(nuclide_q_n3n)?,
         })
     }
 

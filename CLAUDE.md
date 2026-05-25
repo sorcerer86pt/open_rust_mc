@@ -237,7 +237,7 @@ Random-ray: `rr_pincell`, `rr_cadis_slab`, `rr_adjoint_svd`.
 
 Depletion: `deplete_demo`, `deplete_pwr`.
 
-GPU (`--features cuda`): `gpu_bench`, `gpu_recursive_keff`,
+GPU (`--features cuda`): `gpu_bench`, `gpu_godiva_keff`,
 `gpu_const_xs_keff`, `gpu_assembly_keff`, `gpu_pwr_bench`,
 `gpu_hex_minicore`, `gpu_recursive_parity`, `gpu_photon_features`,
 `gpu_wmp_validate`.

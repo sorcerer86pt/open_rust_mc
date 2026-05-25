@@ -380,7 +380,17 @@
 // multi-nuclide structural-reflector cases.
 #define P_URR_INTERP                185
 
-#define N_PARAMS            186
+// ── Per-nuclide ENDF Q-values for (n,2n) and (n,3n) ───────────────
+// `[n_nuc]` each, in eV (negative). `gr_multi_event` reads these for
+// the secondary kinematics — the prior hardcoded `Q ≈ −0.1 × E_inc`
+// (n,2n) / `−0.2 × E_inc` (n,3n) gave Be neutrons ~15× too much
+// outgoing energy and surfaced as +800–1280 pcm bias on
+// Be-reflected ICSBEP cases (heu-comp-inter-003, heu-met-fast-019).
+// `0.0` slot when the nuclide doesn't evaluate that MT.
+#define P_Q_N2N_TABLE               186
+#define P_Q_N3N_TABLE               187
+
+#define N_PARAMS            188
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust

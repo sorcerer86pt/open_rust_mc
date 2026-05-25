@@ -1219,9 +1219,29 @@ extern "C" __global__ void gr_multi_event(
     double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
 
     int n_extra = (ev == EV_N2N) ? 1 : 2;
-    double Q_mult = (ev == EV_N2N) ? -E * 0.1 : -E * 0.2;
+    // Real ENDF Q-value for the reaction. The host populates these per
+    // nuclide from `reader.reaction_q_value({16,17})`; `0.0` when the
+    // nuclide doesn't evaluate the channel. Be-9 (n,2n) is the
+    // motivating case — real Q = −1.665 MeV (fixed) versus the prior
+    // hardcoded `−0.1 × E_inc`, which on 1 MeV neutrons gave Q ≈
+    // −100 keV and produced secondaries with ~15× too much energy.
+    double Q_mult = (ev == EV_N2N)
+        ? __ldg(&PTR_D(p, P_Q_N2N_TABLE)[hit_nuc])
+        : __ldg(&PTR_D(p, P_Q_N3N_TABLE)[hit_nuc]);
+    // Guard against the nuclide-has-no-MT case (Q_mult == 0.0) and
+    // any malformed dataset that would produce Q ≥ 0 for these
+    // endothermic channels. Falls back to the prior heuristic so the
+    // kernel still produces *some* physical-ish secondary instead of
+    // emitting at E_inc (which would otherwise leak ν̄ artificially).
+    if (Q_mult >= 0.0) {
+        Q_mult = (ev == EV_N2N) ? -E * 0.1 : -E * 0.2;
+    }
 
     for (int s = 0; s < n_extra; s++) {
+        // TODO: replace analytic Maxwell with the real per-nuclide
+        // (n,2n)/(n,3n) outgoing-energy tables once the diagnostic
+        // OpenMC tally diff (see docs/) confirms which channels need
+        // it. For now the historical temp = E/10 sampling stays.
         double temp = E / 10.0;
         double x1 = fmax(pcg_uniform(&rng), 1e-30);
         double x2 = fmax(pcg_uniform(&rng), 1e-30);

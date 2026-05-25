@@ -309,8 +309,10 @@ mod cuda_main {
         let materials = setup_materials();
         let awrs: Vec<f64> = NUCLIDE_SPECS.iter().map(|s| s.1).collect();
         let nu_bars: Vec<f64> = NUCLIDE_SPECS.iter().map(|s| s.2).collect();
+        let q_n2ns: Vec<f64> = kernels.iter().map(|k| k.q_n2n).collect();
+        let q_n3ns: Vec<f64> = kernels.iter().map(|k| k.q_n3n).collect();
         let mat_data = gpu
-            .upload_material_data(&materials, &awrs, &nu_bars)
+            .upload_material_data(&materials, &awrs, &nu_bars, &q_n2ns, &q_n3ns)
             .expect("upload materials");
 
         // S(α,β) on H-1 (NUCLIDE_SPECS index 3).

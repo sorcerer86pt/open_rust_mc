@@ -73,7 +73,7 @@ pub const MAGIC: &[u8; 8] = b"ORM_NK01";
 ///   inner payload's first bytes (ASCII `O` from `ORM_NK01`) decode
 ///   to an invalid `NuclideKernels.elastic` discriminant, surfacing
 ///   as `DecodeError::BadDiscriminant`).
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
@@ -747,6 +747,11 @@ fn encode_body<W: Write>(w: &mut W, k: &NuclideKernels) -> Result<(), EncodeErro
     write_option(w, k.n_np.as_ref(), encode_reaction_kernel)?;
     write_option(w, k.n_np_edist.as_ref(), encode_energy_distribution)?;
     write_f64(w, k.q_n_np)?;
+    // (n,2n) / (n,3n) Q-values used by the GPU's gr_multi_event
+    // kernel for secondary kinematics. Format-version bump enforces
+    // a rebuild of any L2 cache written before this field landed.
+    write_f64(w, k.q_n2n)?;
+    write_f64(w, k.q_n3n)?;
     write_option(w, k.urr_tables.as_ref(), encode_urr_tables)?;
     // photon_products: Vec<(u32, PhotonProduct)>
     write_u64(w, k.photon_products.len() as u64)?;
@@ -806,6 +811,8 @@ fn decode_body<R: Read>(r: &mut R) -> Result<NuclideKernels, DecodeError> {
     let n_np = read_option(r, decode_reaction_kernel)?;
     let n_np_edist = read_option(r, decode_energy_distribution)?;
     let q_n_np = read_f64(r)?;
+    let q_n2n = read_f64(r)?;
+    let q_n3n = read_f64(r)?;
     let urr_tables = read_option(r, decode_urr_tables)?;
     let n_photon = read_u64(r)? as usize;
     let mut photon_products = Vec::with_capacity(n_photon);
@@ -856,6 +863,8 @@ fn decode_body<R: Read>(r: &mut R) -> Result<NuclideKernels, DecodeError> {
         n_np,
         n_np_edist,
         q_n_np,
+        q_n2n,
+        q_n3n,
         urr_tables,
         photon_products,
         partial_kernels,
