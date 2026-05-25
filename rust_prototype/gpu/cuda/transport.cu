@@ -2427,25 +2427,40 @@ transport_persistent(
                 // Prefer the ENDF MT=91 tabulated outgoing distribution;
                 // fall back to Weisskopf evaporation when no table.
                 // Matches `sample_inelastic_level` in
-                // `physics/collision.rs`. Closes a small portion (~5 %)
-                // of inelastic-MT=91 events on Godiva — see
-                // transport_recursive.cu for the full investigation note.
+                // `physics/collision.rs` (commit d6d2c6d).
+                //
+                // The sampled E_out from a center_of_mass=true product
+                // IS the neutron's CM kinetic energy directly (OpenMC's
+                // convention for Law 4 / Law 61 — the recoil share is
+                // implicit in the tabulation). The downstream two-body
+                // partition `e_n_cm = e_cm_out * A/(A+1)` would apply
+                // the partition a second time. Invert the partition
+                // into the synthesised Q so the existing two-body math
+                // produces `e_n_cm = e_neutron_cm` exactly:
+                //   q_eff = e_neutron_cm * (A+1)/A − e_cm
                 if(sel_mt==91){
-                    double ecm_mev=E*A/((A+1.0)*1e6);
+                    double e_cm_ev = E * A / (A + 1.0);
                     int n_inc91 = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
-                    double eo_mev;
+                    double e_neutron_cm;
                     if (n_inc91 > 0) {
                         double eo_ev = sample_inel91_energy(E, &rng, p, hit_nuc);
-                        eo_mev = eo_ev / 1.0e6;
+                        // Sampled E_out is already the neutron's CM
+                        // kinetic energy; clamp to physically
+                        // accessible range (below CM energy of relative
+                        // motion).
+                        e_neutron_cm = fmax(fmin(eo_ev, e_cm_ev * 0.99), 1e-5);
                     } else {
-                        double a_p=A/8.0;
-                        double eex=fmax(ecm_mev,0.1);
-                        double T=sqrt(eex/a_p);
-                        double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
-                        eo_mev=-T*log(x1*x2);
+                        double ecm_mev = e_cm_ev / 1.0e6;
+                        double a_p = A / 8.0;
+                        double eex = fmax(ecm_mev, 0.1);
+                        double T = sqrt(eex / a_p);
+                        double x1 = fmax(pcg_uniform(&rng), 1e-30);
+                        double x2 = fmax(pcg_uniform(&rng), 1e-30);
+                        double eo_mev = -T * log(x1 * x2);
+                        eo_mev = fmax(fmin(eo_mev, ecm_mev * 0.9), 1e-11);
+                        e_neutron_cm = eo_mev * 1.0e6;
                     }
-                    eo_mev=fmin(eo_mev, ecm_mev*0.9);
-                    Q = -(ecm_mev - eo_mev)*1e6;
+                    Q = e_neutron_cm * (A + 1.0) / A - e_cm_ev;
                 }
                 // Two-body inelastic kinematics (matches CPU inelastic_scatter)
                 double e_cm = E * A / (A + 1.0);
