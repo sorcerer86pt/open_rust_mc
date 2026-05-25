@@ -176,8 +176,10 @@ fn run_gpu_comparison(_args: &Args, provider: &xs_provider::SvdXsProvider) {
     heu.add_nuclide(0.00265, 2);
     let awrs: Vec<f64> = NUCLIDES.iter().map(|s| s.1).collect();
     let nu_bars: Vec<f64> = NUCLIDES.iter().map(|s| s.2).collect();
+    let q_n2ns: Vec<f64> = provider.nuclides.iter().map(|n| n.q_n2n).collect();
+    let q_n3ns: Vec<f64> = provider.nuclides.iter().map(|n| n.q_n3n).collect();
     let mat_data = gpu
-        .upload_material_data(&[heu], &awrs, &nu_bars)
+        .upload_material_data(&[heu], &awrs, &nu_bars, &q_n2ns, &q_n3ns)
         .expect("upload mat");
     let sab_data = gpu
         .upload_sab_data_empty(NUCLIDES.len())

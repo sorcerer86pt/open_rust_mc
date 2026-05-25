@@ -1807,8 +1807,10 @@ fn run_gpu_eigenvalue(
 
     let awrs: Vec<f64> = nuclide_specs.iter().map(|(_, awr, _, _)| *awr).collect();
     let nu_bars: Vec<f64> = nuclide_specs.iter().map(|(_, _, nu, _)| *nu).collect();
+    let q_n2ns: Vec<f64> = kernels.iter().map(|k| k.q_n2n).collect();
+    let q_n3ns: Vec<f64> = kernels.iter().map(|k| k.q_n3n).collect();
     let mat_data = gpu
-        .upload_material_data(materials_rt, &awrs, &nu_bars)
+        .upload_material_data(materials_rt, &awrs, &nu_bars, &q_n2ns, &q_n3ns)
         .map_err(|e| gpu_err("upload materials", e))?;
 
     // Collect every nuclide that has a thermal-scattering library
@@ -3092,8 +3094,10 @@ fn run_gpu_icsbep(
         .iter()
         .map(|n| n.nu_bar_const)
         .collect();
+    let q_n2ns: Vec<f64> = provider.nuclides.iter().map(|n| n.q_n2n).collect();
+    let q_n3ns: Vec<f64> = provider.nuclides.iter().map(|n| n.q_n3n).collect();
     let mat_data = gpu
-        .upload_material_data(materials_rt, &awrs, &nu_bars)
+        .upload_material_data(materials_rt, &awrs, &nu_bars, &q_n2ns, &q_n3ns)
         .map_err(|e| gpu_err("upload materials", e))?;
 
     // Multi-slot SAB upload — every thermal nuclide goes into its own

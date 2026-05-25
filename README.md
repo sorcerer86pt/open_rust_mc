@@ -277,7 +277,7 @@ shares the same physics as CPU:
 - HexLattice device functions ported; runtime parity test pending.
 
 GPU bench drivers: `gpu_bench`, `gpu_cpu_bench`,
-`gpu_recursive_keff`, `gpu_const_xs_keff`, `gpu_assembly_keff`,
+`gpu_godiva_keff`, `gpu_const_xs_keff`, `gpu_assembly_keff`,
 `gpu_pwr_bench`, `gpu_hex_minicore`, `gpu_compton_validate`,
 `gpu_compton_scaling`, `gpu_photon_features`, `gpu_wmp_validate`.
 
