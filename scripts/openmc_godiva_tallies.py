@@ -21,7 +21,10 @@ import json
 import numpy as np
 import openmc
 
-DATA = "/mnt/c/Users/fog/madman_svd_experiment/data/endfb-vii.1-hdf5"
+DATA = os.environ.get(
+    "OPENMC_GODIVA_DATA",
+    "/mnt/c/Users/fog/madman_svd_experiment/data/endfb-viii.1-hdf5",
+)
 OUT  = "/mnt/c/Users/fog/madman_svd_experiment/outputs/openmc_godiva_tallies.json"
 
 WORK = "/tmp/openmc_godiva_tallies"
@@ -66,6 +69,27 @@ for score in ["elastic", "fission", "absorption", "(n,2n)", "(n,3n)",
     t.nuclides = ["U235", "U238", "U234"]
     t.scores = [score]
     tallies.append(t)
+
+# 2b. MT=91 isolated tally — continuum inelastic only, excluding the
+# MT=51-90 discrete levels. Used by the engine-vs-OpenMC diagnostic
+# to decide whether the GPU's isotropic-CM fallback on MT=91 (vs
+# OpenMC's tabulated energy-angle correlation) is responsible for
+# Godiva's +200 pcm residual after Fix #1 closed the (n,2n) bias.
+# The `(n,nc)` continuum-inelastic score in OpenMC's score namespace
+# is MT=91 specifically.
+t_mt91 = openmc.Tally(name="rate_MT91")
+t_mt91.filters = [cell_filter]
+t_mt91.nuclides = ["U235", "U238", "U234"]
+t_mt91.scores = ["91"]
+tallies.append(t_mt91)
+
+# 2c. MT=4 (total inelastic = discrete + continuum). Subtracting
+# rate_MT91 from this gives the discrete-level sum (MT=51-90).
+t_mt4 = openmc.Tally(name="rate_MT4")
+t_mt4.filters = [cell_filter]
+t_mt4.nuclides = ["U235", "U238", "U234"]
+t_mt4.scores = ["4"]
+tallies.append(t_mt4)
 
 # 3. energy-resolved total rate (coarse groups to see where collisions happen)
 egroups = [0.0, 1e-1, 1e3, 1e5, 1e6, 2e6, 5e6, 2e7]
