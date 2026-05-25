@@ -1069,6 +1069,16 @@ extern "C" __global__ void gr_inelastic_event(
         }
     }
     int sel_mt = (n_lev > 0) ? __ldg(&PTR_I(p, P_LEVEL_MT)[lv_off + selected]) : 0;
+    // MT=91 mu-coupling carry: when `sample_inel91_energy_with_mu` is
+    // called below for a Law-61-carrying nuclide, these stash the
+    // chosen (E_in_bin, E_out_bin, E_out_frac) so the angular branch
+    // can sample mu correlated with E_out via `sample_inel91_mu_at`.
+    // Mirror of the persistent kernel's mu-coupling carry in
+    // transport.cu (see comment there for the precedence rules).
+    int mt91_e_in_bin    = 0;
+    int mt91_e_out_bin   = 0;
+    double mt91_e_out_frac = 0.0;
+    bool mt91_have_bin   = false;
     if (sel_mt == 91) {
         // Mirrors CPU `sample_inelastic_level` MT=91 branch
         // (commit d6d2c6d). The sampled E_out IS the neutron's CM
@@ -1081,7 +1091,10 @@ extern "C" __global__ void gr_inelastic_event(
         int n_inc91 = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
         double e_neutron_cm;
         if (n_inc91 > 0) {
-            double eo_ev = sample_inel91_energy(E, &rng, p, hit_nuc);
+            double eo_ev = sample_inel91_energy_with_mu(
+                E, &rng, p, hit_nuc,
+                &mt91_e_in_bin, &mt91_e_out_bin, &mt91_e_out_frac);
+            mt91_have_bin = true;
             e_neutron_cm = fmax(fmin(eo_ev, e_cm_ev * 0.99), 1e-5);
         } else {
             double ecm_mev = e_cm_ev / 1.0e6;
@@ -1110,9 +1123,22 @@ extern "C" __global__ void gr_inelastic_event(
         double phi = 2.0 * PI * pcg_uniform(&rng);
         rotate_direction(&dx, &dy, &dz, mu_lab, phi);
     } else {
+        // Per-level ENDF angular distribution for MT=51-90 when stored.
+        // For MT=91 continuum, when the nuclide ships Law 61
+        // (KalbachMann) mu coupling (`P_INEL91_MU_HAS_NUC[hit_nuc] == 1`)
+        // and we have a stashed bin triple from the outgoing-energy
+        // sampler, sample mu correlated with E_out. Otherwise fall
+        // back to isotropic-in-CM — same precedence as the CPU
+        // `inelastic_scatter_with_mu`.
         double mu_cm;
         if (n_lev > 0 && sel_mt != 91) {
             mu_cm = sample_level_angular(E, &rng, p, lv_off + selected, hit_nuc);
+        } else if (sel_mt == 91 && mt91_have_bin) {
+            mu_cm = sample_inel91_mu_at(hit_nuc,
+                                         mt91_e_in_bin,
+                                         mt91_e_out_bin,
+                                         mt91_e_out_frac,
+                                         &rng, p);
         } else {
             mu_cm = 2.0 * pcg_uniform(&rng) - 1.0;
         }

@@ -390,7 +390,34 @@
 #define P_Q_N2N_TABLE               186
 #define P_Q_N3N_TABLE               187
 
-#define N_PARAMS            188
+// ── MT=91 Law 61 (KalbachMann) correlated mu coupling — slots 188-191 ─
+// `P_INEL91_MU_HAS_NUC[nuc] == 1` means the nuclide ships per-(E_in_bin,
+// E_out_bin) tabular mu distributions for MT=91 continuum inelastic
+// (currently uranium in ENDF/B-VIII.x). The device sampler
+// `sample_inel91_mu_at` then inverts a mu CDF correlated with the
+// E_out the energy sampler picked, instead of falling back to
+// isotropic-in-CM. Closes the residual ~50 pcm CPU↔GPU bias on
+// Godiva traced to MT=91 isotropic-mu (see
+// docs/engine-vs-openmc-bias-investigation.md).
+//
+// Layout (mirrors CPU `CorrelatedAngleEnergy::sample_mu_at`):
+//   * `P_INEL91_MU_DATA_PTRS[nuc]` — base of f64 slab containing
+//     flat (mu, pdf, cdf) triples across all (E_in_bin, E_out_bin)
+//     mu tables for that nuclide.
+//   * `P_INEL91_MU_OFFSETS_PTRS[nuc]` — i32 array of cumulative
+//     triple-count offsets into mu_data per (E_in_bin, E_out_bin)
+//     table. Length `Σ_ie n_eout(ie) + 1`. Size of table `t` is
+//     `offsets[t+1] - offsets[t]`.
+//   * `P_INEL91_MU_E_IN_START_PTRS[nuc]` — i32 array of starting
+//     indices into mu_offsets per E_in_bin. Length `n_inc + 1`.
+//     Table at (E_in_bin ie, E_out_bin k) lives at
+//     `offsets[starts[ie] + k]`.
+#define P_INEL91_MU_HAS_NUC          188
+#define P_INEL91_MU_DATA_PTRS        189
+#define P_INEL91_MU_OFFSETS_PTRS     190
+#define P_INEL91_MU_E_IN_START_PTRS  191
+
+#define N_PARAMS            192
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -980,6 +1007,235 @@ __device__ double sample_inel91_energy(
     double adjusted = (fabs(span_l) < 1e-30) ? e_out
                     : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
     return fmax(adjusted, 1e-5);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// MT=91 outgoing-energy + mu coupling — same algorithm as
+// `sample_inel91_energy` but ALSO returns the (E_in_bin, E_out_bin,
+// E_out_frac) tuple needed to look up the matching Law 61 mu table.
+//
+// `out_e_in_bin` is the chosen E_in_bin in the *nuclide-local* index
+// space (matches `mu_e_in_starts` indexing); `out_e_out_bin` is
+// likewise nuclide-local; `out_e_out_frac` is the fraction of the
+// sampled E_out across the chosen E_out_bin in [0, 1].
+//
+// Callers MUST guard with `P_INEL91_NUC_NINC[hit_nuc] > 0` — same
+// contract as `sample_inel91_energy`.
+// ───────────────────────────────────────────────────────────────────────
+__device__ double sample_inel91_energy_with_mu(
+    double E_inc, PcgState* rng, Params p, int hit_nuc,
+    int* out_e_in_bin, int* out_e_out_bin, double* out_e_out_frac)
+{
+    int fi_off = __ldg(&PTR_I(p, P_INEL91_NUC_OFF)[hit_nuc]);
+    int fi_n   = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
+    *out_e_in_bin = 0;
+    *out_e_out_bin = 0;
+    *out_e_out_frac = 0.0;
+    if (fi_n <= 0) return -1.0;
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_PDF_PTRS)[hit_nuc]);
+
+    // Edge cases — sample from first / last bin directly. We inline
+    // the (xi-binary-search + frac compute) so we can return the
+    // (e_out, k, frac) triple without a helper closure (NVRTC C++14
+    // lambdas are fine, but avoiding them keeps the IR straightforward).
+    if (E_inc <= inc_e[0] || E_inc >= inc_e[fi_n - 1]) {
+        int chosen = (E_inc <= inc_e[0]) ? fi_off : (fi_off + fi_n - 1);
+        int e_in_bin = (E_inc <= inc_e[0]) ? 0 : (fi_n - 1);
+        int off = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen];
+        int sz  = PTR_I(p, P_INEL91_DIST_SZ)[chosen];
+        double xi_e = pcg_uniform(rng);
+        const double* eo = &nuc_eo[off];
+        const double* cd = &nuc_cdf[off];
+        const double* pd = &nuc_pdf[off];
+        double e_out = sample_eout_bin(xi_e, eo, cd, pd, sz);
+        int k = 0;
+        if (sz >= 2) {
+            int lo = 0, hi = sz - 1;
+            while (hi - lo > 1) {
+                int mid = (lo + hi) >> 1;
+                if (cd[mid] <= xi_e) lo = mid; else hi = mid;
+            }
+            k = lo;
+        }
+        double frac = 0.0;
+        if (sz > 1) {
+            int k_c = (k > sz - 2) ? (sz - 2) : k;
+            double e_lo = eo[k_c];
+            double e_hi = eo[k_c + 1];
+            if (e_hi > e_lo) {
+                frac = (e_out - e_lo) / (e_hi - e_lo);
+                if (frac < 0.0) frac = 0.0;
+                else if (frac > 1.0) frac = 1.0;
+            }
+        }
+        *out_e_in_bin = e_in_bin;
+        *out_e_out_bin = k;
+        *out_e_out_frac = frac;
+        return fmax(e_out, 1e-5);
+    }
+
+    int ie;
+    {
+        int lo = 0, hi = fi_n - 1;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >> 1;
+            if (inc_e[mid] <= E_inc) lo = mid; else hi = mid;
+        }
+        ie = lo;
+    }
+
+    double r = (E_inc - inc_e[ie]) / fmax(inc_e[ie + 1] - inc_e[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen_lo_g = fi_off + ie;
+    int chosen_hi_g = fi_off + ie + 1;
+    int chosen_g = pick_hi ? chosen_hi_g : chosen_lo_g;
+    int chosen_e_in_bin = pick_hi ? (ie + 1) : ie;
+
+    int off_l = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_g];
+    int sz_l  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_g];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
+    double xi = pcg_uniform(rng);
+    double e_out = sample_eout_bin(xi, eo_l, cd_l, pd_l, sz_l);
+
+    // E_out bin index via CDF binary search (matches CPU).
+    int k = 0;
+    if (sz_l >= 2) {
+        int lo2 = 0, hi2 = sz_l - 1;
+        while (hi2 - lo2 > 1) {
+            int mid = (lo2 + hi2) >> 1;
+            if (cd_l[mid] <= xi) lo2 = mid; else hi2 = mid;
+        }
+        k = lo2;
+    }
+
+    // Scaled kinematic remap onto the interpolated outgoing-energy
+    // support (same algorithm as `sample_inel91_energy`).
+    int off_a = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_lo_g];
+    int sz_a  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_lo_g];
+    int off_b = PTR_I(p, P_INEL91_DIST_LOCAL_OFF)[chosen_hi_g];
+    int sz_b  = PTR_I(p, P_INEL91_DIST_SZ)[chosen_hi_g];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
+    double el1_lo = eo_l[0];
+    double el1_hi = (sz_l > 0) ? eo_l[sz_l - 1] : el1_lo;
+    double ea_lo  = eo_a[0];
+    double ea_hi  = (sz_a > 0) ? eo_a[sz_a - 1] : ea_lo;
+    double eb_lo  = eo_b[0];
+    double eb_hi  = (sz_b > 0) ? eo_b[sz_b - 1] : eb_lo;
+    double e1 = (1.0 - r) * ea_lo + r * eb_lo;
+    double eK = (1.0 - r) * ea_hi + r * eb_hi;
+    double span_l = el1_hi - el1_lo;
+    double adjusted = (fabs(span_l) < 1e-30) ? e_out
+                    : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
+
+    // Fraction within the chosen E_out bin — use the pre-remap e_out
+    // against the chosen distribution's grid (mirrors CPU
+    // `sample_with_mu` which computes the fraction against
+    // `dist_l.e_out`).
+    double frac = 0.0;
+    if (sz_l > 1) {
+        int k_clamped = k;
+        if (k_clamped > sz_l - 2) k_clamped = sz_l - 2;
+        double e_lo = eo_l[k_clamped];
+        double e_hi = eo_l[k_clamped + 1];
+        if (e_hi > e_lo) {
+            frac = (e_out - e_lo) / (e_hi - e_lo);
+            if (frac < 0.0) frac = 0.0;
+            else if (frac > 1.0) frac = 1.0;
+        }
+    }
+    *out_e_in_bin = chosen_e_in_bin;
+    *out_e_out_bin = k;
+    *out_e_out_frac = frac;
+    return fmax(adjusted, 1e-5);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// MT=91 Law 61 (KalbachMann) correlated mu sampler. Mirrors CPU
+// `CorrelatedAngleEnergy::sample_mu_at`:
+//   pick = (xi < e_out_frac) ? high_bin : low_bin
+//   invert mu CDF inside the chosen (E_in_bin, E_out_bin) table.
+//
+// When the nuclide carries no mu coupling (`P_INEL91_MU_HAS_NUC[nuc]
+// == 0`), falls back to isotropic-in-CM `2*xi - 1`. Same contract as
+// the CPU isotropic fallback for nuclides whose MT=91 evaluation is
+// Law 4 / pure marginal.
+//
+// Indexing: tables are flat (mu, pdf, cdf) triples; for the t-th
+// table the run is `[offsets[t], offsets[t+1])` in *triple* units —
+// the f64 layout is `data[(offsets[t] + j) * 3 + {0,1,2}]` for j-th
+// (mu, pdf, cdf) entry.
+// ───────────────────────────────────────────────────────────────────────
+__device__ __forceinline__ double sample_inel91_mu_at(
+    int hit_nuc, int e_in_bin, int e_out_bin, double e_out_frac,
+    PcgState* rng, Params p)
+{
+    int has = __ldg(&PTR_I(p, P_INEL91_MU_HAS_NUC)[hit_nuc]);
+    if (!has) return 2.0 * pcg_uniform(rng) - 1.0;
+    const int* e_in_starts =
+        (const int*) __ldg(&PTR_U64(p, P_INEL91_MU_E_IN_START_PTRS)[hit_nuc]);
+    const int* offsets =
+        (const int*) __ldg(&PTR_U64(p, P_INEL91_MU_OFFSETS_PTRS)[hit_nuc]);
+    const double* data =
+        (const double*) __ldg(&PTR_U64(p, P_INEL91_MU_DATA_PTRS)[hit_nuc]);
+
+    // Stochastic E_out bin pick: bracket lo / hi (clamping hi at the
+    // last available E_out bin in this E_in row).
+    int row_start = e_in_starts[e_in_bin];
+    int row_end   = e_in_starts[e_in_bin + 1];  // exclusive
+    int row_len   = row_end - row_start;
+    if (row_len <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
+    int k_lo = e_out_bin;
+    int k_hi = e_out_bin + 1;
+    if (k_lo < 0) k_lo = 0;
+    if (k_lo > row_len - 1) k_lo = row_len - 1;
+    if (k_hi > row_len - 1) k_hi = row_len - 1;
+    bool pick_hi = pcg_uniform(rng) < e_out_frac;
+    int t = row_start + (pick_hi ? k_hi : k_lo);
+
+    int off  = offsets[t];        // triple-index
+    int next = offsets[t + 1];    // triple-index sentinel
+    int sz   = next - off;
+    if (sz <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
+    if (sz == 1) {
+        double mu0 = data[off * 3 + 0];
+        if (mu0 < -1.0) mu0 = -1.0;
+        else if (mu0 > 1.0) mu0 = 1.0;
+        return mu0;
+    }
+
+    // Invert mu CDF (linear interpolation between bracketing breakpoints
+    // — same OpenMC `Tabular::sample` algorithm used by the CPU
+    // `TabularMuDist::sample_with_xi`).
+    double xi = pcg_uniform(rng);
+    int lo = 0, hi = sz - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (data[(off + mid) * 3 + 2] <= xi) lo = mid; else hi = mid;
+    }
+    double c0 = data[(off + lo) * 3 + 2];
+    double c1 = data[(off + lo + 1) * 3 + 2];
+    double m0 = data[(off + lo) * 3 + 0];
+    double m1 = data[(off + lo + 1) * 3 + 0];
+    double mu;
+    if (c1 > c0) {
+        double f = (xi - c0) / (c1 - c0);
+        mu = m0 + f * (m1 - m0);
+    } else {
+        mu = m0;
+    }
+    if (mu < -1.0) mu = -1.0;
+    else if (mu > 1.0) mu = 1.0;
+    return mu;
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -2438,12 +2694,25 @@ transport_persistent(
                 // into the synthesised Q so the existing two-body math
                 // produces `e_n_cm = e_neutron_cm` exactly:
                 //   q_eff = e_neutron_cm * (A+1)/A − e_cm
+                // MT=91 mu-coupling carry: when `sample_inel91_energy_with_mu`
+                // is called below for a Law-61-carrying nuclide,
+                // these stash the chosen (E_in_bin, E_out_bin,
+                // E_out_frac) so the angular branch can sample mu
+                // correlated with E_out via `sample_inel91_mu_at`.
+                // Defaults are safe for the non-MT=91 path.
+                int mt91_e_in_bin   = 0;
+                int mt91_e_out_bin  = 0;
+                double mt91_e_out_frac = 0.0;
+                bool mt91_have_bin = false;
                 if(sel_mt==91){
                     double e_cm_ev = E * A / (A + 1.0);
                     int n_inc91 = __ldg(&PTR_I(p, P_INEL91_NUC_NINC)[hit_nuc]);
                     double e_neutron_cm;
                     if (n_inc91 > 0) {
-                        double eo_ev = sample_inel91_energy(E, &rng, p, hit_nuc);
+                        double eo_ev = sample_inel91_energy_with_mu(
+                            E, &rng, p, hit_nuc,
+                            &mt91_e_in_bin, &mt91_e_out_bin, &mt91_e_out_frac);
+                        mt91_have_bin = true;
                         // Sampled E_out is already the neutron's CM
                         // kinetic energy; clamp to physically
                         // accessible range (below CM energy of relative
@@ -2479,11 +2748,23 @@ transport_persistent(
                     rotate_direction(&dx,&dy,&dz,mu_lab,phi);
                 } else {
                     // Prefer per-level ENDF angular distribution (MT=51-91)
-                    // when the evaluation stored one. Continuum MT=91 and
-                    // "no tabulated data" paths fall back to isotropic CM.
+                    // when the evaluation stored one. For MT=91 continuum,
+                    // when the nuclide ships Law 61 (KalbachMann)
+                    // mu coupling (`P_INEL91_MU_HAS_NUC[hit_nuc] == 1`)
+                    // and we have a stashed (E_in_bin, E_out_bin,
+                    // E_out_frac) from the outgoing-energy sampler,
+                    // sample mu correlated with E_out. Otherwise fall
+                    // back to isotropic-in-CM — same precedence as the
+                    // CPU `inelastic_scatter_with_mu`.
                     double mu_cm;
                     if (n_lev > 0 && sel_mt != 91) {
                         mu_cm = sample_level_angular(E, &rng, p, lv_off + selected, hit_nuc);
+                    } else if (sel_mt == 91 && mt91_have_bin) {
+                        mu_cm = sample_inel91_mu_at(hit_nuc,
+                                                    mt91_e_in_bin,
+                                                    mt91_e_out_bin,
+                                                    mt91_e_out_frac,
+                                                    &rng, p);
                     } else {
                         mu_cm = 2.0*pcg_uniform(&rng) - 1.0;
                     }
