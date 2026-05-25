@@ -950,6 +950,22 @@ pub struct GpuBatchResult {
 
 const BLOCK_SIZE: u32 = 256;
 
+/// Singleton storage for the process-wide `GpuTransportContext`.
+///
+/// `OnceLock` lazy-initialises the `RwLock` once at first
+/// `shared()` call. The `RwLock` mediates between concurrent
+/// readers (Stage 3 + Stage 4 + Python entry points) and the
+/// occasional rebuild from the watchdog. The `Option<Arc<...>>`
+/// permits a "context dropped, not yet rebuilt" state during
+/// recovery — accessors that observe `None` either block on the
+/// rebuild signal or propagate an error per their policy.
+fn shared_cell() -> &'static std::sync::RwLock<Option<Arc<GpuTransportContext>>> {
+    static CELL: std::sync::OnceLock<
+        std::sync::RwLock<Option<Arc<GpuTransportContext>>>,
+    > = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::RwLock::new(None))
+}
+
 impl GpuTransportContext {
     /// Compile all CUDA kernels and initialize GPU context.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -1018,18 +1034,62 @@ impl GpuTransportContext {
     /// Returns `Err` only on first-call failure (no CUDA device, no
     /// driver, NVRTC compile error). Failures are *not* cached —
     /// retry-on-error works because the error path doesn't write to
-    /// the OnceLock; only a successful init seals the slot.
+    /// the inner `Option`; only a successful init seals the slot.
+    ///
+    /// Storage is `OnceLock<RwLock<Option<Arc<Self>>>>` (not a bare
+    /// `OnceLock<Arc<_>>`) so the benchmark pipeline's watchdog can
+    /// call [`force_rebuild`](Self::force_rebuild) after a
+    /// `cuDeviceReset` and replace the dead context without
+    /// restarting the process. Read cost is one `RwLock::read`
+    /// acquisition (nanoseconds), negligible vs the per-case wall.
     pub fn shared() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        static SHARED: std::sync::OnceLock<Arc<GpuTransportContext>> =
-            std::sync::OnceLock::new();
-        if let Some(arc) = SHARED.get() {
+        let cell = shared_cell();
+        // Fast path: a fresh `Arc` already lives in the slot.
+        {
+            let g = cell.read().expect("shared cell poisoned");
+            if let Some(arc) = g.as_ref() {
+                return Ok(Arc::clone(arc));
+            }
+        }
+        // Slow path: first call (or post-rebuild). Build under the
+        // write lock so we don't compile NVRTC twice when several
+        // threads race the first call. Re-check the slot under the
+        // write lock in case someone built it while we waited.
+        let mut g = cell.write().expect("shared cell poisoned");
+        if let Some(arc) = g.as_ref() {
             return Ok(Arc::clone(arc));
         }
-        let ctx = Arc::new(Self::new()?);
-        // Either we win the race and store our Arc, or someone else
-        // beat us — either way the slot now holds a valid Arc.
-        let _ = SHARED.set(Arc::clone(&ctx));
-        Ok(Arc::clone(SHARED.get().expect("OnceLock just set above")))
+        let fresh = Arc::new(Self::new()?);
+        *g = Some(Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Drop the current process-wide context and build a fresh one.
+    /// Intended for the Stage 4 watchdog: after a wedged kernel
+    /// triggers `cuDeviceReset`, all existing device handles are
+    /// invalid and the existing `Arc<GpuTransportContext>` must be
+    /// replaced before any further upload or launch.
+    ///
+    /// **Caller responsibility:** ensure no other thread is mid-call
+    /// into the old context when this runs. The watchdog parks both
+    /// executors on a barrier before invoking. Holders of stale
+    /// `Arc<Self>` clones returned by an earlier `shared()` keep
+    /// their `Arc` alive (no double-free), but operations on it
+    /// will fail because the underlying device handles are dead.
+    ///
+    /// Returns the freshly built context.
+    pub fn force_rebuild() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let cell = shared_cell();
+        {
+            let mut g = cell.write().expect("shared cell poisoned");
+            *g = None;
+        }
+        // After the drop, the per-nuclide / SAB caches inside the
+        // old context's `Arc` go away (assuming no external clones
+        // are held — see method-level note). The watchdog also
+        // issues `cuDeviceReset` from the same thread before calling
+        // `shared()` again; that's its responsibility, not ours.
+        Self::shared()
     }
 
     /// Debug: sample angular distributions at given (energy, xi) pairs.
@@ -2050,6 +2110,23 @@ impl GpuTransportContext {
         }))
     }
 
+    /// Create a fresh CUDA stream for kernel launches (Stage 4 of
+    /// the benchmark pipeline). Distinct from the context's default
+    /// stream and from any transfer stream — cross-stream ordering
+    /// must be made explicit via `CudaEvent`s. See
+    /// `docs/benchmark-pipeline-spec.md` §3.2.
+    pub fn new_compute_stream(&self) -> Result<std::sync::Arc<CudaStream>, Box<dyn std::error::Error>> {
+        Ok(self._ctx.new_stream()?)
+    }
+
+    /// Create a fresh CUDA stream for H→D copies (Stage 3 of the
+    /// benchmark pipeline). Pairs with `new_compute_stream`; uploads
+    /// on this stream are sequenced against kernel launches on the
+    /// compute stream via `CudaEvent::record` + `CudaStream::wait`.
+    pub fn new_transfer_stream(&self) -> Result<std::sync::Arc<CudaStream>, Box<dyn std::error::Error>> {
+        Ok(self._ctx.new_stream()?)
+    }
+
     /// Drop the per-context GPU per-nuclide cache and trim the async
     /// mempool. Callers that need to free GPU memory between long
     /// sweeps without dropping the whole context should call this.
@@ -2732,6 +2809,79 @@ impl GpuTransportContext {
             .expect("sab_buffer_cache poisoned");
         let total_hits: u64 = guard.entries.values().map(|(_, s)| s.hits).sum();
         (guard.entries.len(), guard.total_bytes, total_hits)
+    }
+
+    /// Estimate the device-side byte footprint of a SAB upload
+    /// *before* doing it. Used by the benchmark pipeline's Stage 3
+    /// VRAM pre-flight (see `docs/benchmark-pipeline-spec.md` §5.3.2).
+    ///
+    /// Mirrors the per-temperature accumulators in
+    /// `upload_sab_data_multi` so the estimate tracks the real upload
+    /// within a few percent. Padding bytes that ensure non-empty
+    /// flat arrays (cudarc rejects zero-sized copies) are included as
+    /// a small constant overhead.
+    ///
+    /// The estimate is intentionally an *upper* approximation —
+    /// better to refuse one borderline case than to OOM mid-upload.
+    pub fn estimate_sab_device_bytes(
+        slots: &[(
+            std::sync::Arc<crate::thermal::ThermalScatteringData>,
+            usize,
+        )],
+        n_nuc: usize,
+    ) -> usize {
+        // Per-nuclide lookup tables: slot_per_nuc + slot_count_per_nuc.
+        let mut bytes = n_nuc.max(1) * (4 + 4);
+
+        // Constant per-slot metadata footprint: slot_inc_e_off,
+        // slot_n_inc, slot_eout_table_off, slot_mu_table_off (i32 ×4)
+        // + slot_emax (f64) + slot_kt (f64) + elastic constants
+        // (~5 i32 + 2 f64).
+        const PER_SLOT_METADATA: usize =
+            4 * 4 + 8 + 8 + 5 * 4 + 2 * 8;
+
+        for (tsl, _) in slots.iter() {
+            for inel in tsl.inelastic.iter() {
+                let n_inc = inel.energy.len();
+
+                // inc_e_flat + xs_flat (f64 each).
+                bytes += n_inc * 8 * 2;
+                bytes += PER_SLOT_METADATA;
+
+                match &inel.dist {
+                    crate::thermal::InelasticDist::Continuous(c) => {
+                        // e_out + cdf_e + pdf_e (f64 each).
+                        bytes += c.e_out.len() * 8 * 3;
+                        // eout_offsets + eout_sizes (i32 each), one
+                        // entry per inc energy.
+                        bytes += n_inc * 4 * 2;
+                        // mu + cdf_mu (f64 each).
+                        bytes += c.mu.len() * 8 * 2;
+                        // mu_offsets + mu_sizes (i32 each).
+                        bytes += c.mu_offsets.len() * 4 * 2;
+                    }
+                    crate::thermal::InelasticDist::Discrete(_) => {
+                        // GPU rejects discrete (panics in
+                        // upload_sab_data_multi). Estimate a generous
+                        // size so the pre-flight gate routes the
+                        // case to CPU instead of attempting the
+                        // upload at all.
+                        bytes += n_inc * 8 * 4;
+                    }
+                }
+            }
+
+            // Elastic channel (Bragg edges + Debye-Waller factors).
+            // Sizes are small (~tens of edges per TSL); use a
+            // generous constant rather than walking the optional
+            // `elastic` field.
+            bytes += 1024;
+        }
+
+        // Cudarc-imposed minimum size for non-empty allocations.
+        // upload_sab_data_multi pushes sentinels to ~10 flat arrays
+        // when slots is empty.
+        bytes.max(1024)
     }
 
     /// Create an empty S(α,β) placeholder. `n_nuc` is needed so the
