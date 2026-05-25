@@ -255,6 +255,7 @@ mod tests {
             },
             n_elastic: 0,
             n_inelastic: 0,
+            n_inelastic_continuum: 0,
             n_capture: 0,
             e_fis_in_sum: 0.0,
             e_el_in_sum: 0.0,

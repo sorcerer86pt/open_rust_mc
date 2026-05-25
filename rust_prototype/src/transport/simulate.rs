@@ -446,6 +446,13 @@ pub struct BatchResult {
     /// Default 0 when the backend doesn't populate them.
     pub n_elastic: u64,
     pub n_inelastic: u64,
+    /// Subset of `n_inelastic` whose sampled channel was MT=91
+    /// (continuum inelastic). Used by `bin/metal_stats_diag` to
+    /// localise the Godiva residual to MT=91 isotropic-CM sampling
+    /// versus MT=51-90 discrete-level tabulated angular. Zero when
+    /// the backend doesn't classify (e.g. GPU prior to the per-MT
+    /// counter wiring).
+    pub n_inelastic_continuum: u64,
     pub n_capture: u64,
     pub e_fis_in_sum: f64,
     pub e_el_in_sum: f64,
@@ -555,6 +562,7 @@ struct ParticleResult {
     // upload path.
     n_elastic: u32,
     n_inelastic: u32,
+    n_inelastic_continuum: u32,
     n_capture: u32,
     e_fis_in_sum: f64,
     e_fis_in_sq: f64,
@@ -747,6 +755,7 @@ fn transport_particle<XS: XsProvider>(
         track_length_nu_sigf: 0.0,
         n_elastic: 0,
         n_inelastic: 0,
+        n_inelastic_continuum: 0,
         n_capture: 0,
         e_fis_in_sum: 0.0,
         e_fis_in_sq: 0.0,
@@ -1341,8 +1350,11 @@ fn dispatch_real_collision<XS: XsProvider>(
                 result.e_el_in_sum += e_pre;
                 result.e_el_in_sq += e_pre * e_pre;
             }
-            CollisionOutcome::InelasticScatter { q_value_ev } => {
+            CollisionOutcome::InelasticScatter { q_value_ev, mt } => {
                 result.n_inelastic += 1;
+                if mt == 91 {
+                    result.n_inelastic_continuum += 1;
+                }
                 result.e_inel_in_sum += e_pre;
                 result.e_inel_in_sq += e_pre * e_pre;
                 result.e_inel_out_sum += particle.energy;
@@ -1398,8 +1410,11 @@ fn dispatch_real_collision<XS: XsProvider>(
             result.e_el_in_sum += e_pre;
             result.e_el_in_sq += e_pre * e_pre;
         }
-        CollisionOutcome::InelasticScatter { q_value_ev } => {
+        CollisionOutcome::InelasticScatter { q_value_ev, mt } => {
             result.n_inelastic += 1;
+            if mt == 91 {
+                result.n_inelastic_continuum += 1;
+            }
             result.e_inel_in_sum += e_pre;
             result.e_inel_in_sq += e_pre * e_pre;
             result.e_inel_out_sum += particle.energy;
@@ -1490,6 +1505,7 @@ fn transport_particle_delta<XS: XsProvider>(
         track_length_nu_sigf: 0.0,
         n_elastic: 0,
         n_inelastic: 0,
+        n_inelastic_continuum: 0,
         n_capture: 0,
         e_fis_in_sum: 0.0,
         e_fis_in_sq: 0.0,
@@ -2050,6 +2066,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             // mirrors GPU side; see `bin/metal_stats_diag`).
             n_elastic: u64,
             n_inelastic: u64,
+            n_inelastic_continuum: u64,
             n_capture: u64,
             e_fis_in_sum: f64,
             e_fis_in_sq: f64,
@@ -2069,13 +2086,9 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             thermal_scatters: 0,
             surface_crossings: 0,
             track_length_sum: 0.0,
-            fission_sites: Vec::new(),
-            captures_by_cell: vec![0.0_f64; cells.len()],
-            photon_events: Vec::new(),
-            tallies: BatchTallies::new(&config.tallies),
-            scratch: ParticleTallies::new(&config.tallies),
             n_elastic: 0,
             n_inelastic: 0,
+            n_inelastic_continuum: 0,
             n_capture: 0,
             e_fis_in_sum: 0.0,
             e_fis_in_sq: 0.0,
@@ -2085,6 +2098,11 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             e_inel_in_sq: 0.0,
             e_inel_out_sum: 0.0,
             q_inel_sum: 0.0,
+            fission_sites: Vec::new(),
+            captures_by_cell: vec![0.0_f64; cells.len()],
+            photon_events: Vec::new(),
+            tallies: BatchTallies::new(&config.tallies),
+            scratch: ParticleTallies::new(&config.tallies),
         };
 
         let fold_one = |mut acc: WorkerAccum, (i, site): (usize, &FissionSite)| {
@@ -2152,6 +2170,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             acc.track_length_sum += pr.track_length_nu_sigf;
             acc.n_elastic += pr.n_elastic as u64;
             acc.n_inelastic += pr.n_inelastic as u64;
+            acc.n_inelastic_continuum += pr.n_inelastic_continuum as u64;
             acc.n_capture += pr.n_capture as u64;
             acc.e_fis_in_sum += pr.e_fis_in_sum;
             acc.e_fis_in_sq += pr.e_fis_in_sq;
@@ -2180,6 +2199,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             a.tallies.merge(&b.tallies);
             a.n_elastic += b.n_elastic;
             a.n_inelastic += b.n_inelastic;
+            a.n_inelastic_continuum += b.n_inelastic_continuum;
             a.n_capture += b.n_capture;
             a.e_fis_in_sum += b.e_fis_in_sum;
             a.e_fis_in_sq += b.e_fis_in_sq;
@@ -2244,6 +2264,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             // σ(E_at_reaction) comparison.
             n_elastic: final_acc.n_elastic,
             n_inelastic: final_acc.n_inelastic,
+            n_inelastic_continuum: final_acc.n_inelastic_continuum,
             n_capture: final_acc.n_capture,
             e_fis_in_sum: final_acc.e_fis_in_sum,
             e_el_in_sum: final_acc.e_el_in_sum,
