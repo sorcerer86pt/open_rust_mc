@@ -298,11 +298,55 @@ def run_scene(
     # can see exactly where in the reflector neutrons are lost.
     cell_filter = openmc.CellFilter([c for c in cells if c.fill is not None])
     tallies = openmc.Tallies()
-    for score in ["fission", "absorption", "scatter", "elastic", "(n,gamma)"]:
+    # Channel-resolved reaction rates. Includes (n,2n) / (n,3n) so the
+    # CPU↔GPU↔OpenMC diff in `metal_stats_diag` can localise the
+    # Be-reflector bias (heu-comp-inter-003 case-2/3) to a specific
+    # MT — without these the +1200 pcm signal sits in `rate_scatter`
+    # alongside MT=4 inelastic and is unidentifiable.
+    for score in [
+        "fission", "absorption", "scatter", "elastic",
+        "(n,gamma)", "(n,2n)", "(n,3n)", "total", "nu-fission",
+    ]:
         t = openmc.Tally(name=f"rate_{score}")
         t.filters = [cell_filter]
         t.scores = [score]
         tallies.append(t)
+
+    # Per-nuclide breakdown of the channels above. Same filter + same
+    # scores; adds a `NuclideFilter` so the JSON output carries one
+    # tally entry per (cell, nuclide, score). The Rust diagnostic reads
+    # `nuclides` off the tally to split, e.g., the Be-9 (n,2n) rate
+    # from the U-238 (n,2n) rate. The nuclide list is taken from the
+    # scene materials (de-duplicated) so the tally count stays bounded.
+    def _resolve_nuc(nuc_entry):
+        if "hdf5_file" in nuc_entry and nuc_entry["hdf5_file"]:
+            return hdf5_file_to_openmc_name(nuc_entry["hdf5_file"])
+        if "zaid" in nuc_entry and nuc_entry["zaid"]:
+            return zaid_to_openmc_name(int(nuc_entry["zaid"]), nuc_entry.get("label"))
+        return None
+
+    nuc_names = sorted({
+        _resolve_nuc(n)
+        for m in scene.get("materials", [])
+        for n in m.get("nuclides", [])
+        if _resolve_nuc(n) is not None
+    })
+    for score in ["fission", "absorption", "elastic", "(n,gamma)", "(n,2n)", "(n,3n)"]:
+        t = openmc.Tally(name=f"per_nuc_{score}")
+        t.filters = [cell_filter]
+        t.nuclides = nuc_names
+        t.scores = [score]
+        tallies.append(t)
+
+    # Coarse energy-resolved spectrum for spectrum-shape comparison.
+    # 7 bins span 0–20 MeV; matches `metal_stats_diag.rs` parser.
+    egroups = [0.0, 1e-1, 1e3, 1e5, 1e6, 2e6, 5e6, 2e7]
+    ebins = openmc.EnergyFilter(egroups)
+    t_e = openmc.Tally(name="rate_by_energy")
+    t_e.filters = [cell_filter, ebins]
+    t_e.scores = ["total", "fission", "absorption", "scatter"]
+    tallies.append(t_e)
+
     tallies.export_to_xml()
 
     per_seed = []
