@@ -53,13 +53,27 @@ struct PerNuclideCacheKey {
     rank: usize,
 }
 
-/// Per-nuclide cache budget = `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
-/// Same env vars as before — `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES`
-/// / `_FRACTION` — semantics shift from "one bundle's bytes" to
-/// "the union of cached per-nuclide bytes."
-const BUNDLE_CACHE_DEFAULT_FRACTION: f64 = 0.75;
+/// Bundle cache budget = `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`,
+/// shared across the per-nuclide and SAB caches (their `total_bytes`
+/// sums against the same ceiling). Same env vars as before —
+/// `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES` / `_FRACTION`.
+///
+/// 0.50 (not 0.75) because case transitions briefly carry two live
+/// `GpuNuclideData` bundles (flat-pack pointer arrays from
+/// `assemble_*_cat`) plus the particle bank plus driver overhead.
+/// 0.75 monopolised VRAM and OOM'd on the 5090 with Be S(α,β)
+/// (heu-sol-therm-020_case-4/5).
+const BUNDLE_CACHE_DEFAULT_FRACTION: f64 = 0.50;
 const BUNDLE_CACHE_FRACTION_MIN: f64 = 0.05;
 const BUNDLE_CACHE_FRACTION_MAX: f64 = 0.95;
+/// Free-VRAM fraction at which `defensive_clear_if_low_vram` issues a
+/// hard cache flush (drops both caches + trims the async pool). Below
+/// this the next upload is almost certainly going to OOM otherwise.
+const LOW_VRAM_HARD_CLEAR_FRACTION: f64 = 0.10;
+/// Free-VRAM fraction at which the same helper trims the async pool
+/// (defragments returned-but-unreleased bytes) without dropping cache
+/// entries. Cheaper, preserves cross-case sharing.
+const LOW_VRAM_TRIM_FRACTION: f64 = 0.20;
 
 /// Compiled CUDA kernels for event-based transport.
 pub struct GpuTransportContext {
@@ -83,7 +97,6 @@ pub struct GpuTransportContext {
     /// but uses an independent map + LFU adapter so eviction
     /// decisions stay localised per cache class.
     sab_buffer_cache: std::sync::Mutex<SabCache>,
-    cached_bundle_budget: std::sync::OnceLock<usize>,
     /// Cached `sm_XXY` arch string the kernels were compiled against
     /// (`gpu_recursive::device_nvrtc_arch` of the current device).
     /// Surfaced via `gpu_debug_metrics()` for observability.
@@ -988,7 +1001,6 @@ impl GpuTransportContext {
             k_transport_persistent,
             per_nuclide_cache: std::sync::Mutex::new(PerNuclideCache::new()),
             sab_buffer_cache: std::sync::Mutex::new(SabCache::new()),
-            cached_bundle_budget: std::sync::OnceLock::new(),
             nvrtc_arch: arch_stored,
         })
     }
@@ -1575,7 +1587,17 @@ impl GpuTransportContext {
             upload_one_nuclide, PerNuclideGpu,
         };
 
-        let budget = self.bundle_cache_budget_bytes();
+        // Pre-flight: if VRAM is critically low (driver-reported free
+        // bytes), drop the caches before we add ~hundreds of MB more.
+        // Pure defence; no-op when VRAM is healthy.
+        self.defensive_clear_if_low_vram();
+
+        // Budget is the per-cache effective limit (total cap minus
+        // sibling SAB occupancy) so the two caches collectively never
+        // exceed `bundle_cache_budget_bytes()`. Without this they
+        // could each reach the shared cap independently — the 5090
+        // OOM pattern on heu-sol-therm-020 case-4/5.
+        let budget = self.per_nuclide_cache_budget_bytes();
         let mut per_nucs: Vec<Arc<PerNuclideGpu>> = Vec::with_capacity(nuclides.len());
 
         for nuc in nuclides {
@@ -2064,28 +2086,133 @@ impl GpuTransportContext {
         &self.nvrtc_arch
     }
 
-    /// Resolution order: `_BYTES` env (explicit) → `_FRACTION` env ×
-    /// `total_mem` → `BUNDLE_CACHE_DEFAULT_FRACTION × total_mem`.
-    /// Fallback floor 1 GiB when `cuDeviceTotalMem` returns zero.
+    /// Total bundle-cache budget (shared by the per-nuclide and SAB
+    /// caches). Resolution order:
+    ///   1. `OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES` env — explicit cap,
+    ///      no dynamic adjustment.
+    ///   2. Otherwise: `min(fraction × total_mem, currently_cached +
+    ///      max(0, free_mem − reserved_headroom))` where
+    ///      `reserved_headroom = (1 − fraction) × total_mem`. The
+    ///      first term is the hard ceiling; the second drops the
+    ///      budget when other allocations (live `GpuNuclideData`
+    ///      bundles, particle bank, driver, concurrent processes) eat
+    ///      into free memory. Floor 1 GiB.
+    ///
+    /// Recomputed every call (no `OnceLock`) so the budget tracks the
+    /// actual VRAM landscape across a long sweep. Cost is one
+    /// `cuMemGetInfo` query (~µs) plus two short mutex acquisitions
+    /// for `cached_bytes_sum` — negligible vs the device upload it
+    /// gates.
     pub fn bundle_cache_budget_bytes(&self) -> usize {
-        *self.cached_bundle_budget.get_or_init(|| {
-            const HARD_FLOOR: usize = crate::hardware_profile::GIB;
-            if let Some(v) = std::env::var_os("OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES") {
-                if let Ok(n) = v.to_string_lossy().parse::<usize>() {
-                    return n.max(1);
-                }
+        const HARD_FLOOR: usize = crate::hardware_profile::GIB;
+        if let Some(v) = std::env::var_os("OPEN_RUST_MC_GPU_BUNDLE_CACHE_BYTES") {
+            if let Ok(n) = v.to_string_lossy().parse::<usize>() {
+                return n.max(1);
             }
-            let frac = std::env::var("OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION")
-                .ok()
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(BUNDLE_CACHE_DEFAULT_FRACTION)
-                .clamp(BUNDLE_CACHE_FRACTION_MIN, BUNDLE_CACHE_FRACTION_MAX);
-            let total = self._ctx.total_mem().unwrap_or(0);
-            if total == 0 {
-                return HARD_FLOOR;
-            }
-            ((total as f64) * frac) as usize
-        })
+        }
+        let frac = std::env::var("OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION")
+            .ok()
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(BUNDLE_CACHE_DEFAULT_FRACTION)
+            .clamp(BUNDLE_CACHE_FRACTION_MIN, BUNDLE_CACHE_FRACTION_MAX);
+        let total = self._ctx.total_mem().unwrap_or(0);
+        if total == 0 {
+            return HARD_FLOOR;
+        }
+        let hard_cap = ((total as f64) * frac) as usize;
+        let (free, _) = match self._ctx.mem_get_info() {
+            Ok(p) => p,
+            // mem_get_info failed (driver not ready, etc.) — fall
+            // back to the static hard cap; better than zeroing the
+            // budget and stalling every upload.
+            Err(_) => return hard_cap.max(HARD_FLOOR),
+        };
+        let reserve = ((total as f64) * (1.0 - frac)) as usize;
+        let cached = self.cached_bytes_sum();
+        let dynamic_cap = cached.saturating_add(free.saturating_sub(reserve));
+        hard_cap.min(dynamic_cap).max(HARD_FLOOR)
+    }
+
+    /// Sum of `total_bytes` across the per-nuclide and SAB caches.
+    /// Both caches share `bundle_cache_budget_bytes`; the per-cache
+    /// budgets (`per_nuclide_cache_budget_bytes`,
+    /// `sab_buffer_cache_budget_bytes`) subtract the sibling's
+    /// occupancy so they collectively never exceed the shared cap.
+    fn cached_bytes_sum(&self) -> usize {
+        let p = self
+            .per_nuclide_cache
+            .lock()
+            .expect("per_nuclide_cache poisoned")
+            .total_bytes;
+        let s = self
+            .sab_buffer_cache
+            .lock()
+            .expect("sab_buffer_cache poisoned")
+            .total_bytes;
+        p.saturating_add(s)
+    }
+
+    /// Effective budget for the per-nuclide cache alone. Equal to the
+    /// total bundle-cache budget minus the bytes currently held by
+    /// the SAB cache — this is what `evict_to_budget` needs to keep
+    /// both caches collectively under the shared cap. Without this,
+    /// each cache evicts only against its own bytes and the two can
+    /// together exceed 2× the cap (the 5090 OOM mode).
+    pub fn per_nuclide_cache_budget_bytes(&self) -> usize {
+        let total = self.bundle_cache_budget_bytes();
+        let sab = self
+            .sab_buffer_cache
+            .lock()
+            .expect("sab_buffer_cache poisoned")
+            .total_bytes;
+        total.saturating_sub(sab)
+    }
+
+    /// Effective budget for the SAB buffer cache alone. Mirror of
+    /// `per_nuclide_cache_budget_bytes`. See its doc for rationale.
+    pub fn sab_buffer_cache_budget_bytes(&self) -> usize {
+        let total = self.bundle_cache_budget_bytes();
+        let per = self
+            .per_nuclide_cache
+            .lock()
+            .expect("per_nuclide_cache poisoned")
+            .total_bytes;
+        total.saturating_sub(per)
+    }
+
+    /// Pre-upload safety check: query free VRAM via `cuMemGetInfo`
+    /// and take recovery action if it is critically low.
+    ///
+    /// * `free / total < LOW_VRAM_HARD_CLEAR_FRACTION` (10%) — drop
+    ///   both bundle caches and trim the async mempool. The next
+    ///   upload will pay the full H2D cost but won't OOM.
+    /// * `free / total < LOW_VRAM_TRIM_FRACTION` (20%) — trim the
+    ///   async mempool only. Bytes that `cuMemFreeAsync` parked are
+    ///   returned to the driver; cache contents are preserved so
+    ///   cross-case sharing keeps working.
+    /// * Otherwise — no-op.
+    ///
+    /// Returns `true` iff a hard clear happened (caller may log it).
+    pub fn defensive_clear_if_low_vram(&self) -> bool {
+        let (free, total) = match self._ctx.mem_get_info() {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        if total == 0 {
+            return false;
+        }
+        let frac_free = (free as f64) / (total as f64);
+        if frac_free < LOW_VRAM_HARD_CLEAR_FRACTION {
+            self.clear_nuclide_buffer_cache();
+            self.clear_sab_buffer_cache();
+            self.trim_async_mempool();
+            true
+        } else if frac_free < LOW_VRAM_TRIM_FRACTION {
+            self.trim_async_mempool();
+            false
+        } else {
+            false
+        }
     }
 
     /// `cuMemPoolTrimTo(default_pool, 0)`. `cuMemFreeAsync` parks
@@ -2480,6 +2607,23 @@ impl GpuTransportContext {
         slots: &[(Arc<crate::thermal::ThermalScatteringData>, usize)],
         n_nuc: usize,
     ) -> Result<Arc<GpuSabData>, Box<dyn std::error::Error>> {
+        // Note: no `defensive_clear_if_low_vram` here. The nuclide
+        // upload that runs just before this one already drove free
+        // VRAM into the hard-clear band (cache itself is ~1 GB of
+        // legitimate work); calling the check here would evict the
+        // nuclides we just uploaded.
+        //
+        // The right place to budget the *combined* (nuclide + SAB)
+        // case footprint is Stage 3 of the benchmark pipeline (see
+        // `BENCHMARK_PIPELINE_SPEC.md` §3) — Stage 3 has the resolved
+        // bundle ahead of time, queries `cuMemGetInfo`, and gates the
+        // pre-upload accordingly. Inline aggregation here would
+        // require either a new combined-upload API or callers
+        // pre-computing both sizes; the pipeline does that
+        // naturally. Until the pipeline lands, the SAB miss path
+        // relies on the underlying driver's OOM propagation (the
+        // case is reported ERROR rather than corrupted).
+
         // Build the cache key. Slot order matters (the device layout
         // depends on iteration order), so we preserve input order.
         let key = SabCacheKey {
@@ -2523,8 +2667,10 @@ impl GpuTransportContext {
 
         // Insert. Race-guard: another caller may have populated the
         // same key while we were uploading; if so, drop our fresh
-        // upload and clone the existing entry.
-        let budget = self.bundle_cache_budget_bytes();
+        // upload and clone the existing entry. Budget is the per-cache
+        // effective limit (shared cap minus sibling per-nuclide
+        // occupancy) — see `per_nuclide_cache_budget_bytes` doc.
+        let budget = self.sab_buffer_cache_budget_bytes();
         let mut guard = self
             .sab_buffer_cache
             .lock()
@@ -2566,6 +2712,13 @@ impl GpuTransportContext {
             .expect("sab_buffer_cache poisoned");
         guard.entries.clear();
         guard.total_bytes = 0;
+        drop(guard);
+        // Symmetric with `clear_nuclide_buffer_cache`: trim the async
+        // mempool so `cuMemFreeAsync`-parked bytes actually return to
+        // the device. Without this nvidia-smi keeps showing the
+        // high-water mark and the next upload grows VRAM instead of
+        // reusing pool bytes.
+        self.trim_async_mempool();
     }
 
     /// Diagnostic snapshot of the SAB cache:

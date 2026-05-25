@@ -157,12 +157,17 @@ pub fn log_startup_banner() {
         },
     );
     if let Some(vram) = p.gpu_vram_bytes {
+        // Default fraction must mirror `gpu_transport::BUNDLE_CACHE_DEFAULT_FRACTION`.
+        // 0.50 (not 0.75) since the budget is now dynamic — see
+        // `GpuTransportContext::bundle_cache_budget_bytes` — and case
+        // transitions briefly hold two live `GpuNuclideData` bundles
+        // plus the particle bank plus driver overhead.
         let frac = std::env::var("OPEN_RUST_MC_GPU_BUNDLE_CACHE_FRACTION")
             .ok()
             .and_then(|s| s.parse::<f64>().ok())
-            .unwrap_or(0.75);
+            .unwrap_or(0.50);
         eprintln!(
-            "│ GPU bundle cache budget: {:.1} GB ({:.0}% of {:.1} GB VRAM).",
+            "│ GPU bundle cache budget: ≤{:.1} GB ({:.0}% × {:.1} GB VRAM hard cap; dynamic via cuMemGetInfo).",
             (vram as f64 / GIB as f64) * frac,
             frac * 100.0,
             vram as f64 / GIB as f64,
