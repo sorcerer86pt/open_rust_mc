@@ -2338,6 +2338,7 @@ mod tests {
                 b_values: vec![2.0, 3.0],
                 u: 0.0,
             })),
+            mu_dist: None,
         });
 
         let per_nuc =

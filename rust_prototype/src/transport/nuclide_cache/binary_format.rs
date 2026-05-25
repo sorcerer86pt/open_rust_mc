@@ -73,7 +73,7 @@ pub const MAGIC: &[u8; 8] = b"ORM_NK01";
 ///   inner payload's first bytes (ASCII `O` from `ORM_NK01`) decode
 ///   to an invalid `NuclideKernels.elastic` discriminant, surfacing
 ///   as `DecodeError::BadDiscriminant`).
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EncodeError {
@@ -587,6 +587,7 @@ fn encode_energy_distribution<W: Write>(w: &mut W, e: &EnergyDistribution) -> io
         encode_tabular_energy_dist(w, d)?;
     }
     write_option(w, e.closed_form.as_ref(), encode_fission_energy_law)?;
+    write_option(w, e.mu_dist.as_ref(), encode_correlated_angle_energy)?;
     Ok(())
 }
 
@@ -598,11 +599,43 @@ fn decode_energy_distribution<R: Read>(r: &mut R) -> Result<EnergyDistribution, 
         distributions.push(decode_tabular_energy_dist(r)?);
     }
     let closed_form = read_option(r, decode_fission_energy_law)?;
+    let mu_dist = read_option(r, decode_correlated_angle_energy)?;
     Ok(EnergyDistribution {
         energies,
         distributions,
         closed_form,
+        mu_dist,
     })
+}
+
+fn encode_correlated_angle_energy<W: Write>(
+    w: &mut W,
+    c: &crate::hdf5_reader::CorrelatedAngleEnergy,
+) -> io::Result<()> {
+    write_u64(w, c.mu_dists.len() as u64)?;
+    for row in &c.mu_dists {
+        write_u64(w, row.len() as u64)?;
+        for t in row {
+            encode_tabular_mu_dist(w, t)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_correlated_angle_energy<R: Read>(
+    r: &mut R,
+) -> Result<crate::hdf5_reader::CorrelatedAngleEnergy, DecodeError> {
+    let n_rows = read_u64(r)? as usize;
+    let mut mu_dists = Vec::with_capacity(n_rows);
+    for _ in 0..n_rows {
+        let n_bins = read_u64(r)? as usize;
+        let mut row = Vec::with_capacity(n_bins);
+        for _ in 0..n_bins {
+            row.push(decode_tabular_mu_dist(r)?);
+        }
+        mu_dists.push(row);
+    }
+    Ok(crate::hdf5_reader::CorrelatedAngleEnergy { mu_dists })
 }
 
 fn encode_urr_tables<W: Write>(w: &mut W, u: &UrrProbabilityTables) -> io::Result<()> {
