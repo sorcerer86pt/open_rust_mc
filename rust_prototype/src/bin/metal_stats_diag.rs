@@ -68,6 +68,11 @@ struct Active {
     // Per-reaction tallies (GPU populates; CPU leaves 0).
     el_sum: u64,
     inel_sum: u64,
+    /// Subset of `inel_sum` whose sampled channel was MT=91
+    /// (continuum inelastic). Used for the engine-vs-OpenMC
+    /// MT=91 isolation diagnostic on Godiva. GPU side always
+    /// reports 0 — the CPU number is the one to read.
+    inel_cont_sum: u64,
     cap_sum: u64,
     e_fis_in: f64,
     e_el_in: f64,
@@ -99,6 +104,7 @@ impl Active {
         self.therm_sum += b.thermal_scatters as u64;
         self.el_sum += b.n_elastic;
         self.inel_sum += b.n_inelastic;
+        self.inel_cont_sum += b.n_inelastic_continuum;
         self.cap_sum += b.n_capture;
         self.e_fis_in += b.e_fis_in_sum;
         self.e_el_in += b.e_el_in_sum;
@@ -142,6 +148,18 @@ impl Active {
             println!("  ─ Per-reaction breakdown (events per source neutron) ─");
             println!("    elastic   / src : {:.4}    ({} events)", el / n_source, self.el_sum);
             println!("    inelastic / src : {:.4}    ({} events)", inel / n_source, self.inel_sum);
+            if self.inel_cont_sum > 0 {
+                let cont = self.inel_cont_sum as f64;
+                let disc = inel - cont;
+                println!(
+                    "      MT=91 (cont)  : {:.4}    ({} events, {:.1}% of inel)",
+                    cont / n_source, self.inel_cont_sum, 100.0 * cont / inel,
+                );
+                println!(
+                    "      MT=51-90 (dis): {:.4}    ({} events, {:.1}% of inel)",
+                    disc / n_source, self.inel_sum - self.inel_cont_sum, 100.0 * disc / inel,
+                );
+            }
             println!("    fission   / src : {:.4}    ({} events)", fis / n_source, self.fis_sum);
             println!("    capture   / src : {:.4}    ({} events)", cap / n_source, self.cap_sum);
             let sum = el + inel + fis + cap;
@@ -245,6 +263,12 @@ fn main() {
     let mut arg_i: u32 = 20;
     let mut arg_p: u32 = 5_000;
     let mut arg_s: u64 = 42;
+    // SVD rank for XS reconstruction. 15 = iteration default (~200 pcm
+    // residual on Godiva-class fast metal — the "memory vs precision"
+    // figure in the paper documents the curve). Bump to 30+ for
+    // reference-grade comparisons against OpenMC / MCNP where the
+    // engine-vs-data-compression bias must be sub-MC-noise.
+    let mut arg_r: usize = 15;
     for a in std::env::args().skip(2) {
         if let Some(v) = a.strip_prefix("b=") {
             arg_b = v.parse().unwrap_or(arg_b);
@@ -254,15 +278,17 @@ fn main() {
             arg_p = v.parse().unwrap_or(arg_p);
         } else if let Some(v) = a.strip_prefix("s=") {
             arg_s = v.parse().unwrap_or(arg_s);
+        } else if let Some(v) = a.strip_prefix("r=") {
+            arg_r = v.parse().unwrap_or(arg_r);
         }
     }
-    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s}");
+    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s} rank={arg_r}");
     let text = std::fs::read_to_string(&case_file).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
     let loaded = scene_io::load_scene_from_json(&value["scene"].to_string()).unwrap();
     let lib = NuclideLibrary::from_data_dir(&data_dir());
-    let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, 15).unwrap();
+    let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, arg_r).unwrap();
 
     let mut cfg = SimConfig::default();
     cfg.batches = arg_b;
@@ -311,7 +337,7 @@ fn main() {
 
         let gpu = GpuTransportContext::new().expect("GPU init");
         let nuc_data = gpu
-            .upload_nuclide_data(&resolved.provider.nuclides, 15)
+            .upload_nuclide_data(&resolved.provider.nuclides, arg_r)
             .expect("upload nuclides");
         let q_n2ns: Vec<f64> = resolved.provider.nuclides.iter().map(|n| n.q_n2n).collect();
         let q_n3ns: Vec<f64> = resolved.provider.nuclides.iter().map(|n| n.q_n3n).collect();
@@ -426,12 +452,14 @@ fn main() {
             // reaction; we sum across nuclides for the macro rate.
             println!("  ─ Per-reaction OpenMC (rate × N_source equiv) ─");
             for (label, tname) in [
-                ("elastic   / src ", "rate_elastic"),
-                ("inelastic / src ", "rate_scatter"),  // scatter score ≈ MT≠2
-                ("(n,γ)     / src ", "rate_(n,gamma)"),
-                ("(n,2n)    / src ", "rate_(n,2n)"),
-                ("(n,3n)    / src ", "rate_(n,3n)"),
-                ("absorpt   / src ", "rate_absorption"),
+                ("elastic     / src ", "rate_elastic"),
+                ("inelastic   / src ", "rate_scatter"),  // scatter score ≈ MT≠2
+                ("MT=4 (inel) / src ", "rate_MT4"),
+                ("MT=91 (cont)/ src ", "rate_MT91"),
+                ("(n,γ)       / src ", "rate_(n,gamma)"),
+                ("(n,2n)      / src ", "rate_(n,2n)"),
+                ("(n,3n)      / src ", "rate_(n,3n)"),
+                ("absorpt     / src ", "rate_absorption"),
             ] {
                 if let Some(t) = v["tallies_seed_mean"].get(tname) {
                     if let Some(arr) = t["mean"].as_array() {

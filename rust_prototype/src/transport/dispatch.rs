@@ -440,6 +440,11 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 // loss moment for the CPU↔GPU↔OpenMC 3-way.
                 n_elastic: result.n_elastic,
                 n_inelastic: result.n_inelastic,
+                // GPU doesn't classify MT=91 vs discrete (would
+                // require per-MT atomicAdd in gr_inelastic_event).
+                // Reports total inelastic only; the MT=91 diagnostic
+                // lives on the CPU side for now.
+                n_inelastic_continuum: 0,
                 n_capture: result.n_capture,
                 e_fis_in_sum: result.e_fis_in_sum,
                 e_el_in_sum: result.e_el_in_sum,
