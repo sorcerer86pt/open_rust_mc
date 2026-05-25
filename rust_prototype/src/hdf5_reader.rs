@@ -2621,21 +2621,38 @@ fn read_reaction_edist_from_file(
     // has no prompt/delayed distinction; no filtering needed.
     let product = rxn.group("product_0").ok()?;
     let dist0 = product.group("distribution_0").ok()?;
-    // Two layouts in OpenMC HDF5:
+    // Three layouts in OpenMC HDF5:
     //   a) nested (fission, reaction_018/product_0/distribution_0/energy
     //      is a group with `energy` + `distribution` datasets).
-    //   b) flat (non-fission, MT=91/16/17: distribution_0 directly
-    //      contains `energy` and `distribution` datasets).
+    //   b) flat-uncorrelated (some MT=16/17/91 ContinuousTabular evaluations:
+    //      distribution_0 directly contains `energy` + `distribution`).
+    //   c) flat-correlated (Law 61 / KalbachMann — e.g. U-235/U-238/U-234
+    //      MT=91 in ENDF/B-VIII.x: distribution_0 has `energy`, `energy_out`,
+    //      `mu` datasets. Rows 0..3 of `energy_out` carry the marginal
+    //      f(E_in → E_out) = (E_out, PDF, CDF); rows 3..5 are mu-coupling
+    //      auxiliaries which we ignore here (continuum scattering is
+    //      isotropised in CM by `sample_inelastic_level`).
     // `hdf5_pure::Group::group("X")` returns Ok even when X is a
     // dataset, so probe via `datasets()` to pick the right branch.
     let d0_datasets: Vec<String> = dist0.datasets().unwrap_or_default();
-    let is_flat = d0_datasets.iter().any(|n| n == "energy")
-        && d0_datasets.iter().any(|n| n == "distribution");
-    let (energies, dist_ds) = if is_flat {
+    let has_energy_ds = d0_datasets.iter().any(|n| n == "energy");
+    let has_distribution_ds = d0_datasets.iter().any(|n| n == "distribution");
+    let has_energy_out_ds = d0_datasets.iter().any(|n| n == "energy_out");
+    let (energies, dist_ds) = if has_energy_ds && has_distribution_ds {
+        // Layout (b): flat uncorrelated.
         let energies = dist0.dataset("energy").ok()?.read_f64().ok()?;
         let dist_ds = dist0.dataset("distribution").ok()?;
         (energies, dist_ds)
+    } else if has_energy_ds && has_energy_out_ds {
+        // Layout (c): flat correlated (Law 61). The `energy` dataset is
+        // the incident-energy grid; `energy_out` holds the marginal
+        // outgoing-energy distribution in rows 0..3 plus mu-coupling
+        // rows 3..5.
+        let energies = dist0.dataset("energy").ok()?.read_f64().ok()?;
+        let dist_ds = dist0.dataset("energy_out").ok()?;
+        (energies, dist_ds)
     } else {
+        // Layout (a): nested (fission MT=18).
         let edist_grp = dist0.group("energy").ok()?;
         let energies = edist_grp.dataset("energy").ok()?.read_f64().ok()?;
         let dist_ds = edist_grp.dataset("distribution").ok()?;

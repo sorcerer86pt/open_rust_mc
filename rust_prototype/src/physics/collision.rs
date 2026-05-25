@@ -118,7 +118,12 @@ pub enum CollisionOutcome {
     /// carries away as a γ cascade). Callers that want to emit the
     /// de-excitation γ bank a `PhotonSourceEvent` with
     /// `energy = q_value_ev.abs()` at the collision site.
-    InelasticScatter { q_value_ev: f64 },
+    /// `mt` distinguishes the discrete-level cluster (MT=51-90) from
+    /// the continuum branch (MT=91) for per-channel tallying — the
+    /// engine's CPU-vs-GPU-vs-OpenMC diagnostic uses this to localise
+    /// the residual Godiva bias. `4` is the synthesized MT=4 fallback
+    /// used when no per-level data is loaded.
+    InelasticScatter { q_value_ev: f64, mt: u32 },
     /// Particle absorbed (capture or other absorption).
     Absorption,
     /// Particle caused fission — absorbed, fission sites banked for
@@ -205,8 +210,24 @@ pub fn process_collision(
         );
         particle.energy = new_energy;
         particle.dir = new_dir;
+        // MT routing: discrete level i → levels[i].mt (typically
+        // 51..=90); None → MT=91 if has_continuum else MT=4 fallback.
+        let mt = match level_idx {
+            Some(i) => inelastic_data
+                .and_then(|d| d.levels.get(i))
+                .map(|l| l.mt)
+                .unwrap_or(4),
+            None => {
+                if inelastic_data.map(|d| d.has_continuum).unwrap_or(false) {
+                    91
+                } else {
+                    4
+                }
+            }
+        };
         return CollisionOutcome::InelasticScatter {
             q_value_ev: q_value,
+            mt,
         };
     }
 
@@ -340,6 +361,7 @@ pub fn process_collision(
         particle.dir = crate::geometry::Vec3::new(u, v, w);
         return CollisionOutcome::InelasticScatter {
             q_value_ev: cp_edists.q_n_nalpha,
+            mt: 22,
         };
     }
 
@@ -382,6 +404,7 @@ pub fn process_collision(
         particle.dir = crate::geometry::Vec3::new(u, v, w);
         return CollisionOutcome::InelasticScatter {
             q_value_ev: cp_edists.q_n_np,
+            mt: 28,
         };
     }
 
@@ -504,8 +527,22 @@ pub fn process_scatter_only(
         );
         particle.energy = new_energy;
         particle.dir = new_dir;
+        let mt = match level_idx {
+            Some(i) => inelastic_data
+                .and_then(|d| d.levels.get(i))
+                .map(|l| l.mt)
+                .unwrap_or(4),
+            None => {
+                if inelastic_data.map(|d| d.has_continuum).unwrap_or(false) {
+                    91
+                } else {
+                    4
+                }
+            }
+        };
         return CollisionOutcome::InelasticScatter {
             q_value_ev: q_value,
+            mt,
         };
     }
 
@@ -606,22 +643,36 @@ fn sample_inelastic_level(
             if level.mt == 91 && data.has_continuum {
                 // Continuum inelastic. Preferred path: sample the outgoing
                 // energy directly from the ENDF MT=91 tabulated
-                // distribution (center_of_mass frame, eV). Fall back to
-                // an evaporation approximation with a ~A/8 MeV^-1 level-
-                // density parameter when the distribution isn't
-                // available.
-                let e_cm_mev = energy * awr / ((awr + 1.0) * 1.0e6);
-                let e_out_mev = if let Some(dist) = continuum_edist {
+                // distribution (center_of_mass frame, eV). The sampled
+                // E_out IS the neutron's CM kinetic energy (OpenMC's
+                // `center_of_mass=1` convention for Law 4 / Law 61
+                // products) — the recoil nucleus's share is implicit in
+                // the tabulation. Fall back to an evaporation
+                // approximation with an A/8 MeV^-1 level-density
+                // parameter when the distribution isn't available.
+                let e_cm = energy * awr / (awr + 1.0); // CM kinetic energy of relative motion (eV)
+                let e_neutron_cm = if let Some(dist) = continuum_edist {
+                    // Sampled E_out is already the neutron's CM kinetic
+                    // energy. Clamp to physically accessible range
+                    // (below the CM energy of relative motion).
                     let e_out_ev = dist.sample(energy, rng);
-                    (e_out_ev / 1.0e6).min(e_cm_mev * 0.99).max(1e-5)
+                    e_out_ev.min(e_cm * 0.99).max(1e-5)
                 } else {
+                    let e_cm_mev = e_cm / 1.0e6;
                     let a_param = awr / 8.0;
                     let e_excitation = e_cm_mev.max(0.1);
                     let temp_mev = (e_excitation / a_param).sqrt();
                     let e_out_mev = -temp_mev * (rng.uniform() * rng.uniform()).ln();
-                    e_out_mev.min(e_cm_mev * 0.9)
+                    e_out_mev.min(e_cm_mev * 0.9).max(1e-11) * 1.0e6
                 };
-                let q_eff = -(e_cm_mev - e_out_mev) * 1.0e6;
+                // `inelastic_scatter` treats `q_value` via the two-body
+                // partition: e_cm_out = e_cm + q, then neutron's share is
+                // e_cm_out * A/(A+1). For MT=91 we want the neutron's CM
+                // energy to be exactly `e_neutron_cm`; invert the
+                // partition to derive an equivalent q-value.
+                //   e_cm_out * A/(A+1) = e_neutron_cm
+                //   q_eff = e_cm_out - e_cm = e_neutron_cm * (A+1)/A − e_cm
+                let q_eff = e_neutron_cm * (awr + 1.0) / awr - e_cm;
                 // Continuum: no discrete angular distribution — isotropic.
                 return (q_eff, None);
             }
