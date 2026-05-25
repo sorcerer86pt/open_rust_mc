@@ -27,8 +27,9 @@
 //      gr_multi_event
 //
 // All device helpers are reused from transport.cu / geom_recursive.cu
-// / transport_recursive.cu (concatenated by
-// gpu_recursive::assemble_kernel_source).
+// (concatenated by gpu_recursive::assemble_kernel_source). The
+// `tr_effective_material` helper used to live in the now-deleted
+// transport_recursive.cu and is defined locally below.
 // ═══════════════════════════════════════════════════════════════════════
 
 #ifndef TRANSPORT_EVENT_BASED_CU
@@ -172,6 +173,41 @@ __device__ __forceinline__ GrGeometry eb_make_geom(
     g.n_hex_lattices = n_hex_lattices;
     g.evals = evals_per_thread;
     return g;
+}
+
+// Effective material at the deepest stack frame, applying RectLattice
+// material overrides if present. Consumed by `gr_trace_and_sample`
+// below to resolve the material for the cell each particle entered.
+__device__ int tr_effective_material(
+    const GrGeometry* g, const GrCoord* stack, int depth,
+    const int* lat_override_off, const int* lat_override_count,
+    const int* override_lat_idx, const int* override_cell_idx,
+    const int* override_mat, int n_lattices)
+{
+    if (depth <= 0) return -1;
+    const GrCoord* d = &stack[depth - 1];
+    int cell = d->cell_idx;
+
+    if (d->has_lattice && d->lattice_id < n_lattices) {
+        int lid = d->lattice_id;
+        int off = lat_override_off[lid];
+        if (off >= 0) {
+            int cnt = lat_override_count[lid];
+            const int* sh = g->lat_shape + lid * 3;
+            int lin = d->lat_iz * sh[0] * sh[1] + d->lat_iy * sh[0] + d->lat_ix;
+            for (int i = 0; i < cnt; ++i) {
+                if (override_lat_idx[off + i] == lin
+                    && override_cell_idx[off + i] == cell) {
+                    return override_mat[off + i];
+                }
+            }
+        }
+    }
+
+    int ft = g->cell_fill_type[cell];
+    int fd = g->cell_fill_data[cell];
+    if (ft == GR_FILL_MATERIAL) return fd;
+    return -1;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

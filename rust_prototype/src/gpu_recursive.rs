@@ -375,7 +375,6 @@ pub struct GpuRecursiveContext {
     pub k_trace_step_batch: CudaFunction,
     pub k_multi_step_walk: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
-    pub k_transport_recursive: CudaFunction,
     // Event-based pipeline kernels (Tramm et al., PHYSOR 2022 —
     // "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
     // Particle Transport Code"; original formulation: Brown & Martin,
@@ -441,7 +440,6 @@ const RECURSIVE_DEVICE: &str = include_str!("../gpu/cuda/geom_recursive.cu");
 const RECURSIVE_KERNELS: &str = include_str!("../gpu/cuda/geom_recursive_kernels.cu");
 const CONST_XS_KERNEL: &str = include_str!("../gpu/cuda/transport_recursive_const.cu");
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
-const TRANSPORT_RECURSIVE: &str = include_str!("../gpu/cuda/transport_recursive.cu");
 const TRANSPORT_EVENT_BASED: &str = include_str!("../gpu/cuda/transport_event_based.cu");
 
 /// Event-based reaction class count — mirrors `EV_TYPE_COUNT` in
@@ -471,11 +469,10 @@ fn assemble_kernel_source() -> String {
     // come first, then the recursive geometry primitives, then the
     // kernels that consume both.
     format!(
-        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}\n{}",
+        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}",
         strip(TRANSPORT_KERNELS),
         strip(RECURSIVE_KERNELS),
         strip(CONST_XS_KERNEL),
-        strip(TRANSPORT_RECURSIVE),
         strip(TRANSPORT_EVENT_BASED),
     )
 }
@@ -553,9 +550,6 @@ impl GpuRecursiveContext {
         let k_const_xs_transport = module
             .load_function("const_xs_transport_persistent")
             .map_err(|e| format!("kernel load (const_xs): {e}"))?;
-        let k_transport_recursive = module
-            .load_function("transport_recursive_persistent")
-            .map_err(|e| format!("kernel load (transport_recursive): {e}"))?;
         // Event-based pipeline.
         let k_eb_init_stacks = module
             .load_function("gr_init_stacks")
@@ -741,7 +735,6 @@ impl GpuRecursiveContext {
             k_trace_step_batch,
             k_multi_step_walk,
             k_const_xs_transport,
-            k_transport_recursive,
             k_eb_init_stacks,
             k_eb_trace_and_sample,
             k_eb_scan_offsets,
@@ -1505,7 +1498,7 @@ impl GpuRecursiveContext {
     }
 }
 
-/// Result of one batch through `transport_recursive_persistent`.
+/// Result of one batch through the event-based recursive transport pipeline.
 #[derive(Debug, Clone)]
 pub struct RecursiveTransportBatch {
     /// (x, y, z, energy) for each banked fission / (n,2n) / (n,3n) site.

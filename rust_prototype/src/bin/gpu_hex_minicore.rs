@@ -2,7 +2,7 @@
 //! Hex-lattice mini-core eigenvalue on GPU.
 //!
 //! Mirrors `hex_minicore` (same nuclides, same materials, same hex
-//! geometry) but drives `transport_recursive_persistent` via the
+//! geometry) but drives the event-based recursive transport pipeline via the
 //! dispatch `CudaRunner`. The k_inf result is directly comparable to
 //! the CPU `hex_minicore` baseline — agreement within MC noise is
 //! the validation that GPU hex transport works end-to-end.

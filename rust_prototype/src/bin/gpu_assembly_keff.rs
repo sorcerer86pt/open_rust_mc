@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! 17×17 PWR fuel assembly k_inf on GPU — task #22 stage 4.
 //!
-//! Drives `transport_recursive_persistent` through a full source
+//! Drives the event-based recursive transport pipeline through a full source
 //! iteration (inactive + active batches with fission-bank propagation)
 //! on the depth-3 Westinghouse-pattern assembly geometry from
 //! `pwr_assembly`. Reports k_inf with active-batch mean ± std.

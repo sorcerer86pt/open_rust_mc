@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //! GPU recursive transport with real XS — smoke + parity test (task #22, stage 3b).
 //!
-//! Runs `transport_recursive_persistent` on a recursive Godiva geometry
+//! Runs the event-based recursive transport pipeline on a Godiva geometry
 //! (single-sphere universe) and compares aggregate counts against the
 //! existing `transport_persistent` kernel running on the *hardcoded*
 //! Godiva path. Both consume the same SVD/Pointwise/WMP/URR/SAB device
@@ -174,7 +174,7 @@ mod cuda_main {
         );
 
         // ── Build recursive geometry + recursive context ──
-        println!("\n── Recursive: transport_recursive_persistent ──");
+        println!("\n── Recursive: event-based pipeline ──");
         let geom = build_recursive_godiva();
         let rec = GpuRecursiveContext::build(&geom, n).expect("GpuRecursiveContext::build");
 
