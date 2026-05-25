@@ -450,14 +450,52 @@ impl NuclideKernels {
     }
 
     /// Lookup cross-sections for each discrete level at the given energy.
+    ///
+    /// Uses log-log interpolation between grid points (via
+    /// `ReactionKernel::reconstruct_interp`) so the per-level σ values
+    /// used to **sample** which level fires match the σ amplitudes used
+    /// in the rest of the transport hot path (`SvdXsProvider::lookup`
+    /// also uses `reconstruct_interp`). The non-interpolating
+    /// `ReactionKernel::lookup` returns σ at the nearest grid point ≤ E,
+    /// which on a sparse union grid skews per-level ratios at incident
+    /// energies between grid points — measured as a +1.9 absolute-pp
+    /// shift in MT=91 / MT=4 branching on U-235 Godiva, mapping to
+    /// roughly +180 pcm of k_eff bias.
     pub fn discrete_level_xs(&self, energy: f64) -> Vec<f64> {
+        // Use any level kernel's grid for the (idx, log_frac) search —
+        // every discrete level in the same nuclide shares the union
+        // grid built by the loader. If no level has a kernel, return
+        // zeros via the fast path.
+        let any_kernel = self
+            .discrete_levels
+            .iter()
+            .find_map(|lvl| lvl.kernel.as_ref());
+        let (idx, log_frac) = match any_kernel {
+            Some(k) => {
+                let idx = k.energy_index(energy);
+                let grid = k.energies();
+                let frac = if idx + 1 < grid.len() && grid[idx] > 0.0 && grid[idx + 1] > grid[idx] {
+                    let log_e = energy.ln();
+                    let log_lo = grid[idx].ln();
+                    let log_hi = grid[idx + 1].ln();
+                    ((log_e - log_lo) / (log_hi - log_lo)).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                (idx, frac)
+            }
+            None => return vec![0.0; self.discrete_levels.len()],
+        };
+
         self.discrete_levels
             .iter()
             .map(|lvl| {
                 if energy < lvl.info.threshold {
                     0.0
                 } else {
-                    lvl.kernel.as_ref().map_or(0.0, |k| k.lookup(energy))
+                    lvl.kernel
+                        .as_ref()
+                        .map_or(0.0, |k| k.reconstruct_interp(idx, log_frac).max(0.0))
                 }
             })
             .collect()
@@ -1499,10 +1537,21 @@ pub fn load_nuclide_with_policy(
     let mut discrete_levels: Vec<DiscreteLevel> = Vec::with_capacity(n_levels);
     let mut discrete_level_angles: Vec<Option<AngularDistribution>> = Vec::with_capacity(n_levels);
     for info in level_infos {
-        // Must match top-level svd_rank so the GPU kernel can use a single
-        // rank value for basis stride (P_RANK). Using a different per-level
-        // rank causes the GPU to read garbage data from wrong basis offsets.
-        let kernel = build_kernel_from_reader(&reader, info.mt, svd_rank, temp_idx, &shared_grid);
+        // Non-table channels MUST match top-level svd_rank so the GPU
+        // kernel can use a single rank value for basis stride (P_RANK).
+        // Using a different per-level rank causes the GPU to read garbage
+        // data from wrong basis offsets. `build_kernel_with_policy` falls
+        // through to `policy.rank_for(mt) == policy.default == svd_rank`
+        // whenever no per-MT override is set (the default path), so the
+        // invariant is preserved.
+        //
+        // `policy.table_mts` is also honoured here so that diagnostics
+        // and library users can route specific discrete-level MTs (e.g.
+        // MT=91 continuum) to `ReactionKernel::Table`. GPU caveat: the
+        // device upload (`gpu_transport.rs::level_basis`) currently
+        // assumes every level kernel is `ReactionKernel::Svd`, so the
+        // table override only takes effect on CPU runs.
+        let kernel = build_kernel_with_policy(&reader, policy, info.mt, temp_idx, &shared_grid);
         let angle = reader.angular_distribution(info.mt);
         discrete_level_angles.push(angle);
         discrete_levels.push(DiscreteLevel { info, kernel });
