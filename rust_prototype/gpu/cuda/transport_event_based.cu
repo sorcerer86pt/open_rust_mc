@@ -1012,7 +1012,25 @@ extern "C" __global__ void gr_inelastic_event(
         double lxs_sum = 0.0;
         int g_off = __ldg(&PTR_I(p, P_GRID_OFFSETS)[hit_nuc]);
         int n_e   = __ldg(&PTR_I(p, P_N_ENERGIES)[hit_nuc]);
-        int e_idx = energy_index(&PTR_D(p, P_ENERGY_GRIDS)[g_off], n_e, E);
+        const double* grid_l = &PTR_D(p, P_ENERGY_GRIDS)[g_off];
+        int e_idx = energy_index(grid_l, n_e, E);
+        // Log-log interp fraction — mirrors CPU
+        // `NuclideKernels::discrete_level_xs` fix (commit 77a5b28).
+        // The per-level σ values used to sample which level fires must
+        // match the σ amplitudes built with `svd_reconstruct_interp` in
+        // `eval_nuclide_macro_xs`. Bare grid-point lookups bias the
+        // MT=91 / MT=51..90 branching on rising vs falling ramps —
+        // ~1.9 abs-pp on Godiva, ~180 pcm of k_eff.
+        double log_frac_l = 0.0;
+        if (e_idx + 1 < n_e && grid_l[e_idx] > 0.0) {
+            double log_e  = log(E);
+            double log_lo = log(grid_l[e_idx]);
+            double log_hi = log(grid_l[e_idx + 1]);
+            if (log_hi > log_lo)
+                log_frac_l = (log_e - log_lo) / (log_hi - log_lo);
+            if (log_frac_l < 0.0) log_frac_l = 0.0;
+            if (log_frac_l > 1.0) log_frac_l = 1.0;
+        }
         int lev_cap = n_lev < LEGACY_LEV_CAP ? n_lev : LEGACY_LEV_CAP;
         const double* nuc_lvl_basis =
             (const double*) __ldg(&PTR_U64(p, P_LEVEL_BASIS_PTRS)[hit_nuc]);
@@ -1023,10 +1041,10 @@ extern "C" __global__ void gr_inelastic_event(
             int gl = lv_off + l;
             if (E >= __ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                 && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) {
-                lxs_sum += svd_reconstruct(
+                lxs_sum += svd_reconstruct_interp(
                     &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
                     &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
-                    e_idx, rank);
+                    e_idx, n_e, rank, log_frac_l);
             }
         }
         if (lxs_sum > 0.0) {
@@ -1039,10 +1057,10 @@ extern "C" __global__ void gr_inelastic_event(
                 double lxs = 0.0;
                 if (E >= __ldg(&PTR_D(p, P_LEVEL_THR)[gl])
                     && __ldg(&PTR_I(p, P_LEVEL_HAS_K)[gl])) {
-                    lxs = svd_reconstruct(
+                    lxs = svd_reconstruct_interp(
                         &nuc_lvl_basis[__ldg(&PTR_I(p, P_LEVEL_BLOCAL_OFF)[gl])],
                         &nuc_lvl_coeffs[__ldg(&PTR_I(p, P_LEVEL_CLOCAL_OFF)[gl])],
-                        e_idx, rank);
+                        e_idx, n_e, rank, log_frac_l);
                 }
                 run += lxs;
                 if (xi_l < run) { selected = l; break; }
