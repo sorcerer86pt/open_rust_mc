@@ -28,8 +28,8 @@ impl RunState {
             Verdict::Error => self.errors += 1,
         }
         if r.error.is_none() {
-            let delta_pcm = (r.k_calc - r.spec.k_ref) * 1e5;
-            self.deltas.push((r.case_id.clone(), delta_pcm));
+            let delta_pcm = (r.k_calc - r.summary.k_ref) * 1e5;
+            self.deltas.push((r.summary.case_id.clone(), delta_pcm));
         }
         self.results.push(r);
     }

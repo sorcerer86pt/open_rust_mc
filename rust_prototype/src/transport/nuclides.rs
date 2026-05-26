@@ -1265,7 +1265,14 @@ pub enum NuclideLibraryError {
 pub struct NuclideLibrary {
     data_dir: PathBuf,
     by_zaid: HashMap<u32, &'static CatalogEntry>,
-    cache: std::cell::RefCell<HashMap<u32, NuclideMeta>>,
+    /// Per-ZAID metadata memo. Migrated from `RefCell` to `Mutex` so
+    /// the benchmark pipeline can share `Arc<NuclideLibrary>` across
+    /// threads (Stage 3 resolver is single-threaded today, but the
+    /// `Arc` is held by every stage thread for argument-passing
+    /// uniformity and needs `Sync`). Contention is negligible — every
+    /// case hit is L1 cache (~tens of ns) and misses do real HDF5 I/O
+    /// dwarfing the lock.
+    cache: std::sync::Mutex<HashMap<u32, NuclideMeta>>,
 }
 
 #[derive(Clone)]
@@ -1283,7 +1290,7 @@ impl NuclideLibrary {
         Self {
             data_dir: data_dir.into(),
             by_zaid,
-            cache: std::cell::RefCell::new(HashMap::new()),
+            cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -1368,7 +1375,12 @@ impl NuclideLibrary {
     }
 
     fn load_or_get_meta(&self, zaid: u32, path: &Path) -> Result<NuclideMeta, NuclideLibraryError> {
-        if let Some(m) = self.cache.borrow().get(&zaid) {
+        if let Some(m) = self
+            .cache
+            .lock()
+            .expect("nuclide library cache poisoned")
+            .get(&zaid)
+        {
             return Ok(m.clone());
         }
         let reader = hdf5_reader::NuclideFileReader::open(path)
@@ -1383,7 +1395,10 @@ impl NuclideLibrary {
             awr,
             temperatures_k,
         };
-        self.cache.borrow_mut().insert(zaid, meta.clone());
+        self.cache
+            .lock()
+            .expect("nuclide library cache poisoned")
+            .insert(zaid, meta.clone());
         Ok(meta)
     }
 }

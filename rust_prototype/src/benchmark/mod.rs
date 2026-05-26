@@ -17,6 +17,7 @@
 
 pub mod case_bundle;
 pub mod case_loader;
+pub mod data_loader;
 pub mod executor;
 pub mod finalizer;
 pub mod pipeline;

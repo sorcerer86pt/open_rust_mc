@@ -1,5 +1,24 @@
 # SPDX-License-Identifier: MIT
-"""Sweep every ICSBEP benchmark JSON in `bench/icsbep/`.
+"""**DEPRECATED** — prefer `bin/benchmark_runner` (the in-process,
+heterogeneous CPU/GPU pipeline). See
+`docs/benchmark-pipeline-spec.md` Phase 5.
+
+This Python sweep stays around as a back-compat entry point for
+single-machine, single-runner sweeps and for interactive use from
+Jupyter. It calls `open_rust_mc.run_icsbep_case` per JSON without the
+benefit of Stage 3/4 stream overlap, the §5.4.0 router, the watchdog
+recovery, or the JSONL telemetry the new runner provides.
+
+Production sweeps should use:
+    cargo run --release --features cuda --bin benchmark_runner -- \\
+        --bench-dir bench/icsbep --runner auto \\
+        --csv outputs/sweep.csv --telemetry outputs/sweep.jsonl
+
+The benchmark_runner accepts every flag this script does and adds
+in-process parallelism, GPU bundle pre-upload, and per-case watchdog
+recovery. CSV output format is identical.
+
+---
 
 Runs each `*.json` through `run_icsbep_case`, optionally averaged over
 N seeds. Per-case settings are taken from the JSON's
