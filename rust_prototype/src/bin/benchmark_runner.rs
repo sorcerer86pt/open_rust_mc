@@ -9,7 +9,7 @@
 //!
 //! See `docs/benchmark-pipeline-spec.md` for the architecture.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -20,6 +20,7 @@ use open_rust_mc::benchmark::{
     run_args::{RunArgs, RunnerSelection},
     run_context::RunContext,
 };
+use open_rust_mc::data_paths;
 use open_rust_mc::hardware_profile;
 use open_rust_mc::transport::nuclide_cache;
 use open_rust_mc::transport::nuclides::NuclideLibrary;
@@ -54,11 +55,16 @@ struct Cli {
     #[arg(long, default_value = "bench/icsbep")]
     bench_dir: PathBuf,
 
-    /// Root directory of the OpenMC HDF5 nuclear-data distribution.
-    /// Defaults to ENDF/B-VIII.1 under the workspace `data/` tree;
-    /// override for alternate libraries.
-    #[arg(long, default_value = "data/endfb-viii.1-hdf5/neutron")]
-    data_dir: PathBuf,
+    /// OpenMC HDF5 nuclear-data directory. Accepts any of:
+    ///   * a neutron directory (`.../endfb-viii.1-hdf5/neutron`)
+    ///   * a library root (`.../endfb-viii.1-hdf5`) — the binary
+    ///     auto-appends `neutron/`
+    ///   * a workspace root containing `data/<lib>/neutron` (probed
+    ///     in priority order VIII.1 → VIII.0 → VII.1)
+    /// When omitted, walks up from the current working directory
+    /// looking for `data/<lib>/neutron`.
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
 
     /// Substring filter applied to case file stem (no `.json`).
     #[arg(long)]
@@ -137,11 +143,62 @@ struct Cli {
     sequential: bool,
 }
 
+/// Heuristic: a neutron directory contains the canonical
+/// `<Symbol><Mass>.h5` files (`H1.h5`, `U235.h5`). Probe with `H1.h5`
+/// since every ENDF/B HDF5 distribution ships it.
+fn looks_like_neutron_dir(path: &Path) -> bool {
+    path.join("H1.h5").is_file() || path.join("U235.h5").is_file()
+}
+
+/// Resolve `--data-dir` into the absolute path of a neutron directory.
+///
+/// Accepts:
+///   * `None` — discover via [`data_paths::discover_neutron_dir`]
+///     from the current working directory.
+///   * `Some(p)` where `p` is itself a neutron directory.
+///   * `Some(p)` where `p/neutron` is a neutron directory (library
+///     root form).
+///   * `Some(p)` where `discover_neutron_dir(p)` finds one (workspace
+///     root form).
+fn resolve_data_dir(given: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(path) = given {
+        if looks_like_neutron_dir(&path) {
+            return Ok(path);
+        }
+        let with_neutron = path.join("neutron");
+        if looks_like_neutron_dir(&with_neutron) {
+            return Ok(with_neutron);
+        }
+        if let Some(found) = data_paths::discover_neutron_dir(&path) {
+            return Ok(found);
+        }
+        if path.is_dir() {
+            return Err(format!(
+                "--data-dir {} exists but contains no neutron HDF5 files \
+                 (expected `H1.h5` either directly inside it or under a \
+                 `neutron/` subdirectory)",
+                path.display()
+            ));
+        }
+        return Err(format!("--data-dir {} not found", path.display()));
+    }
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("failed to read current directory: {e}"))?;
+    data_paths::discover_neutron_dir(&cwd).ok_or_else(|| {
+        format!(
+            "no ENDF/B HDF5 library discovered (walked up from {} looking for \
+             data/endfb-viii.1-hdf5/neutron, data/endfb-viii.0-hdf5/neutron, \
+             data/endfb-vii.1-hdf5/neutron). Pass --data-dir explicitly.",
+            cwd.display()
+        )
+    })
+}
+
 impl Cli {
-    fn into_args(self) -> RunArgs {
+    fn into_args(self, data_dir: PathBuf) -> RunArgs {
         let Cli {
             bench_dir,
-            data_dir,
+            data_dir: _,
             filter,
             csv,
             telemetry,
@@ -189,7 +246,17 @@ fn main() -> ExitCode {
     hardware_profile::log_startup_banner();
     let cli = Cli::parse();
     let sequential_mode = cli.sequential;
-    let args = cli.into_args();
+    let data_dir = match resolve_data_dir(cli.data_dir.clone()) {
+        Ok(p) => {
+            eprintln!("[data-dir] using {}", p.display());
+            p
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let args = cli.into_args(data_dir);
 
     let hw = Arc::new(hardware_profile::hardware_profile().clone());
 
