@@ -147,6 +147,14 @@ pub struct CaseDefaults {
     pub batches: Option<u32>,
     pub inactive_batches: Option<u32>,
     pub base_seed: u64,
+    /// When true, every loaded case gets
+    /// `SimConfig::survival_biasing = Some(SurvivalBiasing::default())`
+    /// (OpenMC defaults `w_min=0.25, w_survive=1.0`). Drives implicit
+    /// capture + Bernoulli-banked fission + Russian roulette on both
+    /// CPU and GPU paths. Necessary for high-particle-count runs
+    /// (≥200k) on small-VRAM GPUs where the analog tail otherwise
+    /// hits `SimLimits::max_events_per_history = 1_000_000`.
+    pub survival_biasing: bool,
 }
 
 impl CaseDefaults {
@@ -276,7 +284,11 @@ pub fn parse_case_json(
         parallel: true,
         tallies: Default::default(),
         statepoint_path: None,
-        survival_biasing: None,
+        survival_biasing: if defaults.survival_biasing {
+            Some(crate::transport::simulate::SurvivalBiasing::default())
+        } else {
+            None
+        },
         initial_source_bank: None,
         weight_window: None,
         disable_delayed_neutrons: false,

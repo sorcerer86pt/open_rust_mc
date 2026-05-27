@@ -147,6 +147,16 @@ struct Cli {
     /// one. Diagnostic / determinism mode.
     #[arg(long, default_value_t = false)]
     sequential: bool,
+
+    /// Enable implicit-capture + Russian-roulette survival biasing
+    /// (OpenMC defaults `w_min=0.25, w_survive=1.0`). k_eff unbiased,
+    /// σ tightens, long-tail histories terminate in O(log w) RR
+    /// rolls instead of running the event loop to
+    /// `max_events_per_history = 1_000_000`. Required for ≥200k-
+    /// particle GPU runs on small-VRAM cards (3080 / A1000). Mirrors
+    /// `SimConfig::survival_biasing` on the CPU path.
+    #[arg(long, default_value_t = false)]
+    survival_bias: bool,
 }
 
 /// Heuristic: a neutron directory contains the canonical
@@ -223,6 +233,7 @@ impl Cli {
             max_slots,
             n_cpu_executor_threads,
             plot_every,
+            survival_bias,
             ..
         } = self;
         RunArgs {
@@ -246,6 +257,7 @@ impl Cli {
             max_slots,
             n_cpu_executor_threads,
             plot_every,
+            survival_biasing: survival_bias,
         }
     }
 }

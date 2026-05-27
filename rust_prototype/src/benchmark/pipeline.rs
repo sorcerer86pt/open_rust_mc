@@ -115,6 +115,7 @@ impl Pipeline {
             batches: ctx.args.batches,
             inactive_batches: ctx.args.inactive_batches,
             base_seed: ctx.args.base_seed,
+            survival_biasing: ctx.args.survival_biasing,
         };
 
         let mut state = RunState::default();
@@ -293,6 +294,7 @@ impl Pipeline {
             batches: ctx.args.batches,
             inactive_batches: ctx.args.inactive_batches,
             base_seed: ctx.args.base_seed,
+            survival_biasing: ctx.args.survival_biasing,
         };
         let hint = run_hint(ctx.args.runner);
 

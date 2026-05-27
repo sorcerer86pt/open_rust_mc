@@ -78,8 +78,12 @@ current headline.
 - Track-length k_eff estimator alongside collision estimator
   (`[godiva]` 3.9× lower seed-to-seed σ).
 - Survival biasing + Russian roulette (w_min=0.25, w_survive=1.0)
-  on CPU. Variance-only — no k_eff bias. GPU survival biasing
-  pending.
+  on CPU AND GPU (event-based path). Variance-only — no k_eff bias.
+  GPU implementation lives in `gr_trace_and_sample`'s SB branch and
+  is gated on `SimConfig::survival_biasing.is_some()`. On the
+  historic GPU history-based persistent kernel the analog path
+  remains the only option (the event-based path is what
+  `CudaRunner` / `benchmark_runner` uses).
 - Statepoint write / read / restart (HDF5).
 - Backend dispatch (`transport::dispatch::EigenvalueRunner`,
   `CpuRunner` / `CudaRunner`).
@@ -344,8 +348,18 @@ CLI controls:
   7-case sweep re-uploads 35× the same ~50 MB SAB payload. Same
   LRU + bundle_cache_budget pattern as `per_nuclide_cache` should
   apply.
-- **GPU survival biasing / Russian roulette.** CPU has it (4.5× FOM
-  on PWR); GPU runs analog. Variance-only, k_eff is unbiased.
+- ~~GPU survival biasing / Russian roulette~~ — landed in
+  `transport_event_based.cu` (the path `benchmark_runner` /
+  `CudaRunner` uses). Implicit capture + Bernoulli-banked
+  fission + RR with OpenMC defaults `(w_min=0.25, w_survive=1.0)`.
+  `N_PARAMS` bumped 192 → 195 (slots `P_SURVIVAL_BIAS_ENABLED`,
+  `P_W_MIN`, `P_W_SURVIVE`). `gr_fission_event` skipped under SB —
+  banking happens inside `gr_trace_and_sample`. Verified unbiased
+  on Godiva (HMF-001 case-1): analog k = 0.99986 ± 0.00111, SB
+  k = 1.00088 ± 0.00096 (σ tightened ~13%), Δ = +102 pcm within the
+  2σ_combined envelope of 294 pcm. Primary motivation: terminates
+  long-tail histories that were hanging the 200k-particle 3080 case
+  at `max_events_per_history = 1_000_000`.
 - **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** CPU has it; GPU
   device sampler is continuous-only. OpenMC's ENDF/B HDF5
   distribution emits every TSL as `incoherent_inelastic` so this

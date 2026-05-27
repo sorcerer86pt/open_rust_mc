@@ -98,6 +98,21 @@ def parse_args() -> tuple[argparse.Namespace, list[str]]:
                    help="acceptance envelope multiplier")
     p.add_argument("--sequential", action="store_true",
                    help="single-thread driver (diagnostic / determinism)")
+    # Survival biasing — DEFAULT ON. The analog GPU path's event loop
+    # spins to `max_events_per_history = 1_000_000` whenever the
+    # batch tail contains one persistent neutron (common on
+    # ≥200k-particle runs and on water-moderated cases). Implicit
+    # capture + Bernoulli-banked fission + Russian roulette
+    # terminates such tails in O(log w) RR rolls without biasing
+    # k_eff. Pass `--no-survival-bias` to opt back into pure
+    # analog for A/B parity work.
+    sb = p.add_mutually_exclusive_group()
+    sb.add_argument("--survival-bias", dest="survival_bias",
+                    action="store_true", default=True,
+                    help="enable implicit capture + RR (default)")
+    sb.add_argument("--no-survival-bias", dest="survival_bias",
+                    action="store_false",
+                    help="opt out — pure analog tracking")
     p.add_argument("--cargo-run", action="store_true",
                    help="invoke via `cargo run` instead of the prebuilt binary "
                         "(rebuilds if source has changed)")
@@ -181,6 +196,13 @@ def build_runner_argv(args: argparse.Namespace) -> list[str]:
         argv += ["--n-sigma", str(args.n_sigma)]
     if args.sequential:
         argv += ["--sequential"]
+    # `benchmark_runner` defaults --survival-bias to false; this
+    # script's default is the opposite. Forward the flag only when on
+    # to keep the binary's CLI surface as the source of truth on
+    # default semantics (the binary's help text is what users read
+    # when they `--help`).
+    if args.survival_bias:
+        argv += ["--survival-bias"]
     return argv
 
 

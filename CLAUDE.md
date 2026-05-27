@@ -147,11 +147,16 @@ changing.
   below that. Same binary now targets A1000 (sm_86), A100 (sm_80),
   H100 (sm_90), RTX 5090 (sm_120), etc. without rebuild.
 
-- **`N_PARAMS = 192`** matches between `gpu_transport.rs` and
+- **`N_PARAMS = 195`** matches between `gpu_transport.rs` and
   `gpu/cuda/transport.cu`. Adding or removing a slot requires
   touching both atomically. Earlier inline-vec packing sites that
   open-coded `vec![dptr!(...)…]` are now delegated to
   `build_transport_params_vec` — don't open-code new sites.
+  Slots 192-194 carry the survival-biasing config
+  (`P_SURVIVAL_BIAS_ENABLED`, `P_W_MIN`, `P_W_SURVIVE`); defaults
+  written by the builder run the analog path bit-for-bit, so
+  callers that don't opt in (every path except `CudaRunner` reading
+  `SimConfig::survival_biasing`) are unaffected.
 
 - **`GpuTransportContext::vram_aware_pipeline_slots()`** computes the
   VRAM-safe `n_slots` for `benchmark_runner`. Formula:
@@ -377,9 +382,19 @@ Four commits on top of `547dfcb`:
   but materials are ~few hundred KB total vs ~50 MB for SAB — three
   orders of magnitude smaller. Defer until profile data shows it's
   worth the code surface.
-- **GPU survival biasing / Russian roulette.** CPU has it (4.5×
-  FOM on PWR); GPU runs analog. Variance-only, k_eff stays
-  unbiased.
+- ~~GPU survival biasing / Russian roulette~~ — landed. Implicit
+  capture + Bernoulli-banked fission + RR all live inside
+  `gr_trace_and_sample`'s SB branch (transport_event_based.cu), gated
+  on `params[P_SURVIVAL_BIAS_ENABLED]`. CPU contract preserved
+  (OpenMC defaults `w_min=0.25, w_survive=1.0`). `gr_fission_event`
+  is skipped when SB is on — banking happens in-place. Verified
+  unbiased on Godiva (analog 0.99986 ± 111 pcm, SB 1.00088 ± 96 pcm,
+  Δ = +102 pcm within 294 pcm 2σ envelope), with σ tightened ~13%
+  at 5k × 80 × 3-seed sampling. Primary motivation was unblocking
+  long-tail histories on the RTX 3080 at ≥200k particles where the
+  analog loop hits `max_events_per_history = 1_000_000` chasing a
+  single persistent neutron; RR terminates such tails in O(log w)
+  rolls.
 - **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** Continuous
   only on device. OpenMC's HDF5 emits every TSL as
   `incoherent_inelastic` — zero hits in the 375-case corpus.

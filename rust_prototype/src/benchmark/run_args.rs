@@ -65,6 +65,17 @@ pub struct RunArgs {
     pub n_cpu_executor_threads: usize,
     /// Emit incremental scatter plot every N completed cases.
     pub plot_every: usize,
+    /// Enable implicit-capture + Bernoulli-banked fission + Russian
+    /// roulette on every case. CPU mirror:
+    /// `SimConfig::survival_biasing = Some(SurvivalBiasing::default())`.
+    /// Necessary for high-particle-count GPU runs (≥200k) on
+    /// small-VRAM cards where the analog tail otherwise hits
+    /// `SimLimits::max_events_per_history = 1_000_000` and spends
+    /// minutes per batch chasing a single persistent neutron.
+    /// k_eff stays unbiased; σ tightens ~10-15% at small-particle
+    /// counts. See CLAUDE.md "Open / deferred" entry that this
+    /// commit closed.
+    pub survival_biasing: bool,
 }
 
 impl Default for RunArgs {
@@ -90,6 +101,7 @@ impl Default for RunArgs {
             max_slots: 4,
             n_cpu_executor_threads: 1,
             plot_every: 10,
+            survival_biasing: false,
         }
     }
 }

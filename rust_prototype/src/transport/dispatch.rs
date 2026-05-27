@@ -379,6 +379,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                         self.max_events_per_history,
                         effective_fis_capacity,
                         Some(refill),
+                        config.survival_biasing.as_ref(),
                     )
                     .expect("transport_recursive_with_buffers (refill) failed");
                 r
@@ -398,6 +399,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                         self.max_events_per_history,
                         effective_fis_capacity,
                         None,
+                        config.survival_biasing.as_ref(),
                     )
                     .expect("transport_recursive_with_buffers failed")
             };

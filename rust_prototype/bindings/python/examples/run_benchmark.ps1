@@ -89,7 +89,14 @@ param(
     # JSON `benchmark.recommended_settings.gpu_refill_pool_factor` /
     # `.gpu_auto_refill` per-case override these CLI defaults.
     [double]$GpuRefillFactor = 0.0,
-    [switch]$GpuAutoRefill
+    [switch]$GpuAutoRefill,
+    # Survival biasing — implicit capture + Bernoulli-banked
+    # fission + Russian roulette. Default ON: terminates long-tail
+    # histories that otherwise hang the analog GPU event loop at
+    # `max_events_per_history = 1_000_000` (the 200k-particle 3080
+    # symptom). k_eff stays unbiased; σ tightens ~10-15%. Pass
+    # `-NoSurvivalBias` for pure-analog A/B parity runs.
+    [switch]$NoSurvivalBias
 )
 
 $ErrorActionPreference = "Stop"
@@ -154,6 +161,8 @@ Write-Host ""
 Write-Host "── Sweep configuration ────────────────────────────────"
 Write-Host "  runner       : $resolvedRunner"
 Write-Host "  CLI defaults : batches=$Batches, inactive=$Inactive, particles=$Particles, seeds=$Seeds, base_seed=$BaseSeed, rank=$Rank"
+$sbMode = if ($NoSurvivalBias) { "OFF (analog, opt-out)" } else { "ON (default — implicit capture + RR)" }
+Write-Host "  Survival bias: $sbMode"
 Write-Host "  CSV (append) : $csvPath"
 Write-Host "  Log          : $logPath"
 Write-Host "  Stop file    : $stopPath  (create to terminate gracefully)"
@@ -181,6 +190,9 @@ if ($Filter)    { $sweepArgs += @("--filter", $Filter) }
 if ($Limit -gt 0) { $sweepArgs += @("--limit",  $Limit) }
 if ($GpuRefillFactor -gt 1.0) { $sweepArgs += @("--gpu-refill-factor", $GpuRefillFactor) }
 if ($GpuAutoRefill)           { $sweepArgs += "--gpu-auto-refill" }
+# Survival biasing is ON by default in icsbep_sweep.py — only forward
+# the opt-out flag when the user explicitly requested it.
+if ($NoSurvivalBias)          { $sweepArgs += "--no-survival-bias" }
 
 # ── 5. Run, tee output to log ─────────────────────────────────────────
 $started = Get-Date
