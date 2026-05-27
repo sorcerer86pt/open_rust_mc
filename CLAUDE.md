@@ -147,12 +147,21 @@ changing.
   below that. Same binary now targets A1000 (sm_86), A100 (sm_80),
   H100 (sm_90), RTX 5090 (sm_120), etc. without rebuild.
 
-- **`N_PARAMS = 186`** matches between `gpu_transport.rs:18` and
-  `gpu/cuda/transport.cu:383`. Adding or removing a slot requires
+- **`N_PARAMS = 192`** matches between `gpu_transport.rs` and
+  `gpu/cuda/transport.cu`. Adding or removing a slot requires
   touching both atomically. Earlier inline-vec packing sites that
   open-coded `vec![dptr!(...)…]` are now delegated to
-  `build_transport_params_vec` (see comment at `gpu_transport.rs:2523`)
-  — don't open-code new sites.
+  `build_transport_params_vec` — don't open-code new sites.
+
+- **`GpuTransportContext::vram_aware_pipeline_slots()`** computes the
+  VRAM-safe `n_slots` for `benchmark_runner`. Formula:
+  `(n_slots + 3) × 1.5 GB + 1.7 GB ≤ total_vram`. For RTX 3080
+  (10 GB) → n_slots=2; for 5090 (32 GB) → capped at `--max-slots`
+  (default 4). The flat-pack DtoD copy per bundle (~1.5 GB for
+  20-nuc rank-15 HEU) is OUTSIDE the per-nuclide cache budget and
+  NOT tracked by `bundle_cache_budget_bytes`. Raising
+  `BUNDLE_CACHE_DEFAULT_FRACTION` without accounting for flat-packs
+  will OOM.
 
 - **`SimLimits` (`src/transport/sim_limits.rs`)** is engine policy
   separate from per-run intent (`SimConfig`). `default()` reproduces

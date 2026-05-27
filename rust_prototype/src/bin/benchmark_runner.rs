@@ -124,9 +124,15 @@ struct Cli {
     #[arg(long, default_value_t = 15)]
     rank: usize,
 
-    /// Slot pool capacity override (defaults to §5.3.1 auto-sizing).
+    /// Slot pool capacity exact override (bypasses VRAM-aware sizing).
+    /// Use `--max-slots` to cap the auto value instead.
     #[arg(long)]
     n_slots: Option<usize>,
+
+    /// Upper bound on VRAM-aware n_slots. Auto-computed value is clamped
+    /// to [1, max_slots]. Ignored when `--n-slots` is set. Default 4.
+    #[arg(long, default_value_t = 4)]
+    max_slots: usize,
 
     /// CpuExecutor parallelism (number of cases the CPU runs
     /// concurrently). Default 1 (whole rayon pool per case).
@@ -214,6 +220,7 @@ impl Cli {
             base_seed,
             rank,
             n_slots,
+            max_slots,
             n_cpu_executor_threads,
             plot_every,
             ..
@@ -236,6 +243,7 @@ impl Cli {
             base_seed,
             rank,
             n_slots,
+            max_slots,
             n_cpu_executor_threads,
             plot_every,
         }
@@ -259,11 +267,6 @@ fn main() -> ExitCode {
     let args = cli.into_args(data_dir);
 
     let hw = Arc::new(hardware_profile::hardware_profile().clone());
-
-    // Default slot pool: 4 — enough to keep both executors fed without
-    // ballooning channel queues. Phase 4 plumbs in the dynamic sizing
-    // from §5.3.1 (VRAM-aware on GPU builds).
-    let n_slots = args.n_slots.unwrap_or(4);
 
     // Rayon pool sized to `cores - 6` per §5.4.1; floor at 2 so small
     // hosts still progress (the CPU executor blocks start-to-end on
@@ -297,6 +300,30 @@ fn main() -> ExitCode {
             }
         }
     };
+
+    // VRAM-aware slot pool sizing (§5.3.1). On GPU builds, compute how
+    // many pre-uploaded bundles can coexist in VRAM without OOM; each
+    // bundle's flat-pack DtoD copy is ~1.5 GB for 20-nuclide heavy-metal
+    // cases. Peak concurrent bundles = n_slots + 3 (channel + running +
+    // uploading + cache source). Falls back to 4 on CPU-only. Explicit
+    // `--n-slots` overrides the auto value.
+    #[cfg(feature = "cuda")]
+    let n_slots = args.n_slots.unwrap_or_else(|| {
+        if let Some(gpu) = gpu_t.as_ref() {
+            let vram_n = gpu.vram_aware_pipeline_slots();
+            let n = vram_n.min(args.max_slots).max(1);
+            eprintln!(
+                "[pipeline] n_slots={n} (VRAM-aware={vram_n}, max_slots={}; \
+                 use --n-slots for exact override)",
+                args.max_slots
+            );
+            n
+        } else {
+            args.max_slots.max(1)
+        }
+    });
+    #[cfg(not(feature = "cuda"))]
+    let n_slots = args.n_slots.unwrap_or(args.max_slots.max(1));
 
     let bench_dir = args.bench_dir.clone();
     let data_dir = args.data_dir.clone();

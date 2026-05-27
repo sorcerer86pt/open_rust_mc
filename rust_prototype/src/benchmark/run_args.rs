@@ -53,8 +53,12 @@ pub struct RunArgs {
     pub base_seed: u64,
     /// SVD rank (global default; per-case JSON can override).
     pub rank: usize,
-    /// Slot pool size override (None = §5.3.1 auto-sizing).
+    /// Slot pool size override (None = §5.3.1 VRAM-aware auto-sizing).
     pub n_slots: Option<usize>,
+    /// Upper bound on VRAM-auto n_slots. Auto-computed value is clamped
+    /// to [1, max_slots]. Ignored when `n_slots` is set explicitly.
+    /// Default 4.
+    pub max_slots: usize,
     /// CpuExecutor parallelism: how many cases the CpuExecutor runs
     /// concurrently. Default 1 (whole rayon pool to one case at a
     /// time). >1 splits the pool.
@@ -83,6 +87,7 @@ impl Default for RunArgs {
             base_seed: 42,
             rank: 15,
             n_slots: None,
+            max_slots: 4,
             n_cpu_executor_threads: 1,
             plot_every: 10,
         }

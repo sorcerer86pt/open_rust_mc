@@ -2364,6 +2364,53 @@ impl GpuTransportContext {
         total.saturating_sub(per)
     }
 
+    /// Compute a VRAM-safe `n_slots` for the benchmark pipeline.
+    ///
+    /// The pipeline pre-uploads one flat-pack `GpuNuclideData` bundle per
+    /// channel slot. At any case transition the peak live count is:
+    ///   n_slots (channel) + 1 (running in Stage 4) + 1 (being uploaded)
+    ///   + 1 (per-nuclide cache source, shared but counted separately)
+    ///   = n_slots + 3 bundle-sized VRAM chunks
+    ///
+    /// Formula (in MiB):
+    ///   (n_slots + 3) × PER_BUNDLE_MIB + OVERHEAD_MIB ≤ total_vram_mib
+    ///   n_slots ≤ (total_vram_mib − OVERHEAD_MIB) / PER_BUNDLE_MIB − 3
+    ///
+    /// `PER_BUNDLE_MIB = 1536` (1.5 GiB) is calibrated for rank-15,
+    /// ~20-nuclide heavy-metal cases (heu-comp-inter-003). These are
+    /// VRAM-dominant because U-235/U-238 carry large discrete-level SVD
+    /// basis arrays; each bundle's flat-pack DtoD copy is ~1.5 GB.
+    /// Smaller cases (Godiva: 3 nuclides) use less and this is
+    /// conservative.
+    ///
+    /// `OVERHEAD_MIB = 1700` covers CUDA context (~500 MB) + particle
+    /// buffers (~200 MB) + SAB cache (~50 MB) + 950 MB safety margin.
+    ///
+    /// Returns a value in [1, 4]. Explicit `--n-slots` from the CLI
+    /// overrides this.
+    pub fn vram_aware_pipeline_slots(&self) -> usize {
+        const PER_BUNDLE_MIB: u64 = 1_536; // 1.5 GiB per flat-pack
+        const OVERHEAD_MIB: u64 = 1_700; // context + buffers + safety
+
+        let total_bytes = match self._ctx.total_mem() {
+            Ok(t) if t > 0 => t as u64,
+            _ => return 1,
+        };
+        let total_mib = total_bytes / (1024 * 1024);
+
+        // Need at least 3 bundles + overhead to run at all.
+        if total_mib < PER_BUNDLE_MIB * 3 + OVERHEAD_MIB {
+            return 1;
+        }
+
+        let available_mib = total_mib.saturating_sub(OVERHEAD_MIB);
+        // n_slots ≤ available / per_bundle - 3  (3 = running + uploading + source)
+        let n = (available_mib / PER_BUNDLE_MIB).saturating_sub(3) as usize;
+        // Cap at 16 to prevent runaway on very-large-VRAM devices; the
+        // caller applies a lower `max_slots` constraint if configured.
+        n.max(1).min(16)
+    }
+
     /// Pre-upload safety check: query free VRAM via `cuMemGetInfo`
     /// and take recovery action if it is critically low.
     ///
