@@ -476,7 +476,7 @@ impl CPUInfo {
     }
 
     fn detect_vulnerabilities() -> Result<Vec<String>> {
-        let mut vulnerabilities = Vec::new();
+        let vulnerabilities = Vec::new();
 
         #[cfg(target_os = "linux")]
         {

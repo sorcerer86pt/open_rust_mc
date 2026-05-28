@@ -186,7 +186,7 @@ impl TPUInfo {
     
     /// Detect Google Coral Edge TPUs
     fn detect_edge_tpus() -> Result<Vec<TPUInfo>> {
-        let mut tpus = Vec::new();
+        let tpus = Vec::new();
         
         #[cfg(target_os = "linux")]
         {
@@ -272,7 +272,7 @@ impl TPUInfo {
     
     /// Detect Intel Habana accelerators
     fn detect_intel_habana() -> Result<Vec<TPUInfo>> {
-        let mut tpus = Vec::new();
+        let tpus = Vec::new();
         
         #[cfg(target_os = "linux")]
         {
