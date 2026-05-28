@@ -181,6 +181,19 @@ def parse_args() -> argparse.Namespace:
                    help="GPU runner only: let the engine pick a refill factor "
                         "automatically from device SM count + kernel reg count. "
                         "Ignored if --gpu-refill-factor is set or if runner=cpu.")
+    # Survival biasing — default ON. Implicit capture +
+    # Bernoulli-banked fission + Russian roulette terminates
+    # long-tail histories that otherwise spin the GPU event loop to
+    # `max_events_per_history = 1_000_000` on high-particle-count
+    # runs (the 200k 3080 symptom). k_eff stays unbiased; σ tightens
+    # ~10-15%. Pass `--no-survival-bias` for analog A/B work.
+    sb = p.add_mutually_exclusive_group()
+    sb.add_argument("--survival-bias", dest="survival_bias",
+                    action="store_true", default=True,
+                    help="enable implicit capture + RR (default)")
+    sb.add_argument("--no-survival-bias", dest="survival_bias",
+                    action="store_false",
+                    help="opt out — pure analog tracking")
     p.add_argument("--csv", type=Path, default=None, help="save results to CSV file (appended row-by-row)")
     p.add_argument("--resume", action="store_true",
                    help="skip cases already present in --csv (case names matched on the `case` column)")
@@ -350,6 +363,9 @@ def case_settings(
             auto_refill = True
         else:
             auto_refill = bool(rec.get("gpu_auto_refill", False))
+    # OpenMC defaults: w_min=0.25, w_survive=1.0. CPU + GPU both
+    # read the tuple directly from PySettings.survival_biasing.
+    sb_tuple = (0.25, 1.0) if getattr(args, "survival_bias", False) else None
     settings = Settings(
         batches=batches,
         inactive=inactive,
@@ -357,6 +373,7 @@ def case_settings(
         seed=args.base_seed,  # overwritten per-seed below
         gpu_refill_pool_factor=refill_factor,
         gpu_auto_refill=auto_refill,
+        survival_biasing=sb_tuple,
     )
     return settings, n_seeds, batches, inactive, particles
 
@@ -392,6 +409,7 @@ def run_case_multi_seed(
             seed=seed,
             gpu_refill_pool_factor=base_settings.gpu_refill_pool_factor,
             gpu_auto_refill=base_settings.gpu_auto_refill,
+            survival_biasing=base_settings.survival_biasing,
         )
         try:
             r = run_icsbep_case(
@@ -556,6 +574,8 @@ def main() -> int:
         f"seeds={_show(args.seeds, 1)}, "
         f"base_seed={args.base_seed}, rank={args.rank}"
     )
+    sb_mode = "ON (default — implicit capture + RR)" if args.survival_bias else "OFF (analog, opt-out)"
+    print(f"  Survival bias: {sb_mode}")
     print("  per-case settings: explicit CLI flag > JSON `benchmark.recommended_settings` > built-in default")
     # Backend-equivalence note: GPU has a refill-pool knob to keep SM
     # lanes filled during the batch tail (PHYSOR 2022 Optimization F).
