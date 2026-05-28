@@ -196,14 +196,8 @@ impl LfuEntriesMut for PerNuclideCacheAdapter<'_> {
 // since the device pointers would differ).
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct SabCacheKey {
-    /// Slot list as `(Arc::as_ptr, nuc_idx, temp_filter)` triples in
-    /// upload order. The filter is included so two callers asking
-    /// for the same logical TSL at different material temperatures
-    /// (and thus different uploaded kT slot sets) get distinct
-    /// cached buffers — the device payloads genuinely differ.
-    /// Materials at the same temperature hit the same entry (the
-    /// room-temperature hot path for the ICSBEP corpus).
-    slots: Vec<(usize, usize, Vec<usize>)>,
+    /// Slot list as `(Arc::as_ptr, nuc_idx)` pairs in upload order.
+    slots: Vec<(usize, usize)>,
     /// `n_nuc` parameter sizes `slot_per_nuc` / `slot_count_per_nuc`.
     /// Two callers with identical slots but different `n_nuc` need
     /// distinct cached buffers because those lookup tables differ.
@@ -1006,22 +1000,6 @@ pub struct GpuBatchResult {
 
 const BLOCK_SIZE: u32 = 256;
 
-/// Singleton storage for the process-wide `GpuTransportContext`.
-///
-/// `OnceLock` lazy-initialises the `RwLock` once at first
-/// `shared()` call. The `RwLock` mediates between concurrent
-/// readers (Stage 3 + Stage 4 + Python entry points) and the
-/// occasional rebuild from the watchdog. The `Option<Arc<...>>`
-/// permits a "context dropped, not yet rebuilt" state during
-/// recovery — accessors that observe `None` either block on the
-/// rebuild signal or propagate an error per their policy.
-fn shared_cell() -> &'static std::sync::RwLock<Option<Arc<GpuTransportContext>>> {
-    static CELL: std::sync::OnceLock<
-        std::sync::RwLock<Option<Arc<GpuTransportContext>>>,
-    > = std::sync::OnceLock::new();
-    CELL.get_or_init(|| std::sync::RwLock::new(None))
-}
-
 impl GpuTransportContext {
     /// Compile all CUDA kernels and initialize GPU context.
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
@@ -1090,62 +1068,18 @@ impl GpuTransportContext {
     /// Returns `Err` only on first-call failure (no CUDA device, no
     /// driver, NVRTC compile error). Failures are *not* cached —
     /// retry-on-error works because the error path doesn't write to
-    /// the inner `Option`; only a successful init seals the slot.
-    ///
-    /// Storage is `OnceLock<RwLock<Option<Arc<Self>>>>` (not a bare
-    /// `OnceLock<Arc<_>>`) so the benchmark pipeline's watchdog can
-    /// call [`force_rebuild`](Self::force_rebuild) after a
-    /// `cuDeviceReset` and replace the dead context without
-    /// restarting the process. Read cost is one `RwLock::read`
-    /// acquisition (nanoseconds), negligible vs the per-case wall.
+    /// the OnceLock; only a successful init seals the slot.
     pub fn shared() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        let cell = shared_cell();
-        // Fast path: a fresh `Arc` already lives in the slot.
-        {
-            let g = cell.read().expect("shared cell poisoned");
-            if let Some(arc) = g.as_ref() {
-                return Ok(Arc::clone(arc));
-            }
-        }
-        // Slow path: first call (or post-rebuild). Build under the
-        // write lock so we don't compile NVRTC twice when several
-        // threads race the first call. Re-check the slot under the
-        // write lock in case someone built it while we waited.
-        let mut g = cell.write().expect("shared cell poisoned");
-        if let Some(arc) = g.as_ref() {
+        static SHARED: std::sync::OnceLock<Arc<GpuTransportContext>> =
+            std::sync::OnceLock::new();
+        if let Some(arc) = SHARED.get() {
             return Ok(Arc::clone(arc));
         }
-        let fresh = Arc::new(Self::new()?);
-        *g = Some(Arc::clone(&fresh));
-        Ok(fresh)
-    }
-
-    /// Drop the current process-wide context and build a fresh one.
-    /// Intended for the Stage 4 watchdog: after a wedged kernel
-    /// triggers `cuDeviceReset`, all existing device handles are
-    /// invalid and the existing `Arc<GpuTransportContext>` must be
-    /// replaced before any further upload or launch.
-    ///
-    /// **Caller responsibility:** ensure no other thread is mid-call
-    /// into the old context when this runs. The watchdog parks both
-    /// executors on a barrier before invoking. Holders of stale
-    /// `Arc<Self>` clones returned by an earlier `shared()` keep
-    /// their `Arc` alive (no double-free), but operations on it
-    /// will fail because the underlying device handles are dead.
-    ///
-    /// Returns the freshly built context.
-    pub fn force_rebuild() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        let cell = shared_cell();
-        {
-            let mut g = cell.write().expect("shared cell poisoned");
-            *g = None;
-        }
-        // After the drop, the per-nuclide / SAB caches inside the
-        // old context's `Arc` go away (assuming no external clones
-        // are held — see method-level note). The watchdog also
-        // issues `cuDeviceReset` from the same thread before calling
-        // `shared()` again; that's its responsibility, not ours.
-        Self::shared()
+        let ctx = Arc::new(Self::new()?);
+        // Either we win the race and store our Arc, or someone else
+        // beat us — either way the slot now holds a valid Arc.
+        let _ = SHARED.set(Arc::clone(&ctx));
+        Ok(Arc::clone(SHARED.get().expect("OnceLock just set above")))
     }
 
     /// Debug: sample angular distributions at given (energy, xi) pairs.
@@ -1720,19 +1654,6 @@ impl GpuTransportContext {
         nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
         rank: usize,
     ) -> Result<Arc<GpuNuclideData>, Box<dyn std::error::Error>> {
-        self.upload_nuclide_data_on_stream(nuclides, rank, &self.stream)
-    }
-
-    /// Stream-parameterised variant of [`upload_nuclide_data`]. The
-    /// benchmark pipeline's Stage 3 uses this to route H→D copies onto
-    /// `stream_transfer` so Stage 4 kernel launches on `stream_compute`
-    /// can overlap (per v2 spec §3.2).
-    pub fn upload_nuclide_data_on_stream(
-        &self,
-        nuclides: &[Arc<crate::transport::xs_provider::NuclideKernels>],
-        rank: usize,
-        stream: &Arc<CudaStream>,
-    ) -> Result<Arc<GpuNuclideData>, Box<dyn std::error::Error>> {
         use crate::gpu_per_nuclide::{
             assemble_a4_cat, assemble_a5_cat, assemble_a6_cat, assemble_a7_cat,
             assemble_a8_cat, assemble_a_cat, assemble_b_cat, assemble_c_cat,
@@ -1803,7 +1724,7 @@ impl GpuTransportContext {
                 self.trim_async_mempool();
             }
 
-            let fresh = upload_one_nuclide(stream, nuc, rank)?;
+            let fresh = upload_one_nuclide(&self.stream, nuc, rank)?;
             let bytes = fresh.device_bytes();
             let arc = Arc::new(fresh);
             {
@@ -1849,79 +1770,79 @@ impl GpuTransportContext {
 
         // Assemble the flat-pack bundle. Pure DtoD; no H→D for the
         // already-cached payloads.
-        let a = assemble_a_cat(stream, &per_nucs)?;
-        let b = assemble_b_cat(stream, &per_nucs)?;
-        let c = assemble_c_cat(stream, &per_nucs)?;
-        let a4 = assemble_a4_cat(stream, &per_nucs)?;
-        let a5 = assemble_a5_cat(stream, &per_nucs)?;
-        let a6 = assemble_a6_cat(stream, &per_nucs)?;
-        let a7 = assemble_a7_cat(stream, &per_nucs)?;
-        let a8 = assemble_a8_cat(stream, &per_nucs)?;
+        let a = assemble_a_cat(&self.stream, &per_nucs)?;
+        let b = assemble_b_cat(&self.stream, &per_nucs)?;
+        let c = assemble_c_cat(&self.stream, &per_nucs)?;
+        let a4 = assemble_a4_cat(&self.stream, &per_nucs)?;
+        let a5 = assemble_a5_cat(&self.stream, &per_nucs)?;
+        let a6 = assemble_a6_cat(&self.stream, &per_nucs)?;
+        let a7 = assemble_a7_cat(&self.stream, &per_nucs)?;
+        let a8 = assemble_a8_cat(&self.stream, &per_nucs)?;
 
         let (basis_ptrs, coeffs_ptrs) =
-            crate::gpu_per_nuclide::build_per_nuclide_ptr_arrays(stream, &per_nucs)?;
+            crate::gpu_per_nuclide::build_per_nuclide_ptr_arrays(&self.stream, &per_nucs)?;
         let pw_xs_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.pointwise_xs.as_ref(),
         )?;
         let total_xs_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.total_xs.as_ref(),
         )?;
         let nb_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.nu_bar.as_ref().map(|nb| &nb.energies),
         )?;
         let nb_v_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.nu_bar.as_ref().map(|nb| &nb.values),
         )?;
         let dnb_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.energies),
         )?;
         let dnb_v_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.delayed_nu_bar.as_ref().map(|nb| &nb.values),
         )?;
         let urr_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.energies),
         )?;
         let urr_cp_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.cum_prob),
         )?;
         let urr_tf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.total_factor),
         )?;
         let urr_ef_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.elastic_factor),
         )?;
         let urr_ff_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.fission_factor),
         )?;
         let urr_cf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.urr.as_ref().map(|u| &u.capture_factor),
         )?;
         let inel_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.inel_cdf.as_ref().map(|c| &c.data),
         )?;
@@ -1931,31 +1852,31 @@ impl GpuTransportContext {
             level_basis_local_off,
             level_coeffs_local_off,
         ) = crate::gpu_per_nuclide::build_per_nuc_level_ptr_and_offsets(
-            stream,
+            &self.stream,
             &per_nucs,
         )?;
         let ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.elastic_angle.as_ref().map(|a| &a.energies),
         )?;
         let ang_mu_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.elastic_angle.as_ref().map(|a| &a.mu),
         )?;
         let ang_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.elastic_angle.as_ref().map(|a| &a.cdf),
         )?;
         let ang_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.elastic_angle.as_ref().map(|a| &a.pdf),
         )?;
         let lev_ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| {
                 if p.levels.n_levels > 0 {
@@ -1966,7 +1887,7 @@ impl GpuTransportContext {
             },
         )?;
         let lev_ang_mu_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| {
                 if p.levels.n_levels > 0 {
@@ -1977,7 +1898,7 @@ impl GpuTransportContext {
             },
         )?;
         let lev_ang_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| {
                 if p.levels.n_levels > 0 {
@@ -1988,7 +1909,7 @@ impl GpuTransportContext {
             },
         )?;
         let lev_ang_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| {
                 if p.levels.n_levels > 0 {
@@ -1998,13 +1919,13 @@ impl GpuTransportContext {
                 }
             },
         )?;
-        let ang_dist_local_off = stream.clone_htod(&a4.ang_dist_local_off_vec)?;
+        let ang_dist_local_off = self.stream.clone_htod(&a4.ang_dist_local_off_vec)?;
         let lev_ang_lev_local_off =
-            stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
+            self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
         let lev_ang_dist_local_off =
-            stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
+            self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
         let fis_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| match &p.fission_edist {
                 crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.inc_energies),
@@ -2012,7 +1933,7 @@ impl GpuTransportContext {
             },
         )?;
         let fis_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| match &p.fission_edist {
                 crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.e_out),
@@ -2020,7 +1941,7 @@ impl GpuTransportContext {
             },
         )?;
         let fis_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| match &p.fission_edist {
                 crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.cdf),
@@ -2028,36 +1949,36 @@ impl GpuTransportContext {
             },
         )?;
         let fis_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| match &p.fission_edist {
                 crate::gpu_per_nuclide::FissionEdistGpu::Tabular(t) => Some(&t.pdf),
                 _ => None,
             },
         )?;
-        let fis_dist_local_off = stream.clone_htod(&a5.fis_dist_local_off_vec)?;
+        let fis_dist_local_off = self.stream.clone_htod(&a5.fis_dist_local_off_vec)?;
         let inel91_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.inel91.as_ref().map(|t| &t.inc_energies),
         )?;
         let inel91_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.inel91.as_ref().map(|t| &t.e_out),
         )?;
         let inel91_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.inel91.as_ref().map(|t| &t.cdf),
         )?;
         let inel91_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            stream,
+            &self.stream,
             &per_nucs,
             |p| p.inel91.as_ref().map(|t| &t.pdf),
         )?;
         let inel91_dist_local_off =
-            stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
+            self.stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
         // MT=91 Law 61 mu coupling — host-side vecs assembled in
         // `assemble_a6_cat`; upload the three pointer arrays + the
         // mu_has flag to the device. The per-nuclide mu_data /
@@ -2065,13 +1986,13 @@ impl GpuTransportContext {
         // live in `per_nucs[...]::inel91` and are kept alive by
         // `per_nucs` (see the doc on `GpuNuclideData::inel91_mu_has`).
         let inel91_mu_has =
-            stream.clone_htod(&a6.inel91_mu_has_vec)?;
+            self.stream.clone_htod(&a6.inel91_mu_has_vec)?;
         let inel91_mu_data_ptrs =
-            stream.clone_htod(&a6.inel91_mu_data_ptrs_vec)?;
+            self.stream.clone_htod(&a6.inel91_mu_data_ptrs_vec)?;
         let inel91_mu_offsets_ptrs =
-            stream.clone_htod(&a6.inel91_mu_offsets_ptrs_vec)?;
+            self.stream.clone_htod(&a6.inel91_mu_offsets_ptrs_vec)?;
         let inel91_mu_e_in_start_ptrs =
-            stream.clone_htod(&a6.inel91_mu_e_in_starts_ptrs_vec)?;
+            self.stream.clone_htod(&a6.inel91_mu_e_in_starts_ptrs_vec)?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -2122,134 +2043,103 @@ impl GpuTransportContext {
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,
-            basis_offsets: stream.clone_htod(&b.basis_offsets_vec)?,
-            grid_offsets: stream.clone_htod(&a.grid_offsets_vec)?,
-            n_energies: stream.clone_htod(&a.n_energies_vec)?,
-            has_reaction: stream.clone_htod(&b.has_reaction_vec)?,
-            coeffs_offsets: stream.clone_htod(&b.coeffs_offsets_vec)?,
+            basis_offsets: self.stream.clone_htod(&b.basis_offsets_vec)?,
+            grid_offsets: self.stream.clone_htod(&a.grid_offsets_vec)?,
+            n_energies: self.stream.clone_htod(&a.n_energies_vec)?,
+            has_reaction: self.stream.clone_htod(&b.has_reaction_vec)?,
+            coeffs_offsets: self.stream.clone_htod(&b.coeffs_offsets_vec)?,
             rank: rank as i32,
             total_xs: a.total_xs,
-            total_xs_offsets: stream.clone_htod(&a.total_xs_off_vec)?,
-            has_total_xs: stream.clone_htod(&a.has_total_xs_vec)?,
+            total_xs_offsets: self.stream.clone_htod(&a.total_xs_off_vec)?,
+            has_total_xs: self.stream.clone_htod(&a.has_total_xs_vec)?,
             pointwise_xs: a.pointwise_xs,
-            pw_offsets: stream.clone_htod(&a.pw_off_vec)?,
-            has_pw: stream.clone_htod(&a.has_pw_vec)?,
+            pw_offsets: self.stream.clone_htod(&a.pw_off_vec)?,
+            has_pw: self.stream.clone_htod(&a.has_pw_vec)?,
             nu_bar_energies: a.nu_bar_energies,
             nu_bar_values: a.nu_bar_values,
-            nu_bar_offsets: stream.clone_htod(&a.nu_bar_offsets_vec)?,
-            nu_bar_sizes: stream.clone_htod(&a.nu_bar_sizes_vec)?,
+            nu_bar_offsets: self.stream.clone_htod(&a.nu_bar_offsets_vec)?,
+            nu_bar_sizes: self.stream.clone_htod(&a.nu_bar_sizes_vec)?,
             delayed_nu_bar_energies: a.delayed_nu_bar_energies,
             delayed_nu_bar_values: a.delayed_nu_bar_values,
             delayed_nu_bar_offsets: self
                 .stream
                 .clone_htod(&a.delayed_nu_bar_offsets_vec)?,
-            delayed_nu_bar_sizes: stream.clone_htod(&a.delayed_nu_bar_sizes_vec)?,
+            delayed_nu_bar_sizes: self.stream.clone_htod(&a.delayed_nu_bar_sizes_vec)?,
             level_q_values: c.level_q_values,
             level_thresholds: c.level_thresholds,
-            level_offsets: stream.clone_htod(&c.level_offsets_vec)?,
-            level_counts: stream.clone_htod(&c.level_counts_vec)?,
+            level_offsets: self.stream.clone_htod(&c.level_offsets_vec)?,
+            level_counts: self.stream.clone_htod(&c.level_counts_vec)?,
             level_basis: c.level_basis,
             level_coeffs: c.level_coeffs,
-            level_basis_offsets: stream.clone_htod(&c.level_basis_offsets_vec)?,
-            level_coeffs_offsets: stream.clone_htod(&c.level_coeffs_offsets_vec)?,
+            level_basis_offsets: self.stream.clone_htod(&c.level_basis_offsets_vec)?,
+            level_coeffs_offsets: self.stream.clone_htod(&c.level_coeffs_offsets_vec)?,
             level_has_kernel: c.level_has_kernel,
             level_mt: c.level_mt,
             lev_ang_energies: c.lev_ang_energies,
             lev_ang_mu: c.lev_ang_mu,
             lev_ang_cdf: c.lev_ang_cdf,
             lev_ang_pdf: c.lev_ang_pdf,
-            lev_ang_dist_off: stream.clone_htod(&c.lev_ang_dist_off_vec)?,
-            lev_ang_dist_sz: stream.clone_htod(&c.lev_ang_dist_sz_vec)?,
-            lev_ang_lev_off: stream.clone_htod(&c.lev_ang_lev_off_vec)?,
-            lev_ang_lev_ne: stream.clone_htod(&c.lev_ang_lev_ne_vec)?,
+            lev_ang_dist_off: self.stream.clone_htod(&c.lev_ang_dist_off_vec)?,
+            lev_ang_dist_sz: self.stream.clone_htod(&c.lev_ang_dist_sz_vec)?,
+            lev_ang_lev_off: self.stream.clone_htod(&c.lev_ang_lev_off_vec)?,
+            lev_ang_lev_ne: self.stream.clone_htod(&c.lev_ang_lev_ne_vec)?,
             ang_energies: a4.ang_energies,
             ang_mu: a4.ang_mu,
             ang_cdf: a4.ang_cdf,
             ang_pdf: a4.ang_pdf,
-            ang_dist_offsets: stream.clone_htod(&a4.ang_dist_offsets_vec)?,
-            ang_dist_sizes: stream.clone_htod(&a4.ang_dist_sizes_vec)?,
-            ang_nuc_offsets: stream.clone_htod(&a4.ang_nuc_offsets_vec)?,
-            ang_nuc_n_energies: stream.clone_htod(&a4.ang_nuc_n_energies_vec)?,
-            ang_is_cm: stream.clone_htod(&a4.ang_is_cm_vec)?,
+            ang_dist_offsets: self.stream.clone_htod(&a4.ang_dist_offsets_vec)?,
+            ang_dist_sizes: self.stream.clone_htod(&a4.ang_dist_sizes_vec)?,
+            ang_nuc_offsets: self.stream.clone_htod(&a4.ang_nuc_offsets_vec)?,
+            ang_nuc_n_energies: self.stream.clone_htod(&a4.ang_nuc_n_energies_vec)?,
+            ang_is_cm: self.stream.clone_htod(&a4.ang_is_cm_vec)?,
             fis_inc_energies: a5.fis_inc_energies,
-            fis_dist_offsets: stream.clone_htod(&a5.fis_dist_offsets_vec)?,
-            fis_dist_sizes: stream.clone_htod(&a5.fis_dist_sizes_vec)?,
+            fis_dist_offsets: self.stream.clone_htod(&a5.fis_dist_offsets_vec)?,
+            fis_dist_sizes: self.stream.clone_htod(&a5.fis_dist_sizes_vec)?,
             fis_e_out: a5.fis_e_out,
             fis_cdf: a5.fis_cdf,
             fis_pdf: a5.fis_pdf,
-            fis_nuc_offsets: stream.clone_htod(&a5.fis_nuc_offsets_vec)?,
-            fis_nuc_n_inc: stream.clone_htod(&a5.fis_nuc_n_inc_vec)?,
+            fis_nuc_offsets: self.stream.clone_htod(&a5.fis_nuc_offsets_vec)?,
+            fis_nuc_n_inc: self.stream.clone_htod(&a5.fis_nuc_n_inc_vec)?,
             watt_inc_energies: a5.watt_inc_energies,
             watt_a: a5.watt_a,
             watt_b: a5.watt_b,
-            watt_u: stream.clone_htod(&a5.watt_u_vec)?,
-            watt_nuc_offsets: stream.clone_htod(&a5.watt_nuc_offsets_vec)?,
-            watt_nuc_n: stream.clone_htod(&a5.watt_nuc_n_vec)?,
+            watt_u: self.stream.clone_htod(&a5.watt_u_vec)?,
+            watt_nuc_offsets: self.stream.clone_htod(&a5.watt_nuc_offsets_vec)?,
+            watt_nuc_n: self.stream.clone_htod(&a5.watt_nuc_n_vec)?,
             maxevap_inc_energies: a5.maxevap_inc_energies,
             maxevap_theta: a5.maxevap_theta,
-            maxevap_u: stream.clone_htod(&a5.maxevap_u_vec)?,
-            maxevap_law: stream.clone_htod(&a5.maxevap_law_vec)?,
-            maxevap_nuc_offsets: stream.clone_htod(&a5.maxevap_nuc_offsets_vec)?,
-            maxevap_nuc_n: stream.clone_htod(&a5.maxevap_nuc_n_vec)?,
+            maxevap_u: self.stream.clone_htod(&a5.maxevap_u_vec)?,
+            maxevap_law: self.stream.clone_htod(&a5.maxevap_law_vec)?,
+            maxevap_nuc_offsets: self.stream.clone_htod(&a5.maxevap_nuc_offsets_vec)?,
+            maxevap_nuc_n: self.stream.clone_htod(&a5.maxevap_nuc_n_vec)?,
             inel91_inc_energies: a6.inel91_inc_energies,
-            inel91_dist_offsets: stream.clone_htod(&a6.inel91_dist_offsets_vec)?,
-            inel91_dist_sizes: stream.clone_htod(&a6.inel91_dist_sizes_vec)?,
+            inel91_dist_offsets: self.stream.clone_htod(&a6.inel91_dist_offsets_vec)?,
+            inel91_dist_sizes: self.stream.clone_htod(&a6.inel91_dist_sizes_vec)?,
             inel91_e_out: a6.inel91_e_out,
             inel91_cdf: a6.inel91_cdf,
             inel91_pdf: a6.inel91_pdf,
-            inel91_nuc_offsets: stream.clone_htod(&a6.inel91_nuc_offsets_vec)?,
-            inel91_nuc_n_inc: stream.clone_htod(&a6.inel91_nuc_n_inc_vec)?,
+            inel91_nuc_offsets: self.stream.clone_htod(&a6.inel91_nuc_offsets_vec)?,
+            inel91_nuc_n_inc: self.stream.clone_htod(&a6.inel91_nuc_n_inc_vec)?,
             urr_energies: a7.urr_energies,
             urr_cum_prob: a7.urr_cum_prob,
             urr_total_f: a7.urr_total_f,
             urr_elastic_f: a7.urr_elastic_f,
             urr_fission_f: a7.urr_fission_f,
             urr_capture_f: a7.urr_capture_f,
-            urr_offsets: stream.clone_htod(&a7.urr_offsets_vec)?,
-            urr_n_energies: stream.clone_htod(&a7.urr_n_energies_vec)?,
-            urr_n_bands: stream.clone_htod(&a7.urr_n_bands_vec)?,
-            urr_multiply_smooth: stream.clone_htod(&a7.urr_multiply_smooth_vec)?,
-            urr_interpolation: stream.clone_htod(&a7.urr_interpolation_vec)?,
+            urr_offsets: self.stream.clone_htod(&a7.urr_offsets_vec)?,
+            urr_n_energies: self.stream.clone_htod(&a7.urr_n_energies_vec)?,
+            urr_n_bands: self.stream.clone_htod(&a7.urr_n_bands_vec)?,
+            urr_multiply_smooth: self.stream.clone_htod(&a7.urr_multiply_smooth_vec)?,
+            urr_interpolation: self.stream.clone_htod(&a7.urr_interpolation_vec)?,
             inel_cdf_data: a8.inel_cdf_data,
-            inel_cdf_off: stream.clone_htod(&a8.inel_cdf_off_vec)?,
-            inel_cdf_n_e: stream.clone_htod(&a8.inel_cdf_n_e_vec)?,
-            inel_cdf_n_t: stream.clone_htod(&a8.inel_cdf_n_t_vec)?,
-            inel_cdf_n_lev: stream.clone_htod(&a8.inel_cdf_n_lev_vec)?,
-            inel_cdf_log_e_min: stream.clone_htod(&a8.inel_cdf_log_e_min_vec)?,
-            inel_cdf_log_e_max: stream.clone_htod(&a8.inel_cdf_log_e_max_vec)?,
+            inel_cdf_off: self.stream.clone_htod(&a8.inel_cdf_off_vec)?,
+            inel_cdf_n_e: self.stream.clone_htod(&a8.inel_cdf_n_e_vec)?,
+            inel_cdf_n_t: self.stream.clone_htod(&a8.inel_cdf_n_t_vec)?,
+            inel_cdf_n_lev: self.stream.clone_htod(&a8.inel_cdf_n_lev_vec)?,
+            inel_cdf_log_e_min: self.stream.clone_htod(&a8.inel_cdf_log_e_min_vec)?,
+            inel_cdf_log_e_max: self.stream.clone_htod(&a8.inel_cdf_log_e_max_vec)?,
         }))
     }
-
-    /// Create a fresh CUDA stream for kernel launches (Stage 4 of
-    /// the benchmark pipeline). Distinct from the context's default
-    /// stream and from any transfer stream — cross-stream ordering
-    /// must be made explicit via `CudaEvent`s. See
-    /// `docs/benchmark-pipeline-spec.md` §3.2.
-    pub fn new_compute_stream(&self) -> Result<std::sync::Arc<CudaStream>, Box<dyn std::error::Error>> {
-        Ok(self._ctx.new_stream()?)
-    }
-
-    /// Create a fresh CUDA stream for H→D copies (Stage 3 of the
-    /// benchmark pipeline). Pairs with `new_compute_stream`; uploads
-    /// on this stream are sequenced against kernel launches on the
-    /// compute stream via `CudaEvent::record` + `CudaStream::wait`.
-    pub fn new_transfer_stream(&self) -> Result<std::sync::Arc<CudaStream>, Box<dyn std::error::Error>> {
-        Ok(self._ctx.new_stream()?)
-    }
-
-    /// Create a fresh `CudaEvent` on this context. Stage 3 records the
-    /// event on `stream_transfer` after the upload chain; Stage 4
-    /// `stream_compute.wait(event)` before launching the transport
-    /// kernel. Timing is disabled (the benchmark uses host wall-clock
-    /// instead — about ~10 ns cheaper per record).
-    pub fn new_event(
-        &self,
-    ) -> Result<cudarc::driver::CudaEvent, Box<dyn std::error::Error>> {
-        Ok(self._ctx.new_event(None)?)
-    }
-
-    // `force_rebuild` already lives above at `pub fn force_rebuild`
-    // near `shared_cell()`. Don't duplicate it here.
 
     /// Drop the per-context GPU per-nuclide cache and trim the async
     /// mempool. Callers that need to free GPU memory between long
@@ -2381,53 +2271,6 @@ impl GpuTransportContext {
         total.saturating_sub(per)
     }
 
-    /// Compute a VRAM-safe `n_slots` for the benchmark pipeline.
-    ///
-    /// The pipeline pre-uploads one flat-pack `GpuNuclideData` bundle per
-    /// channel slot. At any case transition the peak live count is:
-    ///   n_slots (channel) + 1 (running in Stage 4) + 1 (being uploaded)
-    ///   + 1 (per-nuclide cache source, shared but counted separately)
-    ///   = n_slots + 3 bundle-sized VRAM chunks
-    ///
-    /// Formula (in MiB):
-    ///   (n_slots + 3) × PER_BUNDLE_MIB + OVERHEAD_MIB ≤ total_vram_mib
-    ///   n_slots ≤ (total_vram_mib − OVERHEAD_MIB) / PER_BUNDLE_MIB − 3
-    ///
-    /// `PER_BUNDLE_MIB = 1536` (1.5 GiB) is calibrated for rank-15,
-    /// ~20-nuclide heavy-metal cases (heu-comp-inter-003). These are
-    /// VRAM-dominant because U-235/U-238 carry large discrete-level SVD
-    /// basis arrays; each bundle's flat-pack DtoD copy is ~1.5 GB.
-    /// Smaller cases (Godiva: 3 nuclides) use less and this is
-    /// conservative.
-    ///
-    /// `OVERHEAD_MIB = 1700` covers CUDA context (~500 MB) + particle
-    /// buffers (~200 MB) + SAB cache (~50 MB) + 950 MB safety margin.
-    ///
-    /// Returns a value in [1, 4]. Explicit `--n-slots` from the CLI
-    /// overrides this.
-    pub fn vram_aware_pipeline_slots(&self) -> usize {
-        const PER_BUNDLE_MIB: u64 = 1_536; // 1.5 GiB per flat-pack
-        const OVERHEAD_MIB: u64 = 1_700; // context + buffers + safety
-
-        let total_bytes = match self._ctx.total_mem() {
-            Ok(t) if t > 0 => t as u64,
-            _ => return 1,
-        };
-        let total_mib = total_bytes / (1024 * 1024);
-
-        // Need at least 3 bundles + overhead to run at all.
-        if total_mib < PER_BUNDLE_MIB * 3 + OVERHEAD_MIB {
-            return 1;
-        }
-
-        let available_mib = total_mib.saturating_sub(OVERHEAD_MIB);
-        // n_slots ≤ available / per_bundle - 3  (3 = running + uploading + source)
-        let n = (available_mib / PER_BUNDLE_MIB).saturating_sub(3) as usize;
-        // Cap at 16 to prevent runaway on very-large-VRAM devices; the
-        // caller applies a lower `max_slots` constraint if configured.
-        n.max(1).min(16)
-    }
-
     /// Pre-upload safety check: query free VRAM via `cuMemGetInfo`
     /// and take recovery action if it is critically low.
     ///
@@ -2496,29 +2339,6 @@ impl GpuTransportContext {
         nuclide_q_n2n: &[f64],
         nuclide_q_n3n: &[f64],
     ) -> Result<GpuMaterialData, Box<dyn std::error::Error>> {
-        self.upload_material_data_on_stream(
-            materials,
-            nuclide_awrs,
-            nuclide_nu_bars,
-            nuclide_q_n2n,
-            nuclide_q_n3n,
-            &self.stream,
-        )
-    }
-
-    /// Stream-parameterised variant of [`upload_material_data`].
-    /// Routes every H→D copy through `stream` so the benchmark
-    /// pipeline can keep `stream_transfer` and `stream_compute`
-    /// distinct (per the v2 spec §3.2 concurrency requirement).
-    pub fn upload_material_data_on_stream(
-        &self,
-        materials: &[crate::transport::material::Material],
-        nuclide_awrs: &[f64],
-        nuclide_nu_bars: &[f64],
-        nuclide_q_n2n: &[f64],
-        nuclide_q_n3n: &[f64],
-        stream: &Arc<CudaStream>,
-    ) -> Result<GpuMaterialData, Box<dyn std::error::Error>> {
         // Single source of truth: `crate::MAX_NUCLIDES_PER_MATERIAL`.
         // The GPU sees the same value via the NVRTC `-DMAX_NUC_PER_MAT`
         // flag wired in `assemble_kernel_source` (gpu_recursive.rs) and
@@ -2546,13 +2366,13 @@ impl GpuTransportContext {
         }
 
         Ok(GpuMaterialData {
-            mat_n_nuclides: stream.clone_htod(&n_nuclides)?,
-            mat_nuclide_idx: stream.clone_htod(&nuc_idx)?,
-            mat_atom_density: stream.clone_htod(&atom_dens)?,
-            awr_table: stream.clone_htod(nuclide_awrs)?,
-            nu_bar_const: stream.clone_htod(nuclide_nu_bars)?,
-            q_n2n_table: stream.clone_htod(nuclide_q_n2n)?,
-            q_n3n_table: stream.clone_htod(nuclide_q_n3n)?,
+            mat_n_nuclides: self.stream.clone_htod(&n_nuclides)?,
+            mat_nuclide_idx: self.stream.clone_htod(&nuc_idx)?,
+            mat_atom_density: self.stream.clone_htod(&atom_dens)?,
+            awr_table: self.stream.clone_htod(nuclide_awrs)?,
+            nu_bar_const: self.stream.clone_htod(nuclide_nu_bars)?,
+            q_n2n_table: self.stream.clone_htod(nuclide_q_n2n)?,
+            q_n3n_table: self.stream.clone_htod(nuclide_q_n3n)?,
         })
     }
 
@@ -2601,46 +2421,6 @@ impl GpuTransportContext {
         )],
         n_nuc: usize,
     ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
-        // All-temps shim — preserves the pre-lazy-TSL behaviour for
-        // existing callers. The benchmark pipeline calls
-        // `upload_sab_data_multi_filtered` directly with a real filter
-        // computed from the resolved materials' temperatures.
-        let filter: Vec<Vec<usize>> = slots
-            .iter()
-            .map(|(tsl, _)| (0..tsl.kts.len()).collect())
-            .collect();
-        self.upload_sab_data_multi_filtered(slots, &filter, n_nuc)
-    }
-
-    /// Lazy-TSL variant: uploads only the kT slots listed in
-    /// `temp_filter[slot_i]` for each input slot. Used by the
-    /// benchmark pipeline's Stage 3 to ship just the bracket pair
-    /// each material actually selects from, saving up to ~80% of
-    /// VRAM on TSLs with many tabulated temperatures (Be-9 at 11
-    /// temps, c_H_in_H2O, c_D_in_D2O).
-    ///
-    /// See `docs/benchmark-pipeline-spec-addendum-lazy-tsl.md` for
-    /// the safety argument: this is identical to the full upload as
-    /// long as the filter covers the bracket pair returned by
-    /// `ThermalScatteringData::bracket(material.T)` for every
-    /// material that references each TSL.
-    pub fn upload_sab_data_multi_filtered(
-        &self,
-        slots: &[(
-            &crate::thermal::ThermalScatteringData,
-            usize, /* nuc_idx */
-        )],
-        temp_filter: &[Vec<usize>],
-        n_nuc: usize,
-    ) -> Result<GpuSabData, Box<dyn std::error::Error>> {
-        if temp_filter.len() != slots.len() {
-            return Err(format!(
-                "upload_sab_data_multi_filtered: temp_filter.len()={} != slots.len()={}",
-                temp_filter.len(),
-                slots.len()
-            )
-            .into());
-        }
         // Concatenated flat arrays.
         let mut inc_e_flat: Vec<f64> = Vec::new();
         let mut xs_flat: Vec<f64> = Vec::new();
@@ -2679,7 +2459,7 @@ impl GpuTransportContext {
         // `mat_kT[mat]` per collision.
         let mut slot_kt: Vec<f64> = Vec::new();
 
-        for (slot_i, (tsl, nuc_idx)) in slots.iter().copied().enumerate() {
+        for (tsl, nuc_idx) in slots.iter().copied() {
             if nuc_idx >= n_nuc {
                 return Err(format!(
                     "upload_sab_data_multi: nuc_idx {nuc_idx} >= n_nuc {n_nuc}"
@@ -2692,23 +2472,12 @@ impl GpuTransportContext {
                 )
                 .into());
             }
-            let filter_for_slot = &temp_filter[slot_i];
-            for &t in filter_for_slot.iter() {
-                if t >= tsl.kts.len() {
-                    return Err(format!(
-                        "upload_sab_data_multi_filtered: temp_filter[{slot_i}] \
-                         contains index {t} but TSL only has {} kT columns",
-                        tsl.kts.len()
-                    )
-                    .into());
-                }
-            }
             let first_slot = slot_inc_e_off.len() as i32;
             slot_per_nuc[nuc_idx] = first_slot;
-            slot_count_per_nuc[nuc_idx] = filter_for_slot.len() as i32;
+            slot_count_per_nuc[nuc_idx] = tsl.kts.len() as i32;
 
-            // Iterate only the kT columns the filter selected.
-            for &temp_idx in filter_for_slot.iter() {
+            // Iterate every kT column of this TSL — one slot per temp.
+            for temp_idx in 0..tsl.kts.len() {
             let slot_id = slot_inc_e_off.len() as i32;
             slot_kt.push(tsl.kts[temp_idx]);
 
@@ -2820,7 +2589,7 @@ impl GpuTransportContext {
                     );
                 }
             }
-            } // end inner `for &temp_idx in filter_for_slot.iter()`
+            } // end inner `for temp_idx in 0..tsl.kts.len()`
         }
 
         // Ensure no flat array is empty (cudarc rejects zero-sized
@@ -2939,38 +2708,6 @@ impl GpuTransportContext {
         slots: &[(Arc<crate::thermal::ThermalScatteringData>, usize)],
         n_nuc: usize,
     ) -> Result<Arc<GpuSabData>, Box<dyn std::error::Error>> {
-        // All-temps shim — delegates to the filtered variant with the
-        // identity filter. Existing callers (binaries, tests, the
-        // Python single-case driver) keep their current signature;
-        // the benchmark pipeline calls
-        // `upload_sab_data_multi_cached_filtered` directly with a
-        // real bracket-pair filter.
-        let filter: Vec<Vec<usize>> = slots
-            .iter()
-            .map(|(arc, _)| (0..arc.kts.len()).collect())
-            .collect();
-        self.upload_sab_data_multi_cached_filtered(slots, &filter, n_nuc)
-    }
-
-    /// Lazy-TSL cache-aware variant. Builds the cache key from the
-    /// `(Arc::as_ptr, nuc_idx, temp_filter)` triple so two cases at
-    /// the same material temperature share a cache entry while two
-    /// cases at different temperatures get distinct entries. See
-    /// `docs/benchmark-pipeline-spec-addendum-lazy-tsl.md` §2.3.
-    pub fn upload_sab_data_multi_cached_filtered(
-        &self,
-        slots: &[(Arc<crate::thermal::ThermalScatteringData>, usize)],
-        temp_filter: &[Vec<usize>],
-        n_nuc: usize,
-    ) -> Result<Arc<GpuSabData>, Box<dyn std::error::Error>> {
-        if temp_filter.len() != slots.len() {
-            return Err(format!(
-                "upload_sab_data_multi_cached_filtered: temp_filter.len()={} != slots.len()={}",
-                temp_filter.len(),
-                slots.len()
-            )
-            .into());
-        }
         // Note: no `defensive_clear_if_low_vram` here. The nuclide
         // upload that runs just before this one already drove free
         // VRAM into the hard-clear band (cache itself is ~1 GB of
@@ -2993,10 +2730,7 @@ impl GpuTransportContext {
         let key = SabCacheKey {
             slots: slots
                 .iter()
-                .zip(temp_filter.iter())
-                .map(|((arc, idx), filt)| {
-                    (Arc::as_ptr(arc) as usize, *idx, filt.clone())
-                })
+                .map(|(arc, idx)| (Arc::as_ptr(arc) as usize, *idx))
                 .collect(),
             n_nuc,
         };
@@ -3028,8 +2762,7 @@ impl GpuTransportContext {
             .iter()
             .map(|(arc, idx)| (arc.as_ref(), *idx))
             .collect();
-        let fresh =
-            self.upload_sab_data_multi_filtered(&borrowed_slots, temp_filter, n_nuc)?;
+        let fresh = self.upload_sab_data_multi(&borrowed_slots, n_nuc)?;
         let bytes = fresh.device_bytes();
         let arc = Arc::new(fresh);
 
@@ -3102,112 +2835,6 @@ impl GpuTransportContext {
         (guard.entries.len(), guard.total_bytes, total_hits)
     }
 
-    /// Estimate the device-side byte footprint of a SAB upload
-    /// *before* doing it. Used by the benchmark pipeline's Stage 3
-    /// VRAM pre-flight (see `docs/benchmark-pipeline-spec.md` §5.3.2).
-    ///
-    /// Mirrors the per-temperature accumulators in
-    /// `upload_sab_data_multi` so the estimate tracks the real upload
-    /// within a few percent. Padding bytes that ensure non-empty
-    /// flat arrays (cudarc rejects zero-sized copies) are included as
-    /// a small constant overhead.
-    ///
-    /// The estimate is intentionally an *upper* approximation —
-    /// better to refuse one borderline case than to OOM mid-upload.
-    pub fn estimate_sab_device_bytes(
-        slots: &[(
-            std::sync::Arc<crate::thermal::ThermalScatteringData>,
-            usize,
-        )],
-        n_nuc: usize,
-    ) -> usize {
-        // All-temps shim — for callers that don't yet have a real
-        // filter to pass. Identical to the pre-lazy-TSL footprint.
-        let filter: Vec<Vec<usize>> = slots
-            .iter()
-            .map(|(arc, _)| (0..arc.kts.len()).collect())
-            .collect();
-        Self::estimate_sab_device_bytes_filtered(slots, &filter, n_nuc)
-    }
-
-    /// Lazy-TSL variant of [`estimate_sab_device_bytes`]. Counts only
-    /// the kT slots listed in `temp_filter[slot_i]`. Used by Stage 3
-    /// of the benchmark pipeline before issuing the H→D upload, so
-    /// the VRAM gate sees the actual (smaller) footprint of a
-    /// bracket-pair upload rather than the full TSL.
-    pub fn estimate_sab_device_bytes_filtered(
-        slots: &[(
-            std::sync::Arc<crate::thermal::ThermalScatteringData>,
-            usize,
-        )],
-        temp_filter: &[Vec<usize>],
-        n_nuc: usize,
-    ) -> usize {
-        // Per-nuclide lookup tables: slot_per_nuc + slot_count_per_nuc.
-        let mut bytes = n_nuc.max(1) * (4 + 4);
-
-        // Constant per-slot metadata footprint: slot_inc_e_off,
-        // slot_n_inc, slot_eout_table_off, slot_mu_table_off (i32 ×4)
-        // + slot_emax (f64) + slot_kt (f64) + elastic constants
-        // (~5 i32 + 2 f64).
-        const PER_SLOT_METADATA: usize =
-            4 * 4 + 8 + 8 + 5 * 4 + 2 * 8;
-
-        for (slot_i, (tsl, _)) in slots.iter().enumerate() {
-            // Fall back to all-temps when the caller passed too short
-            // a filter (defensive — the public entry points enforce
-            // matching lengths).
-            let empty: Vec<usize> = (0..tsl.kts.len()).collect();
-            let indices = temp_filter
-                .get(slot_i)
-                .filter(|f| !f.is_empty())
-                .unwrap_or(&empty);
-            for &t in indices.iter() {
-                let Some(inel) = tsl.inelastic.get(t) else {
-                    continue;
-                };
-                let n_inc = inel.energy.len();
-
-                // inc_e_flat + xs_flat (f64 each).
-                bytes += n_inc * 8 * 2;
-                bytes += PER_SLOT_METADATA;
-
-                match &inel.dist {
-                    crate::thermal::InelasticDist::Continuous(c) => {
-                        // e_out + cdf_e + pdf_e (f64 each).
-                        bytes += c.e_out.len() * 8 * 3;
-                        // eout_offsets + eout_sizes (i32 each), one
-                        // entry per inc energy.
-                        bytes += n_inc * 4 * 2;
-                        // mu + cdf_mu (f64 each).
-                        bytes += c.mu.len() * 8 * 2;
-                        // mu_offsets + mu_sizes (i32 each).
-                        bytes += c.mu_offsets.len() * 4 * 2;
-                    }
-                    crate::thermal::InelasticDist::Discrete(_) => {
-                        // GPU rejects discrete (panics in
-                        // upload_sab_data_multi). Estimate a generous
-                        // size so the pre-flight gate routes the
-                        // case to CPU instead of attempting the
-                        // upload at all.
-                        bytes += n_inc * 8 * 4;
-                    }
-                }
-            }
-
-            // Elastic channel (Bragg edges + Debye-Waller factors).
-            // Sizes are small (~tens of edges per TSL); use a
-            // generous constant rather than walking the optional
-            // `elastic` field.
-            bytes += 1024;
-        }
-
-        // Cudarc-imposed minimum size for non-empty allocations.
-        // upload_sab_data_multi pushes sentinels to ~10 flat arrays
-        // when slots is empty.
-        bytes.max(1024)
-    }
-
     /// Create an empty S(α,β) placeholder. `n_nuc` is needed so the
     /// per-nuclide lookup table is sized correctly for the kernel.
     pub fn upload_sab_data_empty(
@@ -3223,20 +2850,6 @@ impl GpuTransportContext {
     pub fn upload_wmp_data(
         &self,
         wmps: &[Option<(Arc<crate::wmp::WindowedMultipole>, f64)>],
-    ) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
-        self.upload_wmp_data_on_stream(wmps, &self.stream)
-    }
-
-    /// Stream-parameterised variant — uploads on the supplied stream
-    /// so the benchmark pipeline's Stage 3 can issue H→D copies on
-    /// `stream_transfer` while Stage 4 keeps the device busy on
-    /// `stream_compute`. Existing callers continue to use the
-    /// `upload_wmp_data` shim above which routes through
-    /// `self.stream`.
-    pub fn upload_wmp_data_on_stream(
-        &self,
-        wmps: &[Option<(Arc<crate::wmp::WindowedMultipole>, f64)>],
-        stream: &Arc<CudaStream>,
     ) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
         let n_nuc = wmps.len().max(1);
         let mut has_vec = vec![0_i32; n_nuc];
@@ -3319,23 +2932,23 @@ impl GpuTransportContext {
         );
 
         Ok(GpuWmpData {
-            has: stream.clone_htod(&has_vec)?,
-            e_min: stream.clone_htod(&e_min_vec)?,
-            e_max: stream.clone_htod(&e_max_vec)?,
-            spacing: stream.clone_htod(&spacing_vec)?,
-            sqrt_awr: stream.clone_htod(&sqrt_awr_vec)?,
-            t_kelvin: stream.clone_htod(&t_kelvin_vec)?,
-            fit_order: stream.clone_htod(&fit_order_vec)?,
-            n_windows: stream.clone_htod(&n_windows_vec)?,
-            fissionable: stream.clone_htod(&fissionable_vec)?,
-            poles: stream.clone_htod(&poles_vec)?,
-            pole_offsets: stream.clone_htod(&pole_off_vec)?,
-            windows: stream.clone_htod(&windows_vec)?,
-            window_offsets: stream.clone_htod(&win_off_vec)?,
-            broaden: stream.clone_htod(&broaden_vec)?,
-            broaden_offsets: stream.clone_htod(&bro_off_vec)?,
-            curvefit: stream.clone_htod(&curvefit_vec)?,
-            curvefit_offsets: stream.clone_htod(&cf_off_vec)?,
+            has: self.stream.clone_htod(&has_vec)?,
+            e_min: self.stream.clone_htod(&e_min_vec)?,
+            e_max: self.stream.clone_htod(&e_max_vec)?,
+            spacing: self.stream.clone_htod(&spacing_vec)?,
+            sqrt_awr: self.stream.clone_htod(&sqrt_awr_vec)?,
+            t_kelvin: self.stream.clone_htod(&t_kelvin_vec)?,
+            fit_order: self.stream.clone_htod(&fit_order_vec)?,
+            n_windows: self.stream.clone_htod(&n_windows_vec)?,
+            fissionable: self.stream.clone_htod(&fissionable_vec)?,
+            poles: self.stream.clone_htod(&poles_vec)?,
+            pole_offsets: self.stream.clone_htod(&pole_off_vec)?,
+            windows: self.stream.clone_htod(&windows_vec)?,
+            window_offsets: self.stream.clone_htod(&win_off_vec)?,
+            broaden: self.stream.clone_htod(&broaden_vec)?,
+            broaden_offsets: self.stream.clone_htod(&bro_off_vec)?,
+            curvefit: self.stream.clone_htod(&curvefit_vec)?,
+            curvefit_offsets: self.stream.clone_htod(&cf_off_vec)?,
         })
     }
 
@@ -3345,18 +2958,9 @@ impl GpuTransportContext {
         &self,
         n_nuc: usize,
     ) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
-        self.upload_wmp_data_empty_on_stream(n_nuc, &self.stream)
-    }
-
-    /// Stream-parameterised variant of [`upload_wmp_data_empty`].
-    pub fn upload_wmp_data_empty_on_stream(
-        &self,
-        n_nuc: usize,
-        stream: &Arc<CudaStream>,
-    ) -> Result<GpuWmpData, Box<dyn std::error::Error>> {
         let wmps: Vec<Option<(Arc<crate::wmp::WindowedMultipole>, f64)>> =
             (0..n_nuc).map(|_| None).collect();
-        self.upload_wmp_data_on_stream(&wmps, stream)
+        self.upload_wmp_data(&wmps)
     }
 
     /// Run one batch of transport on GPU.
@@ -3946,11 +3550,11 @@ mod tests {
     #[test]
     fn sab_cache_key_is_order_sensitive() {
         let k_ab = SabCacheKey {
-            slots: vec![(0x100, 0, vec![0]), (0x200, 1, vec![0])],
+            slots: vec![(0x100, 0), (0x200, 1)],
             n_nuc: 4,
         };
         let k_ba = SabCacheKey {
-            slots: vec![(0x200, 1, vec![0]), (0x100, 0, vec![0])],
+            slots: vec![(0x200, 1), (0x100, 0)],
             n_nuc: 4,
         };
         assert_ne!(k_ab, k_ba);
@@ -3962,11 +3566,11 @@ mod tests {
     #[test]
     fn sab_cache_key_includes_n_nuc() {
         let k4 = SabCacheKey {
-            slots: vec![(0x100, 0, vec![0])],
+            slots: vec![(0x100, 0)],
             n_nuc: 4,
         };
         let k7 = SabCacheKey {
-            slots: vec![(0x100, 0, vec![0])],
+            slots: vec![(0x100, 0)],
             n_nuc: 7,
         };
         assert_ne!(k4, k7);
@@ -3976,31 +3580,14 @@ mod tests {
     #[test]
     fn sab_cache_key_equal_inputs_equal_keys() {
         let k1 = SabCacheKey {
-            slots: vec![(0x100, 0, vec![0, 1]), (0x200, 1, vec![0])],
+            slots: vec![(0x100, 0), (0x200, 1)],
             n_nuc: 4,
         };
         let k2 = SabCacheKey {
-            slots: vec![(0x100, 0, vec![0, 1]), (0x200, 1, vec![0])],
+            slots: vec![(0x100, 0), (0x200, 1)],
             n_nuc: 4,
         };
         assert_eq!(k1, k2);
-    }
-
-    /// Same logical slots but different temperature filters → distinct
-    /// keys. This is the lazy-TSL safety contract: a case running at
-    /// 294 K must not pull a cached buffer that was built for the
-    /// 600 K bracket pair of the same TSL.
-    #[test]
-    fn sab_cache_key_distinguishes_temperature_filter() {
-        let k_room = SabCacheKey {
-            slots: vec![(0x100, 0, vec![2, 3])],
-            n_nuc: 4,
-        };
-        let k_hot = SabCacheKey {
-            slots: vec![(0x100, 0, vec![4, 5])],
-            n_nuc: 4,
-        };
-        assert_ne!(k_room, k_hot);
     }
 
     #[test]

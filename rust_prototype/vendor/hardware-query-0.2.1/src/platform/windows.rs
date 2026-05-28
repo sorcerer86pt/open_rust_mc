@@ -105,7 +105,7 @@ impl WindowsCPUInfo {
 
     /// Get CPU vulnerabilities from registry or system info
     pub fn get_vulnerabilities(&self) -> Result<Vec<String>> {
-        let mut vulnerabilities = Vec::new();
+        let vulnerabilities = Vec::new();
 
         // Check for common CPU vulnerabilities
         // This would require reading from registry or system files

@@ -19,6 +19,11 @@ Tests on `origin/main`:
 - `cargo test --lib`: **438 / 438 green**.
 - `cargo test --lib --features cuda`: **443 / 443 green**.
 
+(Branch `drop-orchestration-keep-physics` re-runs needed —
+physics cherry-picks added the U-235 MT=91 Law-61 test and the
+`cuda_survival_biasing_unbiased_godiva` parity test; test counts
+will be higher. Re-verify before merging.)
+
 ## How to read results
 
 Numbers in commit messages, docs, and code comments come with a
@@ -104,7 +109,7 @@ rust_prototype/                 — main crate (workspace root)
     depletion/                  — cram, chain, predictor-corrector,
                                   mapping, flux
     gpu.rs                      — CUDA host wrappers (root)
-    gpu_transport.rs            — `GpuTransportContext`, N_PARAMS=186
+    gpu_transport.rs            — `GpuTransportContext`, N_PARAMS=195
     gpu_recursive.rs            — recursive geometry on device
     gpu_random_ray.rs           — random-ray persistent kernel host
     gpu_per_nuclide.rs          — per-nuclide upload + LRU cache
@@ -152,21 +157,23 @@ changing.
   touching both atomically. Earlier inline-vec packing sites that
   open-coded `vec![dptr!(...)…]` are now delegated to
   `build_transport_params_vec` — don't open-code new sites.
-  Slots 192-194 carry the survival-biasing config
-  (`P_SURVIVAL_BIAS_ENABLED`, `P_W_MIN`, `P_W_SURVIVE`); defaults
-  written by the builder run the analog path bit-for-bit, so
-  callers that don't opt in (every path except `CudaRunner` reading
-  `SimConfig::survival_biasing`) are unaffected.
+  Slots 188-191 carry the MT=91 Law 61 (KalbachMann) mu coupling
+  (`inel91_mu_has` + 3 ptr arrays). Slots 192-194 carry the
+  survival-biasing config (`P_SURVIVAL_BIAS_ENABLED`, `P_W_MIN`,
+  `P_W_SURVIVE`); defaults written by the builder run the analog
+  path bit-for-bit, so callers that don't opt in (every path
+  except `CudaRunner` reading `SimConfig::survival_biasing`) are
+  unaffected.
 
-- **`GpuTransportContext::vram_aware_pipeline_slots()`** computes the
-  VRAM-safe `n_slots` for `benchmark_runner`. Formula:
-  `(n_slots + 3) × 1.5 GB + 1.7 GB ≤ total_vram`. For RTX 3080
-  (10 GB) → n_slots=2; for 5090 (32 GB) → capped at `--max-slots`
-  (default 4). The flat-pack DtoD copy per bundle (~1.5 GB for
-  20-nuc rank-15 HEU) is OUTSIDE the per-nuclide cache budget and
-  NOT tracked by `bundle_cache_budget_bytes`. Raising
-  `BUNDLE_CACHE_DEFAULT_FRACTION` without accounting for flat-packs
-  will OOM.
+- **Subprocess-per-case benchmark driver.** ICSBEP sweeps run via
+  the Python `icsbep_sweep.py` harness, which loops over cases
+  and calls into `open_rust_mc.run_icsbep_case` (PyO3) per case.
+  No in-process orchestrator, no shared CUDA context across cases,
+  no `force_rebuild()` watchdog. Process death isolates per-case
+  failures. The previous in-process pipeline (`benchmark_runner`
+  binary + `benchmark/` module) was rolled back after the
+  `force_rebuild()` watchdog was found to corrupt subsequent
+  cases (NaN k_eff after a single timeout on a 375-case sweep).
 
 - **`SimLimits` (`src/transport/sim_limits.rs`)** is engine policy
   separate from per-run intent (`SimConfig`). `default()` reproduces
@@ -382,19 +389,9 @@ Four commits on top of `547dfcb`:
   but materials are ~few hundred KB total vs ~50 MB for SAB — three
   orders of magnitude smaller. Defer until profile data shows it's
   worth the code surface.
-- ~~GPU survival biasing / Russian roulette~~ — landed. Implicit
-  capture + Bernoulli-banked fission + RR all live inside
-  `gr_trace_and_sample`'s SB branch (transport_event_based.cu), gated
-  on `params[P_SURVIVAL_BIAS_ENABLED]`. CPU contract preserved
-  (OpenMC defaults `w_min=0.25, w_survive=1.0`). `gr_fission_event`
-  is skipped when SB is on — banking happens in-place. Verified
-  unbiased on Godiva (analog 0.99986 ± 111 pcm, SB 1.00088 ± 96 pcm,
-  Δ = +102 pcm within 294 pcm 2σ envelope), with σ tightened ~13%
-  at 5k × 80 × 3-seed sampling. Primary motivation was unblocking
-  long-tail histories on the RTX 3080 at ≥200k particles where the
-  analog loop hits `max_events_per_history = 1_000_000` chasing a
-  single persistent neutron; RR terminates such tails in O(log w)
-  rolls.
+- **GPU survival biasing / Russian roulette.** CPU has it (4.5×
+  FOM on PWR); GPU runs analog. Variance-only, k_eff stays
+  unbiased.
 - **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** Continuous
   only on device. OpenMC's HDF5 emits every TSL as
   `incoherent_inelastic` — zero hits in the 375-case corpus.

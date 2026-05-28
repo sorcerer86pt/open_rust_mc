@@ -1,0 +1,5 @@
+case,seq,total,verdict,k_calc,k_sigma,k_ref,sigma_exp,delta_pcm,bound_pcm,sigma_ratio,runtime_s,load_s,backend,error
+heu-comp-inter-003_case-1,1,375,ERROR,NaN,NaN,1.006720,0.005700,NaN,150.0,0.000,0.000,0.000,cpu,timeout after 3600s
+heu-comp-inter-003_case-1,PASS,1.009538,0.000097,1.006720,0.005700,281.8,1140.2,0.494,local_validation (OpenMC on this scene),1752.47,5,150,30,200000,,True,
+heu-comp-inter-003_case-2,PASS,1.011850,0.000049,1.000000,0.006100,1185.0,1220.0,1.943,k_eff_reference (ICSBEP handbook),1886.57,5,150,30,200000,,True,
+heu-comp-inter-003_case-3,FAIL,1.011392,0.000060,1.000000,0.005600,1139.2,1120.1,2.034,k_eff_reference (ICSBEP handbook),1839.95,5,150,30,200000,,True,

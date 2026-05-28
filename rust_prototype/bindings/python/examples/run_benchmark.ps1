@@ -190,8 +190,8 @@ if ($Filter)    { $sweepArgs += @("--filter", $Filter) }
 if ($Limit -gt 0) { $sweepArgs += @("--limit",  $Limit) }
 if ($GpuRefillFactor -gt 1.0) { $sweepArgs += @("--gpu-refill-factor", $GpuRefillFactor) }
 if ($GpuAutoRefill)           { $sweepArgs += "--gpu-auto-refill" }
-# Survival biasing is ON by default in icsbep_sweep.py — only forward
-# the opt-out flag when the user explicitly requested it.
+# Survival biasing is ON by default in icsbep_sweep.py — only
+# forward the opt-out flag when the user explicitly requested it.
 if ($NoSurvivalBias)          { $sweepArgs += "--no-survival-bias" }
 
 # ── 5. Run, tee output to log ─────────────────────────────────────────

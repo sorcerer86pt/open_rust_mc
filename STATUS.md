@@ -3,11 +3,25 @@
 What `origin/main` (`d80a157`) ships today, what's open, what's the
 current headline.
 
+> **Branch note (drop-orchestration-keep-physics, 2026-05-28):**
+> The in-process benchmark pipeline (`c05d678` Phase 1 scaffold,
+> `8171705` Phases 2–5, `5c0844f` data-dir / wrapper, `2308edd`
+> VRAM-aware n_slots) has been rolled back on this branch.
+> Symptom that motivated the rollback: the `force_rebuild()`
+> watchdog inside `stage4_gpu_executor` partially tore down GPU
+> state while channel-held bundles still referenced it, corrupting
+> the next case (NaN k_eff on case 1 of a 200k-particle 375-case
+> sweep). Subprocess-per-case Python driver (`icsbep_sweep.py`)
+> restored; per-case process death now isolates failures. The
+> survival-biasing kernel (`db6b547`) and the MT=91 Law 61 mu
+> coupling (`f1797d0`, etc.) are preserved.
+
 ## Headline
 
 - **Tests**: 438 / 438 lib tests green on default features;
   443 / 443 with `--features cuda`. `cargo check` clean on
-  `--all-targets` (default + cuda).
+  `--all-targets` (default + cuda). (Branch re-run needed — cherry-picked
+  physics added the MT=91 Law-61 + survival-biasing parity tests.)
 - **Default nuclear data**: ENDF/B-VIII.1 (released Oct 2024).
   VIII.0 and VII.1 supported as fallbacks; library autodetected from
   on-disk layout.
@@ -78,12 +92,8 @@ current headline.
 - Track-length k_eff estimator alongside collision estimator
   (`[godiva]` 3.9× lower seed-to-seed σ).
 - Survival biasing + Russian roulette (w_min=0.25, w_survive=1.0)
-  on CPU AND GPU (event-based path). Variance-only — no k_eff bias.
-  GPU implementation lives in `gr_trace_and_sample`'s SB branch and
-  is gated on `SimConfig::survival_biasing.is_some()`. On the
-  historic GPU history-based persistent kernel the analog path
-  remains the only option (the event-based path is what
-  `CudaRunner` / `benchmark_runner` uses).
+  on CPU. Variance-only — no k_eff bias. GPU survival biasing
+  pending.
 - Statepoint write / read / restart (HDF5).
 - Backend dispatch (`transport::dispatch::EigenvalueRunner`,
   `CpuRunner` / `CudaRunner`).
@@ -246,47 +256,6 @@ Wright/Leal ORNL evaluation reports a 1500 pcm C/E spread on
 ENDF/B-VI.5 for this family — both VII.1 and VIII.1 sit inside the
 spread but on opposite halves.
 
-## ENDF/B-VIII.1 ground-truth substrate (2026-05-22)
-
-Two-tier secondary reference for VIII.1 runs, so the engine isn't
-graded against a handbook k_eff that the new library systematically
-biases away from (especially for HCI / hydride / intermediate classes).
-
-- **Tier 1 — LANL Table LIX** (Nobre et al. 2025, arxiv:2511.03564):
-  1151 ICSBEP cases calculated with MCNP6 under VIII.1. Matched against
-  our corpus → **289 / 375 scenes** have a published `lanl_k_eff`
-  stamped in `benchmark.local_validation.viii1`. Details +
-  reproducibility recipe in `docs/endfb-viii1-lanl-table-lix.md`.
-- **Tier 2 — local OpenMC on the same JSON**: the 86 orphans (HCI-003,
-  LST-002/003/016, PST-021, PCI-001, plus sub-cases LANL skipped) get
-  `viii1.openmc_k_eff` from `scripts/openmc_orphans_viii1.py`. 26 / 86
-  stamped at paper-grade (20k × 100 × 3 seeds) before the user switched
-  to higher hardware for the engine half. Remaining 59 deferred.
-
-Tests (`cuda_runs.rs`, `icsbep_runs.rs`) walk the priority chain in
-`resolve_acceptance_target`: LANL → OpenMC-on-this-JSON → legacy
-VII.1 OpenMC → handbook. σ is `max(σ_pub_or_omc, σ_handbook)` so the
-envelope never under-states uncertainty.
-
-Engine vs OpenMC-on-same-JSON across 9 overlapping cases (HCI-003 ×7 +
-HMF-001 case-2 + HMF-002 case-1): engine is **+289 ± 84 pcm** (range
-+173 to +424). Sign systematically positive across fast / intermediate
-spectra → real engine bias, not library or scene drift. Diagnosis
-deferred until the full 5090 corpus sweep lands.
-
-## RunPod RTX 5090 sweep environment (active 2026-05-22)
-
-Full 375-case ICSBEP sweep running on RunPod since 15:42 UTC, paper-grade
-`250k × 150 × 30 inactive × 5 seeds`. ETA ~34 h, cost ~€34 against a
-€47.68 budget. Hardware + SSH + storage layout + monitoring / stop
-commands documented in `docs/runpod-5090-pod.md`. Determinism cross-check
-with the prior MSI-Home (RTX A1000, commit `6bb07bd`) sweep on
-HCI-003 cases 1-6 matches within σ_seeds (≤ 19 pcm). 5090 throughput
-≈ 2.5× A1000 on the same workload at full paper-grade.
-
-Partial 15-case warmup CSV (HCI-003 ×7 + HMF-001 ×2 + HMF-002 ×6) is
-parked at `outputs/icsbep_5090_partial_15cases.csv` for that cross-check.
-
 ## Hardware-specific notes
 
 The same engine source has been exercised on three machines that map
@@ -296,7 +265,6 @@ to different points on the saturation curve:
 |---|---|---|---|---|
 | MSI-Laptop | RTX A1000 | 4 GB | 14p / 20l Intel | dev box; CPU sweeps |
 | MSI-Home | RTX 3080 | 10 GB | 8p / 8l Ryzen | GPU production sweeps |
-| RunPod 5090 | RTX 5090 (sm_120) | 32 GB | 16 vCPU EPYC 9354 | full-corpus sweeps (see `docs/runpod-5090-pod.md`) |
 | (extrapolated) | A100 / H100 | 40 GB+ | — | saturation regime |
 
 Per-card practical particle ceilings:
@@ -311,35 +279,6 @@ For the `outputs/icsbep_full_gpu.csv` baseline (4-case
 heu-comp-inter-003 at 500k particles, 1424-1551 s/case) the
 machine was MSI-Home (RTX 3080).
 
-## Hardware-specific GPU pipeline limits
-
-Each flat-pack `GpuNuclideData` bundle (the DtoD copy assembled for each
-case) occupies ~1.5 GB for a 20-nuclide rank-15 HEU case. The benchmark
-pipeline pre-uploads `n_slots` bundles into the GPU channel before Stage 4
-even starts; peak live = `n_slots + 3` (channel + running + uploading +
-per-nuclide cache source). The VRAM formula is:
-
-```
-(n_slots + 3) × 1.5 GB + 1.7 GB ≤ total_vram
-n_slots ≤ (total_vram − 1.7 GB) / 1.5 GB − 3
-```
-
-Practical ceilings per device (rank 15, 20-nuc HEU, --max-slots default 4):
-
-| GPU | VRAM | n_slots (auto) |
-|---|---|---|
-| A1000 | 4 GB | 1 |
-| RTX 3080 | 10 GB | 2 |
-| RTX 4080 | 16 GB | 4 (capped) |
-| RTX 5090 | 32 GB | 4 (capped) |
-
-Per-card practical particle ceilings are separate — particle bank for
-250k particles is only ~150 MB and does NOT cause OOM.
-
-CLI controls:
-- `--n-slots N` — exact override (bypasses VRAM formula entirely)
-- `--max-slots N` — upper bound on VRAM-auto result (default 4)
-
 ## Open / deferred work
 
 - **GPU device-buffer cache for SAB + material payloads.** Per-nuclide
@@ -348,18 +287,8 @@ CLI controls:
   7-case sweep re-uploads 35× the same ~50 MB SAB payload. Same
   LRU + bundle_cache_budget pattern as `per_nuclide_cache` should
   apply.
-- ~~GPU survival biasing / Russian roulette~~ — landed in
-  `transport_event_based.cu` (the path `benchmark_runner` /
-  `CudaRunner` uses). Implicit capture + Bernoulli-banked
-  fission + RR with OpenMC defaults `(w_min=0.25, w_survive=1.0)`.
-  `N_PARAMS` bumped 192 → 195 (slots `P_SURVIVAL_BIAS_ENABLED`,
-  `P_W_MIN`, `P_W_SURVIVE`). `gr_fission_event` skipped under SB —
-  banking happens inside `gr_trace_and_sample`. Verified unbiased
-  on Godiva (HMF-001 case-1): analog k = 0.99986 ± 0.00111, SB
-  k = 1.00088 ± 0.00096 (σ tightened ~13%), Δ = +102 pcm within the
-  2σ_combined envelope of 294 pcm. Primary motivation: terminates
-  long-tail histories that were hanging the 200k-particle 3080 case
-  at `max_events_per_history = 1_000_000`.
+- **GPU survival biasing / Russian roulette.** CPU has it (4.5× FOM
+  on PWR); GPU runs analog. Variance-only, k_eff is unbiased.
 - **GPU discrete S(α,β) inelastic (NJOY iwt=0/1).** CPU has it; GPU
   device sampler is continuous-only. OpenMC's ENDF/B HDF5
   distribution emits every TSL as `incoherent_inelastic` so this

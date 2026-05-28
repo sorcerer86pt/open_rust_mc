@@ -210,15 +210,6 @@ fn cache() -> &'static TieredStore {
     CACHE.get_or_init(TieredStore::default)
 }
 
-/// Public accessor for the process-wide nuclide cache. The benchmark
-/// pipeline's `RunContext` holds this reference so every stage hits
-/// the same L1/L2/L3 tier set. The historical private `cache()` is
-/// kept for in-module callers that don't need to advertise the
-/// dependency.
-pub fn shared() -> &'static TieredStore {
-    cache()
-}
-
 /// Seed `preload_weight` on the process-wide L1 cache. Each entry
 /// maps `NuclideKey → expected hit count`. Hits + preload are
 /// summed in the LFU score (see `eviction`), so a sweep harness

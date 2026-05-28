@@ -145,48 +145,24 @@ impl ThermalScatteringData {
     /// Given actual temperature T (in K), finds bounding temperatures and
     /// randomly selects one: P(T_{i+1}) = (T - T_i) / (T_{i+1} - T_i).
     pub fn select_temperature(&self, temperature_k: f64, xi: f64) -> usize {
-        let (lo, hi) = self.bracket(temperature_k);
-        if lo == hi {
-            return lo;
-        }
-        let kt = temperature_k * 8.617_333_262e-5;
-        let f = (kt - self.kts[lo]) / (self.kts[hi] - self.kts[lo]);
-        if xi < f { hi } else { lo }
-    }
-
-    /// Deterministic bracket — returns the `(lo, hi)` pair such that
-    /// `select_temperature(T, ξ)` will return either `lo` or `hi` for
-    /// any `ξ ∈ [0, 1)`. When `T` falls outside the tabulated grid the
-    /// returned pair collapses to `(idx, idx)`.
-    ///
-    /// Pure function — no RNG draw, no side effects. Used by the
-    /// benchmark pipeline's lazy-TSL filter to decide which kT slots
-    /// actually need to be uploaded to the GPU (see
-    /// `docs/benchmark-pipeline-spec-addendum-lazy-tsl.md`).
-    pub fn bracket(&self, temperature_k: f64) -> (usize, usize) {
         let k_boltzmann = 8.617_333_262e-5; // eV/K
         let kt = temperature_k * k_boltzmann;
 
         if self.kts.len() == 1 {
-            return (0, 0);
+            return 0;
         }
 
-        // Find bounding temperatures — mirrors select_temperature.
+        // Find bounding temperatures
         let mut i = 0;
         while i + 1 < self.kts.len() && self.kts[i + 1] < kt {
             i += 1;
         }
         if i + 1 >= self.kts.len() {
-            let last = self.kts.len() - 1;
-            return (last, last);
+            return self.kts.len() - 1;
         }
-        // kt below the grid → f < 0 → select_temperature always
-        // returns i. Collapse the pair so the uploader doesn't ship a
-        // slot that will never be sampled.
-        if kt < self.kts[i] {
-            return (i, i);
-        }
-        (i, i + 1)
+
+        let f = (kt - self.kts[i]) / (self.kts[i + 1] - self.kts[i]);
+        if xi < f { i + 1 } else { i }
     }
 
     /// Get total thermal scattering cross section at given energy and temperature index.

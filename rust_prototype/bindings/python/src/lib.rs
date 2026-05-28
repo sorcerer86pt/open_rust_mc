@@ -61,7 +61,7 @@ use open_rust_mc::transport::material::Material as RustMaterial;
 use open_rust_mc::transport::rng::Rng;
 #[cfg(feature = "cuda")]
 use open_rust_mc::transport::sim_limits::SimLimits;
-use open_rust_mc::transport::simulate::{self, SimConfig};
+use open_rust_mc::transport::simulate::{self, SimConfig, SurvivalBiasing};
 use open_rust_mc::transport::xs_provider::{self, RankPolicy, SvdXsProvider, TableXsProvider};
 use open_rust_mc::wmp::WindowedMultipole;
 
@@ -375,12 +375,18 @@ struct PySettings {
     /// `gpu_refill_pool_factor` always wins. Ignored on CPU.
     #[pyo3(get, set)]
     gpu_auto_refill: bool,
+    /// Survival biasing — implicit capture + Bernoulli-banked fission +
+    /// Russian roulette. None = analog tracking. Some((w_min, w_survive))
+    /// enables SB with the given thresholds. Mirrors OpenMC's defaults
+    /// (0.25, 1.0). Available on both CPU and CUDA runners.
+    #[pyo3(get, set)]
+    survival_biasing: Option<(f64, f64)>,
 }
 
 #[pymethods]
 impl PySettings {
     #[new]
-    #[pyo3(signature = (batches=50, inactive=10, particles=5000, seed=1, gpu_refill_pool_factor=None, gpu_auto_refill=false))]
+    #[pyo3(signature = (batches=50, inactive=10, particles=5000, seed=1, gpu_refill_pool_factor=None, gpu_auto_refill=false, survival_biasing=None))]
     fn new(
         batches: u32,
         inactive: u32,
@@ -388,6 +394,7 @@ impl PySettings {
         seed: u64,
         gpu_refill_pool_factor: Option<f64>,
         gpu_auto_refill: bool,
+        survival_biasing: Option<(f64, f64)>,
     ) -> Self {
         Self {
             batches,
@@ -396,18 +403,23 @@ impl PySettings {
             seed,
             gpu_refill_pool_factor,
             gpu_auto_refill,
+            survival_biasing,
         }
     }
 
     fn __repr__(&self) -> String {
+        let sb = match self.survival_biasing {
+            Some((w_min, w_surv)) => format!(" survival_biasing=({:.2},{:.2})", w_min, w_surv),
+            None => String::new(),
+        };
         match self.gpu_refill_pool_factor {
             Some(f) => format!(
-                "<Settings batches={} inactive={} particles={} seed={} gpu_refill_pool_factor={:.2}>",
-                self.batches, self.inactive, self.particles, self.seed, f
+                "<Settings batches={} inactive={} particles={} seed={} gpu_refill_pool_factor={:.2}{}>",
+                self.batches, self.inactive, self.particles, self.seed, f, sb
             ),
             None => format!(
-                "<Settings batches={} inactive={} particles={} seed={}>",
-                self.batches, self.inactive, self.particles, self.seed
+                "<Settings batches={} inactive={} particles={} seed={}{}>",
+                self.batches, self.inactive, self.particles, self.seed, sb
             ),
         }
     }
@@ -1297,7 +1309,9 @@ fn run_gamma_heating(
         parallel: true,
         tallies: Default::default(),
         statepoint_path: None,
-        survival_biasing: None,
+        survival_biasing: neutron_settings
+            .survival_biasing
+            .map(|(w_min, w_survive)| SurvivalBiasing { w_min, w_survive }),
         initial_source_bank: None,
         weight_window: None,
         disable_delayed_neutrons: false,
@@ -2124,7 +2138,9 @@ fn run_eigenvalue(
         parallel: true,
         tallies: Default::default(),
         statepoint_path: None,
-        survival_biasing: None,
+        survival_biasing: settings
+            .survival_biasing
+            .map(|(w_min, w_survive)| SurvivalBiasing { w_min, w_survive }),
         initial_source_bank: None,
         weight_window: None,
         disable_delayed_neutrons: false,
@@ -2921,7 +2937,9 @@ fn run_icsbep_case(
         parallel: true,
         tallies: Default::default(),
         statepoint_path: None,
-        survival_biasing: None,
+        survival_biasing: settings
+            .survival_biasing
+            .map(|(w_min, w_survive)| SurvivalBiasing { w_min, w_survive }),
         initial_source_bank: Some(initial_bank),
         weight_window: None,
         disable_delayed_neutrons: false,

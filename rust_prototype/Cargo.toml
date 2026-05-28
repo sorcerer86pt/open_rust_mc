@@ -101,16 +101,6 @@ png = "0.17"
 # break the build on Rust 1.95+. Minimal patches applied; functionality
 # unchanged for our use (CPU/GPU/memory introspection at engine init).
 hardware-query = { path = "vendor/hardware-query-0.2.1", version = "0.2.1" }
-# Bounded MPSC channels for the benchmark pipeline (Stage 2 → Stage 3
-# load queue, Stage 4 → Stage 5 result channel). Backpressure-aware
-# `bounded()` is the natural way to size the slot pool and keep the
-# loader from outrunning the executors.
-crossbeam-channel = "0.5"
-# Proper CSV reader / writer for the benchmark pipeline's per-case
-# output. Handles field quoting / escaping that a hand-rolled writer
-# inevitably gets wrong on error messages containing commas, quotes,
-# or newlines.
-csv = "1"
 # raw-cpuid (workspace dep above) is used for L2 / L3 cache topology:
 # on AMD X3D chips WMI returns one CCX entry (8 MB) instead of the full
 # stacked total (96 MB on 9800X3D). raw-cpuid enumerates the CPUID

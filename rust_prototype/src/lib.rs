@@ -2,7 +2,6 @@
 //! open_rust_mc — pure-Rust MC neutron transport. SVD-compressed XS,
 //! BVH+enum-dispatch CSG, SoA particles, rayon event-based transport.
 
-pub mod benchmark;
 pub mod compare;
 pub mod cp_decompose;
 pub mod data_paths;
