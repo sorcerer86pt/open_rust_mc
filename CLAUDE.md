@@ -19,6 +19,11 @@ Tests on `origin/main`:
 - `cargo test --lib`: **438 / 438 green**.
 - `cargo test --lib --features cuda`: **443 / 443 green**.
 
+(Branch `drop-orchestration-keep-physics` re-runs needed —
+physics cherry-picks added the U-235 MT=91 Law-61 test and the
+`cuda_survival_biasing_unbiased_godiva` parity test; test counts
+will be higher. Re-verify before merging.)
+
 ## How to read results
 
 Numbers in commit messages, docs, and code comments come with a
@@ -104,7 +109,7 @@ rust_prototype/                 — main crate (workspace root)
     depletion/                  — cram, chain, predictor-corrector,
                                   mapping, flux
     gpu.rs                      — CUDA host wrappers (root)
-    gpu_transport.rs            — `GpuTransportContext`, N_PARAMS=186
+    gpu_transport.rs            — `GpuTransportContext`, N_PARAMS=195
     gpu_recursive.rs            — recursive geometry on device
     gpu_random_ray.rs           — random-ray persistent kernel host
     gpu_per_nuclide.rs          — per-nuclide upload + LRU cache
@@ -147,12 +152,28 @@ changing.
   below that. Same binary now targets A1000 (sm_86), A100 (sm_80),
   H100 (sm_90), RTX 5090 (sm_120), etc. without rebuild.
 
-- **`N_PARAMS = 186`** matches between `gpu_transport.rs:18` and
-  `gpu/cuda/transport.cu:383`. Adding or removing a slot requires
+- **`N_PARAMS = 195`** matches between `gpu_transport.rs` and
+  `gpu/cuda/transport.cu`. Adding or removing a slot requires
   touching both atomically. Earlier inline-vec packing sites that
   open-coded `vec![dptr!(...)…]` are now delegated to
-  `build_transport_params_vec` (see comment at `gpu_transport.rs:2523`)
-  — don't open-code new sites.
+  `build_transport_params_vec` — don't open-code new sites.
+  Slots 188-191 carry the MT=91 Law 61 (KalbachMann) mu coupling
+  (`inel91_mu_has` + 3 ptr arrays). Slots 192-194 carry the
+  survival-biasing config (`P_SURVIVAL_BIAS_ENABLED`, `P_W_MIN`,
+  `P_W_SURVIVE`); defaults written by the builder run the analog
+  path bit-for-bit, so callers that don't opt in (every path
+  except `CudaRunner` reading `SimConfig::survival_biasing`) are
+  unaffected.
+
+- **Subprocess-per-case benchmark driver.** ICSBEP sweeps run via
+  the Python `icsbep_sweep.py` harness, which loops over cases
+  and calls into `open_rust_mc.run_icsbep_case` (PyO3) per case.
+  No in-process orchestrator, no shared CUDA context across cases,
+  no `force_rebuild()` watchdog. Process death isolates per-case
+  failures. The previous in-process pipeline (`benchmark_runner`
+  binary + `benchmark/` module) was rolled back after the
+  `force_rebuild()` watchdog was found to corrupt subsequent
+  cases (NaN k_eff after a single timeout on a 375-case sweep).
 
 - **`SimLimits` (`src/transport/sim_limits.rs`)** is engine policy
   separate from per-run intent (`SimConfig`). `default()` reproduces

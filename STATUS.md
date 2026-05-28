@@ -3,11 +3,25 @@
 What `origin/main` (`d80a157`) ships today, what's open, what's the
 current headline.
 
+> **Branch note (drop-orchestration-keep-physics, 2026-05-28):**
+> The in-process benchmark pipeline (`c05d678` Phase 1 scaffold,
+> `8171705` Phases 2–5, `5c0844f` data-dir / wrapper, `2308edd`
+> VRAM-aware n_slots) has been rolled back on this branch.
+> Symptom that motivated the rollback: the `force_rebuild()`
+> watchdog inside `stage4_gpu_executor` partially tore down GPU
+> state while channel-held bundles still referenced it, corrupting
+> the next case (NaN k_eff on case 1 of a 200k-particle 375-case
+> sweep). Subprocess-per-case Python driver (`icsbep_sweep.py`)
+> restored; per-case process death now isolates failures. The
+> survival-biasing kernel (`db6b547`) and the MT=91 Law 61 mu
+> coupling (`f1797d0`, etc.) are preserved.
+
 ## Headline
 
 - **Tests**: 438 / 438 lib tests green on default features;
   443 / 443 with `--features cuda`. `cargo check` clean on
-  `--all-targets` (default + cuda).
+  `--all-targets` (default + cuda). (Branch re-run needed — cherry-picked
+  physics added the MT=91 Law-61 + survival-biasing parity tests.)
 - **Default nuclear data**: ENDF/B-VIII.1 (released Oct 2024).
   VIII.0 and VII.1 supported as fallbacks; library autodetected from
   on-disk layout.
