@@ -1,0 +1,105 @@
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 10.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: ≤5.0 GB (50% × 10.0 GB VRAM hard cap; dynamic via cuMemGetInfo).
+└──
+  Thermal: c_Be  nuclides=["Be0", "Be9"]  energy_max=4.90 eV  AWR=8.935
+  Temperatures: ["77K", "100K", "294K", "296K", "400K", "500K", "600K", "700K", "800K", "1000K", "1200K"]
+    Continuous: 109 inc energies, 56289 E_out pts, 900624 mu pts
+    77K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 61870 E_out pts, 989920 mu pts
+    100K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 71841 E_out pts, 1149456 mu pts
+    294K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 71910 E_out pts, 1150560 mu pts
+    296K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 73132 E_out pts, 1170112 mu pts
+    400K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 72951 E_out pts, 1167216 mu pts
+    500K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 72400 E_out pts, 1158400 mu pts
+    600K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 72104 E_out pts, 1153664 mu pts
+    700K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 72174 E_out pts, 1154784 mu pts
+    800K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 72916 E_out pts, 1166656 mu pts
+    1000K inelastic: 109 energies, type=incoherent_inelastic
+    Continuous: 109 inc energies, 71989 E_out pts, 1151824 mu pts
+    1200K inelastic: 109 energies, type=incoherent_inelastic
+    77K elastic: coherent, 1168 Bragg edges
+    100K elastic: coherent, 1153 Bragg edges
+    294K elastic: coherent, 809 Bragg edges
+    296K elastic: coherent, 809 Bragg edges
+    400K elastic: coherent, 647 Bragg edges
+    500K elastic: coherent, 529 Bragg edges
+    600K elastic: coherent, 436 Bragg edges
+    700K elastic: coherent, 369 Bragg edges
+    800K elastic: coherent, 318 Bragg edges
+    1000K elastic: coherent, 247 Bragg edges
+    1200K elastic: coherent, 196 Bragg edges
+  GPU transport kernels compiled (8 kernels)
+  GPU S(α,β) slot 0 (nuc 10): coherent elastic, 1168 Bragg edges
+  GPU S(α,β) slot 0 (nuc 10): 109 inc energies, 56289 E_out pts, 900624 mu pts
+  GPU S(α,β) slot 1 (nuc 10): coherent elastic, 1153 Bragg edges
+  GPU S(α,β) slot 1 (nuc 10): 109 inc energies, 61870 E_out pts, 989920 mu pts
+  GPU S(α,β) slot 2 (nuc 10): coherent elastic, 809 Bragg edges
+  GPU S(α,β) slot 2 (nuc 10): 109 inc energies, 71841 E_out pts, 1149456 mu pts
+  GPU S(α,β) slot 3 (nuc 10): coherent elastic, 809 Bragg edges
+  GPU S(α,β) slot 3 (nuc 10): 109 inc energies, 71910 E_out pts, 1150560 mu pts
+  GPU S(α,β) slot 4 (nuc 10): coherent elastic, 647 Bragg edges
+  GPU S(α,β) slot 4 (nuc 10): 109 inc energies, 73132 E_out pts, 1170112 mu pts
+  GPU S(α,β) slot 5 (nuc 10): coherent elastic, 529 Bragg edges
+  GPU S(α,β) slot 5 (nuc 10): 109 inc energies, 72951 E_out pts, 1167216 mu pts
+  GPU S(α,β) slot 6 (nuc 10): coherent elastic, 436 Bragg edges
+  GPU S(α,β) slot 6 (nuc 10): 109 inc energies, 72400 E_out pts, 1158400 mu pts
+  GPU S(α,β) slot 7 (nuc 10): coherent elastic, 369 Bragg edges
+  GPU S(α,β) slot 7 (nuc 10): 109 inc energies, 72104 E_out pts, 1153664 mu pts
+  GPU S(α,β) slot 8 (nuc 10): coherent elastic, 318 Bragg edges
+  GPU S(α,β) slot 8 (nuc 10): 109 inc energies, 72174 E_out pts, 1154784 mu pts
+  GPU S(α,β) slot 9 (nuc 10): coherent elastic, 247 Bragg edges
+  GPU S(α,β) slot 9 (nuc 10): 109 inc energies, 72916 E_out pts, 1166656 mu pts
+  GPU S(α,β) slot 10 (nuc 10): coherent elastic, 196 Bragg edges
+  GPU S(α,β) slot 10 (nuc 10): 109 inc energies, 71989 E_out pts, 1151824 mu pts
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  resume: 1 case(s) already in E:\git\open_rust_mc\outputs\icsbep_full_gpu.csv, skipping those
+Sweeping 374 case(s) on GPU runner
+  CLI overrides: batches=150 (explicit), inactive=30 (explicit), particles=200000 (explicit), seeds=5 (explicit), base_seed=42, rank=15
+  Survival bias: ON (default — implicit capture + RR)
+  per-case settings: explicit CLI flag > JSON `benchmark.recommended_settings` > built-in default
+  preload: 162/162 nuclide weights resolved (1.4s). Top 5: Z=8016@294K*501, Z=26054@294K*472, Z=26056@294K*472, Z=26057@294K*472, Z=26058@294K*472
+  CSV (append, flushed per case): E:\git\open_rust_mc\outputs\icsbep_full_gpu.csv
+  stop-file (create to terminate gracefully): E:\git\open_rust_mc\outputs\STOP
+
+heu-comp-inter-003_case-2: PASS -- k=1.01185+/-0.00005, delta=+1185pcm, bound=+/-1220pcm, 1.94sigma, 1886.6s (5seed x 150b x 30i x 200000p) [2/375]
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+heu-comp-inter-003_case-3: FAIL -- k=1.01139+/-0.00006, delta=+1139pcm, bound=+/-1120pcm, 2.03sigma, 1839.9s (5seed x 150b x 30i x 200000p) [3/375]
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
+  GPU: WMP payload = 0.0 KB (0 / 20 nuclides covered)
+  GPU auto-refill: picked factor=3.48 for particles_per_batch=200000
