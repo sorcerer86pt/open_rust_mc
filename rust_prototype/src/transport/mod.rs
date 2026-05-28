@@ -11,6 +11,7 @@ pub mod material_resolve;
 pub mod nuclide_cache;
 pub mod nuclides;
 pub mod particle;
+pub mod progress;
 pub mod rng;
 pub mod sim_limits;
 pub mod simulate;

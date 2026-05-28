@@ -101,6 +101,10 @@ png = "0.17"
 # break the build on Rust 1.95+. Minimal patches applied; functionality
 # unchanged for our use (CPU/GPU/memory introspection at engine init).
 hardware-query = { path = "vendor/hardware-query-0.2.1", version = "0.2.1" }
+# Live progress bar for the eigenvalue loop. Auto-hides when stderr
+# isn't a TTY so sweep logs (`tee`, CI) stay clean. Replaces the
+# previous "no per-batch progress at all unless verbose=true" UX.
+indicatif = "0.17"
 # raw-cpuid (workspace dep above) is used for L2 / L3 cache topology:
 # on AMD X3D chips WMI returns one CCX entry (8 MB) instead of the full
 # stacked total (96 MB on 9800X3D). raw-cpuid enumerates the CPUID

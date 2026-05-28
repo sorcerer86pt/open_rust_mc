@@ -333,9 +333,28 @@ fn run_case_cuda_seeds(
     assert!(!seeds.is_empty(), "need at least one seed");
     let mut ks = Vec::with_capacity(seeds.len());
     let (mut k_ref, mut sigma_exp) = (0.0_f64, 0.0_f64);
-    for &seed in seeds {
+    let case_label = case_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?");
+    for (i, &seed) in seeds.iter().enumerate() {
+        // GPU regression cases can run 100k particles × ≥30 batches
+        // per seed; without per-seed banners the test sits silent
+        // under `cargo test -- --nocapture` between progress bars.
+        let t0 = std::time::Instant::now();
+        eprintln!(
+            "[icsbep-cuda] {case_label} — seed {}/{} (seed={seed}) starting",
+            i + 1,
+            seeds.len(),
+        );
         let (k, _stderr, kr, se) =
             run_case_cuda(case_file, batches, inactive, particles, seed, rank);
+        eprintln!(
+            "[icsbep-cuda] {case_label} — seed {}/{} done in {:.1}s: k={k:.5}",
+            i + 1,
+            seeds.len(),
+            t0.elapsed().as_secs_f64(),
+        );
         ks.push(k);
         k_ref = kr;
         sigma_exp = se;
