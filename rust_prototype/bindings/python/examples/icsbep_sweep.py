@@ -411,6 +411,16 @@ def run_case_multi_seed(
             gpu_auto_refill=base_settings.gpu_auto_refill,
             survival_biasing=base_settings.survival_biasing,
         )
+        # Per-seed banner: long cases (≥400s/seed) used to sit silent
+        # between the pre-case banner and the post-case summary. With
+        # this, the user sees exactly which seed is running. The Rust
+        # eigenvalue ProgressBar then renders the per-batch progress
+        # inside `run_icsbep_case` when stderr is a TTY.
+        seed_t0 = time.time()
+        print(
+            f"  {case_path.stem} -- seed {s + 1}/{n_seeds} (seed={seed}) starting",
+            flush=True,
+        )
         try:
             r = run_icsbep_case(
                 case_json=case_path,
@@ -421,8 +431,18 @@ def run_case_multi_seed(
             )
         except Exception as e:  # noqa: BLE001
             last_error = str(e).splitlines()[0][:200]
+            print(
+                f"  {case_path.stem} -- seed {s + 1}/{n_seeds} ERROR after "
+                f"{time.time() - seed_t0:.1f}s: {last_error}",
+                flush=True,
+            )
             # On error, abandon the remaining seeds for this case.
             break
+        print(
+            f"  {case_path.stem} -- seed {s + 1}/{n_seeds} done in "
+            f"{time.time() - seed_t0:.1f}s: k={r.k_eff:.5f} +/- {r.k_sigma:.5f}",
+            flush=True,
+        )
         seed_ks.append(r.k_eff)
         seed_ksigmas.append(r.k_sigma)
         case_label = r.case
@@ -675,6 +695,15 @@ def main() -> int:
                 break
 
             base_settings, n_seeds, batches, inactive, particles = case_settings(case_path, args, runner)
+            # Per-case banner. Combined with the per-seed banner in
+            # `run_case_multi_seed` and the Rust eigenvalue ProgressBar
+            # inside `run_icsbep_case`, the user always sees where the
+            # sweep is — even on cases that take 400+ s/seed.
+            print(
+                f"[{idx}/{len(cases)}] {case_path.stem} starting "
+                f"({n_seeds}seed x {batches}b x {inactive}i x {particles}p)",
+                flush=True,
+            )
             row, _ = run_case_multi_seed(
                 case_path=case_path,
                 data_dir=data_dir,

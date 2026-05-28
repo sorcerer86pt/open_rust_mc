@@ -253,6 +253,13 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
             self.fis_capacity
         };
 
+        let mut progress = crate::transport::progress::EigenProgress::new(
+            config.batches,
+            config.inactive,
+            "GPU",
+            config.verbose,
+        );
+
         for batch in 1..=config.batches {
             let batch_seed = config.seed * 100_000 + batch as u64 * 1_000;
             let rng_seeds: Vec<(u64, u64)> = (0..n)
@@ -458,9 +465,12 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 q_inel_sum: result.q_inel_sum,
             });
 
+            progress.tick(batch, result.k_eff);
+
             // Normalize fission bank → next-batch source.
             source = normalize_gpu_bank(&result.fission_bank, n, batch_seed);
         }
+        progress.finish();
 
         let k_eff = if k_count > 0 {
             k_sum / k_count as f64

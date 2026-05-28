@@ -2036,6 +2036,13 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
     };
     let mut auto_converged_at: Option<u32> = None;
 
+    let mut progress = crate::transport::progress::EigenProgress::new(
+        config.batches,
+        config.inactive,
+        "CPU",
+        config.verbose,
+    );
+
     for batch in 1..=config.batches {
         // Parallel transport: dispatch based on tracking mode.
         // Seed offsets batch number to make each seed produce independent streams.
@@ -2317,10 +2324,13 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             let _ = std::io::stdout().flush();
         }
 
+        progress.tick(batch, k_batch);
+
         results.push(result);
 
         source_bank = normalize_fission_bank(&fission_bank, n, batch + seed as u32 * 100_000);
     }
+    progress.finish();
 
     let k_final = if k_count > 0 {
         k_sum / k_count as f64

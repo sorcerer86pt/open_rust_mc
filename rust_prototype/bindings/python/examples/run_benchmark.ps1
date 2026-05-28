@@ -43,6 +43,13 @@
 .PARAMETER Limit
     Cap on cases after filtering. 0 means no cap.
 
+.PARAMETER LiveProgress
+    Set OPEN_RUST_MC_PROGRESS=1 so the Rust eigenvalue runner emits
+    one log line per batch (default: only per-case + per-seed banners
+    are emitted, since the bar self-suppresses when output is teed to
+    a file). Useful when watching a long sweep and you want to see
+    that each individual seed is still making progress.
+
 .EXAMPLE
     .\run_benchmark.ps1
     # Full corpus, auto-detect runner, paper-quality settings.
@@ -96,7 +103,15 @@ param(
     # `max_events_per_history = 1_000_000` (the 200k-particle 3080
     # symptom). k_eff stays unbiased; σ tightens ~10-15%. Pass
     # `-NoSurvivalBias` for pure-analog A/B parity runs.
-    [switch]$NoSurvivalBias
+    [switch]$NoSurvivalBias,
+    # Per-batch progress lines. The Rust eigenvalue ProgressBar
+    # auto-detects TTY; under this wrapper output is teed to a log
+    # file so stderr is no longer a TTY and the bar self-suppresses.
+    # `-LiveProgress` sets OPEN_RUST_MC_PROGRESS=1 which makes the
+    # Rust runner emit one log line per batch instead of an animated
+    # bar — visible both on console and in the .log. Costs ~few k
+    # extra lines per case; off by default to keep sweep logs lean.
+    [switch]$LiveProgress
 )
 
 $ErrorActionPreference = "Stop"
@@ -197,6 +212,10 @@ if ($NoSurvivalBias)          { $sweepArgs += "--no-survival-bias" }
 # ── 5. Run, tee output to log ─────────────────────────────────────────
 $started = Get-Date
 Write-Host "Launching sweep at $started`n"
+if ($LiveProgress) {
+    $env:OPEN_RUST_MC_PROGRESS = "1"
+    Write-Host "  Live progress: ON (one log line per batch)"
+}
 & python @sweepArgs 2>&1 | Tee-Object -FilePath $logPath
 $exit = $LASTEXITCODE
 

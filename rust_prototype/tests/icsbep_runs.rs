@@ -433,8 +433,30 @@ fn run_case_e2e_seeds(
     assert!(!seeds.is_empty(), "need at least one seed");
     let mut ks = Vec::with_capacity(seeds.len());
     let (mut k_ref, mut sigma_exp) = (0.0_f64, 0.0_f64);
-    for &seed in seeds {
-        let (k, _, kr, se) = run_case_e2e(case_file, batches, inactive, particles, seed);
+    let case_label = case_file
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("?");
+    for (i, &seed) in seeds.iter().enumerate() {
+        // Long ICSBEP cases can take minutes per seed. Without this
+        // banner the test sits silent under `cargo test -- --nocapture`
+        // between eigenvalue progress bars. With it, the user sees
+        // exactly which seed is running and how far into the multi-seed
+        // average we are.
+        let t0 = std::time::Instant::now();
+        eprintln!(
+            "[icsbep] {case_label} — seed {}/{} (seed={seed}) starting",
+            i + 1,
+            seeds.len(),
+        );
+        let (k, sigma_calc, kr, se) =
+            run_case_e2e(case_file, batches, inactive, particles, seed);
+        eprintln!(
+            "[icsbep] {case_label} — seed {}/{} done in {:.1}s: k={k:.5} +/- {sigma_calc:.5}",
+            i + 1,
+            seeds.len(),
+            t0.elapsed().as_secs_f64(),
+        );
         ks.push(k);
         k_ref = kr;
         sigma_exp = se;
