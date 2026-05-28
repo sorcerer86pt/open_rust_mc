@@ -13,7 +13,7 @@ use open_rust_mc::geometry::scene_io;
 use open_rust_mc::transport::dispatch::{CudaRunner, EigenvalueRunner};
 use open_rust_mc::transport::material_resolve;
 use open_rust_mc::transport::nuclides::NuclideLibrary;
-use open_rust_mc::transport::simulate::SimConfig;
+use open_rust_mc::transport::simulate::{SimConfig, SurvivalBiasing};
 use open_rust_mc::gpu_transport::GpuTransportContext;
 use open_rust_mc::gpu_recursive::GpuRecursiveContext;
 use std::path::{Path, PathBuf};
@@ -216,6 +216,12 @@ fn run_case_cuda(
     cfg.particles_per_batch = particles;
     cfg.seed = seed;
     cfg.verbose = false;
+    // Survival-biasing override picked up by the harness env var. Set
+    // before any test that wants the implicit-capture + RR path on
+    // GPU. Default is None (analog) so existing tests are unchanged.
+    if std::env::var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS").as_deref() == Ok("1") {
+        cfg.survival_biasing = Some(SurvivalBiasing::default());
+    }
 
     let materials = resolved.materials.clone();
     let cells = loaded.geometry.cells.clone();
@@ -510,4 +516,78 @@ fn cuda_heu_met_fast_018_case_2() {
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("HEU-MET-FAST-018.case-2", k, sigma, k_ref, sigma_exp);
     assert!(pass, "HMF-018 case-2 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+}
+
+/// GPU survival-biasing parity — Godiva analog vs SB.
+///
+/// Runs HMF-001 case-1 twice on the same seed set, once with
+/// `cfg.survival_biasing = None` (analog) and once with
+/// `Some(SurvivalBiasing::default())` (implicit capture +
+/// Bernoulli-banked fission + Russian roulette). Asserts the two
+/// k_eff means agree within 2σ_combined — the SB path is variance-
+/// reducing, not bias-inducing.
+///
+/// What this test buys us:
+///   * `gr_trace_and_sample`'s SB branch produces the same expected
+///     k_eff as the analog kernel (no implicit-capture bug).
+///   * `gr_fission_event` is correctly skipped under SB (the
+///     `debug_assert_eq!(c_fis, 0)` in `gpu_recursive.rs` doesn't
+///     trip).
+///   * Russian roulette's `weight < w_min` branch with default
+///     `(w_min=0.25, w_survive=1.0)` actually terminates histories —
+///     this is what unblocks the 200k 3080 case that hangs at 1M
+///     event-loop iterations under pure analog tracking.
+///
+/// HMF-001 is the cheapest credible case: 3 nuclides, no S(α,β), fast
+/// spectrum, ~80 batches × 5k × 3 seeds completes in ~30 s on an
+/// RTX A1000. The companion `cuda_survival_biasing_unblocks_long_tail`
+/// test (below) is the 200k-particle stress version, kept #[ignore]-
+/// gated so it doesn't run on small dev GPUs.
+#[test]
+#[ignore = "ICSBEP regression (CUDA) — opt in via --ignored. Requires `--features cuda` and a working CUDA device."]
+fn cuda_survival_biasing_unbiased_godiva() {
+    let case = bench_dir().join("heu-met-fast-001_case-1.json");
+
+    // Analog run.
+    unsafe { std::env::remove_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS"); }
+    let (k_analog, s_analog, k_ref, sigma_exp) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+
+    // Survival-biasing run.
+    unsafe { std::env::set_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS", "1"); }
+    let (k_sb, s_sb, _, _) =
+        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    unsafe { std::env::remove_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS"); }
+
+    // Both runs should pass the per-case envelope vs handbook /
+    // OpenMC-on-same-JSON. Use the shared `report` helper for the
+    // verdict and for printing.
+    let pass_analog = report(
+        "HMF-001 analog", k_analog, s_analog, k_ref, sigma_exp,
+    );
+    let pass_sb = report(
+        "HMF-001 + SB", k_sb, s_sb, k_ref, sigma_exp,
+    );
+
+    // Direct analog vs SB comparison — same envelope as the
+    // CPU↔GPU acceptance test (2σ_combined, 150 pcm absolute floor).
+    let delta = k_sb - k_analog;
+    let sigma_c = (s_analog * s_analog + s_sb * s_sb).sqrt();
+    let envelope_pcm = (2.0 * sigma_c * 1.0e5).max(150.0);
+    let delta_pcm = delta * 1.0e5;
+    let pass_parity = delta_pcm.abs() <= envelope_pcm;
+    println!(
+        "  [CUDA HMF-001 analog↔SB] Δk = {:+.0} pcm   bound = ±{:.0} pcm   [{}]",
+        delta_pcm,
+        envelope_pcm,
+        if pass_parity { "PASS" } else { "FAIL" }
+    );
+
+    assert!(pass_analog, "analog Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(pass_sb, "SB Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass_parity,
+        "GPU survival biasing biased k_eff: Δk = {:+.0} pcm > ±{:.0} pcm",
+        delta_pcm, envelope_pcm
+    );
 }

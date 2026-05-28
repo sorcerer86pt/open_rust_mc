@@ -22,7 +22,16 @@ use cudarc::nvrtc;
 /// mu_offsets / mu_e_in_starts` slabs. Drives `sample_inel91_mu_at`
 /// in `transport.cu`, replacing the isotropic-CM fallback that was
 /// the last ~50 pcm of Godiva CPU ↔ GPU bias.
-const N_PARAMS: usize = 192;
+///
+/// 192 → 195: slots 192-194 carry the survival-biasing config —
+/// `P_SURVIVAL_BIAS_ENABLED` (i32 in u64 LSB), `P_W_MIN` (f64 bits),
+/// `P_W_SURVIVE` (f64 bits). Drives the implicit-capture +
+/// Bernoulli-banked-fission + Russian-roulette path in
+/// `gr_trace_and_sample` (CPU mirror:
+/// simulate.rs::dispatch_real_collision). When SB is disabled (the
+/// historical analog path) all three slots hold defaults written by
+/// `build_transport_params_vec` — kernel just doesn't read them.
+const N_PARAMS: usize = 195;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -1614,6 +1623,14 @@ impl GpuTransportContext {
             dptr!(&nuc_data.inel91_mu_data_ptrs),
             dptr!(&nuc_data.inel91_mu_offsets_ptrs),
             dptr!(&nuc_data.inel91_mu_e_in_start_ptrs),
+            // Survival biasing — slots 192-194. Defaults match the
+            // analog path (enabled=0). `transport_event_based_with_buffers`
+            // overwrites these in-place when `config.survival_biasing`
+            // is `Some(_)`. Encoded as u64: enabled is a plain int in
+            // the LSB; w_min / w_survive are `f64::to_bits()`.
+            0_u64,
+            (0.25_f64).to_bits(),
+            (1.0_f64).to_bits(),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v

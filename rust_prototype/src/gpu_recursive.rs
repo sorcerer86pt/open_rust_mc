@@ -1549,6 +1549,14 @@ pub struct TransportBuffers {
     pub d_dzs: CudaSlice<f64>,
     pub d_e: CudaSlice<f64>,
     pub d_alive: CudaSlice<i32>,
+    /// Per-particle statistical weight. Initialised to 1.0 by
+    /// `gr_init_stacks` for every batch (whether or not survival
+    /// biasing is enabled — the analog path simply never reads it
+    /// back). The implicit-capture branch in `gr_trace_and_sample`
+    /// updates it per collision and the Russian-roulette step at the
+    /// end of the same kernel either resets it to `W_SURVIVE` or
+    /// kills the slot. CPU mirror: `Particle::weight`.
+    pub d_weight: CudaSlice<f64>,
     pub d_rng_state: CudaSlice<u64>,
     pub d_rng_inc: CudaSlice<u64>,
     pub d_mat_kt: CudaSlice<f64>,
@@ -1664,6 +1672,7 @@ impl TransportBuffers {
             d_dzs: mk_d(n)?,
             d_e: mk_d(n)?,
             d_alive: mk_i(n)?,
+            d_weight: mk_d(n)?,
             d_rng_state: mk_u(n)?,
             d_rng_inc: mk_u(n)?,
             d_mat_kt: mk_d(n_materials.max(1))?,
@@ -1997,6 +2006,7 @@ impl GpuRecursiveContext {
             max_events_per_history,
             fis_capacity,
             None,
+            None,
         )
     }
 
@@ -2029,6 +2039,13 @@ impl GpuRecursiveContext {
         max_events_per_history: i32,
         fis_capacity: usize,
         refill: Option<&mut RefillBuffers>,
+        // Implicit-capture + Russian-roulette config. `None` runs the
+        // historical analog path (no per-particle weight bookkeeping,
+        // fission outcome sampled discretely). `Some(_)` flips the
+        // SB flag in `params_vec[P_SURVIVAL_BIAS_ENABLED]` and writes
+        // the (w_min, w_survive) thresholds — the kernel does the
+        // rest. Mirrors CPU `SimConfig::survival_biasing`.
+        survival_biasing: Option<&crate::transport::simulate::SurvivalBiasing>,
     ) -> Result<RecursiveTransportBatch, String> {
         let n = source_bank.len();
         if n == 0 {
@@ -2132,8 +2149,22 @@ impl GpuRecursiveContext {
 
         // Packed params hold device pointers that change every time
         // nuc/mat/sab/wmp uploads change; can't cache between batches.
-        let params_vec =
+        let mut params_vec =
             gpu_t.build_transport_params_vec(nuc_data, mat_data, sab_data, wmp_data, 0);
+        // Slots 192-194: survival-biasing config. Defaults are written
+        // by `build_transport_params_vec` (enabled=0, w_min=0.25,
+        // w_survive=1.0); overwrite enabled + thresholds when SB is
+        // requested. P_SURVIVAL_BIAS_ENABLED is checked by
+        // `gr_trace_and_sample` at the top of every collision step.
+        const P_SURVIVAL_BIAS_ENABLED: usize = 192;
+        const P_W_MIN: usize = 193;
+        const P_W_SURVIVE: usize = 194;
+        if let Some(sb) = survival_biasing {
+            params_vec[P_SURVIVAL_BIAS_ENABLED] = 1_u64;
+            params_vec[P_W_MIN] = sb.w_min.to_bits();
+            params_vec[P_W_SURVIVE] = sb.w_survive.to_bits();
+        }
+        let sb_enabled = survival_biasing.is_some();
         stream
             .memcpy_htod(&params_vec, &mut buffers.d_params)
             .map_err(|e| e.to_string())?;
@@ -2167,6 +2198,7 @@ impl GpuRecursiveContext {
                 .arg(&mut buffers.d_ys)
                 .arg(&mut buffers.d_zs)
                 .arg(&mut buffers.d_alive)
+                .arg(&mut buffers.d_weight)
                 .arg(&n_i32)
                 .arg(&self.surf_type)
                 .arg(&self.surf_params)
@@ -2255,6 +2287,7 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_dzs)
                     .arg(&mut buffers.d_e)
                     .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_weight)
                     .arg(&mut buffers.d_rng_state)
                     .arg(&mut buffers.d_rng_inc)
                     .arg(&n_i32)
@@ -2320,12 +2353,26 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_event_urr_xi)
                     .arg(&mut buffers.d_event_ebin)
                     .arg(&mut buffers.d_type_count)
+                    // Fission bank — populated by the SB path in
+                    // gr_trace_and_sample (implicit-capture mode banks
+                    // in-place because gr_fission_event never launches
+                    // when SB is on). Analog path leaves these untouched.
+                    .arg(&mut buffers.d_fis_x)
+                    .arg(&mut buffers.d_fis_y)
+                    .arg(&mut buffers.d_fis_z)
+                    .arg(&mut buffers.d_fis_e)
+                    .arg(&mut buffers.d_fis_w)
+                    .arg(&mut buffers.d_fis_count)
+                    .arg(&max_fis_i)
                     .arg(&mut buffers.d_cnt_coll)
                     .arg(&mut buffers.d_cnt_leak)
                     .arg(&mut buffers.d_cnt_surf)
                     .arg(&mut buffers.d_cnt_cap)
+                    .arg(&mut buffers.d_cnt_fis)
                     .arg(&mut buffers.d_e_el_in)
-                    .arg(&mut buffers.d_e_el_in_sq);
+                    .arg(&mut buffers.d_e_el_in_sq)
+                    .arg(&mut buffers.d_e_fis_in)
+                    .arg(&mut buffers.d_e_fis_in_sq);
                 // SAFETY: kernel signature matches the argument list
                 // (gr_trace_and_sample in transport_event_based.cu).
                 unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
@@ -2431,7 +2478,21 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_q_inel);
                 unsafe { launch.launch(cfg_n(c_in as u32)).map_err(|e| e.to_string())?; }
             }
-            if c_fis > 0 {
+            // In survival-biasing mode `gr_trace_and_sample` banks
+            // expected fissions in-place (implicit capture), so no
+            // particle is ever classed as EV_FISSION → c_fis must be
+            // zero and we skip the launch entirely. The assert
+            // catches a regression where the trace kernel forgets to
+            // skip the fission branch under SB.
+            if sb_enabled {
+                debug_assert_eq!(
+                    c_fis, 0,
+                    "EV_FISSION class non-empty under survival biasing — \
+                     trace_and_sample dispatched to fission outside the \
+                     implicit-capture path"
+                );
+            }
+            if c_fis > 0 && !sb_enabled {
                 let mut launch = stream.launch_builder(&self.k_eb_fission);
                 launch
                     .arg(&buffers.d_params)
@@ -2516,6 +2577,7 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_dzs)
                     .arg(&mut buffers.d_e)
                     .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_weight)
                     .arg(&mut buffers.d_rng_state)
                     .arg(&mut buffers.d_rng_inc)
                     .arg(&mut buffers.d_depth)

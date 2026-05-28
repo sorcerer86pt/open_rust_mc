@@ -417,7 +417,18 @@
 #define P_INEL91_MU_OFFSETS_PTRS     190
 #define P_INEL91_MU_E_IN_START_PTRS  191
 
-#define N_PARAMS            192
+// ── Survival-biasing / Russian-roulette scalars (slots 192-194) ────
+// `P_SURVIVAL_BIAS_ENABLED == 1` selects the implicit-capture +
+// Bernoulli-banked-fission path in gr_trace_and_sample (CPU mirror:
+// simulate.rs `dispatch_real_collision_with_survival_biasing`). When
+// 0, the kernel runs the legacy analog path bit-for-bit.
+// W_MIN / W_SURVIVE are OpenMC defaults (0.25 / 1.0). Stored as f64
+// bits (SCALAR_D unpacks via __longlong_as_double).
+#define P_SURVIVAL_BIAS_ENABLED      192
+#define P_W_MIN                      193
+#define P_W_SURVIVE                  194
+
+#define N_PARAMS            195
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust

@@ -221,6 +221,12 @@ __device__ int tr_effective_material(
 extern "C" __global__ void gr_init_stacks(
     const double* pos_x, const double* pos_y, const double* pos_z,
     int* alive,
+    // Per-particle weight (in/out). gr_init_stacks unconditionally
+    // seeds w = 1.0 regardless of whether survival biasing is enabled
+    // — the analog path simply ignores `d_weight` (kernel never reads
+    // it back). Keeping the initialisation unconditional means the
+    // host doesn't have to branch on the SB flag at htod time.
+    double* d_weight,
     int n_particles,
     const int* surf_type, const double* surf_params, const int* surf_bc,
     int n_surfaces,
@@ -252,6 +258,7 @@ extern "C" __global__ void gr_init_stacks(
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_particles) return;
+    d_weight[tid] = 1.0;
     if (!alive[tid]) { d_depth[tid] = 0; return; }
 
     GrGeometry g = eb_make_geom(
@@ -322,6 +329,10 @@ extern "C" __global__ void gr_refill_dead(
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
     int* alive,
+    // Per-particle weight. Refilled particles start a fresh history;
+    // OpenMC's analog source emits unit weight, so reset to 1.0 on
+    // refill regardless of the analog vs survival-biasing branch.
+    double* d_weight,
     unsigned long long* rng_state, unsigned long long* rng_inc,
     int* d_depth,
     int* d_event_type, int* d_event_ebin,
@@ -425,6 +436,7 @@ extern "C" __global__ void gr_refill_dead(
         d_stack_offx, d_stack_offy, d_stack_offz,
         n_particles, stack);
     d_depth[tid] = depth;
+    d_weight[tid] = 1.0;
     alive[tid] = 1;
     atomicAdd(refilled_count_out, 1);
 }
@@ -452,6 +464,11 @@ gr_trace_and_sample(
     double* dir_x, double* dir_y, double* dir_z,
     double* energy,
     int* alive,
+    // Per-particle weight. Read at every collision (drives implicit
+    // capture and the Russian-roulette decision in survival-biasing
+    // mode); the analog path leaves it untouched. Init to 1.0 by
+    // gr_init_stacks / gr_refill_dead.
+    double* d_weight,
     unsigned long long* rng_state_arr,
     unsigned long long* rng_inc_arr,
     int n_particles,
@@ -498,9 +515,16 @@ gr_trace_and_sample(
     int* d_event_ebin,
     // Atomic per-(class, bin) counters — EB_N_PART_BINS = 80 slots.
     int* d_type_count,
+    // Fission bank — used by the survival-biasing path to deposit
+    // expected fission sites in-place (implicit capture mode never
+    // hands particles off to gr_fission_event, so banking has to
+    // happen here). The analog branch leaves these untouched.
+    double* fis_x, double* fis_y, double* fis_z,
+    double* fis_e, double* fis_w, int* fis_count, int max_fis,
     // Tallies / counters
-    int* cnt_coll, int* cnt_leak, int* cnt_surf, int* cnt_capture,
-    double* e_el_in_sum, double* e_el_in_sq_sum)
+    int* cnt_coll, int* cnt_leak, int* cnt_surf, int* cnt_capture, int* cnt_fis,
+    double* e_el_in_sum, double* e_el_in_sq_sum,
+    double* e_fis_in_sum, double* e_fis_in_sq_sum)
 {
     int tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (tid >= n_particles) return;
@@ -525,6 +549,8 @@ gr_trace_and_sample(
     double px = pos_x[tid], py = pos_y[tid], pz = pos_z[tid];
     double dx = dir_x[tid], dy = dir_y[tid], dz = dir_z[tid];
     double E = energy[tid];
+    double w = d_weight[tid];
+    bool sb_enabled = SCALAR_I(p, P_SURVIVAL_BIAS_ENABLED) != 0;
     PcgState rng; rng.state = rng_state_arr[tid]; rng.inc = rng_inc_arr[tid];
 
     int depth = d_depth[tid];
@@ -550,7 +576,9 @@ gr_trace_and_sample(
     // transport_recursive.cu but with the outer while replaced by the
     // outer driver loop in gpu_recursive.rs.
     int local_leak = 0, local_surf = 0, local_coll = 0, local_cap = 0;
+    int local_fis = 0;
     double local_e_el_in = 0.0, local_e_el_in_sq = 0.0;
+    double local_e_fis_in = 0.0, local_e_fis_in_sq = 0.0;
 
     while (true) {
         int mat = tr_effective_material(
@@ -654,25 +682,125 @@ gr_trace_and_sample(
         NuclideMacroXs hit_xs = eval_nuclide_macro_xs(
             hit_nuc, Ni_hit, E, urr_xi, sab_nuc_idx, rank, p, xs_cell_kT);
 
-        double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
-        double cum_rxn = 0.0;
         int rxn = -1;
-        cum_rxn += hit_xs.s_el;     if (xi_rxn < cum_rxn) { rxn = EV_ELASTIC; }
-        else { cum_rxn += hit_xs.s_inel; if (xi_rxn < cum_rxn) { rxn = EV_INELASTIC; }
-        else { cum_rxn += hit_xs.s_n2n;  if (xi_rxn < cum_rxn) { rxn = EV_N2N; }
-        else { cum_rxn += hit_xs.s_n3n;  if (xi_rxn < cum_rxn) { rxn = EV_N3N; }
-        else { cum_rxn += hit_xs.s_fis;  if (xi_rxn < cum_rxn) { rxn = EV_FISSION; }
-        else { rxn = -2; /* capture */ } } } } }
+        if (sb_enabled) {
+            // ── Implicit capture + Bernoulli-banked fission + RR ─────
+            // CPU mirror: simulate.rs::dispatch_real_collision (the
+            // `if let Some(sb) = survival_biasing` branch at line
+            // ~1265). Stays bit-for-bit on the deterministic algebra;
+            // RNG stream diverges by 2-3 draws per collision (the
+            // Bernoulli for fractional fission and the RR roll), so
+            // per-seed k_eff differs from analog within MC noise.
+            double sigma_t = hit_xs.s_t;
+            double sigma_a = hit_xs.s_fis + hit_xs.s_cap;
+            double sigma_s = (sigma_t - sigma_a);
+            if (sigma_s < 0.0) sigma_s = 0.0;
 
-        if (rxn == -2) {
-            // Capture handled inline; no reaction kernel needed.
-            local_cap++;
-            alive[tid] = 0;
-            break;
+            // ν̄(E) for the hit nuclide. Mirrors gr_fission_event lookup.
+            int nb_off = __ldg(&PTR_I(p, P_NB_OFFSETS)[hit_nuc]);
+            int nb_sz  = __ldg(&PTR_I(p, P_NB_SIZES)[hit_nuc]);
+            double nu_bar = (nb_sz > 0)
+                ? nu_bar_lookup(E,
+                                PTR_D(p, P_NB_ENERGIES),
+                                PTR_D(p, P_NB_VALUES),
+                                nb_off, nb_sz)
+                : __ldg(&PTR_D(p, P_NU_BAR_CONST)[hit_nuc]);
+
+            // Expected fission yield at this collision.
+            double n_fiss_expected = (sigma_t > 0.0)
+                ? w * nu_bar * hit_xs.s_fis / sigma_t
+                : 0.0;
+            int n_fiss = (int)floor(n_fiss_expected);
+            if (pcg_uniform(&rng) < (n_fiss_expected - (double)n_fiss)) n_fiss++;
+
+            if (n_fiss > 0) {
+                // Per-collision unweighted E_in tally — matches CPU
+                // (simulate.rs line ~1283: `if n_fiss > 0 { e_fis_in_sum += e_pre }`).
+                local_e_fis_in    += E;
+                local_e_fis_in_sq += E * E;
+                local_fis++;
+                for (int s = 0; s < n_fiss; s++) {
+                    int fidx = atomicAdd(fis_count, 1);
+                    if (fidx < max_fis) {
+                        fis_x[fidx] = px; fis_y[fidx] = py; fis_z[fidx] = pz;
+                        fis_e[fidx] = sample_fission_emit_energy(E, nu_bar, &rng, p, hit_nuc);
+                        fis_w[fidx] = 1.0;
+                    }
+                }
+            }
+
+            if (sigma_s <= 0.0 || sigma_t <= 0.0) {
+                // No scatter channel — implicit capture absorbs the
+                // particle (this is rare; only happens at energies
+                // where σ_s = 0 for the hit nuclide, e.g. some thermal
+                // (n,γ)-only resonances).
+                local_cap++;
+                alive[tid] = 0;
+                break;
+            }
+
+            // Implicit capture: w *= σ_s / σ_t.
+            w *= sigma_s / sigma_t;
+
+            // Sample scatter sub-channel (no capture / fission classes).
+            double sum_scatter = hit_xs.s_el + hit_xs.s_inel
+                                + hit_xs.s_n2n + hit_xs.s_n3n;
+            if (sum_scatter <= 0.0) {
+                // Numerical edge — defensively kill (shouldn't reach here
+                // when σ_s > 0 unless the scatter MTs all evaluate to zero
+                // at this energy).
+                local_cap++;
+                alive[tid] = 0;
+                break;
+            }
+            double xi_rxn = pcg_uniform(&rng) * sum_scatter;
+            double cum_rxn = 0.0;
+            cum_rxn += hit_xs.s_el;
+            if      (xi_rxn < cum_rxn) { rxn = EV_ELASTIC; }
+            else { cum_rxn += hit_xs.s_inel;
+                if      (xi_rxn < cum_rxn) { rxn = EV_INELASTIC; }
+                else { cum_rxn += hit_xs.s_n2n;
+                    if (xi_rxn < cum_rxn) { rxn = EV_N2N; }
+                    else                   { rxn = EV_N3N; }
+                }
+            }
+
+            // Russian roulette BEFORE the atomic into d_type_count: a
+            // killed particle must not consume a class slot it then
+            // doesn't dispatch to.
+            double w_min = SCALAR_D(p, P_W_MIN);
+            double w_survive = SCALAR_D(p, P_W_SURVIVE);
+            if (w < w_min) {
+                double p_survive = (w_survive > 0.0) ? w / w_survive : 0.0;
+                if (pcg_uniform(&rng) < p_survive) {
+                    w = w_survive;
+                } else {
+                    alive[tid] = 0;
+                    break;
+                }
+            }
+        } else {
+            // ── Analog (legacy bit-exact) ───────────────────────────
+            double xi_rxn = pcg_uniform(&rng) * nuc_t[hit_l];
+            double cum_rxn = 0.0;
+            cum_rxn += hit_xs.s_el;     if (xi_rxn < cum_rxn) { rxn = EV_ELASTIC; }
+            else { cum_rxn += hit_xs.s_inel; if (xi_rxn < cum_rxn) { rxn = EV_INELASTIC; }
+            else { cum_rxn += hit_xs.s_n2n;  if (xi_rxn < cum_rxn) { rxn = EV_N2N; }
+            else { cum_rxn += hit_xs.s_n3n;  if (xi_rxn < cum_rxn) { rxn = EV_N3N; }
+            else { cum_rxn += hit_xs.s_fis;  if (xi_rxn < cum_rxn) { rxn = EV_FISSION; }
+            else { rxn = -2; /* capture */ } } } } }
+
+            if (rxn == -2) {
+                // Capture handled inline; no reaction kernel needed.
+                local_cap++;
+                alive[tid] = 0;
+                break;
+            }
         }
 
         // Elastic E-in tally happens here so it doesn't drift between
-        // the geom kernel and the elastic kernel.
+        // the geom kernel and the elastic kernel. Unweighted in both
+        // analog and SB modes (CPU semantics — simulate.rs line ~1349).
         if (rxn == EV_ELASTIC) {
             local_e_el_in += E;
             local_e_el_in_sq += E * E;
@@ -702,6 +830,7 @@ gr_trace_and_sample(
     pos_x[tid] = px; pos_y[tid] = py; pos_z[tid] = pz;
     dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
     energy[tid] = E;
+    d_weight[tid] = w;
     rng_state_arr[tid] = rng.state; rng_inc_arr[tid] = rng.inc;
     d_depth[tid] = depth;
     eb_store_stack(tid, depth,
@@ -721,8 +850,15 @@ gr_trace_and_sample(
     if (local_leak > 0) atomicAdd(cnt_leak, local_leak);
     if (local_surf > 0) atomicAdd(cnt_surf, local_surf);
     if (local_cap  > 0) atomicAdd(cnt_capture, local_cap);
+    // Fission counters / E-in moments populated only by the SB branch
+    // (analog path goes through gr_fission_event for these). One
+    // `cnt_fis` bump per collision that banked ≥1 fission site, matching
+    // CPU's `result.fissions += 1` in simulate.rs.
+    if (local_fis  > 0) atomicAdd(cnt_fis, local_fis);
     if (local_e_el_in    != 0.0) atomicAdd(e_el_in_sum,    local_e_el_in);
     if (local_e_el_in_sq != 0.0) atomicAdd(e_el_in_sq_sum, local_e_el_in_sq);
+    if (local_e_fis_in    != 0.0) atomicAdd(e_fis_in_sum,    local_e_fis_in);
+    if (local_e_fis_in_sq != 0.0) atomicAdd(e_fis_in_sq_sum, local_e_fis_in_sq);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
