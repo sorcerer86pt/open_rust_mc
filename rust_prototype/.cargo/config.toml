@@ -1,0 +1,12 @@
+# CPU codegen targeting. `native` tunes for the build host's exact ISA
+# (this Intel dev box reports avx2+fma at runtime) and lets LLVM emit
+# FMA/AVX2 in the transport + SVD reconstruction kernels rather than the
+# portable baseline. Binaries built here are NOT portable to a different
+# microarch — CI builds for distributable/specific targets separately.
+#
+# Applies to every cargo build under this workspace, including the
+# maturin wheel build (cargo discovers this by walking up from
+# bindings/python). Floating-point results may shift slightly vs the
+# baseline ISA via FMA contraction; k_eff stays within MC noise.
+[build]
+rustflags = ["-C", "target-cpu=native"]

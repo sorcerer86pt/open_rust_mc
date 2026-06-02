@@ -36,6 +36,13 @@
 //! (unions, complement) are a natural follow-up; for Godiva and PWR
 //! pin cells, intersections cover the problem.
 
+// Thread-caching global allocator for the wheel artifact. The CPU
+// transport path (rayon) allocates from many worker threads; mimalloc's
+// per-thread cache removes the OS-allocator lock contention. Set on the
+// cdylib so every `run_*` entry point through this extension uses it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 
