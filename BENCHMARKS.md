@@ -321,20 +321,32 @@ distribution).
 
 ## 4. Test coverage
 
-**Total: 144 library tests + 5 integration tests (release build).**
+**Total: 440 library tests (`cargo test --lib`) + 9 integration
+test files (release build). 447 library tests with
+`--features cuda`.**
+
+Library tests by top-level module:
 
 | Module | Tests | Purpose |
 |---|---:|---|
-| `photon::data` | 7 | Tail-alignment, endpoints, OOB panics |
-| `photon::hdf5_reader` | 15 | H, C, Fe, Pb, U loads; physical limits; EADL; error paths |
-| `photon::compton` | 12 | KN kinematics, μ(k) identity, analytic moment comparison, bound rejection direction, Doppler spread |
-| `photon::photoelectric` | 11 | Cascade energy conservation, K-shell dominance, fluorescence yield, hydrogen special case |
-| `photon::pair` | 8 | Threshold, energy conservation, `<ε>` = 1/2 by symmetry, `<ε²>` vs analytic Bethe-Heitler |
-| `photon::coherent` | 6 | μ ∈ [−1, 1], forward-peaking, Thomson limit, CDF inversion |
-| `photon::material` | 5 | NIST XCOM vs macro XS, channel bookkeeping, sampling |
-| `photon::transport` | 7 | Direction deflection identities, energy conservation, slab escape |
-| Neutron kernels | 73 | Existing neutron transport test suite |
-| Integration tests | 5 | Cs-137 pulse-height, Hubbell differential (×2), ANSI/ANS buildup (×2) |
+| `transport` | 140 | k-eigenvalue simulate loop, material resolve, URR equivalence, weight windows, point kinetics, tally, statepoint, nuclide cache (binary / L1 / L2 / eviction), CE adjoint, sim limits, dispatch |
+| `photon` | 108 | Compton (KN + bound rejection + Doppler), photoelectric + EADL cascade, Bethe-Heitler pair, coherent/Rayleigh, Seltzer-Berger brems, condensed-history electron, NEE, material XS, HDF5 loads, transport |
+| `geometry` | 72 | surfaces, ray / AABB, scene + scene_io, rect / hex lattices, recursive universes, `Mat3` rotation, shapes, coord stack |
+| `random_ray` | 37 | MGXS, FSR, MoC integrator, forward + adjoint solver, CADIS, adjoint-SVD |
+| `depletion` | 24 | CRAM-16 / CRAM-48, chain + chain_io, predictor-corrector, mapping, flux, matrix |
+| `hdf5_reader` | 17 | neutron HDF5 sampling, MT=91 mu coupling |
+| `physics` | 14 | collision, scatter kinematics |
+| `wmp` | 7 | windowed multipole / Humlicek-W4 Faddeeva |
+| `thermal` | 6 | S(α,β) target-velocity + TSL sampling |
+| `hardware_profile` | 6 | device-attribute detection |
+| `data_paths` | 5 | layout-aware ENDF/B path resolution + multi-library discovery |
+| `quadrature` | 4 | numerical quadrature |
+
+Integration tests (9 files in `rust_prototype/tests/`):
+`ansi_ans_buildup`, `brems_nist_cross_check`, `cache_roundtrip`,
+`cs137_pulse_height_validation`, `hubbell_compton_differential`,
+`icsbep_runs`, `preview_lattice_descent`, `scene_io_corpus`, and
+`cuda_runs` (`--features cuda` only).
 
 ---
 
@@ -402,7 +414,7 @@ distribution).
 # Build (release mode required for benchmark timings)
 cd rust_prototype && cargo build --release
 
-# Library + integration tests (142 lib + 5 integration)
+# Library + integration tests (440 lib + 9 integration files)
 cargo test --release
 
 # Individual benchmarks (each writes outputs/ files for plotting)

@@ -16,13 +16,14 @@ A pure-Rust continuous-energy Monte Carlo radiation transport engine.
 - Python (PyO3) bindings as `open_rust_mc` package.
 
 Tests on `origin/main`:
-- `cargo test --lib`: **438 / 438 green**.
-- `cargo test --lib --features cuda`: **443 / 443 green**.
+- `cargo test --lib`: **440 / 440 green**.
+- `cargo test --lib --features cuda`: **447 / 447 green**.
 
-(Branch `drop-orchestration-keep-physics` re-runs needed —
-physics cherry-picks added the U-235 MT=91 Law-61 test and the
-`cuda_survival_biasing_unbiased_godiva` parity test; test counts
-will be higher. Re-verify before merging.)
+(The `drop-orchestration-keep-physics` rollback and the
+eigenvalue-progress-bar work are now merged to `main` (PR #10 /
+#11). The physics cherry-picks — U-235 MT=91 Law-61 test and the
+`cuda_survival_biasing_unbiased_godiva` parity test — are included
+in the counts above.)
 
 ## How to read results
 
@@ -53,8 +54,8 @@ Primary dev env is Windows / PowerShell.
 cd rust_prototype
 cargo build --release                       # CPU only
 cargo build --release --features cuda       # + CUDA backend
-cargo test --lib                            # 438 / 438
-cargo test --lib --features cuda            # 443 / 443
+cargo test --lib                            # 440 / 440
+cargo test --lib --features cuda            # 447 / 447
 
 # Python extension
 cd bindings/python
@@ -113,7 +114,7 @@ rust_prototype/                 — main crate (workspace root)
     gpu_recursive.rs            — recursive geometry on device
     gpu_random_ray.rs           — random-ray persistent kernel host
     gpu_per_nuclide.rs          — per-nuclide upload + LRU cache
-    bin/                        — 40 binaries (see below)
+    bin/                        — 42 binaries (see below)
   tests/                        — 9 integration tests
   bindings/python/              — PyO3 wrapper, examples/, run_benchmark.ps1
   gpu/cuda/                     — NVRTC-compiled .cu sources
@@ -233,7 +234,7 @@ k_eff measured on the same JSON the engine consumes. Used as a
 secondary target to grade engine quality apart from any scene-
 transcription drift from the registered ICSBEP handbook.
 
-## Binaries (40 in `src/bin/`)
+## Binaries (42 in `src/bin/`)
 
 Neutron k-eigenvalue: `godiva`, `pwr_pincell`, `pwr_d2o_pincell`,
 `pwr_assembly`, `hex_minicore`, `validate_vs_openmc`.
@@ -242,7 +243,9 @@ Diagnostics: `metal_stats_diag` (three-way CPU / GPU / OpenMC
 tally compare), `nu_lookup_compare`, `level_xs_compare`,
 `elastic_kinematics_diag`, `chi_compare`, `debug_lct`,
 `debug_trace`, `xs_dump`, `xs_dump_godiva`, `xs_provider_diff`,
-`photon_dump`, `icsbep_alloc_bench`.
+`photon_dump`, `icsbep_alloc_bench`, `u235_inelastic_audit`
+(per-MT σ SVD vs Table), `inspect_mt91` (MT=91 Law-61 /
+KalbachMann data inspector).
 
 ICSBEP harness (Rust): `icsbep_bench` — runs cases without going
 through Python, useful for clean engine profiles.

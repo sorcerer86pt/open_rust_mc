@@ -1,12 +1,12 @@
 # Project status — 2026-05-21
 
-What `origin/main` (`d80a157`) ships today, what's open, what's the
+What `origin/main` (`dc943e3`) ships today, what's open, what's the
 current headline.
 
-> **Branch note (drop-orchestration-keep-physics, 2026-05-28):**
+> **Orchestration-rollback note (merged to `main` via PR #10):**
 > The in-process benchmark pipeline (`c05d678` Phase 1 scaffold,
 > `8171705` Phases 2–5, `5c0844f` data-dir / wrapper, `2308edd`
-> VRAM-aware n_slots) has been rolled back on this branch.
+> VRAM-aware n_slots) has been rolled back.
 > Symptom that motivated the rollback: the `force_rebuild()`
 > watchdog inside `stage4_gpu_executor` partially tore down GPU
 > state while channel-held bundles still referenced it, corrupting
@@ -18,10 +18,11 @@ current headline.
 
 ## Headline
 
-- **Tests**: 438 / 438 lib tests green on default features;
-  443 / 443 with `--features cuda`. `cargo check` clean on
-  `--all-targets` (default + cuda). (Branch re-run needed — cherry-picked
-  physics added the MT=91 Law-61 + survival-biasing parity tests.)
+- **Tests**: 440 / 440 lib tests green on default features;
+  447 / 447 with `--features cuda`. `cargo check` clean on
+  `--all-targets` (default + cuda). The cherry-picked physics
+  (MT=91 Law-61 + survival-biasing parity tests) is included in
+  these counts.
 - **Default nuclear data**: ENDF/B-VIII.1 (released Oct 2024).
   VIII.0 and VII.1 supported as fallbacks; library autodetected from
   on-disk layout.
@@ -209,7 +210,7 @@ sessions and should be re-measured before being quoted in papers.
 
 | Metric | Scope | Value | Source |
 |---|---|---|---|
-| Lib test count (default) | — | **438 / 438 green** | `cargo test --lib` |
+| Lib test count (default) | — | **440 / 440 green** | `cargo test --lib` |
 | Lib test count (`--features cuda`) | — | **447 / 447 green** | `cargo test --lib --features cuda` |
 | ICSBEP CUDA + CPU family suite | `[icsbep]` | **6 / 6 PASS** in 141 s under `max(150 pcm, 2σ)` | `outputs/cuda_runs_after_rank_fix.txt` |
 | PWR γ-heating split (us vs OpenMC) | `[photon]` | fuel 84.12% / clad 9.81% / water 5.72% / gap 0% | `outputs/pwr_gamma_heating_benchmark.txt` |

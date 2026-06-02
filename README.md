@@ -15,8 +15,8 @@ grew into a research vehicle for studying cross-section
 representation, recursive geometry on GPU, and CIELO-era nuclear-data
 evaluation effects across ENDF/B-VII.1 / VIII.0 / VIII.1.
 
-438 / 438 lib tests + 5 integration tests pass on every push
-(`cargo test`); 443 / 443 with `--features cuda`.
+440 / 440 lib tests + 9 integration tests pass on every push
+(`cargo test`); 447 / 447 with `--features cuda`.
 
 ## Highlights
 
@@ -68,8 +68,8 @@ git clone https://github.com/sorcerer86pt/open_rust_mc
 cd open_rust_mc/rust_prototype
 cargo build --release                       # CPU only
 cargo build --release --features cuda       # + CUDA backend
-cargo test --lib                            # 438 / 438 default
-cargo test --lib --features cuda            # 443 / 443
+cargo test --lib                            # 440 / 440 default
+cargo test --lib --features cuda            # 447 / 447
 ```
 
 ### Download nuclear data (ENDF/B-VIII.1, ~6.5 GB)
@@ -132,7 +132,7 @@ audited table including older claims still awaiting re-measurement.
 
 | Metric | Scope | Value | Source |
 |---|---|---|---|
-| Lib tests (default) | — | **438 / 438 green** | `cargo test --lib` |
+| Lib tests (default) | — | **440 / 440 green** | `cargo test --lib` |
 | Lib tests (`--features cuda`) | — | **447 / 447 green** | `cargo test --lib --features cuda` |
 | ICSBEP family suite | `[icsbep]` | **6 / 6 PASS** (141 s, `max(150 pcm, 2σ)`) | `outputs/cuda_runs_after_rank_fix.txt` |
 | PWR γ-heating fuel/clad/water | `[photon]` | 84.12 % / 9.81 % / 5.72 % (gap 0 %) | `outputs/pwr_gamma_heating_benchmark.txt` |
@@ -194,6 +194,9 @@ Key modules under `rust_prototype/src/`:
 - `random_ray/` — multigroup TRRM (forward + adjoint + immortal),
   CADIS, adjoint-SVD.
 - `depletion/` — CRAM, chain, predictor-corrector, mapping, flux.
+- `bin/` — 42 binaries; notable diagnostics include
+  `u235_inelastic_audit` (per-MT σ SVD vs Table) and `inspect_mt91`
+  (MT=91 law-61 / KalbachMann data inspector).
 
 ## Cross-section providers
 
@@ -276,10 +279,10 @@ shares the same physics as CPU:
   workloads.
 - HexLattice device functions ported; runtime parity test pending.
 
-GPU bench drivers: `gpu_bench`, `gpu_cpu_bench`,
-`gpu_godiva_keff`, `gpu_const_xs_keff`, `gpu_assembly_keff`,
-`gpu_pwr_bench`, `gpu_hex_minicore`, `gpu_compton_validate`,
-`gpu_compton_scaling`, `gpu_photon_features`, `gpu_wmp_validate`.
+GPU bench drivers: `gpu_bench`, `gpu_godiva_keff`,
+`gpu_const_xs_keff`, `gpu_assembly_keff`, `gpu_pwr_bench`,
+`gpu_hex_minicore`, `gpu_recursive_parity`, `gpu_photon_features`,
+`gpu_wmp_validate`.
 
 ## Python bindings
 
@@ -322,6 +325,15 @@ harness lives at `rust_prototype/bindings/python/examples/`.
 
 ## Recent (May 2026)
 
+- **Eigenvalue progress bar** (`indicatif`) — live per-batch k_eff +
+  σ in the terminal; per-case and per-seed banners in sweep harness.
+- **GPU MT=91 Law 61 (KalbachMann) mu coupling** — inelastic
+  outgoing-angle correlation ported to CUDA path, bit-tested vs CPU.
+- **GPU survival biasing** — kernel wired; Python
+  `PySettings.survival_biasing` toggle exposed in sweep harness.
+- In-process benchmark pipeline rolled back; subprocess-per-case
+  Python driver (`icsbep_sweep.py`) restored to isolate per-case
+  GPU-state corruption.
 - ENDF/B-VIII.1 became the default library; sibling-`thermal/`
   layout handled transparently.
 - Natural-element migration on the ICSBEP corpus — 137 cases
