@@ -153,7 +153,7 @@ changing.
   below that. Same binary now targets A1000 (sm_86), A100 (sm_80),
   H100 (sm_90), RTX 5090 (sm_120), etc. without rebuild.
 
-- **`N_PARAMS = 195`** matches between `gpu_transport.rs` and
+- **`N_PARAMS = 211`** matches between `gpu_transport.rs` and
   `gpu/cuda/transport.cu`. Adding or removing a slot requires
   touching both atomically. Earlier inline-vec packing sites that
   open-coded `vec![dptr!(...)…]` are now delegated to
@@ -164,7 +164,16 @@ changing.
   `P_W_SURVIVE`); defaults written by the builder run the analog
   path bit-for-bit, so callers that don't opt in (every path
   except `CudaRunner` reading `SimConfig::survival_biasing`) are
-  unaffected.
+  unaffected. Slots 195-210 carry the `(n,2n)` MT=16 / `(n,3n)`
+  MT=17 continuum outgoing-energy distributions (8 arrays each —
+  same `ContinuousTabular` layout as the MT=91 P_INEL91_* slots),
+  sampled by `sample_continuum_tabular`. They feed the banked
+  secondary neutron's energy from the real ENDF tabulation the CPU
+  uses (evaporation `temp = E/10` fallback when `*_NUC_NINC[nuc] == 0`);
+  the continuing primary still uses two-body CM kinematics with the
+  real `P_Q_N2N/N3N_TABLE` Q-value. New slots must be appended at
+  the end so existing indices (and the in-place survival-biasing
+  writes at 192-194) don't shift.
 
 - **Subprocess-per-case benchmark driver.** ICSBEP sweeps run via
   the Python `icsbep_sweep.py` harness, which loops over cases

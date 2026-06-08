@@ -1408,33 +1408,38 @@ extern "C" __global__ void gr_multi_event(
     double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
 
     int n_extra = (ev == EV_N2N) ? 1 : 2;
-    // Real ENDF Q-value for the reaction. The host populates these per
-    // nuclide from `reader.reaction_q_value({16,17})`; `0.0` when the
-    // nuclide doesn't evaluate the channel. Be-9 (n,2n) is the
-    // motivating case — real Q = −1.665 MeV (fixed) versus the prior
-    // hardcoded `−0.1 × E_inc`, which on 1 MeV neutrons gave Q ≈
-    // −100 keV and produced secondaries with ~15× too much energy.
+    // The banked extra neutron(s) take their outgoing energy from the
+    // ENDF MT=16 / MT=17 tabulated distribution the CPU already samples
+    // (`physics/collision.rs`), with the `temp = E/10` evaporation
+    // spectrum as the no-table fallback — `sample_nxn_eout` handles both.
+    // This replaces the device's previous unconditional `temp = E/10`
+    // Maxwell secondaries. The continuing primary keeps the analytic
+    // two-body CM kinematics driven by the real ENDF Q-value (slots
+    // P_Q_N2N/N3N_TABLE) — that path is already validated against CPU
+    // on Godiva / Jezebel, so it is left intact.
+    int S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ;
+    if (ev == EV_N2N) {
+        S_OFF=P_N2N_NUC_OFF;  S_NINC=P_N2N_NUC_NINC; S_INCE=P_N2N_INC_E_PTRS;
+        S_EO=P_N2N_E_OUT_PTRS; S_CDF=P_N2N_CDF_PTRS;  S_PDF=P_N2N_PDF_PTRS;
+        S_DLO=P_N2N_DIST_LOCAL_OFF; S_DSZ=P_N2N_DIST_SZ;
+    } else {
+        S_OFF=P_N3N_NUC_OFF;  S_NINC=P_N3N_NUC_NINC; S_INCE=P_N3N_INC_E_PTRS;
+        S_EO=P_N3N_E_OUT_PTRS; S_CDF=P_N3N_CDF_PTRS;  S_PDF=P_N3N_PDF_PTRS;
+        S_DLO=P_N3N_DIST_LOCAL_OFF; S_DSZ=P_N3N_DIST_SZ;
+    }
+    // Real ENDF Q-value for the primary's two-body kinematics; fall back
+    // to the historical heuristic only when the nuclide doesn't evaluate
+    // the channel (Q == 0) or the dataset is malformed (Q ≥ 0).
     double Q_mult = (ev == EV_N2N)
         ? __ldg(&PTR_D(p, P_Q_N2N_TABLE)[hit_nuc])
         : __ldg(&PTR_D(p, P_Q_N3N_TABLE)[hit_nuc]);
-    // Guard against the nuclide-has-no-MT case (Q_mult == 0.0) and
-    // any malformed dataset that would produce Q ≥ 0 for these
-    // endothermic channels. Falls back to the prior heuristic so the
-    // kernel still produces *some* physical-ish secondary instead of
-    // emitting at E_inc (which would otherwise leak ν̄ artificially).
     if (Q_mult >= 0.0) {
         Q_mult = (ev == EV_N2N) ? -E * 0.1 : -E * 0.2;
     }
 
     for (int s = 0; s < n_extra; s++) {
-        // TODO: replace analytic Maxwell with the real per-nuclide
-        // (n,2n)/(n,3n) outgoing-energy tables once the diagnostic
-        // OpenMC tally diff (see docs/) confirms which channels need
-        // it. For now the historical temp = E/10 sampling stays.
-        double temp = E / 10.0;
-        double x1 = fmax(pcg_uniform(&rng), 1e-30);
-        double x2 = fmax(pcg_uniform(&rng), 1e-30);
-        double e_sec = fmax(fmin(-temp * log(x1 * x2), E), 1e-5);
+        double e_sec = sample_nxn_eout(E, &rng, p, hit_nuc,
+            S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ);
         int fidx = atomicAdd(fis_count, 1);
         if (fidx < max_fis) {
             fis_x[fidx] = px; fis_y[fidx] = py; fis_z[fidx] = pz;

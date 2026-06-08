@@ -31,7 +31,14 @@ use cudarc::nvrtc;
 /// simulate.rs::dispatch_real_collision). When SB is disabled (the
 /// historical analog path) all three slots hold defaults written by
 /// `build_transport_params_vec` — kernel just doesn't read them.
-const N_PARAMS: usize = 195;
+///
+/// 195 → 211: slots 195-210 carry the `(n,2n)` MT=16 / `(n,3n)` MT=17
+/// continuum outgoing-energy distributions (8 arrays each — the same
+/// `ContinuousTabular` layout as the MT=91 P_INEL91_* slots). They let
+/// `sample_continuum_tabular` reproduce the ENDF tabulated secondary
+/// spectrum the CPU already samples, replacing the device's old
+/// `temp = E/10` Maxwell analytic fallback.
+const N_PARAMS: usize = 211;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -474,6 +481,32 @@ pub struct GpuNuclideData {
     pub inel91_pdf: CudaSlice<f64>,
     pub inel91_nuc_offsets: CudaSlice<i32>,
     pub inel91_nuc_n_inc: CudaSlice<i32>,
+    // (n,2n) MT=16 / (n,3n) MT=17 continuum outgoing-energy
+    // distributions (slots 195-210). Same `ContinuousTabular` layout
+    // as inel91, minus the (sampler-unused) concatenated flat data
+    // arrays and the Law 61 mu coupling. The e_out/cdf/pdf/inc_energies
+    // arrays live per-nuclide in `per_nucs[*].n2n_edist` and are reached
+    // via the `*_ptrs` pointer arrays; the `*_nuc_offsets` /
+    // `*_nuc_n_inc` / `*_dist_local_off` / `*_dist_sizes` i32 arrays are
+    // the flat metadata `sample_continuum_tabular` indexes. When
+    // `*_nuc_n_inc[i] == 0` the kernel falls back to the evaporation
+    // spectrum — matching the CPU `None` branch in collision.rs.
+    pub n2n_nuc_offsets: CudaSlice<i32>,
+    pub n2n_nuc_n_inc: CudaSlice<i32>,
+    pub n2n_dist_local_off: CudaSlice<i32>,
+    pub n2n_dist_sizes: CudaSlice<i32>,
+    pub n2n_inc_e_ptrs: CudaSlice<u64>,
+    pub n2n_e_out_ptrs: CudaSlice<u64>,
+    pub n2n_cdf_ptrs: CudaSlice<u64>,
+    pub n2n_pdf_ptrs: CudaSlice<u64>,
+    pub n3n_nuc_offsets: CudaSlice<i32>,
+    pub n3n_nuc_n_inc: CudaSlice<i32>,
+    pub n3n_dist_local_off: CudaSlice<i32>,
+    pub n3n_dist_sizes: CudaSlice<i32>,
+    pub n3n_inc_e_ptrs: CudaSlice<u64>,
+    pub n3n_e_out_ptrs: CudaSlice<u64>,
+    pub n3n_cdf_ptrs: CudaSlice<u64>,
+    pub n3n_pdf_ptrs: CudaSlice<u64>,
     // Closed-form fission χ parameters per nuclide (ENDF Law 11 Watt).
     // When `fis_nuc_n_inc[i] == 0` and `watt_nuc_n[i] > 0`, the
     // device-side `sample_fission_energy` interpolates
@@ -660,6 +693,17 @@ impl GpuNuclideData {
         let f64_extra: [&CudaSlice<f64>; 2] =
             [&s.inel_cdf_log_e_min, &s.inel_cdf_log_e_max];
         let i32_extra2: [&CudaSlice<i32>; 1] = [&s.inel_cdf_n_lev];
+        // (n,2n)/(n,3n) continuum-edist offset metadata (i32).
+        let nxn_i32: [&CudaSlice<i32>; 8] = [
+            &s.n2n_nuc_offsets,
+            &s.n2n_nuc_n_inc,
+            &s.n2n_dist_local_off,
+            &s.n2n_dist_sizes,
+            &s.n3n_nuc_offsets,
+            &s.n3n_nuc_n_inc,
+            &s.n3n_dist_local_off,
+            &s.n3n_dist_sizes,
+        ];
 
         let f64_total: usize = f64_slices
             .iter()
@@ -670,6 +714,7 @@ impl GpuNuclideData {
             .iter()
             .chain(i32_extra.iter())
             .chain(i32_extra2.iter())
+            .chain(nxn_i32.iter())
             .map(|x| x.num_bytes())
             .sum();
         // Step-D pointer-array buffers (u64 each). The per-nuclide
@@ -721,7 +766,19 @@ impl GpuNuclideData {
             + self.inel91_mu_has.num_bytes()
             + self.inel91_mu_data_ptrs.num_bytes()
             + self.inel91_mu_offsets_ptrs.num_bytes()
-            + self.inel91_mu_e_in_start_ptrs.num_bytes();
+            + self.inel91_mu_e_in_start_ptrs.num_bytes()
+            // (n,2n)/(n,3n) per-nuclide edist pointer arrays (u64). The
+            // f64 data slabs they point at are owned per-nuclide (in
+            // `PerNuclideGpu::n2n_edist` / `n3n_edist`) and accounted
+            // there.
+            + self.n2n_inc_e_ptrs.num_bytes()
+            + self.n2n_e_out_ptrs.num_bytes()
+            + self.n2n_cdf_ptrs.num_bytes()
+            + self.n2n_pdf_ptrs.num_bytes()
+            + self.n3n_inc_e_ptrs.num_bytes()
+            + self.n3n_e_out_ptrs.num_bytes()
+            + self.n3n_cdf_ptrs.num_bytes()
+            + self.n3n_pdf_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1631,6 +1688,25 @@ impl GpuTransportContext {
             0_u64,
             (0.25_f64).to_bits(),
             (1.0_f64).to_bits(),
+            // (n,2n) MT=16 continuum outgoing-energy — slots 195-202.
+            // Order MUST match the P_N2N_* #defines in transport.cu.
+            dptr!(&nuc_data.n2n_nuc_offsets),
+            dptr!(&nuc_data.n2n_nuc_n_inc),
+            dptr!(&nuc_data.n2n_inc_e_ptrs),
+            dptr!(&nuc_data.n2n_e_out_ptrs),
+            dptr!(&nuc_data.n2n_cdf_ptrs),
+            dptr!(&nuc_data.n2n_pdf_ptrs),
+            dptr!(&nuc_data.n2n_dist_local_off),
+            dptr!(&nuc_data.n2n_dist_sizes),
+            // (n,3n) MT=17 continuum outgoing-energy — slots 203-210.
+            dptr!(&nuc_data.n3n_nuc_offsets),
+            dptr!(&nuc_data.n3n_nuc_n_inc),
+            dptr!(&nuc_data.n3n_inc_e_ptrs),
+            dptr!(&nuc_data.n3n_e_out_ptrs),
+            dptr!(&nuc_data.n3n_cdf_ptrs),
+            dptr!(&nuc_data.n3n_pdf_ptrs),
+            dptr!(&nuc_data.n3n_dist_local_off),
+            dptr!(&nuc_data.n3n_dist_sizes),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -1994,6 +2070,53 @@ impl GpuTransportContext {
         let inel91_mu_e_in_start_ptrs =
             self.stream.clone_htod(&a6.inel91_mu_e_in_starts_ptrs_vec)?;
 
+        // (n,2n) MT=16 / (n,3n) MT=17 continuum outgoing-energy. Same
+        // recipe as inel91: per-nuclide pointer arrays into each
+        // `PerNuclideGpu::{n2n,n3n}_edist` data slab + flat offset/size
+        // metadata. `assemble_tabular_cat_offsets` produces the metadata
+        // vecs; the data slabs live in `per_nucs` (kept alive by the
+        // bundle's `per_nucs` Arc clone).
+        let n2n_cat = crate::gpu_per_nuclide::assemble_tabular_cat_offsets(
+            &per_nucs,
+            |p| p.n2n_edist.as_ref(),
+        );
+        let n3n_cat = crate::gpu_per_nuclide::assemble_tabular_cat_offsets(
+            &per_nucs,
+            |p| p.n3n_edist.as_ref(),
+        );
+        let n2n_nuc_offsets = self.stream.clone_htod(&n2n_cat.nuc_offsets_vec)?;
+        let n2n_nuc_n_inc = self.stream.clone_htod(&n2n_cat.nuc_n_inc_vec)?;
+        let n2n_dist_local_off = self.stream.clone_htod(&n2n_cat.dist_local_off_vec)?;
+        let n2n_dist_sizes = self.stream.clone_htod(&n2n_cat.dist_sizes_vec)?;
+        let n3n_nuc_offsets = self.stream.clone_htod(&n3n_cat.nuc_offsets_vec)?;
+        let n3n_nuc_n_inc = self.stream.clone_htod(&n3n_cat.nuc_n_inc_vec)?;
+        let n3n_dist_local_off = self.stream.clone_htod(&n3n_cat.dist_local_off_vec)?;
+        let n3n_dist_sizes = self.stream.clone_htod(&n3n_cat.dist_sizes_vec)?;
+        let n2n_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.inc_energies),
+        )?;
+        let n2n_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.e_out),
+        )?;
+        let n2n_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.cdf),
+        )?;
+        let n2n_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.pdf),
+        )?;
+        let n3n_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.inc_energies),
+        )?;
+        let n3n_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.e_out),
+        )?;
+        let n3n_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.cdf),
+        )?;
+        let n3n_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.pdf),
+        )?;
+
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
             basis_ptrs,
@@ -2040,6 +2163,22 @@ impl GpuTransportContext {
             inel91_mu_data_ptrs,
             inel91_mu_offsets_ptrs,
             inel91_mu_e_in_start_ptrs,
+            n2n_nuc_offsets,
+            n2n_nuc_n_inc,
+            n2n_dist_local_off,
+            n2n_dist_sizes,
+            n2n_inc_e_ptrs,
+            n2n_e_out_ptrs,
+            n2n_cdf_ptrs,
+            n2n_pdf_ptrs,
+            n3n_nuc_offsets,
+            n3n_nuc_n_inc,
+            n3n_dist_local_off,
+            n3n_dist_sizes,
+            n3n_inc_e_ptrs,
+            n3n_e_out_ptrs,
+            n3n_cdf_ptrs,
+            n3n_pdf_ptrs,
             all_basis: b.all_basis,
             all_coeffs: b.all_coeffs,
             all_energy_grids: a.all_energy_grids,

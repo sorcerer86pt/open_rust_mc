@@ -418,6 +418,14 @@ pub struct PerNuclideGpu {
     // ── Category A.6 — MT=91 continuum inelastic outgoing-energy ──
     pub inel91: Option<TabularEdistSlicesGpu>,
 
+    // ── Category A.6b — (n,2n) MT=16 / (n,3n) MT=17 outgoing-energy ──
+    // Same `ContinuousTabular` layout as `inel91`; no Law 61 mu coupling
+    // (the CPU and GPU both emit these isotropically in LAB). `None`
+    // when the nuclide doesn't evaluate the channel — the device kernel
+    // then falls back to the evaporation spectrum.
+    pub n2n_edist: Option<TabularEdistSlicesGpu>,
+    pub n3n_edist: Option<TabularEdistSlicesGpu>,
+
     // ── Category A.7 — URR probability tables ──
     pub urr: Option<UrrSlicesGpu>,
 
@@ -454,6 +462,12 @@ impl PerNuclideGpu {
         }
         total += self.fission_edist.device_bytes();
         if let Some(i) = &self.inel91 {
+            total += i.device_bytes();
+        }
+        if let Some(i) = &self.n2n_edist {
+            total += i.device_bytes();
+        }
+        if let Some(i) = &self.n3n_edist {
             total += i.device_bytes();
         }
         if let Some(u) = &self.urr {
@@ -629,6 +643,21 @@ pub fn upload_one_nuclide(
         _ => None,
     };
 
+    // Category A.6b — (n,2n) MT=16 / (n,3n) MT=17 outgoing-energy.
+    // Pass `mu_dist: None` unconditionally — the CPU `collision.rs`
+    // n2n/n3n branch calls `dist.sample()` (not `sample_with_mu`) and
+    // emits isotropically, so the device must do the same.
+    let build_nxn = |edist: Option<&crate::hdf5_reader::EnergyDistribution>| {
+        match edist {
+            Some(e) if !e.energies.is_empty() && !e.distributions.is_empty() => {
+                build_tabular_edist(stream, &e.energies, &e.distributions, None).map(Some)
+            }
+            _ => Ok(None),
+        }
+    };
+    let n2n_edist = build_nxn(nuc.n2n_edist.as_ref())?;
+    let n3n_edist = build_nxn(nuc.n3n_edist.as_ref())?;
+
     // Category A.7 — URR probability tables.
     let urr = nuc
         .urr_tables
@@ -669,6 +698,8 @@ pub fn upload_one_nuclide(
         elastic_angle,
         fission_edist,
         inel91,
+        n2n_edist,
+        n3n_edist,
         urr,
         inel_cdf,
     })
@@ -1338,6 +1369,63 @@ pub fn assemble_a7_cat(
         urr_multiply_smooth_vec,
         urr_interpolation_vec,
     })
+}
+
+/// Per-nuclide offset metadata for a continuum-tabular outgoing-energy
+/// channel — used for `(n,2n)` MT=16 and `(n,3n)` MT=17. The device
+/// sampler (`sample_continuum_tabular`) reads each nuclide's
+/// inc_energies / e_out / cdf / pdf arrays through per-nuclide pointer
+/// arrays (built in `gpu_transport.rs` via
+/// `build_per_nuc_optional_ptr_array`); this struct supplies the flat
+/// metadata it also needs — per-nuclide start offset + incident-energy
+/// bin count, plus the concatenated per-distribution local offsets and
+/// sizes. It's the inel91 subset of `AssembledBundleA6Cat` minus the
+/// (sampler-unused) flat data copies and the Law 61 mu coupling.
+pub struct TabularCatOffsets {
+    pub nuc_offsets_vec: Vec<i32>,
+    pub nuc_n_inc_vec: Vec<i32>,
+    pub dist_local_off_vec: Vec<i32>,
+    pub dist_sizes_vec: Vec<i32>,
+}
+
+/// Assemble `TabularCatOffsets` for whichever continuum channel
+/// `accessor` selects (`|p| p.n2n_edist.as_ref()` etc.). `nuc_offsets`
+/// is the running incident-energy-bin count so the device computes the
+/// global distribution index as `nuc_offsets[nuc] + ie`.
+pub fn assemble_tabular_cat_offsets(
+    per_nucs: &[Arc<PerNuclideGpu>],
+    accessor: impl Fn(&PerNuclideGpu) -> Option<&TabularEdistSlicesGpu>,
+) -> TabularCatOffsets {
+    let n_nuc = per_nucs.len();
+    let mut nuc_offsets_vec = vec![0_i32; n_nuc];
+    let mut nuc_n_inc_vec = vec![0_i32; n_nuc];
+    let mut dist_local_off_vec: Vec<i32> = Vec::new();
+    let mut dist_sizes_vec: Vec<i32> = Vec::new();
+    let mut run_inc = 0_usize;
+    for (nuc_idx, p) in per_nucs.iter().enumerate() {
+        let Some(t) = accessor(p) else { continue };
+        let ni = t.n_inc as usize;
+        nuc_offsets_vec[nuc_idx] = run_inc as i32;
+        nuc_n_inc_vec[nuc_idx] = t.n_inc;
+        for di in 0..ni {
+            dist_local_off_vec.push(t.dist_local_off[di]);
+            dist_sizes_vec.push(t.dist_sz[di]);
+        }
+        run_inc += ni;
+    }
+    // Keep device pointers non-null even when no nuclide carries the
+    // channel — one-element sentinel (mirrors the inel91 empty-bundle
+    // guard). `nuc_n_inc[nuc] == 0` still gates the sampler off.
+    if dist_local_off_vec.is_empty() {
+        dist_local_off_vec.push(0);
+        dist_sizes_vec.push(0);
+    }
+    TabularCatOffsets {
+        nuc_offsets_vec,
+        nuc_n_inc_vec,
+        dist_local_off_vec,
+        dist_sizes_vec,
+    }
 }
 
 /// Assembled cat-A.6 (MT=91 continuum inelastic outgoing-energy)

@@ -428,7 +428,35 @@
 #define P_W_MIN                      193
 #define P_W_SURVIVE                  194
 
-#define N_PARAMS            195
+// ── (n,2n) / (n,3n) continuum outgoing-energy distributions ────────
+// Slots 195-210. The ENDF MT=16 / MT=17 tabulated outgoing-energy
+// distribution the CPU (`physics/collision.rs`) already samples from;
+// previously the device used only a `temp = E/10` Maxwell analytic
+// fallback. Each reaction needs the same 8 arrays consumed by
+// `sample_continuum_tabular` — a verbatim layout clone of the MT=91
+// P_INEL91_* slots (NUC_OFF / NUC_NINC + INC_E/E_OUT/CDF/PDF per-nuc
+// pointer arrays + DIST_LOCAL_OFF / DIST_SZ flat metadata). When a
+// nuclide doesn't evaluate the channel `NUC_NINC[nuc] == 0` and the
+// caller falls back to the evaporation spectrum (matches the CPU's
+// `sample_evaporation_energy` `None` branch).
+#define P_N2N_NUC_OFF        195
+#define P_N2N_NUC_NINC       196
+#define P_N2N_INC_E_PTRS     197
+#define P_N2N_E_OUT_PTRS     198
+#define P_N2N_CDF_PTRS       199
+#define P_N2N_PDF_PTRS       200
+#define P_N2N_DIST_LOCAL_OFF 201
+#define P_N2N_DIST_SZ        202
+#define P_N3N_NUC_OFF        203
+#define P_N3N_NUC_NINC       204
+#define P_N3N_INC_E_PTRS     205
+#define P_N3N_E_OUT_PTRS     206
+#define P_N3N_CDF_PTRS       207
+#define P_N3N_PDF_PTRS       208
+#define P_N3N_DIST_LOCAL_OFF 209
+#define P_N3N_DIST_SZ        210
+
+#define N_PARAMS            211
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1018,6 +1046,108 @@ __device__ double sample_inel91_energy(
     double adjusted = (fabs(span_l) < 1e-30) ? e_out
                     : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
     return fmax(adjusted, 1e-5);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Generic continuum-tabular outgoing-energy sampler. Identical
+// algorithm to `sample_inel91_energy` (OpenMC `ContinuousTabular::
+// sample`) but reads its 8 arrays from caller-supplied slot indices
+// instead of the hardwired P_INEL91_* slots, so the same code drives
+// MT=91 continuum inelastic, (n,2n) MT=16 and (n,3n) MT=17. Returns
+// `-1.0` when the nuclide carries no table for the channel (NUC_NINC
+// == 0); callers fall back to the evaporation spectrum.
+// ───────────────────────────────────────────────────────────────────────
+__device__ double sample_continuum_tabular(
+    double E_inc, PcgState* rng, Params p, int hit_nuc,
+    int S_NUC_OFF, int S_NUC_NINC, int S_INC_E_PTRS, int S_E_OUT_PTRS,
+    int S_CDF_PTRS, int S_PDF_PTRS, int S_DIST_LOCAL_OFF, int S_DIST_SZ)
+{
+    int fi_off = __ldg(&PTR_I(p, S_NUC_OFF)[hit_nuc]);
+    int fi_n   = __ldg(&PTR_I(p, S_NUC_NINC)[hit_nuc]);
+    if (fi_n <= 0) return -1.0;  // caller falls back to evaporation
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, S_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, S_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, S_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, S_PDF_PTRS)[hit_nuc]);
+
+    if (E_inc <= inc_e[0]) {
+        int off = PTR_I(p, S_DIST_LOCAL_OFF)[fi_off];
+        int sz  = PTR_I(p, S_DIST_SZ)[fi_off];
+        return fmax(sample_eout_bin(pcg_uniform(rng),
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
+    }
+    if (E_inc >= inc_e[fi_n - 1]) {
+        int off = PTR_I(p, S_DIST_LOCAL_OFF)[fi_off + fi_n - 1];
+        int sz  = PTR_I(p, S_DIST_SZ)[fi_off + fi_n - 1];
+        return fmax(sample_eout_bin(pcg_uniform(rng),
+                                    &nuc_eo[off], &nuc_cdf[off], &nuc_pdf[off], sz), 1e-5);
+    }
+
+    int ie;
+    {
+        int lo = 0, hi = fi_n - 1;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >> 1;
+            if (inc_e[mid] <= E_inc) lo = mid; else hi = mid;
+        }
+        ie = lo;
+    }
+
+    double r = (E_inc - inc_e[ie]) / fmax(inc_e[ie + 1] - inc_e[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen_lo = fi_off + ie;
+    int chosen_hi = fi_off + ie + 1;
+    int chosen = pick_hi ? chosen_hi : chosen_lo;
+    int off_l = PTR_I(p, S_DIST_LOCAL_OFF)[chosen];
+    int sz_l  = PTR_I(p, S_DIST_SZ)[chosen];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
+    double e_out = sample_eout_bin(pcg_uniform(rng), eo_l, cd_l, pd_l, sz_l);
+
+    int off_a = PTR_I(p, S_DIST_LOCAL_OFF)[chosen_lo];
+    int sz_a  = PTR_I(p, S_DIST_SZ)[chosen_lo];
+    int off_b = PTR_I(p, S_DIST_LOCAL_OFF)[chosen_hi];
+    int sz_b  = PTR_I(p, S_DIST_SZ)[chosen_hi];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
+    double el1_lo = eo_l[0];
+    double el1_hi = (sz_l > 0) ? eo_l[sz_l - 1] : el1_lo;
+    double ea_lo  = eo_a[0];
+    double ea_hi  = (sz_a > 0) ? eo_a[sz_a - 1] : ea_lo;
+    double eb_lo  = eo_b[0];
+    double eb_hi  = (sz_b > 0) ? eo_b[sz_b - 1] : eb_lo;
+    double e1 = (1.0 - r) * ea_lo + r * eb_lo;
+    double eK = (1.0 - r) * ea_hi + r * eb_hi;
+    double span_l = el1_hi - el1_lo;
+    double adjusted = (fabs(span_l) < 1e-30) ? e_out
+                    : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
+    return fmax(adjusted, 1e-5);
+}
+
+// (n,2n)/(n,3n) outgoing-neutron energy: sample the ENDF MT=16/MT=17
+// tabulated distribution when the nuclide ships it, else the
+// evaporation spectrum `P(E') ~ E' exp(-E'/T)`, `T = E/10`. Mirrors
+// the CPU `physics/collision.rs` `match n2n_edist { Some => dist.sample,
+// None => sample_evaporation_energy }` exactly (same T, same min(E)
+// / max(1e-5) clamps).
+__device__ double sample_nxn_eout(
+    double E, PcgState* rng, Params p, int hit_nuc,
+    int S_NUC_OFF, int S_NUC_NINC, int S_INC_E_PTRS, int S_E_OUT_PTRS,
+    int S_CDF_PTRS, int S_PDF_PTRS, int S_DIST_LOCAL_OFF, int S_DIST_SZ)
+{
+    double e = sample_continuum_tabular(
+        E, rng, p, hit_nuc, S_NUC_OFF, S_NUC_NINC, S_INC_E_PTRS,
+        S_E_OUT_PTRS, S_CDF_PTRS, S_PDF_PTRS, S_DIST_LOCAL_OFF, S_DIST_SZ);
+    if (e > 0.0) return e;
+    double temp = E / 10.0;
+    double x1 = fmax(pcg_uniform(rng), 1e-30);
+    double x2 = fmax(pcg_uniform(rng), 1e-30);
+    return fmax(fmin(-temp * log(x1 * x2), E), 1e-5);
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -2503,13 +2633,24 @@ transport_persistent(
 
             } else if ((cum_rxn+=hit_xs.s_n2n), xi_rxn < cum_rxn) {
                 // ═══ (n,2n) — bank 1 extra neutron, primary continues ═══
-                { double temp=E/10.0;
-                  double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
-                  double e_sec=fmax(fmin(-temp*log(x1*x2),E),1e-5);
+                // Banked neutron's outgoing energy now comes from the
+                // ENDF MT=16 tabulated distribution the CPU already uses
+                // (`sample_nxn_eout`, evaporation fallback when the
+                // nuclide ships no table), replacing the old `temp = E/10`
+                // Maxwell. The primary keeps two-body CM kinematics, now
+                // driven by the REAL ENDF Q-value from P_Q_N2N_TABLE
+                // (was a hardcoded `Q=-E*0.1`) so it matches the
+                // event-based kernel.
+                { double e_sec = sample_nxn_eout(E, &rng, p, hit_nuc,
+                      P_N2N_NUC_OFF, P_N2N_NUC_NINC, P_N2N_INC_E_PTRS,
+                      P_N2N_E_OUT_PTRS, P_N2N_CDF_PTRS, P_N2N_PDF_PTRS,
+                      P_N2N_DIST_LOCAL_OFF, P_N2N_DIST_SZ);
                   int idx2=atomicAdd(fis_count,1);
                   if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
                 }
-                { double Q_n2n=-E*0.1, e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n2n;
+                { double Q_n2n=__ldg(&PTR_D(p, P_Q_N2N_TABLE)[hit_nuc]);
+                  if(Q_n2n>=0.0) Q_n2n=-E*0.1;
+                  double e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n2n;
                   if(e_cm_out<=0.0) e_cm_out=E*0.01;
                   double mu_cm=2.0*pcg_uniform(&rng)-1.0, ap1=A+1.0;
                   double e_n=e_cm_out*A/ap1, vni=sqrt(2.0*e_n), vcs=sqrt(2.0*E/(ap1*ap1));
@@ -2523,14 +2664,21 @@ transport_persistent(
 
             } else if ((cum_rxn+=hit_xs.s_n3n), xi_rxn < cum_rxn) {
                 // ═══ (n,3n) — bank 2 extra neutrons, primary continues ═══
+                // Same treatment as (n,2n): banked neutrons drawn from the
+                // ENDF MT=17 distribution (evaporation fallback), primary
+                // continues via two-body CM kinematics with the real
+                // P_Q_N3N_TABLE Q-value (was hardcoded `Q=-E*0.2`).
                 for(int ns3=0;ns3<2;ns3++){
-                  double temp=E/10.0;
-                  double x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
-                  double e_sec=fmax(fmin(-temp*log(x1*x2),E),1e-5);
+                  double e_sec = sample_nxn_eout(E, &rng, p, hit_nuc,
+                      P_N3N_NUC_OFF, P_N3N_NUC_NINC, P_N3N_INC_E_PTRS,
+                      P_N3N_E_OUT_PTRS, P_N3N_CDF_PTRS, P_N3N_PDF_PTRS,
+                      P_N3N_DIST_LOCAL_OFF, P_N3N_DIST_SZ);
                   int idx2=atomicAdd(fis_count,1);
                   if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
                 }
-                { double Q_n3n=-E*0.2, e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n3n;
+                { double Q_n3n=__ldg(&PTR_D(p, P_Q_N3N_TABLE)[hit_nuc]);
+                  if(Q_n3n>=0.0) Q_n3n=-E*0.2;
+                  double e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n3n;
                   if(e_cm_out<=0.0) e_cm_out=E*0.01;
                   double mu_cm=2.0*pcg_uniform(&rng)-1.0, ap1=A+1.0;
                   double e_n=e_cm_out*A/ap1, vni=sqrt(2.0*e_n), vcs=sqrt(2.0*E/(ap1*ap1));
