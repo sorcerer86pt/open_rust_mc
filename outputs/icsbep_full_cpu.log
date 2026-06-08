@@ -1,0 +1,17 @@
+Sweeping 375 case(s) on CPU runner
+  CLI overrides: batches=150 (explicit), inactive=30 (explicit), particles=200000 (explicit), seeds=5 (explicit), base_seed=42, rank=15
+  Survival bias: ON (default — implicit capture + RR)
+  per-case settings: explicit CLI flag > JSON `benchmark.recommended_settings` > built-in default
+  CPU runner: any `gpu_auto_refill` / `gpu_refill_pool_factor` in JSON is ignored (no analog needed; rayon work-stealing saturates cores).
+  preload: 162/162 nuclide weights resolved (4.0s). Top 5: Z=8016@294K*507, Z=26054@294K*480, Z=26056@294K*480, Z=26057@294K*480, Z=26058@294K*480
+  CSV (append, flushed per case): E:\git\open_rust_mc\outputs\icsbep_full_cpu.csv
+  stop-file (create to terminate gracefully): E:\git\open_rust_mc\outputs\STOP
+
+[1/375] heu-comp-inter-003_case-1 starting (5seed x 150b x 30i x 200000p)
+  heu-comp-inter-003_case-1 -- seed 1/5 (seed=42) starting
+┌─ open_rust_mc — hardware profile ─
+│ RAM 61.6 GB, 8p/8l cores, L1 640 KB / L2 1024 KB / L3 98304 KB, GPU 4.0 GB (sm_86)
+│ Rayon pool: 8 threads (logical cores). SIMD path: avx2+fma.
+│ Host nuclide cache budget: 46.2 GB (75%× detected RAM).
+│ GPU bundle cache budget: ≤2.0 GB (50% × 4.0 GB VRAM hard cap; dynamic via cuMemGetInfo).
+└──
