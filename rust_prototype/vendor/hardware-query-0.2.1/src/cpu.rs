@@ -476,7 +476,10 @@ impl CPUInfo {
     }
 
     fn detect_vulnerabilities() -> Result<Vec<String>> {
-        let vulnerabilities = Vec::new();
+        // Mutated only inside the cfg(target_os = "linux") block below;
+        // allow the dead `mut` on other platforms where it is excluded.
+        #[allow(unused_mut)]
+        let mut vulnerabilities = Vec::new();
 
         #[cfg(target_os = "linux")]
         {

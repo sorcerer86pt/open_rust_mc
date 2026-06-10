@@ -186,7 +186,10 @@ impl TPUInfo {
     
     /// Detect Google Coral Edge TPUs
     fn detect_edge_tpus() -> Result<Vec<TPUInfo>> {
-        let tpus = Vec::new();
+        // Mutated only inside the cfg(target_os = "linux") block below;
+        // allow the dead `mut` on other platforms where it is excluded.
+        #[allow(unused_mut)]
+        let mut tpus = Vec::new();
         
         #[cfg(target_os = "linux")]
         {
@@ -272,7 +275,10 @@ impl TPUInfo {
     
     /// Detect Intel Habana accelerators
     fn detect_intel_habana() -> Result<Vec<TPUInfo>> {
-        let tpus = Vec::new();
+        // Mutated only inside the cfg(target_os = "linux") block below;
+        // allow the dead `mut` on other platforms where it is excluded.
+        #[allow(unused_mut)]
+        let mut tpus = Vec::new();
         
         #[cfg(target_os = "linux")]
         {
