@@ -1,0 +1,6 @@
+case,status,k_calc,k_sigma,k_ref ,sigma_exp ,dekta_pcm,bound_pcm,sigma_ratio,ref_source,runtime_s,n_seeds,batches,inactive,particles,gpu_refill_pool_factor ,gpu_auto_refill ,error_str
+heu-met-fast-058_case-1,FAIL,1.008813,0.000040,1.001380,0.002500,743.3,500.1,2.973,local_validation.viii1 (LANL Table LIX),2726.40,5,150,30,200000,,True,
+heu-met-fast-058_case-2,PASS,1.008743,0.000068,1.002400,0.003500,634.3,700.1,1.812,local_validation.viii1 (LANL Table LIX),859.84,5,150,30,200000,,True,
+heu-met-fast-058_case-3,FAIL,1.006495,0.000060,1.000730,0.002700,576.5,540.1,2.135,local_validation.viii1 (LANL Table LIX),471.40,5,150,30,200000,,True,
+heu-met-fast-058_case-4,FAIL,1.005364,0.000072,1.000090,0.002100,527.4,420.2,2.510,local_validation.viii1 (LANL Table LIX),321.52,5,150,30,200000,,True,
+heu-met-fast-058_case-5,PASS,1.003924,0.000052,0.999410,0.003300,451.4,660.1,1.368,local_validation.viii1 (LANL Table LIX),269.45,5,150,30,200000,,True,
