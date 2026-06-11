@@ -319,6 +319,60 @@ machine was MSI-Home (RTX 3080).
   A/B runs once GPU device-buffer cache lands and the 3080 box is
   available.
 
+## Session 2026-06-11 (cont.) — GPU (n,2n) in-generation transport + the injection bug
+
+Follow-on to the instrumentation session below. Implemented true
+in-generation (n,2n)/(n,3n) transport on the GPU and, in doing so,
+found+fixed the actual cause of the Be reaction-rate deficit. Shipped
+in commit `2f6ad7b` (in-gen kernel, `nxn_mode` 3-way flag, SVD≥0 clamp,
+σ_t≤0 stream-safety, refill rate-normalization). **Two corrections to
+the earlier session's conclusions — read these before quoting numbers:**
+
+1. **The "+3380 pcm (n,2n) bank over-credit" was a measurement artifact.**
+   It compared bank-as-fission to *drop* (n,2n removed entirely) — the
+   wrong baseline. Against the correct in-generation transport, k agrees:
+   bank-as-fission **+49** vs in-gen **+44** (A1000, HMF-058, 20k, seed
+   42). At a near-critical system, banking an (n,2n) neutron as a fission
+   source and transporting it in-generation give the *same* k_eff (each
+   extra neutron produces ≈1 fission neutron at k≈1). **So the in-gen fix
+   is ~k-neutral and does NOT lower the B200 +851 hot result.** Its real
+   value is tally correctness (below), not k.
+
+2. **The ~8% "under-thermalization deficit" was a bug in the in-gen
+   injection I wrote, not a pre-existing physics difference.**
+   `gr_inject_secondaries` cloned `gr_refill_dead`'s `atomicAdd` cursor
+   claim, but the secondary bank GROWS during the batch (unlike refill's
+   fixed bank). Once the population decayed, dead slots advanced the read
+   cursor past the write count, orphaning ~72% of secondaries. Fixed with
+   an `atomicCAS` bounded pop. Result (A1000, 20k):
+
+   | /src | broken inj. | atomicCAS fix | CPU |
+   |---|---|---|---|
+   | k_eff | −2073 | **+44** | +533 |
+   | collisions | 63.99 (−7.7%) | **68.80 (−0.75%)** | 69.31 |
+   | thermal scat | 30.50 (−8.4%) | **32.92 (−1.5%)** | 33.44 |
+   | terminal bal. | 1.022 | **1.081 = 1+n2n ✓** | 1.074 |
+
+   GPU reaction rates now match CPU to ~1% — the orphaned secondaries
+   *were* the missing collisions/thermal-scatters. This matters for flux
+   / reaction-rate / depletion / γ-heating tallies (the GPU was ~8% wrong
+   there); it is the genuine fix from this session.
+
+**What's still open (the actual hot-bias driver):** the GPU k_eff is
+config-unstable — same HMF-058 case gives **+44 @ 20k (A1000)** vs
+**+851 @ 5M+refill (B200)**, ~800 pcm apart, while the CPU is stable at
++533. Now that GPU rates match CPU, this residual is isolated to the
+**population/particle-count/clustering** behavior (high Be dominance
+ratio), not physics. Validation path (on the RTX 3080, not B200 — B200
+is final-product only): run HMF-058 at increasing particle counts and
+confirm GPU k walks toward +533 while collisions/thermal stay locked to
+CPU. If it does, the engine is correct and the rest is "enough particles
++ population control + inactive batches."
+
+Validation note: the A1000 (4 GB) is the debug box; the RTX 3080 (10 GB,
+MSI-Home) is the validation target; the B200 is reserved for the final
+product check (too costly for debug).
+
 ## Session 2026-06-11 — HMF-058 Be hot-bias: instrumentation + refill-normalization fix
 
 Triggered by the partial B200 GPU sweep flagging beryllium-reflected
