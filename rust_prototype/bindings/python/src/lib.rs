@@ -1914,6 +1914,7 @@ fn run_gpu_eigenvalue(
         initial_source: init_src,
         buffers: std::cell::RefCell::new(None),
         refill: std::cell::RefCell::new(None),
+        nxn_mode: 0, // in-generation (n,2n)/(n,3n) transport (the fix)
     };
 
     let _ = py;
@@ -2869,24 +2870,73 @@ fn run_icsbep_case(
         .as_f64()
         .ok_or_else(|| PyValueError::new_err("benchmark.k_eff_sigma missing"))?;
 
-    let (k_ref, sigma_exp, ref_source): (f64, f64, String) = match benchmark.get("local_validation") {
-        Some(lv) if lv.get("openmc_k_eff").and_then(|v: &serde_json::Value| v.as_f64()).is_some() => {
-            let k = lv["openmc_k_eff"].as_f64().unwrap();
-            let s_omc = lv["openmc_k_sigma_seeds"]
-                .as_f64()
-                .unwrap_or(0.001);
-            (
-                k,
-                s_omc.max(handbook_sigma),
-                "local_validation (OpenMC on this scene)".to_string(),
-            )
-        }
-        _ => (
-            handbook_k,
-            handbook_sigma,
-            "k_eff_reference (ICSBEP handbook)".to_string(),
-        ),
-    };
+    // Acceptance-target resolution. MUST stay in lockstep with
+    // `tests/cuda_runs.rs::resolve_acceptance_target` — the sweep harness
+    // (`icsbep_sweep.py`) grades against whatever this returns, so a
+    // divergence here re-introduces the bug where VIII.1-shifted cases are
+    // graded against the experimental handbook k they no longer match.
+    // Priority (highest wins):
+    //   1. local_validation.viii1.lanl_k_eff   — LANL MCNP under VIII.1 (Table LIX)
+    //   2. local_validation.viii1.openmc_k_eff — our OpenMC on this JSON under VIII.1
+    //   3. local_validation.openmc_k_eff       — legacy VII.1 OpenMC block
+    //   4. benchmark.k_eff_reference           — handbook experimental k
+    // σ for tiers 1-3 is max(σ_pub, handbook_sigma) so the envelope never
+    // under-states uncertainty when a published σ_calc is artificially tight.
+    let (k_ref, sigma_exp, ref_source): (f64, f64, String) =
+        match benchmark.get("local_validation") {
+            None => (
+                handbook_k,
+                handbook_sigma,
+                "k_eff_reference (ICSBEP handbook)".to_string(),
+            ),
+            Some(lv) => {
+                let viii1 = lv.get("viii1");
+                let lanl = viii1
+                    .and_then(|v| v.get("lanl_k_eff"))
+                    .and_then(serde_json::Value::as_f64);
+                let viii1_omc = viii1
+                    .and_then(|v| v.get("openmc_k_eff"))
+                    .and_then(serde_json::Value::as_f64);
+                let legacy_omc = lv.get("openmc_k_eff").and_then(serde_json::Value::as_f64);
+                if let Some(k) = lanl {
+                    let s = viii1
+                        .and_then(|v| v.get("lanl_sigma"))
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    (
+                        k,
+                        s.max(handbook_sigma),
+                        "local_validation.viii1 (LANL Table LIX)".to_string(),
+                    )
+                } else if let Some(k) = viii1_omc {
+                    let s = viii1
+                        .and_then(|v| v.get("openmc_sigma_seeds"))
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.0);
+                    (
+                        k,
+                        s.max(handbook_sigma),
+                        "local_validation.viii1 (OpenMC on this scene)".to_string(),
+                    )
+                } else if let Some(k) = legacy_omc {
+                    let s = lv
+                        .get("openmc_k_sigma_seeds")
+                        .and_then(serde_json::Value::as_f64)
+                        .unwrap_or(0.001);
+                    (
+                        k,
+                        s.max(handbook_sigma),
+                        "local_validation (legacy OpenMC)".to_string(),
+                    )
+                } else {
+                    (
+                        handbook_k,
+                        handbook_sigma,
+                        "k_eff_reference (ICSBEP handbook)".to_string(),
+                    )
+                }
+            }
+        };
 
     let t_load_start = std::time::Instant::now();
     let loaded = scene_io::load_scene_from_json(&scene.to_string())
@@ -3207,6 +3257,7 @@ fn run_gpu_icsbep(
         initial_source: init_src,
         buffers: std::cell::RefCell::new(None),
         refill: std::cell::RefCell::new(None),
+        nxn_mode: 0, // in-generation (n,2n)/(n,3n) transport (the fix)
     };
 
     let outcome = runner.run(config);

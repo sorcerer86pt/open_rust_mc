@@ -396,6 +396,8 @@ pub struct GpuRecursiveContext {
     pub k_eb_inelastic: CudaFunction,
     pub k_eb_fission: CudaFunction,
     pub k_eb_multi: CudaFunction,
+    /// In-generation (n,2n)/(n,3n) secondary injection (NXN_MODE_INGEN).
+    pub k_eb_inject_sec: CudaFunction,
     // Geometry tables on device.
     surf_type: CudaSlice<i32>,
     surf_params: CudaSlice<f64>,
@@ -578,6 +580,9 @@ impl GpuRecursiveContext {
         let k_eb_refill_dead = module
             .load_function("gr_refill_dead")
             .map_err(|e| format!("kernel load (gr_refill_dead): {e}"))?;
+        let k_eb_inject_sec = module
+            .load_function("gr_inject_secondaries")
+            .map_err(|e| format!("kernel load (gr_inject_secondaries): {e}"))?;
 
         // Build host SoA + upload.
         let t = build_host_tables(geom);
@@ -744,6 +749,7 @@ impl GpuRecursiveContext {
             k_eb_fission,
             k_eb_multi,
             k_eb_refill_dead,
+            k_eb_inject_sec,
             surf_type,
             surf_params,
             surf_bc,
@@ -1612,6 +1618,20 @@ pub struct TransportBuffers {
     pub d_e_nxn_out: CudaSlice<f64>,
     pub d_e_nxn_out_sq: CudaSlice<f64>,
     pub d_cnt_therm: CudaSlice<i32>,
+    /// In-generation (n,2n)/(n,3n) secondary bank (NXN_MODE_INGEN).
+    /// gr_multi_event appends (pos, energy, child-RNG); gr_inject_secondaries
+    /// drains it into dead slots within the batch. Sized `n` (n,2n rate
+    /// per source is ≪ 1, so this is generous headroom). `d_sec_write`
+    /// is the append cursor, `d_sec_read` the injection cursor; both
+    /// zeroed per batch.
+    pub d_sec_x: CudaSlice<f64>,
+    pub d_sec_y: CudaSlice<f64>,
+    pub d_sec_z: CudaSlice<f64>,
+    pub d_sec_e: CudaSlice<f64>,
+    pub d_sec_rng_state: CudaSlice<u64>,
+    pub d_sec_rng_inc: CudaSlice<u64>,
+    pub d_sec_write: CudaSlice<i32>,
+    pub d_sec_read: CudaSlice<i32>,
     /// `TransportParams` packed buffer. Host repacks per batch
     /// (pointers depend on the current nuc/mat/sab/wmp uploads).
     pub d_params: CudaSlice<u64>,
@@ -1734,6 +1754,14 @@ impl TransportBuffers {
             d_e_nxn_out: mk_d(1)?,
             d_e_nxn_out_sq: mk_d(1)?,
             d_cnt_therm: mk_i(1)?,
+            d_sec_x: mk_d(n)?,
+            d_sec_y: mk_d(n)?,
+            d_sec_z: mk_d(n)?,
+            d_sec_e: mk_d(n)?,
+            d_sec_rng_state: mk_u(n)?,
+            d_sec_rng_inc: mk_u(n)?,
+            d_sec_write: mk_i(1)?,
+            d_sec_read: mk_i(1)?,
             d_params: mk_u(params_len)?,
             alive_host_ones: vec![1_i32; n],
             // Event-based pipeline. GR_MAX_DEPTH = 4 (matches the CUDA
@@ -2039,6 +2067,7 @@ impl GpuRecursiveContext {
             fis_capacity,
             None,
             None,
+            0, // NXN_MODE_INGEN
         )
     }
 
@@ -2078,6 +2107,10 @@ impl GpuRecursiveContext {
         // the (w_min, w_survive) thresholds — the kernel does the
         // rest. Mirrors CPU `SimConfig::survival_biasing`.
         survival_biasing: Option<&crate::transport::simulate::SurvivalBiasing>,
+        // (n,2n)/(n,3n) secondary routing mode (P_NXN_MODE):
+        // 0 = in-generation transport (correct, default), 1 = bank-as-
+        // fission (legacy), 2 = drop. See transport.cu.
+        nxn_mode: i32,
     ) -> Result<RecursiveTransportBatch, String> {
         let n = source_bank.len();
         if n == 0 {
@@ -2176,6 +2209,8 @@ impl GpuRecursiveContext {
         zero_f(&mut buffers.d_e_nxn_out)?;
         zero_f(&mut buffers.d_e_nxn_out_sq)?;
         zero_i(&mut buffers.d_cnt_therm)?;
+        zero_i(&mut buffers.d_sec_write)?;
+        zero_i(&mut buffers.d_sec_read)?;
 
         // Reborrow `refill` so the event loop can keep using it across
         // iterations without consuming the original Option. The `mut`
@@ -2202,6 +2237,10 @@ impl GpuRecursiveContext {
             params_vec[P_W_MIN] = sb.w_min.to_bits();
             params_vec[P_W_SURVIVE] = sb.w_survive.to_bits();
         }
+        // Slot 211: P_NXN_MODE. 0 = in-gen (correct), 1 = bank-as-fission
+        // (legacy), 2 = drop. build_transport_params_vec defaults to 0.
+        const P_NXN_MODE: usize = 211;
+        params_vec[P_NXN_MODE] = nxn_mode as u64;
         let sb_enabled = survival_biasing.is_some();
         stream
             .memcpy_htod(&params_vec, &mut buffers.d_params)
@@ -2587,7 +2626,15 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_cnt_n3n)
                     .arg(&mut buffers.d_cnt_nxn_out)
                     .arg(&mut buffers.d_e_nxn_out)
-                    .arg(&mut buffers.d_e_nxn_out_sq);
+                    .arg(&mut buffers.d_e_nxn_out_sq)
+                    .arg(&mut buffers.d_sec_x)
+                    .arg(&mut buffers.d_sec_y)
+                    .arg(&mut buffers.d_sec_z)
+                    .arg(&mut buffers.d_sec_e)
+                    .arg(&mut buffers.d_sec_rng_state)
+                    .arg(&mut buffers.d_sec_rng_inc)
+                    .arg(&mut buffers.d_sec_write)
+                    .arg(&n_i32);
                 unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
             }
 
@@ -2674,6 +2721,89 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_stack_offz)
                     .arg(&mut buffers.d_cnt_leak)
                     .arg(&mut refill.d_refilled_count);
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
+            }
+
+            // In-generation (n,2n)/(n,3n) secondary injection. Only in
+            // NXN_MODE_INGEN (0); other modes leave the secondary bank
+            // empty so this would be a no-op. Must run AFTER all event
+            // kernels (same constraint as refill — it revives dead slots
+            // and must not clobber particles the event kernels are
+            // mid-processing). Does NOT bump any history counter.
+            if nxn_mode == 0 {
+                let mut launch = stream.launch_builder(&self.k_eb_inject_sec);
+                launch
+                    .arg(&n_i32)
+                    .arg(&mut buffers.d_sec_read)
+                    .arg(&buffers.d_sec_write)
+                    .arg(&buffers.d_sec_x)
+                    .arg(&buffers.d_sec_y)
+                    .arg(&buffers.d_sec_z)
+                    .arg(&buffers.d_sec_e)
+                    .arg(&buffers.d_sec_rng_state)
+                    .arg(&buffers.d_sec_rng_inc)
+                    .arg(&mut buffers.d_xs)
+                    .arg(&mut buffers.d_ys)
+                    .arg(&mut buffers.d_zs)
+                    .arg(&mut buffers.d_dxs)
+                    .arg(&mut buffers.d_dys)
+                    .arg(&mut buffers.d_dzs)
+                    .arg(&mut buffers.d_e)
+                    .arg(&mut buffers.d_alive)
+                    .arg(&mut buffers.d_weight)
+                    .arg(&mut buffers.d_rng_state)
+                    .arg(&mut buffers.d_rng_inc)
+                    .arg(&mut buffers.d_depth)
+                    .arg(&mut buffers.d_event_type)
+                    .arg(&mut buffers.d_event_ebin)
+                    .arg(&self.surf_type)
+                    .arg(&self.surf_params)
+                    .arg(&self.surf_bc)
+                    .arg(&n_surf)
+                    .arg(&self.cell_region_off)
+                    .arg(&self.cell_region_len)
+                    .arg(&self.cell_fill_type)
+                    .arg(&self.cell_fill_data)
+                    .arg(&self.cell_aabb_min)
+                    .arg(&self.cell_aabb_max)
+                    .arg(&self.region_op)
+                    .arg(&self.region_arg)
+                    .arg(&self.univ_cells_off)
+                    .arg(&self.univ_cells_len)
+                    .arg(&self.univ_surfaces_off)
+                    .arg(&self.univ_surfaces_len)
+                    .arg(&self.univ_cell_indices)
+                    .arg(&self.univ_surface_indices)
+                    .arg(&root)
+                    .arg(&self.lat_origin)
+                    .arg(&self.lat_pitch)
+                    .arg(&self.lat_shape)
+                    .arg(&self.lat_universes_off)
+                    .arg(&self.lat_universes)
+                    .arg(&n_lat)
+                    .arg(&self.hex_center)
+                    .arg(&self.hex_pitch_xy)
+                    .arg(&self.hex_pitch_z)
+                    .arg(&self.hex_n_rings)
+                    .arg(&self.hex_n_axial)
+                    .arg(&self.hex_orientation)
+                    .arg(&self.hex_universes_off)
+                    .arg(&self.hex_universes)
+                    .arg(&self.n_hex_lattices)
+                    .arg(&self.evals_scratch)
+                    .arg(&mut buffers.d_stack_universe)
+                    .arg(&mut buffers.d_stack_cell_idx)
+                    .arg(&mut buffers.d_stack_has_lattice)
+                    .arg(&mut buffers.d_stack_lattice_id)
+                    .arg(&mut buffers.d_stack_lat_ix)
+                    .arg(&mut buffers.d_stack_lat_iy)
+                    .arg(&mut buffers.d_stack_lat_iz)
+                    .arg(&mut buffers.d_stack_offx)
+                    .arg(&mut buffers.d_stack_offy)
+                    .arg(&mut buffers.d_stack_offz)
+                    .arg(&mut buffers.d_cnt_leak);
                 unsafe {
                     launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
                 }

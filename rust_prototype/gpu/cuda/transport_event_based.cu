@@ -635,9 +635,18 @@ gr_trace_and_sample(
             nuc_t[i] = xs.s_t;
             sum_t   += xs.s_t;
         }
-        if (sum_t <= 0.0) { alive[tid] = 0; break; }
-
-        double d_coll = -log(pcg_uniform(&rng)) / sum_t;
+        // sum_t can floor to <= 0 in the deep thermal tail: the SVD/SAB
+        // reconstruction underflows below the table's lowest energy point
+        // (the CPU's Table provider clamps it positive, so CPU never sees
+        // this). DON'T silently kill the neutron here — that loses ~8% of
+        // thermal histories in low-absorption reflectors (Be) with no
+        // tallied fate, biasing k_eff low. Instead stream it to the next
+        // surface like a transparent region: it re-evaluates XS in the
+        // next cell or leaks at the boundary (and IS counted there). The
+        // huge d_coll forces the surface branch below. Draw the uniform
+        // unconditionally so the RNG stream stays aligned with sum_t > 0.
+        double xi_coll = pcg_uniform(&rng);
+        double d_coll = (sum_t > 0.0) ? (-log(xi_coll) / sum_t) : 1.0e30;
         double d_s; int surf_idx; int bc; int next_depth;
         GrCoord next_stack[GR_MAX_DEPTH];
         if (!gr_trace_step(&g, stack, depth, px, py, pz, dx, dy, dz,
@@ -1401,7 +1410,14 @@ extern "C" __global__ void gr_multi_event(
     // (continuing primary + banked secondaries); e_nxn_out_sum/_sq
     // accumulate their energies for ⟨E_out⟩ ± σ.
     int* cnt_n2n, int* cnt_n3n, int* cnt_nxn_out,
-    double* e_nxn_out_sum, double* e_nxn_out_sq)
+    double* e_nxn_out_sum, double* e_nxn_out_sq,
+    // In-generation secondary bank (NXN_MODE_INGEN). gr_multi_event
+    // appends each secondary here; gr_inject_secondaries revives dead
+    // slots from it THIS batch so the secondary transports in-generation
+    // (matching the CPU) instead of being banked as a fission neutron.
+    double* sec_x, double* sec_y, double* sec_z, double* sec_e,
+    unsigned long long* sec_rng_state, unsigned long long* sec_rng_inc,
+    int* sec_write, int sec_cap)
 {
     // Sweeps both N2N and N3N classes — their slots are adjacent in
     // d_sorted_idx (offsets[3]..offsets[5]). Each thread reads its
@@ -1452,18 +1468,42 @@ extern "C" __global__ void gr_multi_event(
     }
 
     // Accumulate outgoing-neutron energies for the ⟨E_out⟩ ± σ
-    // diagnostic: each banked secondary plus the continuing primary
-    // (added after its kinematics below).
+    // diagnostic: each secondary plus the continuing primary (added
+    // after its kinematics below). The energy is recorded regardless
+    // of routing so the (n,2n) rate/spectrum counters match between
+    // the bank and no-bank arms.
+    // P_NXN_MODE: 0=in-gen (default, correct), 1=bank-as-fission
+    // (legacy), 2=drop. See the #define in transport.cu.
+    int nxn_mode = (int) SCALAR_I(p, P_NXN_MODE);
     double e_out_sum = 0.0, e_out_sq = 0.0;
     for (int s = 0; s < n_extra; s++) {
         double e_sec = sample_nxn_eout(E, &rng, p, hit_nuc,
             S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ);
         e_out_sum += e_sec; e_out_sq += e_sec * e_sec;
-        int fidx = atomicAdd(fis_count, 1);
-        if (fidx < max_fis) {
-            fis_x[fidx] = px; fis_y[fidx] = py; fis_z[fidx] = pz;
-            fis_e[fidx] = e_sec; fis_w[fidx] = 1.0;
+        if (nxn_mode == NXN_MODE_BANK) {
+            // Legacy: bank into the fission source (enters k numerator).
+            int fidx = atomicAdd(fis_count, 1);
+            if (fidx < max_fis) {
+                fis_x[fidx] = px; fis_y[fidx] = py; fis_z[fidx] = pz;
+                fis_e[fidx] = e_sec; fis_w[fidx] = 1.0;
+            }
+        } else if (nxn_mode == NXN_MODE_INGEN) {
+            // Correct: append to the in-generation secondary bank.
+            // gr_inject_secondaries picks it up into a dead slot this
+            // batch. Not counted in the k numerator — it contributes
+            // only via the fissions it induces.
+            int sidx = atomicAdd(sec_write, 1);
+            if (sidx < sec_cap) {
+                sec_x[sidx] = px; sec_y[sidx] = py; sec_z[sidx] = pz;
+                sec_e[sidx] = e_sec;
+                // Child RNG: derive from the primary's stream so it's
+                // deterministic and independent of the continuing primary.
+                sec_rng_state[sidx] =
+                    rng.state ^ (0x9E3779B97F4A7C15ULL * (unsigned long long)(sidx + 1));
+                sec_rng_inc[sidx] = rng.inc | 1ULL;
+            }
         }
+        // NXN_MODE_DROP: discard (no transport) — A/B isolation arm.
     }
     {
         double e_cm = E * A / (A + 1.0);
@@ -1493,6 +1533,145 @@ extern "C" __global__ void gr_multi_event(
     atomicAdd(e_nxn_out_sum, e_out_sum);
     atomicAdd(e_nxn_out_sq, e_out_sq);
     (void)px; (void)py; (void)pz;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Kernel 8: gr_inject_secondaries  (in-generation (n,2n)/(n,3n) transport)
+//
+// Per step, after all reaction kernels. Walks dead slots and revives
+// each from the per-batch secondary bank that gr_multi_event appended
+// to (NXN_MODE_INGEN). Mirrors gr_refill_dead, with two differences:
+//   * source bound is the live device write-cursor *sec_write (the bank
+//     fills DURING the batch), not a fixed host size;
+//   * it does NOT bump any history counter — secondaries are part of an
+//     existing source neutron's history, so they must NOT inflate the
+//     k_eff denominator (n + refilled). They contribute to k only via
+//     the fissions they induce, exactly like the CPU's in-generation
+//     `pending` queue.
+// The secondary is born at the collision site with an isotropic lab
+// direction (matching the CPU (n,2n) kinematics) and its stored child
+// RNG. Slots with no pending secondary stay dead.
+// ═══════════════════════════════════════════════════════════════════════
+
+extern "C" __global__ void gr_inject_secondaries(
+    int n_particles,
+    int* d_sec_read,                  // atomic read cursor, init=0
+    const int* d_sec_write,           // live write cursor (bank bound)
+    const double* sec_pos_x, const double* sec_pos_y, const double* sec_pos_z,
+    const double* sec_energy,
+    const unsigned long long* sec_rng_state,
+    const unsigned long long* sec_rng_inc,
+    // Active slots (in/out) — same layout as gr_refill_dead.
+    double* pos_x, double* pos_y, double* pos_z,
+    double* dir_x, double* dir_y, double* dir_z,
+    double* energy,
+    int* alive,
+    double* d_weight,
+    unsigned long long* rng_state, unsigned long long* rng_inc,
+    int* d_depth,
+    int* d_event_type, int* d_event_ebin,
+    const int* surf_type, const double* surf_params, const int* surf_bc,
+    int n_surfaces,
+    const int* cell_region_off, const int* cell_region_len,
+    const int* cell_fill_type, const int* cell_fill_data,
+    const double* cell_aabb_min, const double* cell_aabb_max,
+    const int* region_op, const int* region_arg,
+    const int* univ_cells_off, const int* univ_cells_len,
+    const int* univ_surfaces_off, const int* univ_surfaces_len,
+    const int* univ_cell_indices, const int* univ_surface_indices,
+    int root_universe,
+    const double* lat_origin, const double* lat_pitch,
+    const int* lat_shape,
+    const int* lat_universes_off, const int* lat_universes,
+    int n_lattices,
+    const double* hex_center, const double* hex_pitch_xy,
+    const double* hex_pitch_z,
+    const int* hex_n_rings, const int* hex_n_axial,
+    const int* hex_orientation,
+    const int* hex_universes_off, const int* hex_universes,
+    int n_hex_lattices,
+    double* evals_scratch,
+    int* d_stack_universe, int* d_stack_cell_idx, int* d_stack_has_lattice,
+    int* d_stack_lattice_id, int* d_stack_lat_ix, int* d_stack_lat_iy, int* d_stack_lat_iz,
+    double* d_stack_offx, double* d_stack_offy, double* d_stack_offz,
+    int* cnt_leak)
+{
+    int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (tid >= n_particles) return;
+    if (alive[tid]) return;             // live slot — leave alone
+
+    // Pop one genuinely-available secondary. The bank GROWS during the
+    // batch (gr_multi_event appends), unlike gr_refill_dead's fixed bank.
+    // A plain atomicAdd would let dead slots advance the cursor past
+    // *d_sec_write once the population starts dying, permanently
+    // orphaning every later-appended secondary (~72% loss). atomicCAS
+    // reserves only an index below the current write count, so the
+    // cursor never runs ahead of what's been written.
+    int claim;
+    while (true) {
+        claim = *d_sec_read;
+        if (claim >= *d_sec_write) return;   // nothing pending right now
+        if (atomicCAS(d_sec_read, claim, claim + 1) == claim) break;
+        // lost the race to another dead slot — retry
+    }
+
+    double px = sec_pos_x[claim];
+    double py = sec_pos_y[claim];
+    double pz = sec_pos_z[claim];
+    double E  = sec_energy[claim];
+    unsigned long long rs = sec_rng_state[claim];
+    unsigned long long ri = sec_rng_inc[claim] | 1ULL;
+
+    // Isotropic lab direction — matches the CPU (n,2n)/(n,3n) secondary.
+    PcgState rng; rng.state = rs; rng.inc = ri;
+    double mu  = 2.0 * pcg_uniform(&rng) - 1.0;
+    double phi = 2.0 * PI * pcg_uniform(&rng);
+    double s_th = sqrt(fmax(0.0, 1.0 - mu * mu));
+    double dx = s_th * cos(phi);
+    double dy = s_th * sin(phi);
+    double dz = mu;
+
+    pos_x[tid] = px; pos_y[tid] = py; pos_z[tid] = pz;
+    dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
+    energy[tid] = E;
+    rng_state[tid] = rng.state;
+    rng_inc[tid]   = rng.inc;
+    d_event_type[tid] = EV_NONE;
+    d_event_ebin[tid] = 0;
+
+    GrGeometry g = eb_make_geom(
+        surf_type, surf_params, surf_bc, n_surfaces,
+        cell_region_off, cell_region_len, cell_fill_type, cell_fill_data,
+        cell_aabb_min, cell_aabb_max, region_op, region_arg,
+        univ_cells_off, univ_cells_len,
+        univ_surfaces_off, univ_surfaces_len,
+        univ_cell_indices, univ_surface_indices,
+        root_universe,
+        lat_origin, lat_pitch, lat_shape,
+        lat_universes_off, lat_universes, n_lattices,
+        hex_center, hex_pitch_xy, hex_pitch_z,
+        hex_n_rings, hex_n_axial, hex_orientation,
+        hex_universes_off, hex_universes, n_hex_lattices,
+        evals_scratch + tid * n_surfaces);
+
+    GrCoord stack[GR_MAX_DEPTH];
+    int depth = gr_find_cell(&g, px, py, pz, stack);
+    if (depth == 0) {
+        // Born outside geometry (shouldn't happen — the collision site
+        // is interior). Count as immediate leakage, stay dead. NOT a
+        // new source history, so no history counter is touched.
+        d_depth[tid] = 0;
+        atomicAdd(cnt_leak, 1);
+        return;
+    }
+    eb_store_stack(tid, depth,
+        d_stack_universe, d_stack_cell_idx, d_stack_has_lattice,
+        d_stack_lattice_id, d_stack_lat_ix, d_stack_lat_iy, d_stack_lat_iz,
+        d_stack_offx, d_stack_offy, d_stack_offz,
+        n_particles, stack);
+    d_depth[tid] = depth;
+    d_weight[tid] = 1.0;
+    alive[tid] = 1;
 }
 
 #endif // TRANSPORT_EVENT_BASED_CU

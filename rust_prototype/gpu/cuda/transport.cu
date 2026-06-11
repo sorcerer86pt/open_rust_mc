@@ -456,7 +456,23 @@
 #define P_N3N_DIST_LOCAL_OFF 209
 #define P_N3N_DIST_SZ        210
 
-#define N_PARAMS            211
+// (n,2n)/(n,3n) secondary-neutron routing mode. Read by gr_multi_event.
+//   0 = in-generation transport (CORRECT, default): the secondary is
+//       pushed to a per-batch secondary bank and injected into a dead
+//       slot THIS batch (gr_inject_secondaries), matching the CPU. It
+//       contributes to k only via the fissions it induces — NOT counted
+//       directly in the k numerator.
+//   1 = bank-as-fission (legacy/regression): banked into the fission
+//       source → enters the k numerator (over-credits k ~+3380 pcm on
+//       Be reflectors; the bug this fix replaces).
+//   2 = drop: secondary discarded (no transport) — A/B isolation arm.
+// Default 0 so zero-padded param paths get the correct in-gen behavior.
+#define P_NXN_MODE           211
+#define NXN_MODE_INGEN       0
+#define NXN_MODE_BANK        1
+#define NXN_MODE_DROP        2
+
+#define N_PARAMS            212
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -2284,10 +2300,17 @@ __device__ NuclideMacroXs eval_nuclide_macro_xs(
             int key = ni * N_REACTIONS + r;
             if (__ldg(&PTR_I(p, P_HAS_REACTION)[key])) {
                 // Stage C step D — direct per-nuclide pointer load.
-                double s = svd_reconstruct_interp(
+                // Clamp to >= 0: rank-truncated SVD can reconstruct a
+                // small negative value, especially at the energy-grid
+                // extremes. The pointwise path clamps (s_cap fmax above);
+                // the SVD path did not, so the per-channel negatives could
+                // sum to sigma_t <= 0 in the deep thermal tail (Be), which
+                // then silently killed the neutron in gr_trace_and_sample
+                // — an ~8% thermal-history loss that biased k_eff low.
+                double s = fmax(svd_reconstruct_interp(
                     (const double*) __ldg(&PTR_U64(p, P_BASIS_PTRS)[key]),
                     (const double*) __ldg(&PTR_U64(p, P_COEFFS_PTRS)[key]),
-                    e_idx, n_e, rank, log_frac);
+                    e_idx, n_e, rank, log_frac), 0.0);
                 if (r == 0)      s_el = s;
                 else if (r == 1) { s_inel = s; has_inel_k = true; }
                 else if (r == 2) s_n2n = s;

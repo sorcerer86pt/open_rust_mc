@@ -158,6 +158,10 @@ pub struct CudaRunner<'a> {
     /// i.e. `n * (factor - 1)` particles, capped at the per-batch
     /// (factor * n) total bank size.
     pub refill: std::cell::RefCell<Option<crate::gpu_recursive::RefillBuffers>>,
+    /// (n,2n)/(n,3n) secondary routing mode: 0 = in-generation transport
+    /// (correct, production default), 1 = bank-as-fission (legacy
+    /// regression), 2 = drop (A/B isolation). See `P_NXN_MODE`.
+    pub nxn_mode: i32,
 }
 
 #[cfg(feature = "cuda")]
@@ -387,6 +391,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                         effective_fis_capacity,
                         Some(refill),
                         config.survival_biasing.as_ref(),
+                        self.nxn_mode,
                     )
                     .expect("transport_recursive_with_buffers (refill) failed");
                 r
@@ -407,6 +412,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                         effective_fis_capacity,
                         None,
                         config.survival_biasing.as_ref(),
+                        self.nxn_mode,
                     )
                     .expect("transport_recursive_with_buffers failed")
             };

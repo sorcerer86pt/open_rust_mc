@@ -38,7 +38,7 @@ use cudarc::nvrtc;
 /// `sample_continuum_tabular` reproduce the ENDF tabulated secondary
 /// spectrum the CPU already samples, replacing the device's old
 /// `temp = E/10` Maxwell analytic fallback.
-const N_PARAMS: usize = 211;
+const N_PARAMS: usize = 212;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -1707,6 +1707,11 @@ impl GpuTransportContext {
             dptr!(&nuc_data.n3n_pdf_ptrs),
             dptr!(&nuc_data.n3n_dist_local_off),
             dptr!(&nuc_data.n3n_dist_sizes),
+            // Slot 211: P_NXN_NO_BANK diagnostic toggle. Default 0 =
+            // bank (n,2n)/(n,3n) secondaries into the fission source
+            // (current behavior). `transport_recursive_with_buffers`
+            // overwrites in-place to 1 for the no-bank A/B arm.
+            0_u64,
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v

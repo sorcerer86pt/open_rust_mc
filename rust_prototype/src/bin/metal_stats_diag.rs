@@ -348,6 +348,16 @@ fn main() {
     // path for back-compat; pass `openmc=outputs/openmc_<case>.json`
     // (produced by scripts/openmc_scene_runner.py) to grade any scene.
     let mut arg_openmc: Option<String> = None;
+    // (n,2n)/(n,3n) secondary routing mode for the GPU. Default 0 =
+    // in-generation transport (the correct fix). `bank_as_fission`
+    // selects the legacy mode 1 (over-credits k — for regression A/B);
+    // `no_nxn_bank` selects mode 2 (drop — isolation arm).
+    let mut arg_nxn_mode: i32 = 0;
+    // GPU max event-pipeline steps per batch. The historical hardcode
+    // (10000) truncates the long many-bounce thermal tail in
+    // low-absorption reflectors (Be), losing ~8% of thermal scatters
+    // and biasing k low. Raise via `maxev=N` to test/fix.
+    let mut arg_maxev: i32 = 10_000;
     for a in std::env::args().skip(2) {
         if let Some(v) = a.strip_prefix("b=") {
             arg_b = v.parse().unwrap_or(arg_b);
@@ -365,9 +375,15 @@ fn main() {
             arg_auto_refill = true;
         } else if let Some(v) = a.strip_prefix("openmc=") {
             arg_openmc = Some(v.to_string());
+        } else if a == "no_nxn_bank" {
+            arg_nxn_mode = 2; // drop
+        } else if a == "bank_as_fission" {
+            arg_nxn_mode = 1; // legacy bank-as-fission
+        } else if let Some(v) = a.strip_prefix("maxev=") {
+            arg_maxev = v.parse().unwrap_or(arg_maxev);
         }
     }
-    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s} rank={arg_r} refill={arg_refill:?} auto_refill={arg_auto_refill}");
+    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s} rank={arg_r} refill={arg_refill:?} auto_refill={arg_auto_refill} nxn_mode={arg_nxn_mode} maxev={arg_maxev}");
     let text = std::fs::read_to_string(&case_file).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
@@ -465,7 +481,7 @@ fn main() {
             wmp_data: &wmp_data,
             mat_k_t: &mat_k_t,
             sab_nuc_idx,
-            max_events_per_history: 10_000,
+            max_events_per_history: arg_maxev,
             fis_capacity: (cfg.particles_per_batch as usize) * 4,
             initial_source: Box::new(move |n, s| {
                 let sites = open_rust_mc::transport::simulate::initial_source(
@@ -478,6 +494,7 @@ fn main() {
             }),
             buffers: std::cell::RefCell::new(None),
         refill: std::cell::RefCell::new(None),
+            nxn_mode: arg_nxn_mode,
         };
         let gpu_outcome = runner.run(&cfg);
         let mut gpu_act = Active::default();

@@ -395,6 +395,7 @@ mod cuda_main {
                 initial_source: make_initial_source_factory(args.rings, args.reflective_z),
                 buffers: std::cell::RefCell::new(None),
         refill: std::cell::RefCell::new(None),
+                nxn_mode: 0,
             };
 
             let t_seed = Instant::now();
