@@ -89,6 +89,18 @@ struct Active {
     // the per-event CM-frame excitation energy. A CPU↔GPU gap here
     // localises the spectrum-hardening bias to level selection.
     q_inel_sum: f64,
+    // (n,2n)/(n,3n) explicit tallies — both backends populate now.
+    // The reconciliation residual is useless in S(α,β) systems
+    // (thermal scatter swamps it), so these read the real rate.
+    n2n_sum: u64,
+    n3n_sum: u64,
+    nxn_out_sum: u64,
+    e_nxn_out_sum: f64,
+    e_nxn_out_sq: f64,
+    // Real histories transported (Σ over active batches of n+refilled).
+    // The correct per-source denominator — using nominal n over-reports
+    // every rate by the refill factor when PHYSOR-F refill is active.
+    hist_sum: u64,
 }
 
 impl Active {
@@ -114,11 +126,25 @@ impl Active {
         self.e_el_in_sq += b.e_el_in_sq_sum;
         self.e_inel_in_sq += b.e_inel_in_sq_sum;
         self.q_inel_sum += b.q_inel_sum;
+        self.n2n_sum += b.n_n2n;
+        self.n3n_sum += b.n_n3n;
+        self.nxn_out_sum += b.n_nxn_out;
+        self.e_nxn_out_sum += b.e_nxn_out_sum;
+        self.e_nxn_out_sq += b.e_nxn_out_sq;
+        self.hist_sum += b.source_histories;
     }
 
     fn report(&self, label: &str, particles_per_batch: u64) {
         let n = self.n as f64;
-        let n_source = n * particles_per_batch as f64;
+        // Real histories transported (n + refilled under PHYSOR-F refill),
+        // falling back to nominal n×ppb for older batches that don't
+        // report source_histories. Using nominal n over-reports every
+        // rate by the refill factor — see the refill-normalization fix.
+        let n_source = if self.hist_sum > 0 {
+            self.hist_sum as f64
+        } else {
+            n * particles_per_batch as f64
+        };
         let mean = self.k_sum / n;
         let var = (self.k_sq_sum / n - mean * mean).max(0.0);
         let stderr = (var / n).sqrt();
@@ -166,6 +192,29 @@ impl Active {
             let recon = sum / self.coll_sum as f64;
             println!("    (n2n+n3n+...) / src = collisions − (el+inel+fis+cap) = {:.4}   reconciliation {:.4} of total coll",
                      (self.coll_sum as f64 - sum) / n_source, recon);
+            // Explicit (n,2n)/(n,3n) tally — the reconciliation residual
+            // above is useless in S(α,β) systems (thermal scatter swamps
+            // it), so read the real rate here. The CPU transports the
+            // secondaries IN-GENERATION; the GPU banks them into the
+            // FISSION source (so they enter the k numerator) — a count
+            // gap or k gap here localises that methodological split.
+            let n2n = self.n2n_sum as f64;
+            let n3n = self.n3n_sum as f64;
+            println!("  ─ (n,2n) / (n,3n) explicit tally ─");
+            println!("    (n,2n)    / src : {:.6}    ({} events)", n2n / n_source, self.n2n_sum);
+            println!("    (n,3n)    / src : {:.6}    ({} events)", n3n / n_source, self.n3n_sum);
+            // Secondary neutrons added per source (1·n2n + 2·n3n). On the
+            // GPU these are banked into the fission source → +k numerator;
+            // on the CPU they transport in-generation → 0 direct k.
+            let banked = n2n + 2.0 * n3n;
+            println!("    extra-n bank / src : {:.6}   (1·n2n + 2·n3n — GPU routes to fission source, CPU in-generation)",
+                     banked / n_source);
+            if self.nxn_out_sum > 0 {
+                let m = self.e_nxn_out_sum / self.nxn_out_sum as f64;
+                let m2 = self.e_nxn_out_sq / self.nxn_out_sum as f64;
+                let s = (m2 - m * m).max(0.0).sqrt();
+                println!("    nxn ⟨E_out⟩    : {:.4e} eV   σ = {:.4e}   ({} outgoing n)", m, s, self.nxn_out_sum);
+            }
             // σ(E_at_reaction) = sqrt(⟨E²⟩ − ⟨E⟩²). After nu_lookup_compare
             // proved ν(E) parity, the only way the GPU can have higher
             // ⟨ν⟩ at lower ⟨E_in fission⟩ than OpenMC is a wider /
@@ -217,8 +266,11 @@ fn diff_pct(cpu: f64, gpu: f64) -> f64 {
 }
 
 fn report_delta(cpu: &Active, gpu: &Active, particles_per_batch: u64) {
-    let nps = (cpu.n as f64) * particles_per_batch as f64;
-    let nps_g = (gpu.n as f64) * particles_per_batch as f64;
+    // Real transported histories per leg (n + refilled), so refilled
+    // GPU rates are comparable to CPU rates rather than inflated by the
+    // refill factor.
+    let nps = if cpu.hist_sum > 0 { cpu.hist_sum as f64 } else { (cpu.n as f64) * particles_per_batch as f64 };
+    let nps_g = if gpu.hist_sum > 0 { gpu.hist_sum as f64 } else { (gpu.n as f64) * particles_per_batch as f64 };
     println!("\n=== Δ (GPU − CPU) ===");
     let cpu_k = cpu.k_sum / cpu.n as f64;
     let gpu_k = gpu.k_sum / gpu.n as f64;
@@ -238,6 +290,21 @@ fn report_delta(cpu: &Active, gpu: &Active, particles_per_batch: u64) {
     let cpu_surf = cpu.surf_sum as f64 / nps;
     let gpu_surf = gpu.surf_sum as f64 / nps_g;
     println!("  Δ surf/src   : {:+.2}   ({:+.2}%)   cpu={:.2}  gpu={:.2}", gpu_surf - cpu_surf, diff_pct(cpu_surf, gpu_surf), cpu_surf, gpu_surf);
+    // S(α,β) thermal scatter — the GPU side used to be hardcoded 0; now
+    // a real counter, so this Δ is meaningful. A large gap means the
+    // backends disagree on bound-vs-free scattering in the reflector.
+    let cpu_therm = cpu.therm_sum as f64 / nps;
+    let gpu_therm = gpu.therm_sum as f64 / nps_g;
+    println!("  Δ therm/src  : {:+.4} ({:+.2}%)   cpu={:.4}  gpu={:.4}", gpu_therm - cpu_therm, diff_pct(cpu_therm, gpu_therm), cpu_therm, gpu_therm);
+    // (n,2n)/(n,3n) rate Δ — the channel the Be-reflector hypothesis is
+    // about. cpu/gpu should agree on the RATE (same XS); the k effect of
+    // the GPU's bank-into-fission routing shows up in Δ k_eff above.
+    let cpu_n2n = cpu.n2n_sum as f64 / nps;
+    let gpu_n2n = gpu.n2n_sum as f64 / nps_g;
+    println!("  Δ n2n/src    : {:+.6} ({:+.2}%)   cpu={:.6}  gpu={:.6}", gpu_n2n - cpu_n2n, diff_pct(cpu_n2n, gpu_n2n), cpu_n2n, gpu_n2n);
+    let cpu_n3n = cpu.n3n_sum as f64 / nps;
+    let gpu_n3n = gpu.n3n_sum as f64 / nps_g;
+    println!("  Δ n3n/src    : {:+.6} ({:+.2}%)   cpu={:.6}  gpu={:.6}", gpu_n3n - cpu_n3n, diff_pct(cpu_n3n, gpu_n3n), cpu_n3n, gpu_n3n);
 }
 
 fn main() {
@@ -269,6 +336,18 @@ fn main() {
     // reference-grade comparisons against OpenMC / MCNP where the
     // engine-vs-data-compression bias must be sub-MC-noise.
     let mut arg_r: usize = 15;
+    // Sweep-faithful GPU knobs. The B200 ICSBEP sweep ran with
+    // `gpu_auto_refill=true` (PHYSOR 2022 Optimization F population
+    // refill) and 5M particles; the diag's historical 5k / no-refill
+    // default is NOT representative — the same case swung ~620 pcm
+    // between the two configs. `refill=<f>` pins an explicit pool
+    // factor; `auto_refill` lets the device-attribute heuristic pick.
+    let mut arg_refill: Option<f64> = None;
+    let mut arg_auto_refill = false;
+    // OpenMC reference JSON (per-case). Defaults to the legacy Godiva
+    // path for back-compat; pass `openmc=outputs/openmc_<case>.json`
+    // (produced by scripts/openmc_scene_runner.py) to grade any scene.
+    let mut arg_openmc: Option<String> = None;
     for a in std::env::args().skip(2) {
         if let Some(v) = a.strip_prefix("b=") {
             arg_b = v.parse().unwrap_or(arg_b);
@@ -280,9 +359,15 @@ fn main() {
             arg_s = v.parse().unwrap_or(arg_s);
         } else if let Some(v) = a.strip_prefix("r=") {
             arg_r = v.parse().unwrap_or(arg_r);
+        } else if let Some(v) = a.strip_prefix("refill=") {
+            arg_refill = v.parse().ok();
+        } else if a == "auto_refill" {
+            arg_auto_refill = true;
+        } else if let Some(v) = a.strip_prefix("openmc=") {
+            arg_openmc = Some(v.to_string());
         }
     }
-    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s} rank={arg_r}");
+    eprintln!("settings: batches={arg_b} inactive={arg_i} particles={arg_p} seed={arg_s} rank={arg_r} refill={arg_refill:?} auto_refill={arg_auto_refill}");
     let text = std::fs::read_to_string(&case_file).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
@@ -296,6 +381,9 @@ fn main() {
     cfg.particles_per_batch = arg_p;
     cfg.seed = arg_s;
     cfg.verbose = false;
+    // Sweep-faithful GPU population control (CPU path ignores these).
+    cfg.gpu_refill_pool_factor = arg_refill;
+    cfg.gpu_auto_refill = arg_auto_refill;
 
     let inactive = cfg.inactive;
     let ppb = cfg.particles_per_batch as u64;
@@ -407,7 +495,14 @@ fn main() {
         // Godiva geometry. If present, fold its k / leakage /
         // reaction-rate aggregates into the comparison so the
         // CPU↔GPU↔OpenMC three-way is visible at a glance.
-        let openmc_path = workspace_root().join("outputs").join("openmc_godiva_tallies.json");
+        // Per-case OpenMC reference. `openmc=<path>` overrides the
+        // legacy Godiva default — grading HMF-058 against Godiva's
+        // OpenMC k (the old hardcode) is meaningless. Generate a
+        // matching reference with scripts/openmc_scene_runner.py.
+        let openmc_path = match &arg_openmc {
+            Some(p) => std::path::PathBuf::from(p),
+            None => workspace_root().join("outputs").join("openmc_godiva_tallies.json"),
+        };
         if let Ok(text) = std::fs::read_to_string(&openmc_path) {
             let v: serde_json::Value = serde_json::from_str(&text).unwrap();
             let k_omc = v["k_mean"].as_f64().unwrap_or(f64::NAN);
@@ -662,8 +757,8 @@ fn main() {
                      (cpu_k - k_omc) * 1e5, (gpu_k - k_omc) * 1e5, (gpu_k - cpu_k) * 1e5);
             if let Some(leak_t) = v["tallies_seed_mean"].get("leakage") {
                 if let Some(leak_omc) = leak_t["mean"].as_array().and_then(|a| a.first()).and_then(|x| x.as_f64()) {
-                    let nps = (cpu_act.n as f64) * ppb as f64;
-                    let nps_g = (gpu_act.n as f64) * ppb as f64;
+                    let nps = if cpu_act.hist_sum > 0 { cpu_act.hist_sum as f64 } else { (cpu_act.n as f64) * ppb as f64 };
+                    let nps_g = if gpu_act.hist_sum > 0 { gpu_act.hist_sum as f64 } else { (gpu_act.n as f64) * ppb as f64 };
                     let cpu_leak = cpu_act.leak_sum as f64 / nps;
                     let gpu_leak = gpu_act.leak_sum as f64 / nps_g;
                     println!("  leakage/src Δ  : CPU {:+.4}   GPU {:+.4}   (cpu={:.4} gpu={:.4} omc={:.4})",

@@ -471,6 +471,28 @@ pub struct BatchResult {
     /// agree on ⟨|Q|⟩ = q_inel_sum / n_inelastic if level selection
     /// is unbiased.
     pub q_inel_sum: f64,
+    /// (n,2n) MT=16 and (n,3n) MT=17 event counts. The reconciliation
+    /// residual `collisions − (el+inel+fis+cap)` is useless in S(α,β)
+    /// systems (thermal scatter swamps it), so these are tallied
+    /// explicitly to read the real (n,2n)/(n,3n) rate for the
+    /// Be-reflector CPU↔GPU↔OpenMC diagnostic. Populated on both
+    /// backends.
+    pub n_n2n: u64,
+    pub n_n3n: u64,
+    /// Outgoing neutrons from (n,2n)/(n,3n) events (continuing primary
+    /// + banked secondaries) and their Σ E / Σ E². ⟨E_out⟩ =
+    /// `e_nxn_out_sum / n_nxn_out`; σ tests whether the GPU MT=16/17
+    /// secondary energy (`sample_nxn_eout`) matches the CPU.
+    pub n_nxn_out: u64,
+    pub e_nxn_out_sum: f64,
+    pub e_nxn_out_sq: f64,
+    /// Real source histories transported this batch. CPU: the source
+    /// bank size `n`. GPU: `n + refilled` under PHYSOR-F refill (else
+    /// `n`). Per-source rate denominators MUST use this, not the
+    /// nominal `particles_per_batch`, or refilled runs over-report
+    /// rates by the refill factor. k_eff is unaffected (its own
+    /// denominator already accounts for refill).
+    pub source_histories: u64,
 }
 
 /// Coarse Cartesian mesh used to bin fission sites for the Shannon
@@ -572,6 +594,13 @@ struct ParticleResult {
     e_inel_in_sq: f64,
     e_inel_out_sum: f64,
     q_inel_sum: f64,
+    // (n,2n)/(n,3n) diagnostics — see `BatchResult` docs. Counted in
+    // the `Multiplicity` collision arms; only MT=16/17 contribute.
+    n_n2n: u32,
+    n_n3n: u32,
+    n_nxn_out: u32,
+    e_nxn_out_sum: f64,
+    e_nxn_out_sq: f64,
 }
 
 /// Worker-thread-local sinks that the transport functions write into
@@ -765,6 +794,11 @@ fn transport_particle<XS: XsProvider>(
         e_inel_in_sq: 0.0,
         e_inel_out_sum: 0.0,
         q_inel_sum: 0.0,
+        n_n2n: 0,
+        n_n3n: 0,
+        n_nxn_out: 0,
+        e_nxn_out_sum: 0.0,
+        e_nxn_out_sq: 0.0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -1366,7 +1400,25 @@ fn dispatch_real_collision<XS: XsProvider>(
                     mt: 4,
                 });
             }
-            CollisionOutcome::Multiplicity { secondaries } => {
+            CollisionOutcome::Multiplicity { secondaries, mt } => {
+                // (n,2n)/(n,3n): tally event + outgoing-neutron energies
+                // (continuing primary's new energy + banked secondaries),
+                // then transport the secondaries in the CURRENT
+                // generation. Only MT=16/17 feed the nxn diagnostic.
+                if mt == 16 || mt == 17 {
+                    result.e_nxn_out_sum += particle.energy;
+                    result.e_nxn_out_sq += particle.energy * particle.energy;
+                    for s in &secondaries {
+                        result.e_nxn_out_sum += s.energy;
+                        result.e_nxn_out_sq += s.energy * s.energy;
+                    }
+                    result.n_nxn_out += 1 + secondaries.len() as u32;
+                    if mt == 16 {
+                        result.n_n2n += 1;
+                    } else {
+                        result.n_n3n += 1;
+                    }
+                }
                 for s in secondaries {
                     pending.push(Particle::new(s.pos, s.dir, s.energy, particle.cell_idx));
                 }
@@ -1453,7 +1505,22 @@ fn dispatch_real_collision<XS: XsProvider>(
                 ctx.photon_events,
             );
         }
-        CollisionOutcome::Multiplicity { secondaries } => {
+        CollisionOutcome::Multiplicity { secondaries, mt } => {
+            // See the survival-biasing arm above — same nxn tally.
+            if mt == 16 || mt == 17 {
+                result.e_nxn_out_sum += particle.energy;
+                result.e_nxn_out_sq += particle.energy * particle.energy;
+                for s in &secondaries {
+                    result.e_nxn_out_sum += s.energy;
+                    result.e_nxn_out_sq += s.energy * s.energy;
+                }
+                result.n_nxn_out += 1 + secondaries.len() as u32;
+                if mt == 16 {
+                    result.n_n2n += 1;
+                } else {
+                    result.n_n3n += 1;
+                }
+            }
             for s in secondaries {
                 pending.push(Particle::new(s.pos, s.dir, s.energy, particle.cell_idx));
             }
@@ -1515,6 +1582,11 @@ fn transport_particle_delta<XS: XsProvider>(
         e_inel_in_sq: 0.0,
         e_inel_out_sum: 0.0,
         q_inel_sum: 0.0,
+        n_n2n: 0,
+        n_n3n: 0,
+        n_nxn_out: 0,
+        e_nxn_out_sum: 0.0,
+        e_nxn_out_sq: 0.0,
     };
 
     let (u, v, w) = rng.isotropic_direction();
@@ -2083,6 +2155,11 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             e_inel_in_sq: f64,
             e_inel_out_sum: f64,
             q_inel_sum: f64,
+            n_n2n: u64,
+            n_n3n: u64,
+            n_nxn_out: u64,
+            e_nxn_out_sum: f64,
+            e_nxn_out_sq: f64,
         }
 
         let worker_init = || WorkerAccum {
@@ -2105,6 +2182,11 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             e_inel_in_sq: 0.0,
             e_inel_out_sum: 0.0,
             q_inel_sum: 0.0,
+            n_n2n: 0,
+            n_n3n: 0,
+            n_nxn_out: 0,
+            e_nxn_out_sum: 0.0,
+            e_nxn_out_sq: 0.0,
             fission_sites: Vec::new(),
             captures_by_cell: vec![0.0_f64; cells.len()],
             photon_events: Vec::new(),
@@ -2187,6 +2269,11 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             acc.e_inel_in_sq += pr.e_inel_in_sq;
             acc.e_inel_out_sum += pr.e_inel_out_sum;
             acc.q_inel_sum += pr.q_inel_sum;
+            acc.n_n2n += pr.n_n2n as u64;
+            acc.n_n3n += pr.n_n3n as u64;
+            acc.n_nxn_out += pr.n_nxn_out as u64;
+            acc.e_nxn_out_sum += pr.e_nxn_out_sum;
+            acc.e_nxn_out_sq += pr.e_nxn_out_sq;
             acc
         };
 
@@ -2216,6 +2303,11 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             a.e_inel_in_sq += b.e_inel_in_sq;
             a.e_inel_out_sum += b.e_inel_out_sum;
             a.q_inel_sum += b.q_inel_sum;
+            a.n_n2n += b.n_n2n;
+            a.n_n3n += b.n_n3n;
+            a.n_nxn_out += b.n_nxn_out;
+            a.e_nxn_out_sum += b.e_nxn_out_sum;
+            a.e_nxn_out_sq += b.e_nxn_out_sq;
             a
         };
 
@@ -2281,6 +2373,13 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
             e_el_in_sq_sum: final_acc.e_el_in_sq,
             e_inel_in_sq_sum: final_acc.e_inel_in_sq,
             q_inel_sum: final_acc.q_inel_sum,
+            n_n2n: final_acc.n_n2n,
+            n_n3n: final_acc.n_n3n,
+            n_nxn_out: final_acc.n_nxn_out,
+            e_nxn_out_sum: final_acc.e_nxn_out_sum,
+            e_nxn_out_sq: final_acc.e_nxn_out_sq,
+            // CPU has no refill: real histories = source-bank size.
+            source_histories: n as u64,
         };
 
         // Auto-inactive: promote this batch to active if entropy has plateaued.

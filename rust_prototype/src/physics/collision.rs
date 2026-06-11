@@ -135,7 +135,13 @@ pub enum CollisionOutcome {
     /// must transport in the CURRENT generation. They do NOT seed the
     /// next generation's fission bank. This mirrors OpenMC / MCNP
     /// convention: only true fission neutrons count toward k_eff.
-    Multiplicity { secondaries: SecondaryList },
+    /// `mt` is the reaction MT (16 = (n,2n), 17 = (n,3n), 24 = (n,2nα),
+    /// 37 = (n,4n)) so the caller can tally the channel — the
+    /// CPU-vs-GPU-vs-OpenMC `(n,2n)` diagnostic in `bin/metal_stats_diag`
+    /// keys off this to read the real (n,2n)/(n,3n) rate (the
+    /// reconciliation residual is useless in S(α,β) systems where
+    /// thermal scatter swamps it).
+    Multiplicity { secondaries: SecondaryList, mt: u32 },
 }
 
 /// Process a collision for a particle.
@@ -263,6 +269,7 @@ pub fn process_collision(
         };
         return CollisionOutcome::Multiplicity {
             secondaries: smallvec![secondary],
+            mt: 16,
         };
     }
 
@@ -297,7 +304,7 @@ pub fn process_collision(
                 energy: e_s2,
             },
         ];
-        return CollisionOutcome::Multiplicity { secondaries };
+        return CollisionOutcome::Multiplicity { secondaries, mt: 17 };
     }
 
     // (n,4n) MT=37 — four neutrons emerge. Primary continues, three
@@ -343,7 +350,7 @@ pub fn process_collision(
                 energy: e_s3,
             },
         ];
-        return CollisionOutcome::Multiplicity { secondaries };
+        return CollisionOutcome::Multiplicity { secondaries, mt: 37 };
     }
 
     // (n,nα) MT=22 — one outgoing neutron + an absorbed α particle.
@@ -389,6 +396,7 @@ pub fn process_collision(
                 dir: crate::geometry::Vec3::new(us, vs, ws),
                 energy: e_secondary,
             }],
+            mt: 24,
         };
     }
 
@@ -569,6 +577,7 @@ pub fn process_scatter_only(
         };
         return CollisionOutcome::Multiplicity {
             secondaries: smallvec![secondary],
+            mt: 16,
         };
     }
 
@@ -599,7 +608,7 @@ pub fn process_scatter_only(
             energy: e_s2,
         },
     ];
-    CollisionOutcome::Multiplicity { secondaries }
+    CollisionOutcome::Multiplicity { secondaries, mt: 17 }
 }
 
 /// Sample which discrete inelastic level is excited and return its Q-value.

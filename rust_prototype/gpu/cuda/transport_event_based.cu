@@ -981,7 +981,7 @@ extern "C" __global__ void gr_elastic_event(
     unsigned long long* rng_inc_arr,
     const int* d_event_hit_nuc, const double* d_event_kT, const double* d_event_urr_xi,
     int sab_nuc_idx,
-    int* cnt_elastic)
+    int* cnt_elastic, int* cnt_thermal)
 {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int count = d_type_class_total[EV_ELASTIC];
@@ -1007,7 +1007,15 @@ extern "C" __global__ void gr_elastic_event(
             E = fmax(E_sab, 1e-11);
             double phi = 2.0 * PI * pcg_uniform(&rng);
             rotate_direction(&dx, &dy, &dz, mu_sab, phi);
-            goto end_elastic;
+            // S(α,β) thermal scatter — count in cnt_thermal, NOT
+            // cnt_elastic, so the GPU's elastic/thermal split matches
+            // the CPU buckets (CPU tallies thermal separately). Store
+            // state and return, bypassing the cnt_elastic increment.
+            energy[tid] = E;
+            dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
+            rng_state_arr[tid] = rng.state; rng_inc_arr[tid] = rng.inc;
+            atomicAdd(cnt_thermal, 1);
+            return;
         }
     }
     {
@@ -1387,7 +1395,13 @@ extern "C" __global__ void gr_multi_event(
     unsigned long long* rng_inc_arr,
     const int* d_event_type, const int* d_event_hit_nuc,
     double* fis_x, double* fis_y, double* fis_z,
-    double* fis_e, double* fis_w, int* fis_count, int max_fis)
+    double* fis_e, double* fis_w, int* fis_count, int max_fis,
+    // (n,2n)/(n,3n) diagnostic counters (mirror the CPU
+    // `BatchResult` nxn tallies). cnt_nxn_out counts emitted neutrons
+    // (continuing primary + banked secondaries); e_nxn_out_sum/_sq
+    // accumulate their energies for ⟨E_out⟩ ± σ.
+    int* cnt_n2n, int* cnt_n3n, int* cnt_nxn_out,
+    double* e_nxn_out_sum, double* e_nxn_out_sq)
 {
     // Sweeps both N2N and N3N classes — their slots are adjacent in
     // d_sorted_idx (offsets[3]..offsets[5]). Each thread reads its
@@ -1437,9 +1451,14 @@ extern "C" __global__ void gr_multi_event(
         Q_mult = (ev == EV_N2N) ? -E * 0.1 : -E * 0.2;
     }
 
+    // Accumulate outgoing-neutron energies for the ⟨E_out⟩ ± σ
+    // diagnostic: each banked secondary plus the continuing primary
+    // (added after its kinematics below).
+    double e_out_sum = 0.0, e_out_sq = 0.0;
     for (int s = 0; s < n_extra; s++) {
         double e_sec = sample_nxn_eout(E, &rng, p, hit_nuc,
             S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ);
+        e_out_sum += e_sec; e_out_sq += e_sec * e_sec;
         int fidx = atomicAdd(fis_count, 1);
         if (fidx < max_fis) {
             fis_x[fidx] = px; fis_y[fidx] = py; fis_z[fidx] = pz;
@@ -1467,6 +1486,12 @@ extern "C" __global__ void gr_multi_event(
     energy[tid] = E;
     dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
     rng_state_arr[tid] = rng.state; rng_inc_arr[tid] = rng.inc;
+    // The continuing primary is also an outgoing neutron of the event.
+    e_out_sum += E; e_out_sq += E * E;
+    if (ev == EV_N2N) atomicAdd(cnt_n2n, 1); else atomicAdd(cnt_n3n, 1);
+    atomicAdd(cnt_nxn_out, n_extra + 1);
+    atomicAdd(e_nxn_out_sum, e_out_sum);
+    atomicAdd(e_nxn_out_sq, e_out_sq);
     (void)px; (void)py; (void)pz;
 }
 

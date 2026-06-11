@@ -1,4 +1,4 @@
-# Project status — 2026-05-21
+# Project status — 2026-06-11
 
 What `origin/main` (`dc943e3`) ships today, what's open, what's the
 current headline.
@@ -318,6 +318,76 @@ machine was MSI-Home (RTX 3080).
 - **Backfill the rest of the 137 migrated ICSBEP JSONs** with VIII.1
   A/B runs once GPU device-buffer cache lands and the 3080 box is
   available.
+
+## Session 2026-06-11 — HMF-058 Be hot-bias: instrumentation + refill-normalization fix
+
+Triggered by the partial B200 GPU sweep flagging beryllium-reflected
+HEU-MET-FAST cases (058 / 066 / 009) ~+400–850 pcm hot vs LANL
+MCNP-VIII.1 (Table LIX). Systematic isolation on `metal_stats_diag`
+(`heu-met-fast-058_case-1`, A1000) eliminated four suspects and split
+the bias into two independent problems.
+
+**What shipped (built green, CUDA NVRTC-validated on A1000):**
+1. **Explicit (n,2n)/(n,3n) tally, CPU + GPU.** `mt` tag on
+   `CollisionOutcome::Multiplicity`; `n_n2n` / `n_n3n` / `n_nxn_out` +
+   ⟨E_out⟩±σ through `ParticleResult` → `BatchResult` (CPU) and device
+   atomics in `gr_multi_event` → `RecursiveTransportBatch` (GPU). The
+   reconciliation residual `coll−(el+inel+fis+cap)` is **useless in
+   S(α,β) systems** — it's swamped by thermal scatter (33/src), so the
+   real (n,2n) rate needed explicit counters.
+2. **Real GPU thermal-scatter counter** — `gr_elastic_event` counts
+   S(α,β) into a new `cnt_thermal` (split out of `cnt_elastic` so the
+   GPU/CPU elastic-vs-thermal buckets line up). Replaces the hardcoded
+   `thermal_scatters: 0` in `dispatch.rs`.
+3. **Refill rate-normalization fix.** `metal_stats_diag` divided
+   per-source rates by nominal `N` (active_batches × particles), not
+   the real `N + refilled` histories — inflating every rate by the
+   refill factor (measured: n2n ratio 3.49 ≈ factor 3.48). Surfaced
+   `total_histories` (`RecursiveTransportBatch` → `BatchResult
+   .source_histories`); report() now divides by `Σ source_histories`.
+   Verified: under refill=3.48, GPU n2n/src went from 0.257 → 0.0739
+   (matches CPU 0.0737, Δ +0.19%). **k_eff was always immune** (its
+   own denominator already used N+refilled).
+4. **Sweep-faithful + per-case OpenMC** in `metal_stats_diag`:
+   `refill=<f>` / `auto_refill` / `p=<N>` knobs and `openmc=<path>`
+   (was hardcoded to the Godiva tally JSON — grading HMF-058 against
+   Godiva's k). `openmc_scene_runner.py` now emits the
+   `tallies_seed_mean` schema the diag reads (leakage on vacuum
+   surfaces, MT4/MT91, fine fission, (n,2n)/(n,3n)).
+
+**Findings — four suspects eliminated:**
+- **(n,2n) rate**: CPU 0.07373 vs GPU 0.07387 /real-history — agree to
+  0.19%. Not a rate bug. (GPU banks the secondary into the fission
+  source, CPU transports in-generation, but the *rate* is identical.)
+- **Under-convergence**: ruled out. CPU k *rises* with inactive batches
+  (i=20 → +533, i=60 → +682 pcm) — drifts away from LANL (+138), not
+  toward it. The CPU is converged and genuinely hot.
+- **SVD rank truncation**: ruled out. CPU k is **bit-identical at rank
+  15 and rank 60** (1.00533 ± 0.00105 both) — reconstruction saturates
+  by rank 15 for these nuclides. Recorded in `CLAUDE.md`.
+- **Refill mechanism**: not the lever. At fixed 20k particles,
+  no-refill (+49) vs refill=3.48 (+68) differ ~19 pcm (within noise).
+
+**Two independent problems remain:**
+- **(A) Shared CPU+GPU Be bias** ~+400 pcm vs LANL — real, converged,
+  not (n,2n)/convergence/SVD. Prime suspects: ⁹Be S(α,β) thermal
+  sampling and/or ⁹Be(n,xn) secondary kinematics vs MCNP. Next step is
+  the OpenMC-on-this-scene comparison (the fixed `openmc_scene_runner`
+  produces a matching reference).
+- **(B) GPU population/clustering instability** — GPU k drifts with
+  raw particle count even with no refill (5k +222 → 20k +49) and spans
+  +49 → +851 pcm (~10× statistics) across configs. Classic neutron
+  clustering in a weakly-absorbing high-dominance-ratio Be reflector
+  (cf. burn-up-instability literature). The B200 +851 is one draw on
+  that unstable distribution, not a reproducible bias. A persistent
+  ~8% GPU deficit in thermal/collision/fission tallies (n2n unaffected)
+  points at long-thermal-history loss (event-cap / undersampling).
+
+**Open follow-ups:** A/B-flag the (n,2n) bank-as-fission vs
+transport-in-generation routing (deprioritized — CPU does it correctly
+and is still hot, so it's not the shared bias); OpenMC-on-HMF-058 to
+pin the shared Be physics; GPU population control / more inactive
+batches for (B).
 
 ## Recent session highlights (2026-05-21)
 

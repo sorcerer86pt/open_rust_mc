@@ -432,7 +432,10 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 absorptions: result.n_capture as u32,
                 fissions: result.n_fissions as u32,
                 collisions: result.n_collisions as u32,
-                thermal_scatters: 0,
+                // Real device-side S(α,β) counter (was hardcoded 0).
+                // gr_elastic_event tallies thermal scatters separately
+                // from elastic so CPU/GPU buckets line up.
+                thermal_scatters: result.n_thermal as u32,
                 // GPU's transport_recursive_persistent does tally `cnt_surf` —
                 // wire it through so diagnostics (e.g. `bin/metal_stats_diag`)
                 // can compare against the CPU surface_crossings count.
@@ -463,6 +466,13 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 e_el_in_sq_sum: result.e_el_in_sq_sum,
                 e_inel_in_sq_sum: result.e_inel_in_sq_sum,
                 q_inel_sum: result.q_inel_sum,
+                n_n2n: result.n_n2n,
+                n_n3n: result.n_n3n,
+                n_nxn_out: result.n_nxn_out,
+                e_nxn_out_sum: result.e_nxn_out_sum,
+                e_nxn_out_sq: result.e_nxn_out_sq,
+                // Real histories incl. PHYSOR-F refill (n + refilled).
+                source_histories: result.total_histories,
             });
 
             progress.tick(batch, result.k_eff);

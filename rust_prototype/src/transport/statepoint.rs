@@ -265,6 +265,12 @@ mod tests {
             e_el_in_sq_sum: 0.0,
             e_inel_in_sq_sum: 0.0,
             q_inel_sum: 0.0,
+            n_n2n: 0,
+            n_n3n: 0,
+            n_nxn_out: 0,
+            e_nxn_out_sum: 0.0,
+            e_nxn_out_sq: 0.0,
+            source_histories: 0,
         }
     }
 

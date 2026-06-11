@@ -46,6 +46,23 @@ scope tag. Treating them without the tag is a bug pattern.
 Recurring pattern: `[micro]` headlines shrink or invert under
 `[pwr]` / `[assembly]`.
 
+## SVD rank saturates by 15 — higher rank does not change k
+
+Empirical (2026-06-11, `metal_stats_diag` on `heu-met-fast-058_case-1`,
+Be-reflected HEU, VIII.1, seed 42, 20k particles × 60 active batches):
+
+- **CPU k_eff is bit-identical at rank 15 and rank 60**:
+  `1.00533 ± 0.00105` for both. Same seed ⇒ deterministic MC, so an
+  identical k to 5 digits means the reconstructed cross-sections are
+  the same — the SVD reconstruction **saturates by rank 15** (effective
+  rank ≤ 15; singular values beyond 15 are below f64 noise for these
+  nuclides). **Increasing rank past 15 buys nothing.**
+- Consequence: rank-15 truncation is **not** a source of bias. When a
+  scoped k_eff disagrees with a reference (e.g. the ~+500 pcm
+  Be-reflected over-prediction vs LANL MCNP-VIII.1), do **not** reach
+  for "raise the rank" — it won't move. Look at the physics
+  (S(α,β), (n,xn) secondary kinematics) or population/refill instead.
+
 ## Build & run
 
 Primary dev env is Windows / PowerShell.

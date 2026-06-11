@@ -1531,6 +1531,22 @@ pub struct RecursiveTransportBatch {
     /// a gap localises the metal hot bias to the level selection
     /// path.
     pub q_inel_sum: f64,
+    /// (n,2n)/(n,3n) event counts + outgoing-neutron energy moments,
+    /// mirroring the CPU `BatchResult` nxn tallies. `n_nxn_out` counts
+    /// emitted neutrons (continuing primary + banked secondaries).
+    pub n_n2n: u64,
+    pub n_n3n: u64,
+    pub n_nxn_out: u64,
+    pub e_nxn_out_sum: f64,
+    pub e_nxn_out_sq: f64,
+    /// S(α,β) thermal-scatter events. Replaces the hardcoded
+    /// `thermal_scatters: 0` the GPU `BatchResult` used to carry.
+    pub n_thermal: u64,
+    /// Real histories transported this batch = `n + refilled_count`.
+    /// Under PHYSOR-F refill this exceeds the nominal `n`; per-source
+    /// rates MUST divide by this, not `n`, or they over-report by the
+    /// refill factor. k_eff already uses it (it's the k denominator).
+    pub total_histories: u64,
 }
 
 /// Persistent device-side buffer pool for one (n_particles, fis_cap,
@@ -1586,6 +1602,16 @@ pub struct TransportBuffers {
     pub d_e_el_in_sq: CudaSlice<f64>,
     pub d_e_inel_in_sq: CudaSlice<f64>,
     pub d_q_inel: CudaSlice<f64>,
+    /// (n,2n)/(n,3n) diagnostic counters + thermal-scatter counter
+    /// (replaces the hardcoded `thermal_scatters: 0` in dispatch.rs).
+    /// `d_cnt_nxn_out` counts emitted neutrons (primary + secondaries);
+    /// `d_e_nxn_out` / `d_e_nxn_out_sq` accumulate their energies.
+    pub d_cnt_n2n: CudaSlice<i32>,
+    pub d_cnt_n3n: CudaSlice<i32>,
+    pub d_cnt_nxn_out: CudaSlice<i32>,
+    pub d_e_nxn_out: CudaSlice<f64>,
+    pub d_e_nxn_out_sq: CudaSlice<f64>,
+    pub d_cnt_therm: CudaSlice<i32>,
     /// `TransportParams` packed buffer. Host repacks per batch
     /// (pointers depend on the current nuc/mat/sab/wmp uploads).
     pub d_params: CudaSlice<u64>,
@@ -1702,6 +1728,12 @@ impl TransportBuffers {
             d_e_el_in_sq: mk_d(1)?,
             d_e_inel_in_sq: mk_d(1)?,
             d_q_inel: mk_d(1)?,
+            d_cnt_n2n: mk_i(1)?,
+            d_cnt_n3n: mk_i(1)?,
+            d_cnt_nxn_out: mk_i(1)?,
+            d_e_nxn_out: mk_d(1)?,
+            d_e_nxn_out_sq: mk_d(1)?,
+            d_cnt_therm: mk_i(1)?,
             d_params: mk_u(params_len)?,
             alive_host_ones: vec![1_i32; n],
             // Event-based pipeline. GR_MAX_DEPTH = 4 (matches the CUDA
@@ -2138,6 +2170,12 @@ impl GpuRecursiveContext {
         zero_f(&mut buffers.d_e_el_in_sq)?;
         zero_f(&mut buffers.d_e_inel_in_sq)?;
         zero_f(&mut buffers.d_q_inel)?;
+        zero_i(&mut buffers.d_cnt_n2n)?;
+        zero_i(&mut buffers.d_cnt_n3n)?;
+        zero_i(&mut buffers.d_cnt_nxn_out)?;
+        zero_f(&mut buffers.d_e_nxn_out)?;
+        zero_f(&mut buffers.d_e_nxn_out_sq)?;
+        zero_i(&mut buffers.d_cnt_therm)?;
 
         // Reborrow `refill` so the event loop can keep using it across
         // iterations without consuming the original Option. The `mut`
@@ -2454,7 +2492,8 @@ impl GpuRecursiveContext {
                     .arg(&buffers.d_event_kT)
                     .arg(&buffers.d_event_urr_xi)
                     .arg(&sab_nuc_idx)
-                    .arg(&mut buffers.d_cnt_el);
+                    .arg(&mut buffers.d_cnt_el)
+                    .arg(&mut buffers.d_cnt_therm);
                 unsafe { launch.launch(cfg_n(c_el as u32)).map_err(|e| e.to_string())?; }
             }
             if c_in > 0 {
@@ -2543,7 +2582,12 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_fis_e)
                     .arg(&mut buffers.d_fis_w)
                     .arg(&mut buffers.d_fis_count)
-                    .arg(&max_fis_i);
+                    .arg(&max_fis_i)
+                    .arg(&mut buffers.d_cnt_n2n)
+                    .arg(&mut buffers.d_cnt_n3n)
+                    .arg(&mut buffers.d_cnt_nxn_out)
+                    .arg(&mut buffers.d_e_nxn_out)
+                    .arg(&mut buffers.d_e_nxn_out_sq);
                 unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
             }
 
@@ -2662,6 +2706,12 @@ impl GpuRecursiveContext {
         let e_el_in_sq = stream.clone_dtoh(&buffers.d_e_el_in_sq).map_err(|e| e.to_string())?[0];
         let e_inel_in_sq = stream.clone_dtoh(&buffers.d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
         let q_inel = stream.clone_dtoh(&buffers.d_q_inel).map_err(|e| e.to_string())?[0];
+        let cnt_n2n = stream.clone_dtoh(&buffers.d_cnt_n2n).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_n3n = stream.clone_dtoh(&buffers.d_cnt_n3n).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_nxn_out = stream.clone_dtoh(&buffers.d_cnt_nxn_out).map_err(|e| e.to_string())?[0] as u64;
+        let e_nxn_out = stream.clone_dtoh(&buffers.d_e_nxn_out).map_err(|e| e.to_string())?[0];
+        let e_nxn_out_sq = stream.clone_dtoh(&buffers.d_e_nxn_out_sq).map_err(|e| e.to_string())?[0];
+        let cnt_therm = stream.clone_dtoh(&buffers.d_cnt_therm).map_err(|e| e.to_string())?[0] as u64;
 
         // k_eff = fission_bank.len() / total_histories. When refill is
         // active, total_histories = n + refilled_count (host reads the
@@ -2692,6 +2742,13 @@ impl GpuRecursiveContext {
             e_el_in_sq_sum: e_el_in_sq,
             e_inel_in_sq_sum: e_inel_in_sq,
             q_inel_sum: q_inel,
+            n_n2n: cnt_n2n,
+            n_n3n: cnt_n3n,
+            n_nxn_out: cnt_nxn_out,
+            e_nxn_out_sum: e_nxn_out,
+            e_nxn_out_sq: e_nxn_out_sq,
+            n_thermal: cnt_therm,
+            total_histories: total_histories as u64,
         })
     }
 }
@@ -2717,6 +2774,13 @@ fn empty_recursive_batch() -> RecursiveTransportBatch {
         e_el_in_sq_sum: 0.0,
         e_inel_in_sq_sum: 0.0,
         q_inel_sum: 0.0,
+        n_n2n: 0,
+        n_n3n: 0,
+        n_nxn_out: 0,
+        e_nxn_out_sum: 0.0,
+        e_nxn_out_sq: 0.0,
+        n_thermal: 0,
+        total_histories: 0,
     }
 }
 

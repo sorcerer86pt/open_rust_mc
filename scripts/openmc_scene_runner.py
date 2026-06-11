@@ -93,11 +93,18 @@ BC_MAP = {
 }
 
 
-def build_surfaces(dtos: list[dict]) -> list[openmc.Surface]:
+def build_surfaces(dtos: list[dict]) -> tuple[list[openmc.Surface], list[int]]:
     """Translate scene-JSON surfaces in their original order so cell
-    `surface_idx` references resolve directly into the returned list."""
+    `surface_idx` references resolve directly into the returned list.
+
+    Returns `(surfaces, vacuum_idxs)` — `vacuum_idxs` are the indices of
+    surfaces with a vacuum boundary, used to build the leakage current
+    tally (`metal_stats_diag` reads `tallies_seed_mean["leakage"]`)."""
     out = []
+    vacuum_idxs: list[int] = []
     for i, s in enumerate(dtos):
+        if s.get("bc", "Transmission") == "Vacuum":
+            vacuum_idxs.append(i)
         bc = BC_MAP.get(s.get("bc", "Transmission"), "transmission")
         t = s["type"]
         if t == "Sphere":
@@ -129,7 +136,7 @@ def build_surfaces(dtos: list[dict]) -> list[openmc.Surface]:
         else:
             raise NotImplementedError(f"surface[{i}] type {t!r} not translated")
         out.append(surf)
-    return out
+    return out, vacuum_idxs
 
 
 # ── Region tree translation ───────────────────────────────────────────
@@ -281,7 +288,7 @@ def run_scene(
     os.makedirs(work, exist_ok=True)
     os.chdir(work)
 
-    surfaces = build_surfaces(scene["surfaces"])
+    surfaces, vacuum_idxs = build_surfaces(scene["surfaces"])
     materials = build_materials(scene["materials"])
     cells = build_cells(scene["cells"], surfaces, materials)
 
@@ -298,6 +305,18 @@ def run_scene(
     # can see exactly where in the reflector neutrons are lost.
     cell_filter = openmc.CellFilter([c for c in cells if c.fill is not None])
     tallies = openmc.Tallies()
+
+    # Leakage current through the vacuum boundary surface(s) — the
+    # neutrons that escape the geometry. `metal_stats_diag` reads
+    # tallies_seed_mean["leakage"]["mean"][0] for the per-source
+    # leakage Δ. Without a vacuum surface (fully reflective scene)
+    # there's nothing to escape, so the tally is simply omitted.
+    if vacuum_idxs:
+        leak_filter = openmc.SurfaceFilter([surfaces[i] for i in vacuum_idxs])
+        t_leak = openmc.Tally(name="leakage")
+        t_leak.filters = [leak_filter]
+        t_leak.scores = ["current"]
+        tallies.append(t_leak)
     # Channel-resolved reaction rates. Includes (n,2n) / (n,3n) so the
     # CPU↔GPU↔OpenMC diff in `metal_stats_diag` can localise the
     # Be-reflector bias (heu-comp-inter-003 case-2/3) to a specific
@@ -342,10 +361,33 @@ def run_scene(
     # 7 bins span 0–20 MeV; matches `metal_stats_diag.rs` parser.
     egroups = [0.0, 1e-1, 1e3, 1e5, 1e6, 2e6, 5e6, 2e7]
     ebins = openmc.EnergyFilter(egroups)
+    # Energy-only (no cell filter) so the flat layout is mean[bin*4 +
+    # score] — the single-block layout metal_stats_diag's parser
+    # expects. A cell filter would make it cell-major and mis-index on
+    # multi-cell scenes (e.g. reflected assemblies).
     t_e = openmc.Tally(name="rate_by_energy")
-    t_e.filters = [cell_filter, ebins]
+    t_e.filters = [ebins]
     t_e.scores = ["total", "fission", "absorption", "scatter"]
     tallies.append(t_e)
+
+    # MT=4 (total inelastic) and MT=91 (continuum inelastic) — the
+    # discrete-vs-continuum split `metal_stats_diag` reads as rate_MT4 /
+    # rate_MT91 to localise inelastic-spectrum bias. Cell-summed.
+    for name, score in [("rate_MT4", "4"), ("rate_MT91", "91")]:
+        t = openmc.Tally(name=name)
+        t.filters = [cell_filter]
+        t.scores = [score]
+        tallies.append(t)
+
+    # Fine (100-bin log) fission-rate spectrum for a faithful σ(E_in at
+    # fission) — the coarse 7-bin σ is biased high by wide bins. Matches
+    # openmc_godiva_tallies.py so the Rust diag's `fine` branch fires.
+    fine_egroups = [0.0] + np.logspace(np.log10(1e3), np.log10(2e7), 101).tolist()
+    fine_ebins = openmc.EnergyFilter(fine_egroups)
+    t_fine = openmc.Tally(name="fission_by_energy_fine")
+    t_fine.filters = [fine_ebins]
+    t_fine.scores = ["fission"]
+    tallies.append(t_fine)
 
     tallies.export_to_xml()
 
@@ -401,6 +443,25 @@ def run_scene(
     delta_pcm = delta * 1.0e5
     sigma_combined = (sigma_seeds**2 + sigma_exp**2) ** 0.5
 
+    # Per-tally seed-mean in the schema bin/metal_stats_diag consumes:
+    # tallies_seed_mean[name] = {"mean": [...], "std_seeds": [...]}.
+    # (The Rust diag reads `mean` and sums across the array for cell-
+    # summed channels.) First seed's tally names define the set.
+    tally_names = list(per_seed[0]["rates"].keys())
+    tallies_seed_mean = {}
+    for tname in tally_names:
+        stacked = np.stack(
+            [np.asarray(r["rates"][tname]["mean"], dtype=float) for r in per_seed]
+        )
+        tallies_seed_mean[tname] = {
+            "mean": stacked.mean(axis=0).tolist(),
+            "std_seeds": (
+                stacked.std(axis=0, ddof=1).tolist()
+                if len(per_seed) > 1
+                else np.zeros_like(stacked[0]).tolist()
+            ),
+        }
+
     agg = {
         "case_id": case_id,
         "scene_json": os.path.basename(scene_path),
@@ -410,12 +471,20 @@ def run_scene(
         "sigma_exp": sigma_exp,
         "delta_pcm": delta_pcm,
         "n_sigma_combined": abs(delta) / sigma_combined if sigma_combined > 0 else 0.0,
+        # Top-level knobs (metal_stats_diag reads these flat, not nested).
+        "batches": batches,
+        "inactive": inactive,
+        "particles": particles,
+        "seeds": seeds,
         "settings": {
             "batches": batches,
             "inactive": inactive,
             "particles": particles,
             "seeds": seeds,
         },
+        "tallies_seed_mean": tallies_seed_mean,
+        "energy_groups_MeV": [e / 1e6 for e in egroups],
+        "fine_fission_groups_eV": fine_egroups,
         "per_seed": per_seed,
     }
     with open(output_path, "w") as fh:
