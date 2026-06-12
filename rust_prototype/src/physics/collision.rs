@@ -239,32 +239,49 @@ pub fn process_collision(
     }
 
     // (n,2n) — two neutrons emerge from a compound nucleus. Each
-    // outgoing energy is sampled from the ENDF MT=16 tabulated
-    // distribution when available, evaporation otherwise. Angles are
-    // isotropic in the lab frame (Kalbach-Mann `r` is essentially
-    // zero for uranium at Godiva-relevant incident energies, so the
-    // isotropic LAB approximation matches the underlying physics).
+    // outgoing energy is sampled from the ENDF MT=16 distribution when
+    // available, evaporation otherwise. When the evaluation ships a
+    // correlated energy-angle distribution (OpenMC `CorrelatedAngleEnergy`,
+    // e.g. Be-9 MT=16, `center_of_mass=0`), use its emission cosine for
+    // the direction instead of forcing isotropy: Be-reflected fast
+    // systems are sensitive to the (n,2n) return current, and the cosine
+    // is genuinely forward-peaked. The sampled energy is treated as LAB
+    // (status quo), so a LAB emission cosine is consistent; nuclides
+    // whose MT=16 carries no `mu_dist` fall back to isotropic LAB,
+    // preserving the exact prior RNG stream (and Godiva/Jezebel results).
     // The primary continues as one of the two; the other is emitted
     // as a CURRENT-generation secondary that the transport loop will
     // pick up from `secondaries`. Neither neutron seeds the next
     // generation's fission bank — that's reserved for MT=18 fission.
     cum += xs.n2n;
     if xi < cum {
-        let sample_e = |rng: &mut Rng| -> f64 {
+        let inc_e = particle.energy;
+        let inc_dir = particle.dir;
+        let sample = |rng: &mut Rng| -> (f64, Option<f64>) {
             match n2n_edist {
-                Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
-                None => sample_evaporation_energy(particle.energy, rng),
+                Some(dist) => {
+                    let (e, mu) = dist.sample_with_mu(inc_e, rng);
+                    (e.max(1e-5), mu)
+                }
+                None => (sample_evaporation_energy(inc_e, rng), None),
             }
         };
-        let e_primary = sample_e(rng);
-        let e_secondary = sample_e(rng);
-        let (u, v, w) = rng.isotropic_direction();
+        let emit_dir = |rng: &mut Rng, mu: Option<f64>| -> crate::geometry::Vec3 {
+            match mu {
+                Some(m) => super::scatter::rotate_direction(inc_dir, m, rng),
+                None => {
+                    let (u, v, w) = rng.isotropic_direction();
+                    crate::geometry::Vec3::new(u, v, w)
+                }
+            }
+        };
+        let (e_primary, mu_primary) = sample(rng);
+        let (e_secondary, mu_secondary) = sample(rng);
         particle.energy = e_primary;
-        particle.dir = crate::geometry::Vec3::new(u, v, w);
-        let (us, vs, ws) = rng.isotropic_direction();
+        particle.dir = emit_dir(rng, mu_primary);
         let secondary = SecondaryNeutron {
             pos: particle.pos,
-            dir: crate::geometry::Vec3::new(us, vs, ws),
+            dir: emit_dir(rng, mu_secondary),
             energy: e_secondary,
         };
         return CollisionOutcome::Multiplicity {
@@ -275,32 +292,43 @@ pub fn process_collision(
 
     // (n,3n) — three neutrons emerge. Primary continues, two
     // secondaries transport in current generation. Same ENDF
-    // MT=17 / evaporation fallback convention as (n,2n).
+    // MT=17 / evaporation / correlated-mu convention as (n,2n).
     cum += xs.n3n;
     if xi < cum {
-        let sample_e = |rng: &mut Rng| -> f64 {
+        let inc_e = particle.energy;
+        let inc_dir = particle.dir;
+        let sample = |rng: &mut Rng| -> (f64, Option<f64>) {
             match n3n_edist {
-                Some(dist) => dist.sample(particle.energy, rng).max(1e-5),
-                None => sample_evaporation_energy(particle.energy, rng),
+                Some(dist) => {
+                    let (e, mu) = dist.sample_with_mu(inc_e, rng);
+                    (e.max(1e-5), mu)
+                }
+                None => (sample_evaporation_energy(inc_e, rng), None),
             }
         };
-        let e_primary = sample_e(rng);
-        let e_s1 = sample_e(rng);
-        let e_s2 = sample_e(rng);
-        let (u, v, w) = rng.isotropic_direction();
+        let emit_dir = |rng: &mut Rng, mu: Option<f64>| -> crate::geometry::Vec3 {
+            match mu {
+                Some(m) => super::scatter::rotate_direction(inc_dir, m, rng),
+                None => {
+                    let (u, v, w) = rng.isotropic_direction();
+                    crate::geometry::Vec3::new(u, v, w)
+                }
+            }
+        };
+        let (e_primary, mu_primary) = sample(rng);
+        let (e_s1, mu_s1) = sample(rng);
+        let (e_s2, mu_s2) = sample(rng);
         particle.energy = e_primary;
-        particle.dir = crate::geometry::Vec3::new(u, v, w);
-        let (u1, v1, w1) = rng.isotropic_direction();
-        let (u2, v2, w2) = rng.isotropic_direction();
+        particle.dir = emit_dir(rng, mu_primary);
         let secondaries: SecondaryList = smallvec![
             SecondaryNeutron {
                 pos: particle.pos,
-                dir: crate::geometry::Vec3::new(u1, v1, w1),
+                dir: emit_dir(rng, mu_s1),
                 energy: e_s1,
             },
             SecondaryNeutron {
                 pos: particle.pos,
-                dir: crate::geometry::Vec3::new(u2, v2, w2),
+                dir: emit_dir(rng, mu_s2),
                 energy: e_s2,
             },
         ];

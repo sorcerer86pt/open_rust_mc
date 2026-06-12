@@ -254,7 +254,7 @@ pub fn inelastic_scatter_with_mu(
 
 /// Rotate a direction vector by a polar angle (given by its cosine)
 /// and a uniformly sampled azimuthal angle.
-fn rotate_direction(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
+pub(crate) fn rotate_direction(dir: Vec3, mu: f64, rng: &mut Rng) -> Vec3 {
     let phi = 2.0 * std::f64::consts::PI * rng.uniform();
     let sin_theta = (1.0 - mu * mu).max(0.0).sqrt();
     let cos_phi = phi.cos();

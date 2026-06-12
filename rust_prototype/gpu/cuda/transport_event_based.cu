@@ -1435,18 +1435,16 @@ extern "C" __global__ void gr_multi_event(
     double dx = dir_x[tid], dy = dir_y[tid], dz = dir_z[tid];
     double px = pos_x[tid], py = pos_y[tid], pz = pos_z[tid];
     PcgState rng; rng.state = rng_state_arr[tid]; rng.inc = rng_inc_arr[tid];
-    double A = __ldg(&PTR_D(p, P_AWR_TABLE)[hit_nuc]);
-
     int n_extra = (ev == EV_N2N) ? 1 : 2;
-    // The banked extra neutron(s) take their outgoing energy from the
-    // ENDF MT=16 / MT=17 tabulated distribution the CPU already samples
-    // (`physics/collision.rs`), with the `temp = E/10` evaporation
-    // spectrum as the no-table fallback — `sample_nxn_eout` handles both.
-    // This replaces the device's previous unconditional `temp = E/10`
-    // Maxwell secondaries. The continuing primary keeps the analytic
-    // two-body CM kinematics driven by the real ENDF Q-value (slots
-    // P_Q_N2N/N3N_TABLE) — that path is already validated against CPU
-    // on Godiva / Jezebel, so it is left intact.
+    // Every emitted neutron (the n_extra banked secondaries AND the
+    // continuing primary) takes its outgoing energy from the ENDF
+    // MT=16 / MT=17 distribution the CPU samples (`physics/collision.rs`),
+    // with the `temp = E/10` evaporation spectrum as the no-table
+    // fallback — `sample_nxn_eout` handles both. (n,2n)/(n,3n) is a
+    // multi-body breakup, not a two-body reaction, so all neutrons draw
+    // from the same inclusive emission spectrum (matches OpenMC); the
+    // previous two-body-CM+Q primary made it too hard and re-triggered
+    // (n,2n).
     int S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ;
     if (ev == EV_N2N) {
         S_OFF=P_N2N_NUC_OFF;  S_NINC=P_N2N_NUC_NINC; S_INCE=P_N2N_INC_E_PTRS;
@@ -1457,16 +1455,6 @@ extern "C" __global__ void gr_multi_event(
         S_EO=P_N3N_E_OUT_PTRS; S_CDF=P_N3N_CDF_PTRS;  S_PDF=P_N3N_PDF_PTRS;
         S_DLO=P_N3N_DIST_LOCAL_OFF; S_DSZ=P_N3N_DIST_SZ;
     }
-    // Real ENDF Q-value for the primary's two-body kinematics; fall back
-    // to the historical heuristic only when the nuclide doesn't evaluate
-    // the channel (Q == 0) or the dataset is malformed (Q ≥ 0).
-    double Q_mult = (ev == EV_N2N)
-        ? __ldg(&PTR_D(p, P_Q_N2N_TABLE)[hit_nuc])
-        : __ldg(&PTR_D(p, P_Q_N3N_TABLE)[hit_nuc]);
-    if (Q_mult >= 0.0) {
-        Q_mult = (ev == EV_N2N) ? -E * 0.1 : -E * 0.2;
-    }
-
     // Accumulate outgoing-neutron energies for the ⟨E_out⟩ ± σ
     // diagnostic: each secondary plus the continuing primary (added
     // after its kinematics below). The energy is recorded regardless
@@ -1506,22 +1494,20 @@ extern "C" __global__ void gr_multi_event(
         // NXN_MODE_DROP: discard (no transport) — A/B isolation arm.
     }
     {
-        double e_cm = E * A / (A + 1.0);
-        double e_cm_out = e_cm + Q_mult;
-        if (e_cm_out <= 0.0) e_cm_out = E * 0.01;
-        double mu_cm = 2.0 * pcg_uniform(&rng) - 1.0;
-        double ap1 = A + 1.0;
-        double e_n = e_cm_out * A / ap1;
-        double vni = sqrt(2.0 * e_n);
-        double vcs = sqrt(2.0 * E / (ap1 * ap1));
-        double v2 = vni * vni + vcs * vcs + 2.0 * vni * vcs * mu_cm;
-        E = fmax(0.5 * v2, 1e-5);
-        double den = sqrt(fmax(v2, 1e-40));
-        double ml = (vni + vcs > 1e-20)
-            ? fmax(-1.0, fmin(1.0, (vcs + vni * mu_cm) / den))
-            : 2.0 * pcg_uniform(&rng) - 1.0;
-        double phi = 2.0 * PI * pcg_uniform(&rng);
-        rotate_direction(&dx, &dy, &dz, ml, phi);
+        // Primary continues as one of the emitted neutrons: outgoing
+        // energy from the SAME ENDF MT=16/17 distribution as the banked
+        // secondaries (not two-body CM — (n,2n)/(n,3n) is a multi-body
+        // breakup whose neutrons share the inclusive emission spectrum,
+        // matching CPU and OpenMC). Isotropic LAB direction. Removes the
+        // too-hard two-body primary that biased ⟨E_out⟩ and re-triggered
+        // (n,2n) (+10% rate vs OpenMC).
+        double e_prim = sample_nxn_eout(E, &rng, p, hit_nuc,
+            S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ);
+        E = fmax(e_prim, 1e-5);
+        double mu_iso = 2.0 * pcg_uniform(&rng) - 1.0;
+        double phi_iso = 2.0 * PI * pcg_uniform(&rng);
+        double st = sqrt(fmax(0.0, 1.0 - mu_iso * mu_iso));
+        dx = st * cos(phi_iso); dy = st * sin(phi_iso); dz = mu_iso;
     }
     energy[tid] = E;
     dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;

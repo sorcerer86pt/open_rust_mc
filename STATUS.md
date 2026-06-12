@@ -1,6 +1,6 @@
-# Project status — 2026-06-11
+# Project status — 2026-06-12
 
-What `origin/main` (`dc943e3`) ships today, what's open, what's the
+What `main` (`7e15c29`) ships today, what's open, what's the
 current headline.
 
 > **Orchestration-rollback note (merged to `main` via PR #10):**
@@ -318,6 +318,117 @@ machine was MSI-Home (RTX 3080).
 - **Backfill the rest of the 137 migrated ICSBEP JSONs** with VIII.1
   A/B runs once GPU device-buffer cache lands and the 3080 box is
   available.
+
+## Session 2026-06-12 (cont.) — HMF-058 hot bias root-caused: isotropic (n,2n) angle
+
+Problem (A) — the shared CPU+GPU Be hot bias — is **root-caused and
+fixed on CPU**. It was the **(n,2n) emission angle**, not the rate,
+energy, S(α,β), or library.
+
+**Diagnosis (three-way vs OpenMC on the exact scene JSON):** OpenMC on
+`heu-met-fast-058_case-1` (VIII.1, `openmc_scene_runner.py`) reproduces
+LANL Table LIX to within σ (k = 1.00090–1.00171 vs 1.00138), so the
+bias is in our engine, not the scene/library. Every integrated channel
+— (n,2n) rate, total absorption, fission rate, fission ⟨E_in⟩ (0.95
+MeV all three), leakage (0.544), collisions (~69) — matches OpenMC to
+~1–3 %. A +500 pcm (0.5 %) bias below that resolution pointed at the
+one thing scalar tallies can't see: **angular distribution**. Be-9
+MT=16 ships a `correlated` (File-6) energy-angle distribution with
+`center_of_mass=0` (LAB frame, Q=−1.5728 MeV, yield 2) — genuinely
+forward-peaked — but both backends forced **isotropic** emission. In a
+leakage-dominated reflector (0.54 leak/src), isotropizing the multiplied
+neutrons over-returns them to the core ⇒ hot.
+
+**Fix — CPU (this commit):** `collision.rs` (n,2n)/(n,3n) now sample
+the correlated LAB-frame μ via `EnergyDistribution::sample_with_mu`
+(`scatter::rotate_direction` made `pub(crate)`); nuclides whose MT=16/17
+carries no `mu_dist` fall back to isotropic with the **exact prior RNG
+stream**, so every non-correlated nuclide (Godiva/Jezebel U/Pu) is
+bit-identical — 440/440 CPU tests stay green.
+
+**Fix — GPU (this commit, partial = "A"):** the (n,2n)/(n,3n) **primary**
+now samples its outgoing energy from the same ENDF MT=16/17 distribution
+as the secondaries (`transport.cu`, `transport_event_based.cu`),
+dropping the non-physical two-body-CM+Q treatment. That alone fixed the
+GPU's too-hard primary (⟨E_out⟩ 1.58 → 0.87 MeV) and the +10 %
+(n,2n) over-rate (0.081 → 0.073, vs OpenMC 0.0737). 453/453 CUDA tests
+green. GPU still emits **isotropic** μ (device correlated-μ = "GPU-B",
+pending).
+
+**Converged result** (`metal_stats_diag heu-met-fast-058_case-1
+b=90 i=50 p=20000`, σ ≈ 147 pcm):
+
+| | k vs LANL | k vs OpenMC | (n,2n) rate |
+|---|---|---|---|
+| original CPU (isotropic μ) | +395 | +443 | 0.075 |
+| **CPU correlated μ** | **+31** | **+80** | 0.0733 |
+| GPU (A only, isotropic μ) | +706 | +844 | 0.0730 |
+| OpenMC / LANL | 0 | — | 0.0737 |
+
+`Δk(GPU−CPU) = +764 pcm` cleanly isolates the (n,2n) angular effect.
+CPU lands on target; GPU stays hot purely because it still emits
+isotropically — which is itself confirmation.
+
+Also added an **absorption-bucket reconciliation** block to
+`metal_stats_diag` (OpenMC's narrow `(n,γ)` MT=102 = 0.106 vs our lumped
+"capture" = all non-fission absorption = 0.135 = 0.106 + 0.028 charged;
+total absorption matches 0.529 vs 0.532) so the labeling difference
+can't be misread as a physics gap again.
+
+**Pending — GPU-B:** device-side correlated μ for (n,2n)/(n,3n). Data
+side is a one-liner (`build_nxn` passes `mu_dist` instead of `None`);
+needs new param slots + a μ sampler for the primary, and secondary-
+direction bank buffers threaded through `gr_inject_secondaries` for the
+banked neutron. Expected to bring GPU from +706 to ≈ CPU's +31 vs LANL.
+
+## Session 2026-06-12 — RTX 3080 validation of the in-gen fix (HMF-058 sweep)
+
+The validation flagged PENDING in `2f6ad7b` and `3a948a2` is now done.
+Committed as `7e15c29` (`be_58 sweep`): the full 5-case HMF-058 sweep
+on the RTX 3080 (MSI-Home) at **production statistics — 200k particles
+× 150 batches / 30 inactive, 5 seeds**, in-gen `nxn_mode=0` + atomicCAS
+injection fix live, graded against LANL Table LIX VIII.1
+(`local_validation.viii1`, k = 1.00138 ± 0.00011).
+
+`outputs/icsbep_heus_fast_058.csv`:
+
+| case | GPU k_calc | σ_calc | Δ vs LANL | bound | status |
+|---|---|---|---|---|---|
+| 1 | 1.008813 | 0.000040 | **+743** | 500 | FAIL |
+| 2 | 1.008743 | 0.000068 | +634 | 700 | PASS |
+| 3 | 1.006495 | 0.000060 | +577 | 540 | FAIL |
+| 4 | 1.005364 | 0.000072 | +527 | 420 | FAIL |
+| 5 | 1.003924 | 0.000052 | +451 | 660 | PASS |
+
+**What this resolves (Problem B — GPU config instability):** at
+production statistics the GPU k is **stable and well-converged**, σ_calc
+40–72 pcm. The wild **+44 @ 20k (A1000) → +851 @ 5M+refill (B200)** swing
+was an under-sampled draw on a high-dominance-ratio Be reflector, not a
+reproducible bias — it does not survive at proper particle counts. The
+GPU now gives a tight, repeatable k per case. Problem (B) is closed:
+"enough particles" was the answer.
+
+**What remains (Problem A — shared Be physics hot bias):** the GPU is
+genuinely hot vs LANL, **+451 … +743 pcm**, and the offset decreases
+monotonically case-1 → case-5, tracking the Be reflector thickness
+(more Be ⇒ hotter). This is the converged, real Be-reflector bias —
+the sole open driver. 3/5 cases breach the `max(150, 2σ)` envelope on
+it alone.
+
+**Caveat — do not over-claim GPU≡CPU yet.** The existing CPU anchor
+(+533 pcm vs *handbook* 1.0 ⇒ k≈1.00533; CLAUDE.md) is a **20k**
+number; HMF-058 case-1 here is +881 vs handbook at **200k**. They are
+not at matched statistics, and CPU k itself drifts with inactive count
+(+533 @ i=20 → +682 @ i=60). Two confirmations still pending:
+1. **CPU at matched 200k/150/30** — to show GPU and CPU converge to the
+   same hot k at production statistics (expected, since rates already
+   match to ~1%, but unmeasured).
+2. **OpenMC on the exact scene JSON** (running now,
+   `outputs/openmc_hmf058_case1_viii1.json`, VIII.1, 200k/150/30 ×3) —
+   splits ⁹Be library/transcription bias from engine bias. If OpenMC
+   on this JSON also lands ~+700 vs LANL, the bias is in the scene/
+   library, not our engine; if OpenMC matches LANL, the ⁹Be S(α,β) /
+   (n,xn) kinematics in our engine is the culprit.
 
 ## Session 2026-06-11 (cont.) — GPU (n,2n) in-generation transport + the injection bug
 

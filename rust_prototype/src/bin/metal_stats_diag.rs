@@ -782,6 +782,47 @@ fn main() {
                              cpu_leak - leak_omc, gpu_leak - leak_omc, cpu_leak, gpu_leak, leak_omc);
                 }
             }
+
+            // ── Absorption-bucket reconciliation ─────────────────────
+            // OpenMC reports the narrow (n,γ) MT=102 score separately
+            // from charged-particle absorption ((n,α)/(n,p)/…), while
+            // our engine lumps ALL non-fission absorption into a single
+            // "capture" bucket (total − el − inel − n2n − n3n − fis).
+            // Comparing our "capture" against OpenMC's bare "(n,γ)" looks
+            // like a large gap that is purely a labeling artifact. The
+            // apples-to-apples quantities are (a) total absorption and
+            // (b) capture-equivalent = OpenMC(absorption − fission) =
+            // (n,γ) + charged. Print the full decomposition so the
+            // mismatch can't be misread as a physics difference.
+            {
+                let sum_tally = |name: &str| -> Option<f64> {
+                    v["tallies_seed_mean"][name]["mean"]
+                        .as_array()
+                        .map(|a| a.iter().filter_map(|x| x.as_f64()).sum::<f64>())
+                };
+                if let (Some(omc_abs), Some(omc_fis)) =
+                    (sum_tally("rate_absorption"), sum_tally("rate_fission"))
+                {
+                    let omc_ngamma = sum_tally("rate_(n,gamma)").unwrap_or(f64::NAN);
+                    let omc_charged = omc_abs - omc_fis - omc_ngamma;
+                    let omc_cap_equiv = omc_abs - omc_fis; // (n,γ) + charged
+                    let nps = if cpu_act.hist_sum > 0 { cpu_act.hist_sum as f64 } else { (cpu_act.n as f64) * ppb as f64 };
+                    let nps_g = if gpu_act.hist_sum > 0 { gpu_act.hist_sum as f64 } else { (gpu_act.n as f64) * ppb as f64 };
+                    let cpu_cap = cpu_act.abs_sum as f64 / nps;
+                    let gpu_cap = gpu_act.abs_sum as f64 / nps_g;
+                    let cpu_totabs = (cpu_act.abs_sum + cpu_act.fis_sum) as f64 / nps;
+                    let gpu_totabs = (gpu_act.abs_sum + gpu_act.fis_sum) as f64 / nps_g;
+                    println!("  ─ absorption-bucket reconciliation (read THIS before quoting a capture gap) ─");
+                    println!("    OpenMC: total_abs {omc_abs:.4} = fission {omc_fis:.4} + (n,γ) {omc_ngamma:.4} + charged {omc_charged:.4}");
+                    println!("    OpenMC capture-equiv ((n,γ)+charged = total_abs − fis) : {omc_cap_equiv:.4}");
+                    println!("    our \"capture\" bucket (ALL non-fission abs)            : CPU {cpu_cap:.4}   GPU {gpu_cap:.4}");
+                    println!("      → Δ capture-equiv : CPU {:+.4}   GPU {:+.4}   (compare vs capture-equiv, NOT bare (n,γ))",
+                             cpu_cap - omc_cap_equiv, gpu_cap - omc_cap_equiv);
+                    println!("    total absorption (cap + fis)                          : CPU {cpu_totabs:.4}   GPU {gpu_totabs:.4}   omc {omc_abs:.4}");
+                    println!("      → Δ total-abs     : CPU {:+.4}   GPU {:+.4}",
+                             cpu_totabs - omc_abs, gpu_totabs - omc_abs);
+                }
+            }
         } else {
             println!("\n(OpenMC reference JSON not found at {})", openmc_path.display());
             println!("To generate: (in WSL + conda env with openmc installed)");

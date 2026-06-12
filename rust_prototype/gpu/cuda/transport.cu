@@ -2671,18 +2671,24 @@ transport_persistent(
                   int idx2=atomicAdd(fis_count,1);
                   if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
                 }
-                { double Q_n2n=__ldg(&PTR_D(p, P_Q_N2N_TABLE)[hit_nuc]);
-                  if(Q_n2n>=0.0) Q_n2n=-E*0.1;
-                  double e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n2n;
-                  if(e_cm_out<=0.0) e_cm_out=E*0.01;
-                  double mu_cm=2.0*pcg_uniform(&rng)-1.0, ap1=A+1.0;
-                  double e_n=e_cm_out*A/ap1, vni=sqrt(2.0*e_n), vcs=sqrt(2.0*E/(ap1*ap1));
-                  double v2=vni*vni+vcs*vcs+2.0*vni*vcs*mu_cm;
-                  E=fmax(0.5*v2,1e-5);
-                  double den=sqrt(fmax(v2,1e-40));
-                  double ml=(vni+vcs>1e-20)?fmax(-1.0,fmin(1.0,(vcs+vni*mu_cm)/den)):2.0*pcg_uniform(&rng)-1.0;
-                  double phi=2.0*PI*pcg_uniform(&rng);
-                  rotate_direction(&dx,&dy,&dz,ml,phi);
+                { // The primary continues as one of the two emitted
+                  // neutrons: sample its outgoing energy from the SAME
+                  // ENDF MT=16 distribution as the banked secondary.
+                  // (n,2n) is not a two-body reaction — both neutrons
+                  // share the inclusive emission spectrum, so the old
+                  // two-body-CM+Q treatment made the primary too hard
+                  // (⟨E_out⟩ 1.58 vs 0.88 MeV CPU) and re-triggered (n,2n)
+                  // (+10% rate). This matches the CPU and OpenMC. Direction
+                  // is isotropic in LAB; the correlated emission cosine is
+                  // a follow-up (GPU mu-coupling slots).
+                  double e_prim = sample_nxn_eout(E, &rng, p, hit_nuc,
+                      P_N2N_NUC_OFF, P_N2N_NUC_NINC, P_N2N_INC_E_PTRS,
+                      P_N2N_E_OUT_PTRS, P_N2N_CDF_PTRS, P_N2N_PDF_PTRS,
+                      P_N2N_DIST_LOCAL_OFF, P_N2N_DIST_SZ);
+                  E=fmax(e_prim,1e-5);
+                  double mu_iso=2.0*pcg_uniform(&rng)-1.0, phi_iso=2.0*PI*pcg_uniform(&rng);
+                  double st=sqrt(fmax(0.0,1.0-mu_iso*mu_iso));
+                  dx=st*cos(phi_iso); dy=st*sin(phi_iso); dz=mu_iso;
                 }
 
             } else if ((cum_rxn+=hit_xs.s_n3n), xi_rxn < cum_rxn) {
@@ -2699,18 +2705,18 @@ transport_persistent(
                   int idx2=atomicAdd(fis_count,1);
                   if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
                 }
-                { double Q_n3n=__ldg(&PTR_D(p, P_Q_N3N_TABLE)[hit_nuc]);
-                  if(Q_n3n>=0.0) Q_n3n=-E*0.2;
-                  double e_cm=E*A/(A+1.0), e_cm_out=e_cm+Q_n3n;
-                  if(e_cm_out<=0.0) e_cm_out=E*0.01;
-                  double mu_cm=2.0*pcg_uniform(&rng)-1.0, ap1=A+1.0;
-                  double e_n=e_cm_out*A/ap1, vni=sqrt(2.0*e_n), vcs=sqrt(2.0*E/(ap1*ap1));
-                  double v2=vni*vni+vcs*vcs+2.0*vni*vcs*mu_cm;
-                  E=fmax(0.5*v2,1e-5);
-                  double den=sqrt(fmax(v2,1e-40));
-                  double ml=(vni+vcs>1e-20)?fmax(-1.0,fmin(1.0,(vcs+vni*mu_cm)/den)):2.0*pcg_uniform(&rng)-1.0;
-                  double phi=2.0*PI*pcg_uniform(&rng);
-                  rotate_direction(&dx,&dy,&dz,ml,phi);
+                { // Primary energy from the ENDF MT=17 distribution (same
+                  // as the two banked secondaries); isotropic LAB direction.
+                  // See the (n,2n) note above — drops the non-physical
+                  // two-body-CM+Q primary.
+                  double e_prim = sample_nxn_eout(E, &rng, p, hit_nuc,
+                      P_N3N_NUC_OFF, P_N3N_NUC_NINC, P_N3N_INC_E_PTRS,
+                      P_N3N_E_OUT_PTRS, P_N3N_CDF_PTRS, P_N3N_PDF_PTRS,
+                      P_N3N_DIST_LOCAL_OFF, P_N3N_DIST_SZ);
+                  E=fmax(e_prim,1e-5);
+                  double mu_iso=2.0*pcg_uniform(&rng)-1.0, phi_iso=2.0*PI*pcg_uniform(&rng);
+                  double st=sqrt(fmax(0.0,1.0-mu_iso*mu_iso));
+                  dx=st*cos(phi_iso); dy=st*sin(phi_iso); dz=mu_iso;
                 }
 
             } else if ((cum_rxn+=hit_xs.s_fis), xi_rxn < cum_rxn) {
