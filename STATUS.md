@@ -375,11 +375,20 @@ Also added an **absorption-bucket reconciliation** block to
 total absorption matches 0.529 vs 0.532) so the labeling difference
 can't be misread as a physics gap again.
 
-**Pending — GPU-B:** device-side correlated μ for (n,2n)/(n,3n). Data
-side is a one-liner (`build_nxn` passes `mu_dist` instead of `None`);
-needs new param slots + a μ sampler for the primary, and secondary-
-direction bank buffers threaded through `gr_inject_secondaries` for the
-banked neutron. Expected to bring GPU from +706 to ≈ CPU's +31 vs LANL.
+**Done — GPU-B (device-side correlated μ):** the GPU now samples the
+File-6 emission cosine for (n,2n)/(n,3n) on BOTH the continuing primary
+(in-kernel) and the banked secondary (via new `sec_dx/dy/dz` direction
+bank threaded through `gr_inject_secondaries`). `build_nxn` packs the
+mu slabs; slots 212-219 (`P_N2N/N3N_MU_*`, N_PARAMS 212→220) carry the
+per-nuclide pointers; `sample_corr_mu_at` + `sample_continuum_eout_with_mu`
+mirror the MT=91 Law-61 samplers. `sample_corr_mu_at` returns a uniform
+cosine when a nuclide ships no mu table — rotated off any axis that is
+isotropic — so one path covers Be-9 (correlated) and everything else
+(isotropic), matching the CPU. Converged HMF-058 case-1 (b=90 i=50
+p=20000, σ ≈ 137 pcm): **GPU +58 vs LANL**, CPU +31, `Δk(GPU−CPU) = +27
+pcm` (down from +764 isotropic → +267 primary-only → +27 full). GPU
+(n,2n) rate 0.0737 = OpenMC. 453/453 CUDA tests green. Problem (A) is
+now fixed on both backends.
 
 ## Session 2026-06-12 — RTX 3080 validation of the in-gen fix (HMF-058 sweep)
 

@@ -1415,7 +1415,8 @@ extern "C" __global__ void gr_multi_event(
     // appends each secondary here; gr_inject_secondaries revives dead
     // slots from it THIS batch so the secondary transports in-generation
     // (matching the CPU) instead of being banked as a fission neutron.
-    double* sec_x, double* sec_y, double* sec_z, double* sec_e,
+    double* sec_x, double* sec_y, double* sec_z,
+    double* sec_dx, double* sec_dy, double* sec_dz, double* sec_e,
     unsigned long long* sec_rng_state, unsigned long long* sec_rng_inc,
     int* sec_write, int sec_cap)
 {
@@ -1446,14 +1447,19 @@ extern "C" __global__ void gr_multi_event(
     // previous two-body-CM+Q primary made it too hard and re-triggered
     // (n,2n).
     int S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ;
+    int S_MUHAS, S_MUEIN, S_MUOFF, S_MUDATA;
     if (ev == EV_N2N) {
         S_OFF=P_N2N_NUC_OFF;  S_NINC=P_N2N_NUC_NINC; S_INCE=P_N2N_INC_E_PTRS;
         S_EO=P_N2N_E_OUT_PTRS; S_CDF=P_N2N_CDF_PTRS;  S_PDF=P_N2N_PDF_PTRS;
         S_DLO=P_N2N_DIST_LOCAL_OFF; S_DSZ=P_N2N_DIST_SZ;
+        S_MUHAS=P_N2N_MU_HAS; S_MUEIN=P_N2N_MU_E_IN_START_PTRS;
+        S_MUOFF=P_N2N_MU_OFFSETS_PTRS; S_MUDATA=P_N2N_MU_DATA_PTRS;
     } else {
         S_OFF=P_N3N_NUC_OFF;  S_NINC=P_N3N_NUC_NINC; S_INCE=P_N3N_INC_E_PTRS;
         S_EO=P_N3N_E_OUT_PTRS; S_CDF=P_N3N_CDF_PTRS;  S_PDF=P_N3N_PDF_PTRS;
         S_DLO=P_N3N_DIST_LOCAL_OFF; S_DSZ=P_N3N_DIST_SZ;
+        S_MUHAS=P_N3N_MU_HAS; S_MUEIN=P_N3N_MU_E_IN_START_PTRS;
+        S_MUOFF=P_N3N_MU_OFFSETS_PTRS; S_MUDATA=P_N3N_MU_DATA_PTRS;
     }
     // Accumulate outgoing-neutron energies for the ⟨E_out⟩ ± σ
     // diagnostic: each secondary plus the continuing primary (added
@@ -1465,11 +1471,35 @@ extern "C" __global__ void gr_multi_event(
     int nxn_mode = (int) SCALAR_I(p, P_NXN_MODE);
     double e_out_sum = 0.0, e_out_sq = 0.0;
     for (int s = 0; s < n_extra; s++) {
-        double e_sec = sample_nxn_eout(E, &rng, p, hit_nuc,
-            S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ);
+        // Sample (E_out, correlated LAB mu) for the banked secondary from
+        // the same File-6 distribution as the primary, and compute its
+        // emission direction off the incident direction (dx,dy,dz here is
+        // still the pre-collision direction — the primary is updated only
+        // after this loop). Stored in the bank so gr_inject_secondaries
+        // revives it with the correlated direction instead of isotropic.
+        int eib, eob; double efr;
+        double e_sec = sample_continuum_eout_with_mu(E, &rng, p, hit_nuc,
+            S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ,
+            &eib, &eob, &efr);
+        double mu_s;
+        if (e_sec > 0.0) {
+            mu_s = sample_corr_mu_at(hit_nuc, eib, eob, efr, &rng, p,
+                S_MUHAS, S_MUEIN, S_MUOFF, S_MUDATA);
+        } else {
+            double temp = E / 10.0;
+            double x1 = fmax(pcg_uniform(&rng), 1e-30);
+            double x2 = fmax(pcg_uniform(&rng), 1e-30);
+            e_sec = fmax(fmin(-temp * log(x1 * x2), E), 1e-5);
+            mu_s = 2.0 * pcg_uniform(&rng) - 1.0;
+        }
+        double phi_s = 2.0 * PI * pcg_uniform(&rng);
+        double sdx = dx, sdy = dy, sdz = dz;
+        rotate_direction(&sdx, &sdy, &sdz, mu_s, phi_s);
         e_out_sum += e_sec; e_out_sq += e_sec * e_sec;
         if (nxn_mode == NXN_MODE_BANK) {
             // Legacy: bank into the fission source (enters k numerator).
+            // The fission-source resampler assigns its own direction, so
+            // the correlated sdx/sdy/sdz is not used in this arm.
             int fidx = atomicAdd(fis_count, 1);
             if (fidx < max_fis) {
                 fis_x[fidx] = px; fis_y[fidx] = py; fis_z[fidx] = pz;
@@ -1483,6 +1513,7 @@ extern "C" __global__ void gr_multi_event(
             int sidx = atomicAdd(sec_write, 1);
             if (sidx < sec_cap) {
                 sec_x[sidx] = px; sec_y[sidx] = py; sec_z[sidx] = pz;
+                sec_dx[sidx] = sdx; sec_dy[sidx] = sdy; sec_dz[sidx] = sdz;
                 sec_e[sidx] = e_sec;
                 // Child RNG: derive from the primary's stream so it's
                 // deterministic and independent of the continuing primary.
@@ -1494,20 +1525,34 @@ extern "C" __global__ void gr_multi_event(
         // NXN_MODE_DROP: discard (no transport) — A/B isolation arm.
     }
     {
-        // Primary continues as one of the emitted neutrons: outgoing
-        // energy from the SAME ENDF MT=16/17 distribution as the banked
-        // secondaries (not two-body CM — (n,2n)/(n,3n) is a multi-body
-        // breakup whose neutrons share the inclusive emission spectrum,
-        // matching CPU and OpenMC). Isotropic LAB direction. Removes the
-        // too-hard two-body primary that biased ⟨E_out⟩ and re-triggered
-        // (n,2n) (+10% rate vs OpenMC).
-        double e_prim = sample_nxn_eout(E, &rng, p, hit_nuc,
-            S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ);
-        E = fmax(e_prim, 1e-5);
-        double mu_iso = 2.0 * pcg_uniform(&rng) - 1.0;
-        double phi_iso = 2.0 * PI * pcg_uniform(&rng);
-        double st = sqrt(fmax(0.0, 1.0 - mu_iso * mu_iso));
-        dx = st * cos(phi_iso); dy = st * sin(phi_iso); dz = mu_iso;
+        // Primary continues as one of the emitted neutrons: sample
+        // (E_out, correlated LAB mu) from the ENDF MT=16/17 File-6
+        // distribution and emit off the incident direction. (n,2n)/(n,3n)
+        // is a multi-body breakup whose neutrons share the inclusive
+        // emission spectrum (matches CPU/OpenMC); Be-9 MT=16 is
+        // center_of_mass=0 so the cosine is applied directly in LAB.
+        // No table => evaporation energy + uniform mu (rotated =
+        // isotropic). (The banked secondary still emits isotropically
+        // via gr_inject_secondaries until the secondary-direction bank
+        // lands — "GPU-B2".)
+        int eib, eob; double efr;
+        double e_prim = sample_continuum_eout_with_mu(E, &rng, p, hit_nuc,
+            S_OFF, S_NINC, S_INCE, S_EO, S_CDF, S_PDF, S_DLO, S_DSZ,
+            &eib, &eob, &efr);
+        double mu_p;
+        if (e_prim > 0.0) {
+            E = fmax(e_prim, 1e-5);
+            mu_p = sample_corr_mu_at(hit_nuc, eib, eob, efr, &rng, p,
+                S_MUHAS, S_MUEIN, S_MUOFF, S_MUDATA);
+        } else {
+            double temp = E / 10.0;
+            double x1 = fmax(pcg_uniform(&rng), 1e-30);
+            double x2 = fmax(pcg_uniform(&rng), 1e-30);
+            E = fmax(fmin(-temp * log(x1 * x2), E), 1e-5);
+            mu_p = 2.0 * pcg_uniform(&rng) - 1.0;
+        }
+        double phi = 2.0 * PI * pcg_uniform(&rng);
+        rotate_direction(&dx, &dy, &dz, mu_p, phi);
     }
     energy[tid] = E;
     dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;
@@ -1534,9 +1579,9 @@ extern "C" __global__ void gr_multi_event(
 //     k_eff denominator (n + refilled). They contribute to k only via
 //     the fissions they induce, exactly like the CPU's in-generation
 //     `pending` queue.
-// The secondary is born at the collision site with an isotropic lab
-// direction (matching the CPU (n,2n) kinematics) and its stored child
-// RNG. Slots with no pending secondary stay dead.
+// The secondary is born at the collision site with the correlated
+// File-6 emission direction gr_multi_event precomputed (GPU-B2) and its
+// stored child RNG. Slots with no pending secondary stay dead.
 // ═══════════════════════════════════════════════════════════════════════
 
 extern "C" __global__ void gr_inject_secondaries(
@@ -1544,6 +1589,7 @@ extern "C" __global__ void gr_inject_secondaries(
     int* d_sec_read,                  // atomic read cursor, init=0
     const int* d_sec_write,           // live write cursor (bank bound)
     const double* sec_pos_x, const double* sec_pos_y, const double* sec_pos_z,
+    const double* sec_dir_x, const double* sec_dir_y, const double* sec_dir_z,
     const double* sec_energy,
     const unsigned long long* sec_rng_state,
     const unsigned long long* sec_rng_inc,
@@ -1608,14 +1654,14 @@ extern "C" __global__ void gr_inject_secondaries(
     unsigned long long rs = sec_rng_state[claim];
     unsigned long long ri = sec_rng_inc[claim] | 1ULL;
 
-    // Isotropic lab direction — matches the CPU (n,2n)/(n,3n) secondary.
+    // Correlated File-6 emission direction precomputed by gr_multi_event
+    // off the incident direction (GPU-B2) — use it directly. The child
+    // RNG is reserved for the secondary's subsequent transport (the
+    // direction draws were consumed in gr_multi_event's parent stream).
     PcgState rng; rng.state = rs; rng.inc = ri;
-    double mu  = 2.0 * pcg_uniform(&rng) - 1.0;
-    double phi = 2.0 * PI * pcg_uniform(&rng);
-    double s_th = sqrt(fmax(0.0, 1.0 - mu * mu));
-    double dx = s_th * cos(phi);
-    double dy = s_th * sin(phi);
-    double dz = mu;
+    double dx = sec_dir_x[claim];
+    double dy = sec_dir_y[claim];
+    double dz = sec_dir_z[claim];
 
     pos_x[tid] = px; pos_y[tid] = py; pos_z[tid] = pz;
     dir_x[tid] = dx; dir_y[tid] = dy; dir_z[tid] = dz;

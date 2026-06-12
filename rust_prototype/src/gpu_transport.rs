@@ -38,7 +38,7 @@ use cudarc::nvrtc;
 /// `sample_continuum_tabular` reproduce the ENDF tabulated secondary
 /// spectrum the CPU already samples, replacing the device's old
 /// `temp = E/10` Maxwell analytic fallback.
-const N_PARAMS: usize = 212;
+const N_PARAMS: usize = 220;
 
 /// NVRTC compile-options builder. Every site that compiles
 /// `TRANSPORT_KERNELS` must thread `MAX_NUC_PER_MAT` in from the Rust
@@ -507,6 +507,18 @@ pub struct GpuNuclideData {
     pub n3n_e_out_ptrs: CudaSlice<u64>,
     pub n3n_cdf_ptrs: CudaSlice<u64>,
     pub n3n_pdf_ptrs: CudaSlice<u64>,
+    // (n,2n)/(n,3n) File-6 correlated emission-angle mu coupling. Same
+    // per-nuclide pointer pattern as the inel91_mu_* slabs; `*_mu_has`
+    // gates the device sampler (`sample_corr_mu_at`). `0`/null per nuc
+    // when the evaluation ships no mu_dist (-> isotropic fallback).
+    pub n2n_mu_has: CudaSlice<i32>,
+    pub n2n_mu_data_ptrs: CudaSlice<u64>,
+    pub n2n_mu_offsets_ptrs: CudaSlice<u64>,
+    pub n2n_mu_e_in_start_ptrs: CudaSlice<u64>,
+    pub n3n_mu_has: CudaSlice<i32>,
+    pub n3n_mu_data_ptrs: CudaSlice<u64>,
+    pub n3n_mu_offsets_ptrs: CudaSlice<u64>,
+    pub n3n_mu_e_in_start_ptrs: CudaSlice<u64>,
     // Closed-form fission χ parameters per nuclide (ENDF Law 11 Watt).
     // When `fis_nuc_n_inc[i] == 0` and `watt_nuc_n[i] > 0`, the
     // device-side `sample_fission_energy` interpolates
@@ -778,7 +790,16 @@ impl GpuNuclideData {
             + self.n3n_inc_e_ptrs.num_bytes()
             + self.n3n_e_out_ptrs.num_bytes()
             + self.n3n_cdf_ptrs.num_bytes()
-            + self.n3n_pdf_ptrs.num_bytes();
+            + self.n3n_pdf_ptrs.num_bytes()
+            // (n,2n)/(n,3n) File-6 mu coupling pointer / flag buffers.
+            + self.n2n_mu_has.num_bytes()
+            + self.n2n_mu_data_ptrs.num_bytes()
+            + self.n2n_mu_offsets_ptrs.num_bytes()
+            + self.n2n_mu_e_in_start_ptrs.num_bytes()
+            + self.n3n_mu_has.num_bytes()
+            + self.n3n_mu_data_ptrs.num_bytes()
+            + self.n3n_mu_offsets_ptrs.num_bytes()
+            + self.n3n_mu_e_in_start_ptrs.num_bytes();
         f64_total + i32_total + ptr_total
     }
 }
@@ -1712,6 +1733,19 @@ impl GpuTransportContext {
             // (current behavior). `transport_recursive_with_buffers`
             // overwrites in-place to 1 for the no-bank A/B arm.
             0_u64,
+            // (n,2n)/(n,3n) File-6 correlated emission-angle mu coupling
+            // — slots 212-219. Order MUST match the P_N2N/N3N_MU_*
+            // #defines in transport.cu. Pointer arrays reference the
+            // per-nuclide mu slabs owned by `per_nucs[...].{n2n,n3n}_edist`
+            // (kept alive by `per_nucs`); `*_mu_has` gates the sampler.
+            dptr!(&nuc_data.n2n_mu_has),
+            dptr!(&nuc_data.n2n_mu_data_ptrs),
+            dptr!(&nuc_data.n2n_mu_offsets_ptrs),
+            dptr!(&nuc_data.n2n_mu_e_in_start_ptrs),
+            dptr!(&nuc_data.n3n_mu_has),
+            dptr!(&nuc_data.n3n_mu_data_ptrs),
+            dptr!(&nuc_data.n3n_mu_offsets_ptrs),
+            dptr!(&nuc_data.n3n_mu_e_in_start_ptrs),
         ];
         debug_assert_eq!(v.len(), N_PARAMS);
         v
@@ -2121,6 +2155,35 @@ impl GpuTransportContext {
         let n3n_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
             &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.pdf),
         )?;
+        // (n,2n)/(n,3n) File-6 correlated mu coupling — per-nuclide
+        // pointer arrays into the n2n/n3n edist mu slabs (built by
+        // `build_tabular_edist` when the evaluation ships `mu_dist`).
+        // `*_mu_has` is 1 where the slab exists; the device sampler
+        // (`sample_corr_mu_at`) falls back to isotropic where it's 0.
+        let n2n_mu_has_vec: Vec<i32> = per_nucs.iter().map(|p|
+            i32::from(p.n2n_edist.as_ref().and_then(|t| t.mu_data.as_ref()).is_some())).collect();
+        let n2n_mu_has = self.stream.clone_htod(&n2n_mu_has_vec)?;
+        let n2n_mu_data_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().and_then(|t| t.mu_data.as_ref()),
+        )?;
+        let n2n_mu_offsets_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().and_then(|t| t.mu_offsets.as_ref()),
+        )?;
+        let n2n_mu_e_in_start_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().and_then(|t| t.mu_e_in_starts.as_ref()),
+        )?;
+        let n3n_mu_has_vec: Vec<i32> = per_nucs.iter().map(|p|
+            i32::from(p.n3n_edist.as_ref().and_then(|t| t.mu_data.as_ref()).is_some())).collect();
+        let n3n_mu_has = self.stream.clone_htod(&n3n_mu_has_vec)?;
+        let n3n_mu_data_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().and_then(|t| t.mu_data.as_ref()),
+        )?;
+        let n3n_mu_offsets_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().and_then(|t| t.mu_offsets.as_ref()),
+        )?;
+        let n3n_mu_e_in_start_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
+            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().and_then(|t| t.mu_e_in_starts.as_ref()),
+        )?;
 
         Ok(Arc::new(GpuNuclideData {
             per_nucs: per_nucs.clone(),
@@ -2180,6 +2243,14 @@ impl GpuTransportContext {
             n3n_nuc_n_inc,
             n3n_dist_local_off,
             n3n_dist_sizes,
+            n2n_mu_has,
+            n2n_mu_data_ptrs,
+            n2n_mu_offsets_ptrs,
+            n2n_mu_e_in_start_ptrs,
+            n3n_mu_has,
+            n3n_mu_data_ptrs,
+            n3n_mu_offsets_ptrs,
+            n3n_mu_e_in_start_ptrs,
             n3n_inc_e_ptrs,
             n3n_e_out_ptrs,
             n3n_cdf_ptrs,

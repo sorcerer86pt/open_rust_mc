@@ -14,7 +14,7 @@
 //! ABI stays unchanged until Stage 4 (separate commit, gated on
 //! `metal_stats_diag` 3-way passing).
 
-use cudarc::driver::{CudaSlice, CudaStream, DevicePtr};
+use cudarc::driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr};
 use std::sync::Arc;
 
 use crate::transport::xs_provider::{NuclideKernels, ReactionKernel};
@@ -644,13 +644,16 @@ pub fn upload_one_nuclide(
     };
 
     // Category A.6b — (n,2n) MT=16 / (n,3n) MT=17 outgoing-energy.
-    // Pass `mu_dist: None` unconditionally — the CPU `collision.rs`
-    // n2n/n3n branch calls `dist.sample()` (not `sample_with_mu`) and
-    // emits isotropically, so the device must do the same.
+    // Pass `e.mu_dist` so `build_tabular_edist` also packs the File-6
+    // correlated emission-angle mu tables when the evaluation ships them
+    // (e.g. Be-9 MT=16, `center_of_mass=0`). The CPU `collision.rs`
+    // n2n/n3n branch now calls `sample_with_mu`; the device samples the
+    // matching mu via `sample_corr_mu_at` off the P_N2N/N3N_MU_* slots.
     let build_nxn = |edist: Option<&crate::hdf5_reader::EnergyDistribution>| {
         match edist {
             Some(e) if !e.energies.is_empty() && !e.distributions.is_empty() => {
-                build_tabular_edist(stream, &e.energies, &e.distributions, None).map(Some)
+                build_tabular_edist(stream, &e.energies, &e.distributions, e.mu_dist.as_ref())
+                    .map(Some)
             }
             _ => Ok(None),
         }
@@ -2005,13 +2008,14 @@ pub fn build_per_nuc_level_ptr_and_offsets(
 /// `Option<CudaSlice<f64>>` field. Absent / empty per-nuclide slices
 /// store `0`; the caller's kernel must gate on the corresponding
 /// `has_*` flag before dereferencing.
-pub fn build_per_nuc_optional_ptr_array<F>(
+pub fn build_per_nuc_optional_ptr_array<T, F>(
     stream: &Arc<CudaStream>,
     per_nucs: &[Arc<PerNuclideGpu>],
     pick: F,
 ) -> Result<CudaSlice<u64>, Box<dyn std::error::Error>>
 where
-    F: Fn(&PerNuclideGpu) -> Option<&CudaSlice<f64>>,
+    T: DeviceRepr,
+    F: Fn(&PerNuclideGpu) -> Option<&CudaSlice<T>>,
 {
     let mut ptrs: Vec<u64> = Vec::with_capacity(per_nucs.len().max(1));
     for p in per_nucs {

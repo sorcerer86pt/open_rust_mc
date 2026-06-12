@@ -472,7 +472,24 @@
 #define NXN_MODE_BANK        1
 #define NXN_MODE_DROP        2
 
-#define N_PARAMS            212
+// (n,2n) MT=16 / (n,3n) MT=17 correlated emission-angle (File-6) mu
+// coupling — slots 212-219. Same layout/sampler as the MT=91 Law-61
+// P_INEL91_MU_* slots, but the frame is whatever the reaction declares
+// (Be-9 MT=16 is center_of_mass=0, i.e. LAB), so the caller applies the
+// sampled cosine directly off the incident direction (no CM->LAB boost).
+// `*_MU_HAS[nuc]==0` => no table => sample_corr_mu_at returns a uniform
+// cosine, which rotated off any axis is isotropic (matches the CPU
+// isotropic fallback for nuclides without mu_dist).
+#define P_N2N_MU_HAS               212
+#define P_N2N_MU_DATA_PTRS         213
+#define P_N2N_MU_OFFSETS_PTRS      214
+#define P_N2N_MU_E_IN_START_PTRS   215
+#define P_N3N_MU_HAS               216
+#define P_N3N_MU_DATA_PTRS         217
+#define P_N3N_MU_OFFSETS_PTRS      218
+#define P_N3N_MU_E_IN_START_PTRS   219
+
+#define N_PARAMS            220
 
 // ───────────────────────────────────────────────────────────────────────
 // Per-material nuclide stride. Single source of truth is the Rust
@@ -1164,6 +1181,206 @@ __device__ double sample_nxn_eout(
     double x1 = fmax(pcg_uniform(rng), 1e-30);
     double x2 = fmax(pcg_uniform(rng), 1e-30);
     return fmax(fmin(-temp * log(x1 * x2), E), 1e-5);
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Slot-parameterized continuum outgoing-energy sampler that ALSO returns
+// the (E_in_bin, E_out_bin, E_out_frac) tuple for a correlated mu lookup.
+// Identical algorithm to `sample_inel91_energy_with_mu`, but the eight
+// ContinuousTabular slot indices are passed in so it serves (n,2n) MT=16
+// and (n,3n) MT=17 as well. Returns -1.0 when the nuclide has no table
+// (caller falls back to evaporation + isotropic).
+// ───────────────────────────────────────────────────────────────────────
+__device__ double sample_continuum_eout_with_mu(
+    double E_inc, PcgState* rng, Params p, int hit_nuc,
+    int S_NUC_OFF, int S_NUC_NINC, int S_INC_E_PTRS, int S_E_OUT_PTRS,
+    int S_CDF_PTRS, int S_PDF_PTRS, int S_DIST_LOCAL_OFF, int S_DIST_SZ,
+    int* out_e_in_bin, int* out_e_out_bin, double* out_e_out_frac)
+{
+    int fi_off = __ldg(&PTR_I(p, S_NUC_OFF)[hit_nuc]);
+    int fi_n   = __ldg(&PTR_I(p, S_NUC_NINC)[hit_nuc]);
+    *out_e_in_bin = 0;
+    *out_e_out_bin = 0;
+    *out_e_out_frac = 0.0;
+    if (fi_n <= 0) return -1.0;
+    const double* inc_e =
+        (const double*) __ldg(&PTR_U64(p, S_INC_E_PTRS)[hit_nuc]);
+    const double* nuc_eo =
+        (const double*) __ldg(&PTR_U64(p, S_E_OUT_PTRS)[hit_nuc]);
+    const double* nuc_cdf =
+        (const double*) __ldg(&PTR_U64(p, S_CDF_PTRS)[hit_nuc]);
+    const double* nuc_pdf =
+        (const double*) __ldg(&PTR_U64(p, S_PDF_PTRS)[hit_nuc]);
+
+    if (E_inc <= inc_e[0] || E_inc >= inc_e[fi_n - 1]) {
+        int chosen = (E_inc <= inc_e[0]) ? fi_off : (fi_off + fi_n - 1);
+        int e_in_bin = (E_inc <= inc_e[0]) ? 0 : (fi_n - 1);
+        int off = PTR_I(p, S_DIST_LOCAL_OFF)[chosen];
+        int sz  = PTR_I(p, S_DIST_SZ)[chosen];
+        double xi_e = pcg_uniform(rng);
+        const double* eo = &nuc_eo[off];
+        const double* cd = &nuc_cdf[off];
+        const double* pd = &nuc_pdf[off];
+        double e_out = sample_eout_bin(xi_e, eo, cd, pd, sz);
+        int k = 0;
+        if (sz >= 2) {
+            int lo = 0, hi = sz - 1;
+            while (hi - lo > 1) {
+                int mid = (lo + hi) >> 1;
+                if (cd[mid] <= xi_e) lo = mid; else hi = mid;
+            }
+            k = lo;
+        }
+        double frac = 0.0;
+        if (sz > 1) {
+            int k_c = (k > sz - 2) ? (sz - 2) : k;
+            double e_lo = eo[k_c];
+            double e_hi = eo[k_c + 1];
+            if (e_hi > e_lo) {
+                frac = (e_out - e_lo) / (e_hi - e_lo);
+                if (frac < 0.0) frac = 0.0;
+                else if (frac > 1.0) frac = 1.0;
+            }
+        }
+        *out_e_in_bin = e_in_bin;
+        *out_e_out_bin = k;
+        *out_e_out_frac = frac;
+        return fmax(e_out, 1e-5);
+    }
+
+    int ie;
+    {
+        int lo = 0, hi = fi_n - 1;
+        while (hi - lo > 1) {
+            int mid = (lo + hi) >> 1;
+            if (inc_e[mid] <= E_inc) lo = mid; else hi = mid;
+        }
+        ie = lo;
+    }
+
+    double r = (E_inc - inc_e[ie]) / fmax(inc_e[ie + 1] - inc_e[ie], 1e-30);
+    bool pick_hi = pcg_uniform(rng) < r;
+    int chosen_lo_g = fi_off + ie;
+    int chosen_hi_g = fi_off + ie + 1;
+    int chosen_g = pick_hi ? chosen_hi_g : chosen_lo_g;
+    int chosen_e_in_bin = pick_hi ? (ie + 1) : ie;
+
+    int off_l = PTR_I(p, S_DIST_LOCAL_OFF)[chosen_g];
+    int sz_l  = PTR_I(p, S_DIST_SZ)[chosen_g];
+    const double* eo_l = &nuc_eo[off_l];
+    const double* cd_l = &nuc_cdf[off_l];
+    const double* pd_l = &nuc_pdf[off_l];
+    double xi = pcg_uniform(rng);
+    double e_out = sample_eout_bin(xi, eo_l, cd_l, pd_l, sz_l);
+
+    int k = 0;
+    if (sz_l >= 2) {
+        int lo2 = 0, hi2 = sz_l - 1;
+        while (hi2 - lo2 > 1) {
+            int mid = (lo2 + hi2) >> 1;
+            if (cd_l[mid] <= xi) lo2 = mid; else hi2 = mid;
+        }
+        k = lo2;
+    }
+
+    int off_a = PTR_I(p, S_DIST_LOCAL_OFF)[chosen_lo_g];
+    int sz_a  = PTR_I(p, S_DIST_SZ)[chosen_lo_g];
+    int off_b = PTR_I(p, S_DIST_LOCAL_OFF)[chosen_hi_g];
+    int sz_b  = PTR_I(p, S_DIST_SZ)[chosen_hi_g];
+    const double* eo_a = &nuc_eo[off_a];
+    const double* eo_b = &nuc_eo[off_b];
+    double el1_lo = eo_l[0];
+    double el1_hi = (sz_l > 0) ? eo_l[sz_l - 1] : el1_lo;
+    double ea_lo  = eo_a[0];
+    double ea_hi  = (sz_a > 0) ? eo_a[sz_a - 1] : ea_lo;
+    double eb_lo  = eo_b[0];
+    double eb_hi  = (sz_b > 0) ? eo_b[sz_b - 1] : eb_lo;
+    double e1 = (1.0 - r) * ea_lo + r * eb_lo;
+    double eK = (1.0 - r) * ea_hi + r * eb_hi;
+    double span_l = el1_hi - el1_lo;
+    double adjusted = (fabs(span_l) < 1e-30) ? e_out
+                    : e1 + (e_out - el1_lo) * (eK - e1) / span_l;
+
+    double frac = 0.0;
+    if (sz_l > 1) {
+        int k_clamped = k;
+        if (k_clamped > sz_l - 2) k_clamped = sz_l - 2;
+        double e_lo = eo_l[k_clamped];
+        double e_hi = eo_l[k_clamped + 1];
+        if (e_hi > e_lo) {
+            frac = (e_out - e_lo) / (e_hi - e_lo);
+            if (frac < 0.0) frac = 0.0;
+            else if (frac > 1.0) frac = 1.0;
+        }
+    }
+    *out_e_in_bin = chosen_e_in_bin;
+    *out_e_out_bin = k;
+    *out_e_out_frac = frac;
+    return fmax(adjusted, 1e-5);
+}
+
+// Slot-parameterized correlated-mu sampler (File-6 / Law 61). Identical
+// to `sample_inel91_mu_at` but the four mu slot indices are passed in so
+// it serves (n,2n)/(n,3n) too. Returns a uniform cosine `2u-1` when the
+// nuclide has no mu table — rotated off any axis that is isotropic,
+// matching the CPU isotropic fallback for distributions without mu_dist.
+__device__ __forceinline__ double sample_corr_mu_at(
+    int hit_nuc, int e_in_bin, int e_out_bin, double e_out_frac,
+    PcgState* rng, Params p,
+    int S_MU_HAS, int S_MU_E_IN_START_PTRS, int S_MU_OFFSETS_PTRS, int S_MU_DATA_PTRS)
+{
+    int has = __ldg(&PTR_I(p, S_MU_HAS)[hit_nuc]);
+    if (!has) return 2.0 * pcg_uniform(rng) - 1.0;
+    const int* e_in_starts =
+        (const int*) __ldg(&PTR_U64(p, S_MU_E_IN_START_PTRS)[hit_nuc]);
+    const int* offsets =
+        (const int*) __ldg(&PTR_U64(p, S_MU_OFFSETS_PTRS)[hit_nuc]);
+    const double* data =
+        (const double*) __ldg(&PTR_U64(p, S_MU_DATA_PTRS)[hit_nuc]);
+
+    int row_start = e_in_starts[e_in_bin];
+    int row_end   = e_in_starts[e_in_bin + 1];
+    int row_len   = row_end - row_start;
+    if (row_len <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
+    int k_lo = e_out_bin;
+    int k_hi = e_out_bin + 1;
+    if (k_lo < 0) k_lo = 0;
+    if (k_lo > row_len - 1) k_lo = row_len - 1;
+    if (k_hi > row_len - 1) k_hi = row_len - 1;
+    bool pick_hi = pcg_uniform(rng) < e_out_frac;
+    int t = row_start + (pick_hi ? k_hi : k_lo);
+
+    int off  = offsets[t];
+    int next = offsets[t + 1];
+    int sz   = next - off;
+    if (sz <= 0) return 2.0 * pcg_uniform(rng) - 1.0;
+    if (sz == 1) {
+        double mu0 = data[off * 3 + 0];
+        if (mu0 < -1.0) mu0 = -1.0;
+        else if (mu0 > 1.0) mu0 = 1.0;
+        return mu0;
+    }
+
+    double xi = pcg_uniform(rng);
+    int lo = 0, hi = sz - 1;
+    while (hi - lo > 1) {
+        int mid = (lo + hi) >> 1;
+        if (data[(off + mid) * 3 + 2] <= xi) lo = mid; else hi = mid;
+    }
+    double c0 = data[(off + lo) * 3 + 2];
+    double c1 = data[(off + lo + 1) * 3 + 2];
+    double m0 = data[(off + lo) * 3 + 0];
+    double m1 = data[(off + lo + 1) * 3 + 0];
+    double mu;
+    if (c1 > c0) {
+        double f = (xi - c0) / (c1 - c0);
+        mu = m0 + f * (m1 - m0);
+    } else {
+        mu = m0;
+    }
+    if (mu < -1.0) mu = -1.0;
+    else if (mu > 1.0) mu = 1.0;
+    return mu;
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -2672,23 +2889,26 @@ transport_persistent(
                   if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
                 }
                 { // The primary continues as one of the two emitted
-                  // neutrons: sample its outgoing energy from the SAME
-                  // ENDF MT=16 distribution as the banked secondary.
-                  // (n,2n) is not a two-body reaction — both neutrons
-                  // share the inclusive emission spectrum, so the old
-                  // two-body-CM+Q treatment made the primary too hard
-                  // (⟨E_out⟩ 1.58 vs 0.88 MeV CPU) and re-triggered (n,2n)
-                  // (+10% rate). This matches the CPU and OpenMC. Direction
-                  // is isotropic in LAB; the correlated emission cosine is
-                  // a follow-up (GPU mu-coupling slots).
-                  double e_prim = sample_nxn_eout(E, &rng, p, hit_nuc,
-                      P_N2N_NUC_OFF, P_N2N_NUC_NINC, P_N2N_INC_E_PTRS,
-                      P_N2N_E_OUT_PTRS, P_N2N_CDF_PTRS, P_N2N_PDF_PTRS,
-                      P_N2N_DIST_LOCAL_OFF, P_N2N_DIST_SZ);
-                  E=fmax(e_prim,1e-5);
-                  double mu_iso=2.0*pcg_uniform(&rng)-1.0, phi_iso=2.0*PI*pcg_uniform(&rng);
-                  double st=sqrt(fmax(0.0,1.0-mu_iso*mu_iso));
-                  dx=st*cos(phi_iso); dy=st*sin(phi_iso); dz=mu_iso;
+                  // neutrons: sample (E_out, correlated LAB mu) from the
+                  // ENDF MT=16 File-6 distribution and emit off the
+                  // incident direction. (n,2n) is not a two-body reaction
+                  // — both neutrons share the inclusive emission spectrum
+                  // (matches CPU/OpenMC). Be-9 MT=16 is center_of_mass=0
+                  // so the cosine is applied directly in LAB. No table =>
+                  // evaporation energy + uniform mu (rotated = isotropic).
+                  int eib, eob; double efr;
+                  double e_prim = sample_continuum_eout_with_mu(E, &rng, p, hit_nuc,
+                      P_N2N_NUC_OFF, P_N2N_NUC_NINC, P_N2N_INC_E_PTRS, P_N2N_E_OUT_PTRS,
+                      P_N2N_CDF_PTRS, P_N2N_PDF_PTRS, P_N2N_DIST_LOCAL_OFF, P_N2N_DIST_SZ,
+                      &eib, &eob, &efr);
+                  double mu_p;
+                  if(e_prim>0.0){ E=fmax(e_prim,1e-5);
+                      mu_p=sample_corr_mu_at(hit_nuc, eib, eob, efr, &rng, p,
+                          P_N2N_MU_HAS, P_N2N_MU_E_IN_START_PTRS, P_N2N_MU_OFFSETS_PTRS, P_N2N_MU_DATA_PTRS);
+                  } else { double temp=E/10.0, x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
+                      E=fmax(fmin(-temp*log(x1*x2),E),1e-5); mu_p=2.0*pcg_uniform(&rng)-1.0; }
+                  double phi=2.0*PI*pcg_uniform(&rng);
+                  rotate_direction(&dx,&dy,&dz,mu_p,phi);
                 }
 
             } else if ((cum_rxn+=hit_xs.s_n3n), xi_rxn < cum_rxn) {
@@ -2705,18 +2925,22 @@ transport_persistent(
                   int idx2=atomicAdd(fis_count,1);
                   if(idx2<max_fis){ fis_x[idx2]=px;fis_y[idx2]=py;fis_z[idx2]=pz;fis_e[idx2]=e_sec;fis_w[idx2]=1.0; }
                 }
-                { // Primary energy from the ENDF MT=17 distribution (same
-                  // as the two banked secondaries); isotropic LAB direction.
-                  // See the (n,2n) note above — drops the non-physical
-                  // two-body-CM+Q primary.
-                  double e_prim = sample_nxn_eout(E, &rng, p, hit_nuc,
-                      P_N3N_NUC_OFF, P_N3N_NUC_NINC, P_N3N_INC_E_PTRS,
-                      P_N3N_E_OUT_PTRS, P_N3N_CDF_PTRS, P_N3N_PDF_PTRS,
-                      P_N3N_DIST_LOCAL_OFF, P_N3N_DIST_SZ);
-                  E=fmax(e_prim,1e-5);
-                  double mu_iso=2.0*pcg_uniform(&rng)-1.0, phi_iso=2.0*PI*pcg_uniform(&rng);
-                  double st=sqrt(fmax(0.0,1.0-mu_iso*mu_iso));
-                  dx=st*cos(phi_iso); dy=st*sin(phi_iso); dz=mu_iso;
+                { // Primary: (E_out, correlated LAB mu) from the ENDF
+                  // MT=17 File-6 distribution off the incident direction.
+                  // See the (n,2n) note above.
+                  int eib, eob; double efr;
+                  double e_prim = sample_continuum_eout_with_mu(E, &rng, p, hit_nuc,
+                      P_N3N_NUC_OFF, P_N3N_NUC_NINC, P_N3N_INC_E_PTRS, P_N3N_E_OUT_PTRS,
+                      P_N3N_CDF_PTRS, P_N3N_PDF_PTRS, P_N3N_DIST_LOCAL_OFF, P_N3N_DIST_SZ,
+                      &eib, &eob, &efr);
+                  double mu_p;
+                  if(e_prim>0.0){ E=fmax(e_prim,1e-5);
+                      mu_p=sample_corr_mu_at(hit_nuc, eib, eob, efr, &rng, p,
+                          P_N3N_MU_HAS, P_N3N_MU_E_IN_START_PTRS, P_N3N_MU_OFFSETS_PTRS, P_N3N_MU_DATA_PTRS);
+                  } else { double temp=E/10.0, x1=fmax(pcg_uniform(&rng),1e-30), x2=fmax(pcg_uniform(&rng),1e-30);
+                      E=fmax(fmin(-temp*log(x1*x2),E),1e-5); mu_p=2.0*pcg_uniform(&rng)-1.0; }
+                  double phi=2.0*PI*pcg_uniform(&rng);
+                  rotate_direction(&dx,&dy,&dz,mu_p,phi);
                 }
 
             } else if ((cum_rxn+=hit_xs.s_fis), xi_rxn < cum_rxn) {

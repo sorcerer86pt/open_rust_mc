@@ -1627,6 +1627,13 @@ pub struct TransportBuffers {
     pub d_sec_x: CudaSlice<f64>,
     pub d_sec_y: CudaSlice<f64>,
     pub d_sec_z: CudaSlice<f64>,
+    /// Correlated (n,2n)/(n,3n) emission direction for the banked
+    /// secondary (GPU-B2). gr_multi_event samples the File-6 mu off the
+    /// incident direction and stores the resulting unit vector here;
+    /// gr_inject_secondaries reads it instead of re-sampling isotropic.
+    pub d_sec_dx: CudaSlice<f64>,
+    pub d_sec_dy: CudaSlice<f64>,
+    pub d_sec_dz: CudaSlice<f64>,
     pub d_sec_e: CudaSlice<f64>,
     pub d_sec_rng_state: CudaSlice<u64>,
     pub d_sec_rng_inc: CudaSlice<u64>,
@@ -1757,6 +1764,9 @@ impl TransportBuffers {
             d_sec_x: mk_d(n)?,
             d_sec_y: mk_d(n)?,
             d_sec_z: mk_d(n)?,
+            d_sec_dx: mk_d(n)?,
+            d_sec_dy: mk_d(n)?,
+            d_sec_dz: mk_d(n)?,
             d_sec_e: mk_d(n)?,
             d_sec_rng_state: mk_u(n)?,
             d_sec_rng_inc: mk_u(n)?,
@@ -2630,6 +2640,9 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_sec_x)
                     .arg(&mut buffers.d_sec_y)
                     .arg(&mut buffers.d_sec_z)
+                    .arg(&mut buffers.d_sec_dx)
+                    .arg(&mut buffers.d_sec_dy)
+                    .arg(&mut buffers.d_sec_dz)
                     .arg(&mut buffers.d_sec_e)
                     .arg(&mut buffers.d_sec_rng_state)
                     .arg(&mut buffers.d_sec_rng_inc)
@@ -2741,6 +2754,9 @@ impl GpuRecursiveContext {
                     .arg(&buffers.d_sec_x)
                     .arg(&buffers.d_sec_y)
                     .arg(&buffers.d_sec_z)
+                    .arg(&buffers.d_sec_dx)
+                    .arg(&buffers.d_sec_dy)
+                    .arg(&buffers.d_sec_dz)
                     .arg(&buffers.d_sec_e)
                     .arg(&buffers.d_sec_rng_state)
                     .arg(&buffers.d_sec_rng_inc)
