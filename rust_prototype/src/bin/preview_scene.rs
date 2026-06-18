@@ -244,6 +244,25 @@ struct Args {
     /// `--render3d-out`.
     #[arg(long)]
     gpu: bool,
+
+    /// Interactive GPU *rasterized* 3D view (requires `--features
+    /// raster3d`). The CSG is meshed (surface nets) and drawn with a
+    /// real GPU pipeline — depth buffer + MSAA — in a winit orbit
+    /// window. Smoother than the ray-cast `--3d` view; the mesh is an
+    /// approximation at the `--mesh-grid` resolution.
+    #[arg(long)]
+    raster: bool,
+
+    /// Headless rasterized render to PNG (no window; requires
+    /// `--features raster3d`). Meshes + rasterizes from the
+    /// `--cam-azim` / `--cam-elev` angle.
+    #[arg(long = "raster-out")]
+    raster_out: Option<PathBuf>,
+
+    /// Grid resolution per axis for the rasterizer's surface-nets
+    /// meshing. Higher = finer mesh (slower build, more triangles).
+    #[arg(long = "mesh-grid", default_value_t = 128)]
+    mesh_grid: usize,
 }
 
 #[cfg(feature = "preview")]
@@ -1323,6 +1342,21 @@ fn main() {
         return;
     }
 
+    // Headless rasterized (meshed) render to PNG.
+    if let Some(out) = args.raster_out.as_deref() {
+        #[cfg(feature = "raster3d")]
+        {
+            raster3d::render_to_png(&args, out, args.mesh_grid);
+            return;
+        }
+        #[cfg(not(feature = "raster3d"))]
+        {
+            let _ = out;
+            eprintln!("--raster-out needs the `raster3d` feature (cargo run --features raster3d ...)");
+            std::process::exit(2);
+        }
+    }
+
     // Headless 2D render: `--ppm-out` and `--png-out` both route through
     // `render_ppm` (despite the legacy name) since the format is
     // picked up from the file extension by `write_image`.
@@ -2012,7 +2046,7 @@ mod render3d {
     /// Axis-aligned bounds of the geometry (xy from surfaces/lattices,
     /// z from PlaneZ / lattice extents), padded 6%. Falls back to a
     /// cube around the z-slice when the axial extent is unbounded.
-    fn scene_aabb(geom: &Geometry) -> (Vec3, Vec3) {
+    pub(crate) fn scene_aabb(geom: &Geometry) -> (Vec3, Vec3) {
         match world_bounds_xy(geom) {
             Some(b) => {
                 let (zmin, zmax) = if b.z_min.is_finite() && b.z_max.is_finite() && b.z_max > b.z_min
@@ -2068,7 +2102,7 @@ mod render3d {
     /// `true` for materials that should be drawn solid. Air / void /
     /// vacuum (and the no-material `Void` fill) are transparent so the
     /// camera sees the objects suspended inside them.
-    fn opaque_mask(names: &[String]) -> Vec<bool> {
+    pub(crate) fn opaque_mask(names: &[String]) -> Vec<bool> {
         names
             .iter()
             .map(|n| {
@@ -2680,5 +2714,742 @@ mod render3d {
             let hits = buf.iter().filter(|&&p| p != background(0, 64) ).count();
             assert!(hits > 64 * 64 / 8, "object coverage too small: {hits}");
         }
+    }
+}
+
+// ── CSG → triangle mesh (surface nets) ──────────────────────────────
+//
+// Turns the recursive CSG into per-material triangle meshes for the
+// GPU rasterizer: sample the deepest opaque material on a regular grid
+// once, then run Naive Surface Nets per material on the binary
+// occupancy indicator. Vertex normals are pulled analytically from the
+// nearest real surface (crisp on the quadrics/planes these scenes are
+// built from), oriented to agree with the surface-nets gradient.
+//
+// The mesh is an APPROXIMATION of the geometry at the grid resolution —
+// unlike the exact ray-cast paths — but it feeds a real rasterization
+// pipeline (depth + MSAA), which is what makes the orbit buttery.
+#[cfg(feature = "mesh3d")]
+pub mod mesh3d {
+    use super::render3d::{opaque_mask, scene_aabb};
+    use super::{load_preview, Args, LoadedPreview};
+    use fast_surface_nets::ndshape::{RuntimeShape, Shape};
+    use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
+    use open_rust_mc::geometry::cell::CellFill;
+    use open_rust_mc::geometry::ray::find_cell_recursive;
+    use open_rust_mc::geometry::{Geometry, Vec3};
+
+    /// GPU-ready triangle mesh of the whole scene (all materials merged,
+    /// colour baked per vertex). SoA so each array maps to a wgpu
+    /// vertex attribute / index buffer directly.
+    pub struct SceneMesh {
+        pub positions: Vec<[f32; 3]>,
+        pub normals: Vec<[f32; 3]>,
+        pub colors: Vec<[f32; 3]>,
+        pub indices: Vec<u32>,
+        /// World-space bounds (for camera framing in the rasterizer).
+        pub aabb_min: [f32; 3],
+        pub aabb_max: [f32; 3],
+    }
+
+    impl SceneMesh {
+        pub fn is_empty(&self) -> bool {
+            self.indices.is_empty()
+        }
+        pub fn triangle_count(&self) -> usize {
+            self.indices.len() / 3
+        }
+    }
+
+    /// Deepest opaque material index at `p`, or `-1` for empty
+    /// (transparent material / void / leak).
+    fn material_at(geom: &Geometry, opaque: &[bool], p: Vec3) -> i32 {
+        match find_cell_recursive(p, geom) {
+            Some(stack) => {
+                let ci = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                if let CellFill::Material(m) = geom.cells[ci].fill {
+                    if opaque.get(m as usize).copied().unwrap_or(true) {
+                        return m as i32;
+                    }
+                }
+                -1
+            }
+            None => -1,
+        }
+    }
+
+    /// Smooth per-vertex normals = area-weighted average of adjacent
+    /// face normals, computed from the mesh topology. Frame-independent
+    /// (correct for lattices too) and free of the surface-picking
+    /// ambiguity an analytic per-vertex normal would have; surface-nets
+    /// winds triangles outward, so the averaged normals point outward.
+    fn compute_smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+        let mut normals = vec![[0.0f32; 3]; positions.len()];
+        for tri in indices.chunks_exact(3) {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let p0 = positions[a];
+            let p1 = positions[b];
+            let p2 = positions[c];
+            let u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let v = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            // Un-normalised cross product = area-weighted face normal.
+            let fnv = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            for &idx in &[a, b, c] {
+                normals[idx][0] += fnv[0];
+                normals[idx][1] += fnv[1];
+                normals[idx][2] += fnv[2];
+            }
+        }
+        for n in &mut normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-12 {
+                n[0] /= len;
+                n[1] /= len;
+                n[2] /= len;
+            } else {
+                *n = [0.0, 0.0, 1.0];
+            }
+        }
+        normals
+    }
+
+    /// Mesh the geometry at `grid` samples per axis (clamped to a sane
+    /// range). Pure function of `(geometry, palette, opaque, grid)` —
+    /// the unit-testable core.
+    pub fn build_mesh(
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        opaque: &[bool],
+        grid: usize,
+    ) -> SceneMesh {
+        let (amin, amax) = scene_aabb(geometry);
+        let n = grid.clamp(16, 384) as u32;
+        let shape = RuntimeShape::<u32, 3>::new([n, n, n]);
+        let size = shape.size() as usize;
+        // Voxel spacing maps grid coord [0, n-1] across the AABB.
+        let denom = (n as f64 - 1.0).max(1.0);
+        let vs = Vec3::new(
+            (amax.x - amin.x) / denom,
+            (amax.y - amin.y) / denom,
+            (amax.z - amin.z) / denom,
+        );
+        let world_of = |x: u32, y: u32, z: u32| {
+            Vec3::new(
+                amin.x + x as f64 * vs.x,
+                amin.y + y as f64 * vs.y,
+                amin.z + z as f64 * vs.z,
+            )
+        };
+
+        // Sample the deepest opaque material at every grid point once.
+        use rayon::prelude::*;
+        let mat_grid: Vec<i32> = (0..size as u32)
+            .into_par_iter()
+            .map(|i| {
+                let [x, y, z] = shape.delinearize(i);
+                material_at(geometry, opaque, world_of(x, y, z))
+            })
+            .collect();
+
+        let mut mesh = SceneMesh {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+            aabb_min: [amin.x as f32, amin.y as f32, amin.z as f32],
+            aabb_max: [amax.x as f32, amax.y as f32, amax.z as f32],
+        };
+
+        let mut sdf = vec![1.0_f32; size];
+        for (m, &solid) in opaque.iter().enumerate() {
+            if !solid {
+                continue;
+            }
+            // Binary signed indicator: negative inside material m.
+            let mi = m as i32;
+            for (s, &g) in sdf.iter_mut().zip(mat_grid.iter()) {
+                *s = if g == mi { -1.0 } else { 1.0 };
+            }
+            let mut buffer = SurfaceNetsBuffer::default();
+            surface_nets(&sdf, &shape, [0; 3], [n - 1; 3], &mut buffer);
+            if buffer.positions.is_empty() {
+                continue;
+            }
+            let color = palette
+                .get(m)
+                .map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0])
+                .unwrap_or([0.8, 0.8, 0.8]);
+            let base = mesh.positions.len() as u32;
+            for pos in &buffer.positions {
+                // Surface-nets positions are in voxel space [0, n-1].
+                let wp = world_of(0, 0, 0)
+                    + Vec3::new(pos[0] as f64 * vs.x, pos[1] as f64 * vs.y, pos[2] as f64 * vs.z);
+                mesh.positions.push([wp.x as f32, wp.y as f32, wp.z as f32]);
+                mesh.colors.push(color);
+            }
+            mesh.indices.extend(buffer.indices.iter().map(|&i| base + i));
+        }
+        // Smooth normals from the merged topology (one pass over all
+        // materials' triangles).
+        mesh.normals = compute_smooth_normals(&mesh.positions, &mesh.indices);
+        mesh
+    }
+
+    /// Mesh the scene a CLI invocation points at (loads geometry +
+    /// materials, then [`build_mesh`]). Used by the `raster3d` viewer.
+    #[allow(dead_code)]
+    pub(crate) fn build_scene_mesh(args: &Args, grid: usize) -> SceneMesh {
+        let LoadedPreview {
+            geometry,
+            palette,
+            names,
+            ..
+        } = load_preview(args);
+        let opaque = opaque_mask(&names);
+        build_mesh(&geometry, &palette, &opaque, grid)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use open_rust_mc::geometry::cell::{inside, intersect_all, outside, Cell};
+        use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+        use open_rust_mc::geometry::CellId;
+
+        fn two_sphere() -> Geometry {
+            let s_inner = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 2.0,
+                bc: BoundaryCondition::Transmission,
+            };
+            let s_outer = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 4.0,
+                bc: BoundaryCondition::Vacuum,
+            };
+            let inner = Cell::new(CellId(0), inside(0), CellFill::Material(0));
+            let shell = Cell::new(
+                CellId(1),
+                intersect_all(vec![inside(1), outside(0)]),
+                CellFill::Material(1),
+            );
+            Geometry::flat(vec![s_inner, s_outer], vec![inner, shell]).expect("two-sphere")
+        }
+
+        #[test]
+        fn meshes_two_sphere_with_valid_topology() {
+            let geom = two_sphere();
+            let palette = vec![[220u8, 80, 60], [90, 160, 220]];
+            let opaque = vec![true, true];
+            let mesh = build_mesh(&geom, &palette, &opaque, 48);
+
+            assert!(!mesh.is_empty(), "expected a non-empty mesh");
+            assert_eq!(mesh.positions.len(), mesh.normals.len());
+            assert_eq!(mesh.positions.len(), mesh.colors.len());
+            assert_eq!(mesh.indices.len() % 3, 0, "indices must form triangles");
+            // Every index must be in range.
+            let nverts = mesh.positions.len() as u32;
+            assert!(mesh.indices.iter().all(|&i| i < nverts));
+            // Normals must be unit-length.
+            for n in &mesh.normals {
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                assert!((len - 1.0).abs() < 1e-3, "non-unit normal: {len}");
+            }
+            // Vertices must lie within the padded scene bounds.
+            for p in &mesh.positions {
+                assert!(p[0] >= mesh.aabb_min[0] - 1e-3 && p[0] <= mesh.aabb_max[0] + 1e-3);
+                assert!(p[1] >= mesh.aabb_min[1] - 1e-3 && p[1] <= mesh.aabb_max[1] + 1e-3);
+                assert!(p[2] >= mesh.aabb_min[2] - 1e-3 && p[2] <= mesh.aabb_max[2] + 1e-3);
+            }
+        }
+    }
+}
+
+// ── GPU rasterizer (wgpu) ───────────────────────────────────────────
+//
+// Draws the meshed CSG with a real GPU pipeline: depth buffer, 4× MSAA,
+// a Lambert (two directional lights + ambient) WGSL shader, per-vertex
+// colour. `render_to_png` renders headless (offscreen → texture →
+// readback) so it's verifiable without a window; the winit orbit
+// window (`run_window`) reuses the same shader / vertex layout / camera
+// math.
+#[cfg(feature = "raster3d")]
+pub mod raster3d {
+    use super::mesh3d::{build_scene_mesh, SceneMesh};
+    use super::Args;
+    use std::path::Path;
+    use wgpu::util::DeviceExt;
+
+    const SAMPLE_COUNT: u32 = 4;
+    const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+    const SHADER: &str = r#"
+struct U { mvp: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) col: vec3<f32>) -> VsOut {
+    var o: VsOut;
+    o.clip = u.mvp * vec4<f32>(pos, 1.0);
+    o.normal = nrm;
+    o.color = col;
+    return o;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.normal);
+    let key = normalize(vec3<f32>(0.35, 0.45, 0.82));
+    let fill = normalize(vec3<f32>(-0.3, -0.2, 0.5));
+    let kd = max(dot(n, key), 0.0);
+    let fd = max(dot(n, fill), 0.0);
+    let lit = min(0.18 + 0.62 * kd + 0.30 * fd, 1.15);
+    return vec4<f32>(in.color * lit, 1.0);
+}
+"#;
+
+    // ── small column-major 4×4 matrix helpers (avoid a glam dep) ────
+    type Mat4 = [f32; 16];
+
+    fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+        let mut c = [0.0f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += a[k * 4 + row] * b[col * 4 + k];
+                }
+                c[col * 4 + row] = s;
+            }
+        }
+        c
+    }
+
+    /// Right-handed perspective with NDC z in [0, 1] (wgpu convention).
+    fn perspective(fovy_rad: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+        let f = 1.0 / (fovy_rad * 0.5).tan();
+        let mut m = [0.0f32; 16];
+        m[0] = f / aspect;
+        m[5] = f;
+        m[10] = far / (near - far);
+        m[11] = -1.0;
+        m[14] = (near * far) / (near - far);
+        m
+    }
+
+    fn normalize(v: [f32; 3]) -> [f32; 3] {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l > 1e-12 { [v[0] / l, v[1] / l, v[2] / l] } else { v }
+    }
+    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    }
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    /// Right-handed look-at view matrix.
+    fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> Mat4 {
+        let f = normalize([center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]]);
+        let s = normalize(cross(f, up));
+        let u = cross(s, f);
+        [
+            s[0], u[0], -f[0], 0.0,
+            s[1], u[1], -f[1], 0.0,
+            s[2], u[2], -f[2], 0.0,
+            -dot(s, eye), -dot(u, eye), dot(f, eye), 1.0,
+        ]
+    }
+
+    /// Orbit-camera eye/center for the given azimuth/elevation (degrees)
+    /// framing the mesh's bounds. Returns `(mvp, eye)`.
+    pub fn camera_mvp(
+        mesh: &SceneMesh,
+        azim_deg: f64,
+        elev_deg: f64,
+        radius_scale: f32,
+        aspect: f32,
+    ) -> Mat4 {
+        let cx = 0.5 * (mesh.aabb_min[0] + mesh.aabb_max[0]);
+        let cy = 0.5 * (mesh.aabb_min[1] + mesh.aabb_max[1]);
+        let cz = 0.5 * (mesh.aabb_min[2] + mesh.aabb_max[2]);
+        let dx = mesh.aabb_max[0] - mesh.aabb_min[0];
+        let dy = mesh.aabb_max[1] - mesh.aabb_min[1];
+        let dz = mesh.aabb_max[2] - mesh.aabb_min[2];
+        let diag = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+        let radius = diag * radius_scale;
+        let (az, el) = (azim_deg.to_radians() as f32, elev_deg.to_radians() as f32);
+        let ce = el.cos();
+        let eye = [
+            cx + radius * ce * az.cos(),
+            cy + radius * ce * az.sin(),
+            cz + radius * el.sin(),
+        ];
+        let proj = perspective(45.0_f32.to_radians(), aspect, diag * 0.02, diag * 8.0);
+        let view = look_at(eye, [cx, cy, cz], [0.0, 0.0, 1.0]);
+        mat_mul(&proj, &view)
+    }
+
+    /// Interleave the SoA mesh into `[pos(3), normal(3), color(3)]`
+    /// vertices for a single vertex buffer.
+    fn interleave(mesh: &SceneMesh) -> Vec<f32> {
+        let mut v = Vec::with_capacity(mesh.positions.len() * 9);
+        for i in 0..mesh.positions.len() {
+            v.extend_from_slice(&mesh.positions[i]);
+            v.extend_from_slice(&mesh.normals[i]);
+            v.extend_from_slice(&mesh.colors[i]);
+        }
+        v
+    }
+
+    /// GPU resources for drawing one mesh. Shared by the headless and
+    /// windowed paths; `render_into` draws into any provided color/depth
+    /// view pair (offscreen MSAA texture, or a surface frame).
+    pub struct Renderer {
+        pub device: wgpu::Device,
+        pub queue: wgpu::Queue,
+        pipeline: wgpu::RenderPipeline,
+        bind_group: wgpu::BindGroup,
+        uniform: wgpu::Buffer,
+        vbuf: wgpu::Buffer,
+        ibuf: wgpu::Buffer,
+        n_indices: u32,
+    }
+
+    impl Renderer {
+        /// Build the pipeline + upload the mesh. `target_format` is the
+        /// color format the pipeline renders to (offscreen sRGB, or the
+        /// surface's format).
+        pub fn new(
+            device: wgpu::Device,
+            queue: wgpu::Queue,
+            mesh: &SceneMesh,
+            target_format: wgpu::TextureFormat,
+        ) -> Self {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("raster-shader"),
+                source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            });
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raster-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-uniform"),
+                size: 64, // one mat4x4<f32>
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("raster-bg"),
+                layout: &bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("raster-layout"),
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
+            });
+            let vertex_layout = wgpu::VertexBufferLayout {
+                array_stride: 9 * 4,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
+                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 },
+                ],
+            };
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("raster-pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[vertex_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: SAMPLE_COUNT,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            });
+
+            let verts = interleave(mesh);
+            let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("raster-vbuf"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("raster-ibuf"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            Self {
+                device,
+                queue,
+                pipeline,
+                bind_group,
+                uniform,
+                vbuf,
+                ibuf,
+                n_indices: mesh.indices.len() as u32,
+            }
+        }
+
+        pub fn set_mvp(&self, mvp: &Mat4) {
+            self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(mvp));
+        }
+
+        /// Record a render pass drawing the mesh into `color`/`resolve`
+        /// (MSAA color + resolve target) and `depth`.
+        pub fn draw(
+            &self,
+            encoder: &mut wgpu::CommandEncoder,
+            color_msaa: &wgpu::TextureView,
+            resolve: &wgpu::TextureView,
+            depth: &wgpu::TextureView,
+            clear: wgpu::Color,
+        ) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_msaa,
+                    depth_slice: None,
+                    resolve_target: Some(resolve),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vbuf.slice(..));
+            pass.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.n_indices, 0, 0..1);
+        }
+    }
+
+    /// Make the MSAA color + depth textures for a `w × h` target.
+    pub fn make_targets(
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+        color_format: wgpu::TextureFormat,
+    ) -> (wgpu::TextureView, wgpu::TextureView) {
+        let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-msaa-color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        (
+            color.create_view(&Default::default()),
+            depth.create_view(&Default::default()),
+        )
+    }
+
+    /// Headless render → tight RGBA8 bytes (`w*h*4`).
+    async fn render_offscreen(mesh: &SceneMesh, w: u32, h: u32, mvp: Mat4) -> Vec<u8> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .expect("no GPU adapter");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("raster-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .expect("device");
+
+        let renderer = Renderer::new(device, queue, mesh, COLOR_FORMAT);
+        renderer.set_mvp(&mvp);
+
+        let (color_msaa, depth) = make_targets(&renderer.device, w, h, COLOR_FORMAT);
+        // Single-sample resolve target we can copy out of.
+        let resolve_tex = renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-resolve"),
+            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let resolve_view = resolve_tex.create_view(&Default::default());
+
+        let bpr = ((w * 4 + 255) / 256) * 256; // 256-byte aligned row
+        let out_buf = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-readback"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = renderer
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-enc") });
+        renderer.draw(
+            &mut encoder,
+            &color_msaa,
+            &resolve_view,
+            &depth,
+            wgpu::Color { r: 0.06, g: 0.066, b: 0.09, a: 1.0 },
+        );
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resolve_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &out_buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        renderer.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = out_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        renderer.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        rx.recv().expect("map channel").expect("map failed");
+
+        let data = slice.get_mapped_range();
+        let mut tight = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h {
+            let start = (row * bpr) as usize;
+            tight.extend_from_slice(&data[start..start + (w * 4) as usize]);
+        }
+        drop(data);
+        out_buf.unmap();
+        tight
+    }
+
+    /// Headless rasterized render to PNG.
+    pub(crate) fn render_to_png(args: &Args, out: &Path, grid: usize) {
+        let mesh = build_scene_mesh(args, grid);
+        if mesh.is_empty() {
+            eprintln!("raster: nothing opaque to draw (empty mesh)");
+            return;
+        }
+        let w = args.resolution;
+        let h = args.resolution;
+        let mvp = camera_mvp(&mesh, args.cam_azim, args.cam_elev, 0.9, w as f32 / h as f32);
+        let rgba = pollster::block_on(render_offscreen(&mesh, w, h, mvp));
+        write_png_rgba(out, &rgba, w, h);
+        eprintln!(
+            "wrote {} ({}×{}) [raster, {} tris, grid {}]  azim={:.1}° elev={:.1}°",
+            out.display(),
+            w,
+            h,
+            mesh.triangle_count(),
+            grid,
+            args.cam_azim,
+            args.cam_elev
+        );
+    }
+
+    fn write_png_rgba(path: &Path, rgba: &[u8], w: u32, h: u32) {
+        let file = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(rgba).expect("png data");
     }
 }

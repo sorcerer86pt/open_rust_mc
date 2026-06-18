@@ -80,6 +80,17 @@ minifb = { version = "0.27", optional = true }
 # `tui` feature so the engine library, Python wheel, and CUDA builds
 # never compile it.
 ratatui = { version = "0.30", optional = true }
+# 3D rasterizer preview (`preview_scene --raster`). The CSG is meshed
+# (surface-nets over a sampled occupancy grid) and drawn with a real
+# GPU pipeline — depth buffer, MSAA, Lambert shading — via wgpu, in a
+# winit orbit-camera window. `fast-surface-nets` (+ its `ndshape`
+# index helper) does the isosurface extraction; `pollster` blocks on
+# wgpu's async device init. All gated behind `raster3d` so normal
+# builds never pull this (large) graphics stack.
+wgpu = { version = "29", optional = true }
+winit = { version = "0.30", optional = true }
+pollster = { version = "0.4", optional = true }
+fast-surface-nets = { version = "0.2", optional = true }
 
 # Local-only dependencies
 hdf5-pure = "0.1"
@@ -128,6 +139,12 @@ preview = ["rust-mc-sim/preview", "dep:minifb"]
 # graphical minifb window and the terminal viewer are separate paths;
 # enable whichever fits the environment.
 tui = ["dep:ratatui"]
+# CSG → triangle-mesh extraction (surface-nets). Pure Rust, no GPU —
+# the meshing half of the rasterizer preview, separable so it can be
+# unit-tested without compiling the wgpu/winit graphics stack.
+mesh3d = ["dep:fast-surface-nets"]
+# Full GPU rasterizer preview: meshing + wgpu pipeline + winit window.
+raster3d = ["mesh3d", "dep:wgpu", "dep:pollster", "dep:winit"]
 # Multi-PC nuclide kernel cache daemon. When enabled, `nuclide_cache`
 # can connect to a TCP server (set via `OPEN_RUST_MC_CACHE_SERVER`) as
 # its L3 tier — slaves on a LAN fetch parsed kernels from a master
