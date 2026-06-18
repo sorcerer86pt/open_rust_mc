@@ -374,6 +374,9 @@ pub struct GpuRecursiveContext {
     pub k_find_cell_batch: CudaFunction,
     pub k_trace_step_batch: CudaFunction,
     pub k_multi_step_walk: CudaFunction,
+    /// Preview-only: perspective ray-cast of the geometry (see
+    /// `gpu/cuda/geom_recursive_raycast.cu` and `raycast_image`).
+    pub k_raycast: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
     // Event-based pipeline kernels (Tramm et al., PHYSOR 2022 —
     // "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
@@ -440,6 +443,7 @@ pub struct GpuRecursiveContext {
 
 const RECURSIVE_DEVICE: &str = include_str!("../gpu/cuda/geom_recursive.cu");
 const RECURSIVE_KERNELS: &str = include_str!("../gpu/cuda/geom_recursive_kernels.cu");
+const RAYCAST_KERNEL: &str = include_str!("../gpu/cuda/geom_recursive_raycast.cu");
 const CONST_XS_KERNEL: &str = include_str!("../gpu/cuda/transport_recursive_const.cu");
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 const TRANSPORT_EVENT_BASED: &str = include_str!("../gpu/cuda/transport_event_based.cu");
@@ -471,11 +475,14 @@ fn assemble_kernel_source() -> String {
     // come first, then the recursive geometry primitives, then the
     // kernels that consume both.
     format!(
-        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}",
+        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}\n{}",
         strip(TRANSPORT_KERNELS),
         strip(RECURSIVE_KERNELS),
         strip(CONST_XS_KERNEL),
         strip(TRANSPORT_EVENT_BASED),
+        // Preview ray-cast kernel — only needs the gr_* helpers from
+        // RECURSIVE_DEVICE above, so it can go last.
+        strip(RAYCAST_KERNEL),
     )
 }
 
@@ -549,6 +556,9 @@ impl GpuRecursiveContext {
         let k_multi_step_walk = module
             .load_function("multi_step_walk")
             .map_err(|e| format!("kernel load (walk): {e}"))?;
+        let k_raycast = module
+            .load_function("raycast_preview")
+            .map_err(|e| format!("kernel load (raycast): {e}"))?;
         let k_const_xs_transport = module
             .load_function("const_xs_transport_persistent")
             .map_err(|e| format!("kernel load (const_xs): {e}"))?;
@@ -739,6 +749,7 @@ impl GpuRecursiveContext {
             k_find_cell_batch,
             k_trace_step_batch,
             k_multi_step_walk,
+            k_raycast,
             k_const_xs_transport,
             k_eb_init_stacks,
             k_eb_trace_and_sample,
@@ -879,6 +890,124 @@ impl GpuRecursiveContext {
         let host_out = self.stream.clone_dtoh(&out).map_err(|e| e.to_string())?;
         let _ = (xs, ys, zs);
         Ok(host_out)
+    }
+
+    /// Ray-cast a `width × height` 3D preview of the geometry on the
+    /// GPU and return a row-major `0x00RRGGBB` framebuffer.
+    ///
+    /// `cam_*` are the camera basis vectors (forward / right / up must
+    /// be unit-length and orthonormal) and position; `aabb_*` are the
+    /// scene bounds used for ray entry + step scaling. `palette` is
+    /// `[r,g,b]` per material (0..255, length `3 * n_materials`) and
+    /// `opaque` is 0/1 per material (air/void = 0 so the camera sees
+    /// through them). The kernel walks the same device CSG as transport
+    /// (`gr_find_cell` / `gr_trace_step`), so the image is faithful to
+    /// the real geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raycast_image(
+        &self,
+        cam_pos: [f64; 3],
+        cam_fwd: [f64; 3],
+        cam_right: [f64; 3],
+        cam_up: [f64; 3],
+        tan_half_fov: f64,
+        width: usize,
+        height: usize,
+        aabb_min: [f64; 3],
+        aabb_max: [f64; 3],
+        palette: &[i32],
+        opaque: &[i32],
+    ) -> Result<Vec<u32>, String> {
+        let n_pixels = width * height;
+        if n_pixels == 0 {
+            return Ok(Vec::new());
+        }
+        let n_materials = opaque.len() as i32;
+        let aspect = width as f64 / height as f64;
+
+        // Per-call buffers: geometry tables already live on the device;
+        // only the palette / opaque mask / per-thread evals scratch /
+        // output framebuffer are sized to this request.
+        let d_palette = self.stream.clone_htod(palette).map_err(|e| e.to_string())?;
+        let d_opaque = self.stream.clone_htod(opaque).map_err(|e| e.to_string())?;
+        let mut evals = self
+            .stream
+            .alloc_zeros::<f64>(self.n_surfaces.max(1) as usize * n_pixels)
+            .map_err(|e| e.to_string())?;
+        let mut out = self
+            .stream
+            .alloc_zeros::<u32>(n_pixels)
+            .map_err(|e| e.to_string())?;
+
+        let block = 128_u32;
+        let grid = (n_pixels as u32).div_ceil(block);
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Scalars must outlive the launch (launch_builder borrows them).
+        let (cpx, cpy, cpz) = (cam_pos[0], cam_pos[1], cam_pos[2]);
+        let (fx, fy, fz) = (cam_fwd[0], cam_fwd[1], cam_fwd[2]);
+        let (rx, ry, rz) = (cam_right[0], cam_right[1], cam_right[2]);
+        let (ux, uy, uz) = (cam_up[0], cam_up[1], cam_up[2]);
+        let thf = tan_half_fov;
+        let asp = aspect;
+        let w_i = width as i32;
+        let h_i = height as i32;
+        let (amnx, amny, amnz) = (aabb_min[0], aabb_min[1], aabb_min[2]);
+        let (amxx, amxy, amxz) = (aabb_max[0], aabb_max[1], aabb_max[2]);
+        let n_mat = n_materials;
+        let n_surf = self.n_surfaces;
+        let root = self.root_universe;
+
+        let stream = &self.stream;
+        let mut launch = stream.launch_builder(&self.k_raycast);
+        launch
+            // camera
+            .arg(&cpx).arg(&cpy).arg(&cpz)
+            .arg(&fx).arg(&fy).arg(&fz)
+            .arg(&rx).arg(&ry).arg(&rz)
+            .arg(&ux).arg(&uy).arg(&uz)
+            .arg(&thf).arg(&asp)
+            .arg(&w_i).arg(&h_i)
+            // aabb
+            .arg(&amnx).arg(&amny).arg(&amnz)
+            .arg(&amxx).arg(&amxy).arg(&amxz)
+            // shading
+            .arg(&d_palette).arg(&d_opaque).arg(&n_mat)
+            // surfaces
+            .arg(&self.surf_type).arg(&self.surf_params).arg(&self.surf_bc).arg(&n_surf)
+            // cells
+            .arg(&self.cell_region_off).arg(&self.cell_region_len)
+            .arg(&self.cell_fill_type).arg(&self.cell_fill_data)
+            .arg(&self.cell_aabb_min).arg(&self.cell_aabb_max)
+            // region tree
+            .arg(&self.region_op).arg(&self.region_arg)
+            // universes
+            .arg(&self.univ_cells_off).arg(&self.univ_cells_len)
+            .arg(&self.univ_surfaces_off).arg(&self.univ_surfaces_len)
+            .arg(&self.univ_cell_indices).arg(&self.univ_surface_indices)
+            .arg(&root)
+            // lattices
+            .arg(&self.lat_origin).arg(&self.lat_pitch).arg(&self.lat_shape)
+            .arg(&self.lat_universes_off).arg(&self.lat_universes)
+            // hex lattices
+            .arg(&self.hex_center).arg(&self.hex_pitch_xy).arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings).arg(&self.hex_n_axial).arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off).arg(&self.hex_universes)
+            // scratch + output
+            .arg(&mut evals)
+            .arg(&mut out);
+        // SAFETY: argument list matches `raycast_preview`'s signature.
+        unsafe {
+            launch.launch(cfg).map_err(|e| e.to_string())?;
+        }
+
+        let host = self.stream.clone_dtoh(&out).map_err(|e| e.to_string())?;
+        let _ = (d_palette, d_opaque, evals);
+        Ok(host)
     }
 }
 
@@ -2956,5 +3085,109 @@ impl GpuRecursiveContext {
         std::mem::size_of_val(&self.surf_type)
             + std::mem::size_of_val(&self.surf_params)
             + std::mem::size_of_val(&self.surf_bc)
+    }
+}
+
+#[cfg(test)]
+mod raycast_tests {
+    use super::*;
+    use crate::geometry::cell::{inside, intersect_all, outside, Cell};
+    use crate::geometry::surface::{BoundaryCondition, Surface};
+    use crate::geometry::CellId;
+
+    /// Background colour the kernel paints for pixel-row `py` of `h`
+    /// (must match `geom_recursive_raycast.cu`).
+    fn bg(py: usize, h: usize) -> u32 {
+        let f = py as f64 / (h.max(1) as f64);
+        let r = (16.0 + 14.0 * f) as u32;
+        let g = (17.0 + 16.0 * f) as u32;
+        let b = (23.0 + 19.0 * f) as u32;
+        (r << 16) | (g << 8) | b
+    }
+
+    /// Inner solid sphere (mat 0) inside an outer shell (mat 1).
+    fn two_sphere() -> Geometry {
+        let s_inner = Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 2.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        let s_outer = Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 4.0,
+            bc: BoundaryCondition::Vacuum,
+        };
+        let inner = Cell::new(CellId(0), inside(0), CellFill::Material(0));
+        let shell = Cell::new(
+            CellId(1),
+            intersect_all(vec![inside(1), outside(0)]),
+            CellFill::Material(1),
+        );
+        Geometry::flat(vec![s_inner, s_outer], vec![inner, shell]).expect("two-sphere geometry")
+    }
+
+    /// The GPU ray-cast kernel renders the outer shell as a coherent
+    /// shaded object (centre pixel is the material, not background; the
+    /// object covers a meaningful fraction of the frame). Skips cleanly
+    /// when no CUDA device is present so the suite passes on GPU-less
+    /// machines.
+    #[test]
+    fn gpu_raycast_renders_two_sphere() {
+        let geom = two_sphere();
+        let ctx = match GpuRecursiveContext::build(&geom, 1) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping gpu_raycast_renders_two_sphere — no CUDA device: {e}");
+                return;
+            }
+        };
+
+        // Orbit camera looking at the origin.
+        let target = Vec3::new(0.0, 0.0, 0.0);
+        let (azim, elev, radius) = (0.6_f64, 0.3_f64, 12.0_f64);
+        let ce = elev.cos();
+        let dir = Vec3::new(ce * azim.cos(), ce * azim.sin(), elev.sin());
+        let pos = target + dir * radius;
+        let fwd = (target - pos).normalized();
+        let world_up = Vec3::new(0.0, 0.0, 1.0);
+        let right = fwd.cross(world_up).normalized();
+        let up = right.cross(fwd).normalized();
+        let tan_half_fov = (45.0_f64.to_radians() * 0.5).tan();
+
+        let (w, h) = (64usize, 64usize);
+        let palette: Vec<i32> = vec![220, 80, 60, 90, 160, 220];
+        let opaque: Vec<i32> = vec![1, 1];
+
+        let buf = ctx
+            .raycast_image(
+                [pos.x, pos.y, pos.z],
+                [fwd.x, fwd.y, fwd.z],
+                [right.x, right.y, right.z],
+                [up.x, up.y, up.z],
+                tan_half_fov,
+                w,
+                h,
+                [-5.0, -5.0, -5.0],
+                [5.0, 5.0, 5.0],
+                &palette,
+                &opaque,
+            )
+            .expect("raycast_image");
+
+        assert_eq!(buf.len(), w * h);
+        // Centre pixel must hit the sphere, not background.
+        let centre = buf[(h / 2) * w + w / 2];
+        assert_ne!(
+            centre,
+            bg(h / 2, h),
+            "centre pixel should be the shaded shell, not background"
+        );
+        // Object should cover a meaningful fraction of the frame.
+        let hits = buf
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| **p != bg(*i / w, h))
+            .count();
+        assert!(hits > w * h / 8, "object coverage too small: {hits}");
     }
 }

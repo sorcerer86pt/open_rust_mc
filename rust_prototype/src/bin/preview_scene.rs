@@ -236,6 +236,14 @@ struct Args {
     /// initial / headless angle.
     #[arg(long, default_value_t = 25.0)]
     cam_elev: f64,
+
+    /// Render the 3D view on the GPU (requires `--features cuda` + a
+    /// CUDA device). Ray-casts the same device CSG the transport
+    /// kernels use. Falls back to the CPU ray-caster with a warning if
+    /// the GPU context can't be built. No effect without `--3d` /
+    /// `--render3d-out`.
+    #[arg(long)]
+    gpu: bool,
 }
 
 #[cfg(feature = "preview")]
@@ -1949,6 +1957,8 @@ mod render3d {
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
     use open_rust_mc::geometry::{Geometry, Vec3};
+    #[cfg(feature = "cuda")]
+    use open_rust_mc::gpu_recursive::GpuRecursiveContext;
     use std::path::Path;
 
     /// Orbit camera: spherical position about `target`, +z up.
@@ -2280,6 +2290,53 @@ mod render3d {
         buf
     }
 
+    /// Flatten an `[r,g,b]`-per-material palette to the `i32` triples
+    /// the GPU kernel expects.
+    #[cfg(feature = "cuda")]
+    fn palette_i32(palette: &[[u8; 3]]) -> Vec<i32> {
+        palette
+            .iter()
+            .flat_map(|c| [c[0] as i32, c[1] as i32, c[2] as i32])
+            .collect()
+    }
+
+    /// Unpack a `0x00RRGGBB` framebuffer to `[r,g,b]` rows for the PNG
+    /// writer.
+    fn u32_to_rgb(buf: &[u32]) -> Vec<[u8; 3]> {
+        buf.iter()
+            .map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8])
+            .collect()
+    }
+
+    /// GPU ray-cast one frame via the persistent `GpuRecursiveContext`.
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn gpu_frame(
+        palette: &[[u8; 3]],
+        opaque: &[bool],
+        aabb: (Vec3, Vec3),
+        cam: &Camera,
+        w: usize,
+        h: usize,
+        ctx: &GpuRecursiveContext,
+    ) -> Result<Vec<u32>, String> {
+        let pal = palette_i32(palette);
+        let opq: Vec<i32> = opaque.iter().map(|&b| i32::from(b)).collect();
+        ctx.raycast_image(
+            [cam.pos.x, cam.pos.y, cam.pos.z],
+            [cam.forward.x, cam.forward.y, cam.forward.z],
+            [cam.right.x, cam.right.y, cam.right.z],
+            [cam.up.x, cam.up.y, cam.up.z],
+            cam.tan_half_fov,
+            w,
+            h,
+            [aabb.0.x, aabb.0.y, aabb.0.z],
+            [aabb.1.x, aabb.1.y, aabb.1.z],
+            &pal,
+            &opq,
+        )
+    }
+
     /// Headless: ray-cast a single frame from the CLI camera angle and
     /// write it to PNG.
     pub fn render_to_png(args: &Args, out: &Path) {
@@ -2302,6 +2359,30 @@ mod render3d {
         );
         let w = args.resolution as usize;
         let h = args.resolution as usize;
+
+        // GPU path (best-effort; falls back to CPU on any failure).
+        if args.gpu {
+            #[cfg(feature = "cuda")]
+            {
+                match GpuRecursiveContext::build(&geometry, 1) {
+                    Ok(ctx) => match gpu_frame(&palette, &opaque, aabb, &cam, w, h, &ctx) {
+                        Ok(buf) => {
+                            write_png_wh(out, &u32_to_rgb(&buf), w as u32, h as u32);
+                            eprintln!(
+                                "wrote {} ({}×{}) [GPU]  azim={:.1}° elev={:.1}°",
+                                out.display(), w, h, args.cam_azim, args.cam_elev
+                            );
+                            return;
+                        }
+                        Err(e) => eprintln!("GPU raycast failed ({e}); CPU fallback"),
+                    },
+                    Err(e) => eprintln!("GPU context build failed ({e}); CPU fallback"),
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("--gpu needs --features cuda; rendering on CPU instead");
+        }
+
         let buf = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
         write_png_wh(out, &buf, w as u32, h as u32);
         eprintln!(
@@ -2360,6 +2441,28 @@ mod render3d {
             "controls: left-drag orbit · scroll zoom · right-drag pan · r reset · Esc quit"
         );
 
+        // Build the GPU ray-cast context ONCE (NVRTC compile is slow);
+        // the frame closure reuses it every redraw. None ⇒ CPU path.
+        #[cfg(feature = "cuda")]
+        let gpu_ctx = if args.gpu {
+            match GpuRecursiveContext::build(&geometry, 1) {
+                Ok(c) => {
+                    eprintln!("[GPU] ray-cast enabled (CUDA)");
+                    Some(c)
+                }
+                Err(e) => {
+                    eprintln!("[GPU] context build failed ({e}); using CPU ray-caster");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(feature = "cuda"))]
+        if args.gpu {
+            eprintln!("--gpu needs --features cuda; using CPU ray-caster");
+        }
+
         let (mut w, mut h) = (820usize, 600usize);
         let mut azim = args.cam_azim.to_radians();
         let mut elev = args.cam_elev.to_radians();
@@ -2392,6 +2495,13 @@ mod render3d {
                          target: Vec3|
          -> Vec<u32> {
             let cam = Camera::orbit(target, azim, elev, radius, 45.0);
+            #[cfg(feature = "cuda")]
+            if let Some(ref ctx) = gpu_ctx {
+                match gpu_frame(&palette, &opaque, aabb, &cam, w, h, ctx) {
+                    Ok(buf) => return buf,
+                    Err(e) => eprintln!("[GPU] frame failed ({e}); CPU this frame"),
+                }
+            }
             let rgb = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
             rgb.iter()
                 .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
