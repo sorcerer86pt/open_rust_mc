@@ -1958,7 +1958,7 @@ mod render3d {
     use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
     use open_rust_mc::geometry::{Geometry, Vec3};
     #[cfg(feature = "cuda")]
-    use open_rust_mc::gpu_recursive::GpuRecursiveContext;
+    use open_rust_mc::gpu_recursive::{GpuRecursiveContext, RaycastBuffers};
     use std::path::Path;
 
     /// Orbit camera: spherical position about `target`, +z up.
@@ -2308,7 +2308,8 @@ mod render3d {
             .collect()
     }
 
-    /// GPU ray-cast one frame via the persistent `GpuRecursiveContext`.
+    /// GPU ray-cast one frame, reusing persistent device buffers (so an
+    /// orbit drag does no per-frame allocation).
     #[cfg(feature = "cuda")]
     #[allow(clippy::too_many_arguments)]
     fn gpu_frame(
@@ -2319,10 +2320,12 @@ mod render3d {
         w: usize,
         h: usize,
         ctx: &GpuRecursiveContext,
+        buffers: &mut RaycastBuffers,
     ) -> Result<Vec<u32>, String> {
         let pal = palette_i32(palette);
         let opq: Vec<i32> = opaque.iter().map(|&b| i32::from(b)).collect();
-        ctx.raycast_image(
+        ctx.raycast_reuse(
+            buffers,
             [cam.pos.x, cam.pos.y, cam.pos.z],
             [cam.forward.x, cam.forward.y, cam.forward.z],
             [cam.right.x, cam.right.y, cam.right.z],
@@ -2365,7 +2368,10 @@ mod render3d {
             #[cfg(feature = "cuda")]
             {
                 match GpuRecursiveContext::build(&geometry, 1) {
-                    Ok(ctx) => match gpu_frame(&palette, &opaque, aabb, &cam, w, h, &ctx) {
+                    Ok(ctx) => match ctx
+                        .raycast_buffers()
+                        .and_then(|mut b| gpu_frame(&palette, &opaque, aabb, &cam, w, h, &ctx, &mut b))
+                    {
                         Ok(buf) => {
                             write_png_wh(out, &u32_to_rgb(&buf), w as u32, h as u32);
                             eprintln!(
@@ -2463,6 +2469,12 @@ mod render3d {
             eprintln!("--gpu needs --features cuda; using CPU ray-caster");
         }
 
+        // Persistent GPU buffers — allocated once, reused every orbit
+        // frame so dragging does no per-frame device allocation.
+        #[cfg(feature = "cuda")]
+        let mut gpu_buffers: Option<RaycastBuffers> =
+            gpu_ctx.as_ref().and_then(|c| c.raycast_buffers().ok());
+
         let (mut w, mut h) = (820usize, 600usize);
         let mut azim = args.cam_azim.to_radians();
         let mut elev = args.cam_elev.to_radians();
@@ -2487,17 +2499,17 @@ mod render3d {
         .unwrap_or_else(|e| panic!("preview_scene 3D window: {e}"));
         window.set_target_fps(60);
 
-        let frame_u32 = |w: usize,
-                         h: usize,
-                         azim: f64,
-                         elev: f64,
-                         radius: f64,
-                         target: Vec3|
+        let mut frame_u32 = |w: usize,
+                             h: usize,
+                             azim: f64,
+                             elev: f64,
+                             radius: f64,
+                             target: Vec3|
          -> Vec<u32> {
             let cam = Camera::orbit(target, azim, elev, radius, 45.0);
             #[cfg(feature = "cuda")]
-            if let Some(ref ctx) = gpu_ctx {
-                match gpu_frame(&palette, &opaque, aabb, &cam, w, h, ctx) {
+            if let (Some(ctx), Some(bufs)) = (&gpu_ctx, &mut gpu_buffers) {
+                match gpu_frame(&palette, &opaque, aabb, &cam, w, h, ctx, bufs) {
                     Ok(buf) => return buf,
                     Err(e) => eprintln!("[GPU] frame failed ({e}); CPU this frame"),
                 }

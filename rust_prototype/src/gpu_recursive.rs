@@ -486,6 +486,23 @@ fn assemble_kernel_source() -> String {
     )
 }
 
+/// Reusable device scratch + output for repeated `raycast_reuse`
+/// calls (interactive orbiting). Holds the per-thread `evals` scratch,
+/// the `0x00RRGGBB` output framebuffer, and the uploaded palette /
+/// opaque mask. Buffers grow lazily, so a steady window size reuses
+/// them with zero per-frame `cudaMalloc` / memset — the difference
+/// between a laggy and a smooth drag.
+pub struct RaycastBuffers {
+    evals: CudaSlice<f64>,
+    out: CudaSlice<u32>,
+    palette: CudaSlice<i32>,
+    opaque: CudaSlice<i32>,
+    evals_cap: usize,
+    out_pixels: usize,
+    pal_len: usize,
+    opq_len: usize,
+}
+
 impl GpuRecursiveContext {
     /// Build a context for `geom`. The kernel is compiled with NVRTC
     /// and the geometry tables are uploaded once.
@@ -903,9 +920,36 @@ impl GpuRecursiveContext {
     /// through them). The kernel walks the same device CSG as transport
     /// (`gr_find_cell` / `gr_trace_step`), so the image is faithful to
     /// the real geometry.
+    /// Seed an empty [`RaycastBuffers`]. Buffers are sized to the first
+    /// `raycast_reuse` request and grown thereafter. Build one per
+    /// interactive viewer and reuse it for every orbit frame.
+    pub fn raycast_buffers(&self) -> Result<RaycastBuffers, String> {
+        let s = &self.stream;
+        Ok(RaycastBuffers {
+            evals: s.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?,
+            out: s.alloc_zeros::<u32>(1).map_err(|e| e.to_string())?,
+            palette: s.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?,
+            opaque: s.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?,
+            evals_cap: 0,
+            out_pixels: 0,
+            pal_len: 0,
+            opq_len: 0,
+        })
+    }
+
+    /// Ray-cast a `width × height` 3D preview into caller-owned
+    /// [`RaycastBuffers`], returning a row-major `0x00RRGGBB`
+    /// framebuffer. Device buffers are reallocated only when they need
+    /// to grow (the `evals` scratch) or the pixel count changes (the
+    /// output), and the palette / opaque mask are re-uploaded only when
+    /// their length changes — so a steady-size orbit drag does **no**
+    /// per-frame allocation, just the launch + a device→host copy.
+    ///
+    /// See [`Self::raycast_image`] for the argument semantics.
     #[allow(clippy::too_many_arguments)]
-    pub fn raycast_image(
+    pub fn raycast_reuse(
         &self,
+        buf: &mut RaycastBuffers,
         cam_pos: [f64; 3],
         cam_fwd: [f64; 3],
         cam_right: [f64; 3],
@@ -922,22 +966,29 @@ impl GpuRecursiveContext {
         if n_pixels == 0 {
             return Ok(Vec::new());
         }
-        let n_materials = opaque.len() as i32;
-        let aspect = width as f64 / height as f64;
+        let stream = &self.stream;
 
-        // Per-call buffers: geometry tables already live on the device;
-        // only the palette / opaque mask / per-thread evals scratch /
-        // output framebuffer are sized to this request.
-        let d_palette = self.stream.clone_htod(palette).map_err(|e| e.to_string())?;
-        let d_opaque = self.stream.clone_htod(opaque).map_err(|e| e.to_string())?;
-        let mut evals = self
-            .stream
-            .alloc_zeros::<f64>(self.n_surfaces.max(1) as usize * n_pixels)
-            .map_err(|e| e.to_string())?;
-        let mut out = self
-            .stream
-            .alloc_zeros::<u32>(n_pixels)
-            .map_err(|e| e.to_string())?;
+        // Grow / resize only when necessary. The evals scratch only
+        // ever grows (a smaller frame reuses the larger buffer); the
+        // output tracks the exact pixel count so the dtoh length is
+        // right; palette / opaque re-upload only on a length change.
+        let need_evals = self.n_surfaces.max(1) as usize * n_pixels;
+        if need_evals > buf.evals_cap {
+            buf.evals = stream.alloc_zeros::<f64>(need_evals).map_err(|e| e.to_string())?;
+            buf.evals_cap = need_evals;
+        }
+        if n_pixels != buf.out_pixels {
+            buf.out = stream.alloc_zeros::<u32>(n_pixels).map_err(|e| e.to_string())?;
+            buf.out_pixels = n_pixels;
+        }
+        if palette.len() != buf.pal_len {
+            buf.palette = stream.clone_htod(palette).map_err(|e| e.to_string())?;
+            buf.pal_len = palette.len();
+        }
+        if opaque.len() != buf.opq_len {
+            buf.opaque = stream.clone_htod(opaque).map_err(|e| e.to_string())?;
+            buf.opq_len = opaque.len();
+        }
 
         let block = 128_u32;
         let grid = (n_pixels as u32).div_ceil(block);
@@ -953,16 +1004,15 @@ impl GpuRecursiveContext {
         let (rx, ry, rz) = (cam_right[0], cam_right[1], cam_right[2]);
         let (ux, uy, uz) = (cam_up[0], cam_up[1], cam_up[2]);
         let thf = tan_half_fov;
-        let asp = aspect;
+        let asp = width as f64 / height as f64;
         let w_i = width as i32;
         let h_i = height as i32;
         let (amnx, amny, amnz) = (aabb_min[0], aabb_min[1], aabb_min[2]);
         let (amxx, amxy, amxz) = (aabb_max[0], aabb_max[1], aabb_max[2]);
-        let n_mat = n_materials;
+        let n_mat = opaque.len() as i32;
         let n_surf = self.n_surfaces;
         let root = self.root_universe;
 
-        let stream = &self.stream;
         let mut launch = stream.launch_builder(&self.k_raycast);
         launch
             // camera
@@ -976,7 +1026,7 @@ impl GpuRecursiveContext {
             .arg(&amnx).arg(&amny).arg(&amnz)
             .arg(&amxx).arg(&amxy).arg(&amxz)
             // shading
-            .arg(&d_palette).arg(&d_opaque).arg(&n_mat)
+            .arg(&buf.palette).arg(&buf.opaque).arg(&n_mat)
             // surfaces
             .arg(&self.surf_type).arg(&self.surf_params).arg(&self.surf_bc).arg(&n_surf)
             // cells
@@ -998,16 +1048,48 @@ impl GpuRecursiveContext {
             .arg(&self.hex_n_rings).arg(&self.hex_n_axial).arg(&self.hex_orientation)
             .arg(&self.hex_universes_off).arg(&self.hex_universes)
             // scratch + output
-            .arg(&mut evals)
-            .arg(&mut out);
+            .arg(&mut buf.evals)
+            .arg(&mut buf.out);
         // SAFETY: argument list matches `raycast_preview`'s signature.
         unsafe {
             launch.launch(cfg).map_err(|e| e.to_string())?;
         }
 
-        let host = self.stream.clone_dtoh(&out).map_err(|e| e.to_string())?;
-        let _ = (d_palette, d_opaque, evals);
-        Ok(host)
+        self.stream.clone_dtoh(&buf.out).map_err(|e| e.to_string())
+    }
+
+    /// One-shot ray-cast (headless PNG). Allocates a throwaway
+    /// [`RaycastBuffers`] and delegates to [`Self::raycast_reuse`]; for
+    /// repeated frames build buffers once and call `raycast_reuse`.
+    ///
+    /// `cam_*` are the camera basis vectors (forward / right / up must
+    /// be unit-length and orthonormal) and position; `aabb_*` are the
+    /// scene bounds used for ray entry + step scaling. `palette` is
+    /// `[r,g,b]` per material (0..255, length `3 * n_materials`) and
+    /// `opaque` is 0/1 per material (air/void = 0 so the camera sees
+    /// through them). The kernel walks the same device CSG as transport
+    /// (`gr_find_cell` / `gr_trace_step`), so the image is faithful to
+    /// the real geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raycast_image(
+        &self,
+        cam_pos: [f64; 3],
+        cam_fwd: [f64; 3],
+        cam_right: [f64; 3],
+        cam_up: [f64; 3],
+        tan_half_fov: f64,
+        width: usize,
+        height: usize,
+        aabb_min: [f64; 3],
+        aabb_max: [f64; 3],
+        palette: &[i32],
+        opaque: &[i32],
+    ) -> Result<Vec<u32>, String> {
+        let mut buf = self.raycast_buffers()?;
+        self.raycast_reuse(
+            &mut buf, cam_pos, cam_fwd, cam_right, cam_up, tan_half_fov, width, height, aabb_min,
+            aabb_max, palette, opaque,
+        )
     }
 }
 
