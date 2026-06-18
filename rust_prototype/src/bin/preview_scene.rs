@@ -2982,7 +2982,14 @@ pub mod raster3d {
     use super::mesh3d::{build_scene_mesh, SceneMesh};
     use super::Args;
     use std::path::Path;
+    use std::sync::Arc;
     use wgpu::util::DeviceExt;
+    use winit::application::ApplicationHandler;
+    use winit::dpi::LogicalSize;
+    use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    use winit::keyboard::{Key, NamedKey};
+    use winit::window::{Window, WindowId};
 
     const SAMPLE_COUNT: u32 = 4;
     const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
@@ -3451,5 +3458,322 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         encoder.set_depth(png::BitDepth::Eight);
         let mut writer = encoder.write_header().expect("png header");
         writer.write_image_data(rgba).expect("png data");
+    }
+
+    // ── Interactive winit orbit window ──────────────────────────────
+
+    /// Live GPU state bound to the window's surface.
+    struct Gfx {
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+        renderer: Renderer,
+        msaa: wgpu::TextureView,
+        depth: wgpu::TextureView,
+    }
+
+    impl Gfx {
+        async fn new(window: Arc<Window>, mesh: &SceneMesh) -> Self {
+            let instance = wgpu::Instance::default();
+            let surface = instance
+                .create_surface(window.clone())
+                .expect("create surface");
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("raster-window-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .expect("device");
+
+            let size = window.inner_size();
+            let (w, h) = (size.width.max(1), size.height.max(1));
+            let mut config = surface
+                .get_default_config(&adapter, w, h)
+                .expect("surface default config");
+            // Prefer an sRGB target so the shader's linear output is
+            // gamma-encoded correctly on present.
+            let caps = surface.get_capabilities(&adapter);
+            if let Some(srgb) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
+                config.format = srgb;
+            }
+            surface.configure(&device, &config);
+
+            let renderer = Renderer::new(device, queue, mesh, config.format);
+            let (msaa, depth) = make_targets(&renderer.device, w, h, config.format);
+            Self { window, surface, config, renderer, msaa, depth }
+        }
+
+        fn resize(&mut self, w: u32, h: u32) {
+            if w == 0 || h == 0 {
+                return;
+            }
+            self.config.width = w;
+            self.config.height = h;
+            self.surface.configure(&self.renderer.device, &self.config);
+            let (msaa, depth) = make_targets(&self.renderer.device, w, h, self.config.format);
+            self.msaa = msaa;
+            self.depth = depth;
+        }
+
+        fn render(&mut self, mvp: &Mat4) {
+            let frame = match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                // Surface needs reconfiguring; do it and skip this frame.
+                wgpu::CurrentSurfaceTexture::Outdated
+                | wgpu::CurrentSurfaceTexture::Lost => {
+                    let (w, h) = (self.config.width, self.config.height);
+                    self.surface.configure(&self.renderer.device, &self.config);
+                    let _ = (w, h);
+                    return;
+                }
+                _ => return,
+            };
+            let view = frame.texture.create_view(&Default::default());
+            self.renderer.set_mvp(mvp);
+            let mut encoder = self
+                .renderer
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("raster-window-enc"),
+                });
+            self.renderer.draw(
+                &mut encoder,
+                &self.msaa,
+                &view,
+                &self.depth,
+                wgpu::Color { r: 0.06, g: 0.066, b: 0.09, a: 1.0 },
+            );
+            self.renderer.queue.submit(std::iter::once(encoder.finish()));
+            self.window.pre_present_notify();
+            frame.present();
+        }
+    }
+
+    /// winit application: owns the mesh + orbit-camera state, builds the
+    /// GPU surface on `resumed`, and drives render / input.
+    struct App {
+        mesh: SceneMesh,
+        title: String,
+        center: [f32; 3],
+        azim: f64,
+        elev: f64,
+        radius: f32,
+        home: ([f32; 3], f64, f64, f32),
+        left_down: bool,
+        right_down: bool,
+        last_cursor: Option<(f64, f64)>,
+        gfx: Option<Gfx>,
+    }
+
+    impl App {
+        fn new(mesh: SceneMesh, title: String, azim: f64, elev: f64) -> Self {
+            let center = [
+                0.5 * (mesh.aabb_min[0] + mesh.aabb_max[0]),
+                0.5 * (mesh.aabb_min[1] + mesh.aabb_max[1]),
+                0.5 * (mesh.aabb_min[2] + mesh.aabb_max[2]),
+            ];
+            let d = [
+                mesh.aabb_max[0] - mesh.aabb_min[0],
+                mesh.aabb_max[1] - mesh.aabb_min[1],
+                mesh.aabb_max[2] - mesh.aabb_min[2],
+            ];
+            let radius = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1.0) * 0.9;
+            Self {
+                mesh,
+                title,
+                center,
+                azim,
+                elev,
+                radius,
+                home: (center, azim, elev, radius),
+                left_down: false,
+                right_down: false,
+                last_cursor: None,
+                gfx: None,
+            }
+        }
+
+        /// Camera basis (eye, right, up) for the current orbit state.
+        fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+            let (az, el) = (self.azim.to_radians() as f32, self.elev.to_radians() as f32);
+            let ce = el.cos();
+            let eye = [
+                self.center[0] + self.radius * ce * az.cos(),
+                self.center[1] + self.radius * ce * az.sin(),
+                self.center[2] + self.radius * el.sin(),
+            ];
+            let fwd = normalize([
+                self.center[0] - eye[0],
+                self.center[1] - eye[1],
+                self.center[2] - eye[2],
+            ]);
+            let right = normalize(cross(fwd, [0.0, 0.0, 1.0]));
+            let up = cross(right, fwd);
+            (eye, right, up)
+        }
+
+        fn mvp(&self, aspect: f32) -> Mat4 {
+            let (eye, _, _) = self.basis();
+            let proj = perspective(45.0_f32.to_radians(), aspect, self.radius * 0.02, self.radius * 8.0);
+            let view = look_at(eye, self.center, [0.0, 0.0, 1.0]);
+            mat_mul(&proj, &view)
+        }
+    }
+
+    impl ApplicationHandler for App {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.gfx.is_some() {
+                return;
+            }
+            let attrs = Window::default_attributes()
+                .with_title(&self.title)
+                .with_inner_size(LogicalSize::new(900.0, 680.0));
+            let window = Arc::new(
+                event_loop
+                    .create_window(attrs)
+                    .expect("create window"),
+            );
+            let gfx = pollster::block_on(Gfx::new(window, &self.mesh));
+            gfx.window.request_redraw();
+            self.gfx = Some(gfx);
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            _id: WindowId,
+            event: WindowEvent,
+        ) {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::Resized(size) => {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        gfx.resize(size.width, size.height);
+                        gfx.window.request_redraw();
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        let aspect = gfx.config.width as f32 / gfx.config.height.max(1) as f32;
+                        let mvp = {
+                            // borrow self immutably for mvp before mut render
+                            let (eye, _, _) = self.basis();
+                            let proj = perspective(
+                                45.0_f32.to_radians(),
+                                aspect,
+                                self.radius * 0.02,
+                                self.radius * 8.0,
+                            );
+                            let view = look_at(eye, self.center, [0.0, 0.0, 1.0]);
+                            mat_mul(&proj, &view)
+                        };
+                        self.gfx.as_mut().unwrap().render(&mvp);
+                    }
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let down = state == ElementState::Pressed;
+                    match button {
+                        MouseButton::Left => self.left_down = down,
+                        MouseButton::Right => self.right_down = down,
+                        _ => {}
+                    }
+                    if !down {
+                        self.last_cursor = None;
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let (x, y) = (position.x, position.y);
+                    if let Some((px, py)) = self.last_cursor {
+                        let (dx, dy) = ((x - px) as f32, (y - py) as f32);
+                        if self.left_down {
+                            self.azim += dx as f64 * 0.3;
+                            self.elev = (self.elev - dy as f64 * 0.3).clamp(-89.0, 89.0);
+                            redraw(&self.gfx);
+                        } else if self.right_down {
+                            let (_, right, up) = self.basis();
+                            let s = self.radius * 0.0015;
+                            for i in 0..3 {
+                                self.center[i] += -right[i] * dx * s + up[i] * dy * s;
+                            }
+                            redraw(&self.gfx);
+                        }
+                    }
+                    if self.left_down || self.right_down {
+                        self.last_cursor = Some((x, y));
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(p) => p.y / 50.0,
+                    };
+                    if dy.abs() > 0.0 {
+                        self.radius = (self.radius * 0.9_f32.powf(dy as f32)).clamp(1e-3, 1e7);
+                        redraw(&self.gfx);
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if event.state == ElementState::Pressed {
+                        match event.logical_key {
+                            Key::Named(NamedKey::Escape) => event_loop.exit(),
+                            Key::Character(ref c) if c.as_str() == "r" || c.as_str() == "R" => {
+                                let (c0, az, el, r) = self.home;
+                                self.center = c0;
+                                self.azim = az;
+                                self.elev = el;
+                                self.radius = r;
+                                redraw(&self.gfx);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn redraw(gfx: &Option<Gfx>) {
+        if let Some(g) = gfx {
+            g.window.request_redraw();
+        }
+    }
+
+    /// Open the interactive orbit window for the meshed scene.
+    pub(crate) fn run_window(args: &Args, grid: usize) {
+        let mesh = build_scene_mesh(args, grid);
+        if mesh.is_empty() {
+            eprintln!("raster: nothing opaque to draw (empty mesh)");
+            return;
+        }
+        eprintln!(
+            "[raster] {} triangles (grid {}). controls: left-drag orbit · \
+             right-drag pan · scroll zoom · r reset · Esc quit",
+            mesh.triangle_count(),
+            grid
+        );
+        let title = format!(
+            "preview_scene raster — {}",
+            super::resolve_case_path(&args.case_json)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("scene")
+        );
+        let event_loop = EventLoop::new().expect("event loop");
+        event_loop.set_control_flow(ControlFlow::Wait);
+        let mut app = App::new(mesh, title, args.cam_azim, args.cam_elev);
+        event_loop.run_app(&mut app).expect("run_app");
     }
 }
