@@ -3658,6 +3658,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
             let attrs = Window::default_attributes()
                 .with_title(&self.title)
                 .with_inner_size(LogicalSize::new(900.0, 680.0));
+            // On Windows, winit calls OleInitialize for drag-and-drop,
+            // which requires the thread to be in a single-threaded COM
+            // apartment (STA). Other crates pulled in here (wmi via
+            // hardware-query, the CUDA/NVML stack) may already have put
+            // the thread in MTA, making OleInitialize fail with
+            // RPC_E_CHANGED_MODE and panic. We don't need drag-and-drop,
+            // so disable it — winit then skips OleInitialize entirely.
+            #[cfg(target_os = "windows")]
+            let attrs = {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                attrs.with_drag_and_drop(false)
+            };
             let window = Arc::new(
                 event_loop
                     .create_window(attrs)
