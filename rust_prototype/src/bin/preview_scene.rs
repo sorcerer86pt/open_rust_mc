@@ -1383,6 +1383,24 @@ fn main() {
         }
     }
 
+    // Interactive GPU rasterizer window (meshed CSG).
+    if args.raster {
+        #[cfg(feature = "raster3d")]
+        {
+            raster3d::run_window(&args, args.mesh_grid);
+            return;
+        }
+        #[cfg(not(feature = "raster3d"))]
+        {
+            eprintln!(
+                "preview_scene --raster needs the `raster3d` feature. Re-run with:\n  \
+                 cargo run --release --features raster3d --bin preview_scene -- \
+                 --raster <scene> <data_dir>"
+            );
+            std::process::exit(2);
+        }
+    }
+
     // Terminal viewer path.
     if args.tui {
         #[cfg(feature = "tui")]
