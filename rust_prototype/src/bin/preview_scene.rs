@@ -195,6 +195,47 @@ struct Args {
     /// pin for the whole lattice — the "stretched pin" symptom).
     #[arg(long)]
     debug_samples: bool,
+
+    /// Render the cross-section in the *terminal* instead of a Win32
+    /// window (requires `--features tui`). Half-block truecolor cells
+    /// give 2 vertical pixels per character row; pan / zoom / z-slice
+    /// with the keyboard or mouse. Works over SSH / on headless GPU
+    /// boxes where the minifb window can't open. By default this
+    /// launches in a NEW console window so the current shell stays
+    /// free — pass `--inline` to take over the current terminal.
+    #[arg(long)]
+    tui: bool,
+
+    /// With `--tui`, run the terminal viewer in the CURRENT terminal
+    /// rather than spawning a new console window. Useful inside tmux /
+    /// an IDE terminal, or when the new-window spawn isn't wanted.
+    #[arg(long)]
+    inline: bool,
+
+    /// Interactive 3D view of the geometry (requires `--features
+    /// preview`). Ray-casts the actual CSG with the engine's geometry
+    /// walk, shading each material by colour + lighting. Orbit with
+    /// left-drag, zoom with the scroll wheel, pan with right-drag,
+    /// `r` resets, Escape quits.
+    #[arg(long = "3d")]
+    three_d: bool,
+
+    /// Headless 3D render to a PNG (no window). Ray-casts from the
+    /// camera angle given by `--cam-azim` / `--cam-elev` at
+    /// `--resolution`. Works without the `preview` feature — usable
+    /// over SSH / on headless boxes.
+    #[arg(long = "render3d-out")]
+    render3d_out: Option<PathBuf>,
+
+    /// Camera azimuth (degrees around +z) for the 3D view's initial /
+    /// headless angle.
+    #[arg(long, default_value_t = 35.0)]
+    cam_azim: f64,
+
+    /// Camera elevation (degrees above the xy-plane) for the 3D view's
+    /// initial / headless angle.
+    #[arg(long, default_value_t = 25.0)]
+    cam_elev: f64,
 }
 
 #[cfg(feature = "preview")]
@@ -878,10 +919,24 @@ fn semantic_or_index_color(name: &str, index: usize) -> Option<[u8; 3]> {
     Some(INDEX_PALETTE[index % INDEX_PALETTE.len()])
 }
 
-fn render_ppm(args: &Args, ppm_path: &Path) {
-    use open_rust_mc::geometry::ray::find_cell_recursive;
+/// Everything `preview_scene` needs to draw a cross-section, loaded
+/// once: the resolved geometry, an index→colour palette, the void
+/// colour, and the per-material names (for the TUI legend). Shared by
+/// the PPM/PNG renderer and the `--tui` terminal viewer so both paths
+/// produce identical colours from identical inputs.
+struct LoadedPreview {
+    geometry: open_rust_mc::geometry::Geometry,
+    palette: Vec<[u8; 3]>,
+    void: [u8; 3],
+    names: Vec<String>,
+}
+
+/// Load a scene JSON + ENDF materials and build the distinct-colour
+/// palette. Factored out of `render_ppm` so the terminal viewer
+/// reuses the exact same colour logic (semantic anchor → 16-hue
+/// index cycle) without duplicating the load/resolve/palette code.
+fn load_preview(args: &Args) -> LoadedPreview {
     use open_rust_mc::geometry::scene_io;
-    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::transport::material_resolve;
     use open_rust_mc::transport::nuclides::NuclideLibrary;
 
@@ -901,7 +956,6 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
     let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, args.rank)
         .expect("material_resolve failed");
     let materials = &resolved.materials;
-    let geometry = loaded.geometry;
 
     // Distinct-colour palette (same logic as the interactive path):
     // semantic colour when the name is recognized, otherwise a
@@ -919,21 +973,37 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             INDEX_PALETTE[i % INDEX_PALETTE.len()]
         }))
         .collect();
-    // Bright magenta — outside any plausible material colour, so
-    // void is unambiguous in the rendered image.
-    let void = [255_u8, 0, 220];
+    let names: Vec<String> = materials.iter().map(|m| m.name.clone()).collect();
 
-    // Auto-viewport + auto-z + outward-probe tightening.
-    //
-    // Step 1: explicit bounds via `world_bounds_xy` (lattices,
-    // surface AABBs, PlaneX/Y/Z z0). Step 2: pick z_slice = midpoint
-    // of z-extent so stacked-can experiments render where geometry
-    // exists. Step 3: sample outward from the bound centre on
-    // +x/-x/+y/-y axes until we see a long enough miss run — that
-    // tightens the box for cases where explicit bounds are wider
-    // than the actual fissile / structural material (LCT-008 has
-    // reflective boundaries at ±280 cm but the rod array is ~30 cm).
-    let bounds = world_bounds_xy(&geometry);
+    LoadedPreview {
+        geometry: loaded.geometry,
+        palette,
+        // Bright magenta — outside any plausible material colour, so
+        // void is unambiguous in the rendered image.
+        void: [255, 0, 220],
+        names,
+    }
+}
+
+/// Auto-viewport + auto-z + outward-probe tightening, returning
+/// `(x_min, x_max, y_min, y_max, z_slice)`.
+///
+/// Step 1: explicit bounds via `world_bounds_xy` (lattices, surface
+/// AABBs, PlaneX/Y/Z z0). Step 2: pick z_slice = densest-plane-gap
+/// midpoint so stacked-can experiments render where geometry exists.
+/// Step 3: sample outward from the bound centre on +x/-x/+y/-y axes
+/// until we see a long enough miss run — that tightens the box for
+/// cases where explicit bounds are wider than the actual fissile /
+/// structural material (LCT-008 has reflective boundaries at ±280 cm
+/// but the rod array is ~30 cm).
+///
+/// `--half-size` overrides everything; `--zoom` scales the auto half.
+/// Shared by `render_ppm` and the terminal viewer's initial fit.
+fn auto_bounds(
+    geometry: &open_rust_mc::geometry::Geometry,
+    args: &Args,
+) -> (f64, f64, f64, f64, f64) {
+    let bounds = world_bounds_xy(geometry);
     let z_slice = args.z.unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
     let (x_min, x_max, y_min, y_max) = match (args.half_size, bounds.as_ref()) {
         (Some(h), _) => (-h, h, -h, h),
@@ -950,10 +1020,10 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             let dx_neg = open_rust_mc::geometry::Vec3::new(-1.0, 0.0, 0.0);
             let dy_pos = open_rust_mc::geometry::Vec3::new(0.0, 1.0, 0.0);
             let dy_neg = open_rust_mc::geometry::Vec3::new(0.0, -1.0, 0.0);
-            let probe_x_pos = tighten_along_axis(&geometry, origin, dx_pos, z_slice, rough_half);
-            let probe_x_neg = tighten_along_axis(&geometry, origin, dx_neg, z_slice, rough_half);
-            let probe_y_pos = tighten_along_axis(&geometry, origin, dy_pos, z_slice, rough_half);
-            let probe_y_neg = tighten_along_axis(&geometry, origin, dy_neg, z_slice, rough_half);
+            let probe_x_pos = tighten_along_axis(geometry, origin, dx_pos, z_slice, rough_half);
+            let probe_x_neg = tighten_along_axis(geometry, origin, dx_neg, z_slice, rough_half);
+            let probe_y_pos = tighten_along_axis(geometry, origin, dy_pos, z_slice, rough_half);
+            let probe_y_neg = tighten_along_axis(geometry, origin, dy_neg, z_slice, rough_half);
             // Take max of all 4 + 5% padding. If all probes returned
             // 0 (centre is void), fall back to the rough half — the
             // user can always pass --half-size explicitly.
@@ -966,6 +1036,15 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
         (None, None) => (-10.0 * args.zoom, 10.0 * args.zoom,
                          -10.0 * args.zoom, 10.0 * args.zoom),
     };
+    (x_min, x_max, y_min, y_max, z_slice)
+}
+
+fn render_ppm(args: &Args, ppm_path: &Path) {
+    use open_rust_mc::geometry::ray::find_cell_recursive;
+    use open_rust_mc::geometry::Vec3;
+
+    let LoadedPreview { geometry, palette, void, names: _ } = load_preview(args);
+    let (x_min, x_max, y_min, y_max, z_slice) = auto_bounds(&geometry, args);
     let res = args.resolution;
     let buf = render_frame(
         &geometry, &palette, void, x_min, x_max, y_min, y_max, z_slice, res,
@@ -1144,14 +1223,1340 @@ fn write_image(path: &Path, buf: &[[u8; 3]], res: u32) {
     }
 }
 
+/// Env guard that marks the process as the already-spawned TUI child.
+/// Set on the child when `preview_scene --tui` re-execs itself into a
+/// new console window; the child sees it and runs the viewer inline
+/// instead of spawning yet another window (infinite-respawn guard).
+const TUI_CHILD_ENV: &str = "PREVIEW_SCENE_TUI_CHILD";
+
+/// Re-exec this binary with the same arguments inside a brand-new
+/// console window, then return `true` so the caller (the parent) can
+/// exit. The child carries [`TUI_CHILD_ENV`] so it runs the viewer
+/// inline rather than spawning again.
+///
+/// Windows: `CREATE_NEW_CONSOLE` (0x10) gives the child its own
+/// console window with fresh stdin/stdout — exactly what a TUI needs.
+/// Other platforms have no portable "new terminal window" primitive,
+/// so we report that and let the caller fall back to running inline.
+#[cfg(feature = "tui")]
+fn spawn_in_new_window() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("preview_scene: cannot find own exe to relaunch ({e}); running inline");
+            return false;
+        }
+    };
+    let forwarded: Vec<String> = std::env::args().skip(1).collect();
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_CONSOLE — child gets its own console window.
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        match std::process::Command::new(&exe)
+            .args(&forwarded)
+            .env(TUI_CHILD_ENV, "1")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+        {
+            Ok(_) => {
+                println!("preview_scene: launched terminal viewer in a new window.");
+                true
+            }
+            Err(e) => {
+                eprintln!("preview_scene: new-window spawn failed ({e}); running inline");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // No portable cross-terminal launcher; try a couple of common
+        // emulators, else fall back to inline. Honour $TERMINAL first.
+        let exe_str = exe.to_string_lossy().to_string();
+        let mut cmd = String::from(&exe_str);
+        for a in &forwarded {
+            cmd.push(' ');
+            cmd.push_str(a);
+        }
+        let terminals: Vec<(String, Vec<String>)> = {
+            let mut v = Vec::new();
+            if let Ok(t) = std::env::var("TERMINAL") {
+                v.push((t, vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()]));
+            }
+            v.push(("x-terminal-emulator".into(),
+                    vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()]));
+            v
+        };
+        for (term, targs) in terminals {
+            if std::process::Command::new(&term)
+                .args(&targs)
+                .env(TUI_CHILD_ENV, "1")
+                .spawn()
+                .is_ok()
+            {
+                println!("preview_scene: launched terminal viewer via {term}.");
+                return true;
+            }
+        }
+        eprintln!("preview_scene: no terminal emulator found; running inline");
+        false
+    }
+}
+
 fn main() {
     let args = Args::parse();
-    // Headless render: `--ppm-out` and `--png-out` both route through
+
+    // Headless 3D ray-cast render to PNG (works without `preview`).
+    if let Some(out) = args.render3d_out.as_deref() {
+        render3d::render_to_png(&args, out);
+        return;
+    }
+
+    // Headless 2D render: `--ppm-out` and `--png-out` both route through
     // `render_ppm` (despite the legacy name) since the format is
     // picked up from the file extension by `write_image`.
     if let Some(out) = args.png_out.as_deref().or(args.ppm_out.as_deref()) {
         render_ppm(&args, out);
         return;
     }
+
+    // Interactive 3D orbit view (needs the graphical window).
+    if args.three_d {
+        #[cfg(feature = "preview")]
+        {
+            render3d::run_window(&args);
+            return;
+        }
+        #[cfg(not(feature = "preview"))]
+        {
+            eprintln!(
+                "preview_scene --3d needs the `preview` feature for the window. \
+                 Either re-run with `--features preview`, or use \
+                 `--render3d-out <file.png>` for a headless 3D render."
+            );
+            std::process::exit(2);
+        }
+    }
+
+    // Terminal viewer path.
+    if args.tui {
+        #[cfg(feature = "tui")]
+        {
+            let already_child = std::env::var_os(TUI_CHILD_ENV).is_some();
+            // Default to a new console window; `--inline` keeps it in
+            // the current terminal. Never re-spawn from the child.
+            if !args.inline && !already_child && spawn_in_new_window() {
+                return;
+            }
+            if let Err(e) = tui_preview::run(&args) {
+                eprintln!("preview_scene --tui: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            eprintln!(
+                "preview_scene --tui requires the `tui` feature. Re-run with:\n\
+                 cargo run --release --features tui --bin preview_scene -- \
+                 --tui <scene.json> <data_dir>"
+            );
+            std::process::exit(2);
+        }
+    }
+
     run_preview(&args);
+}
+
+// ── Terminal (ratatui) cross-section viewer ─────────────────────────
+//
+// A half-block truecolor renderer for the XY cross-section, drawn into
+// the terminal instead of a Win32 window. Each character cell carries
+// TWO vertical pixels (`▀` U+2580: foreground paints the top half,
+// background the bottom half), so a 120×40 terminal renders a
+// 120×80 image. Reuses the engine's `find_cell_recursive` walk and the
+// shared `load_preview` / `auto_bounds` machinery, so colours and the
+// default viewport match the PNG/PPM path exactly.
+//
+// Controls: arrows or hjkl pan · +/- zoom · scroll-wheel zoom-at-cursor
+// · left-drag pan · [ / ] step the z-slice · L toggle legend · r reset
+// · q / Esc quit. The status bar probes the material under the cursor.
+#[cfg(feature = "tui")]
+mod tui_preview {
+    use super::{
+        auto_bounds, load_preview, resolve_case_path, world_bounds_xy, Args, LoadedPreview,
+    };
+    use open_rust_mc::geometry::cell::CellFill;
+    use open_rust_mc::geometry::ray::find_cell_recursive;
+    use open_rust_mc::geometry::{Geometry, Vec3};
+    use ratatui::crossterm::event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEventKind,
+    };
+    use ratatui::crossterm::execute;
+    use ratatui::layout::{Constraint, Layout, Rect};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Paragraph};
+    use std::time::Duration;
+
+    /// Half-block glyph: fg = upper pixel, bg = lower pixel.
+    const HALF_BLOCK: &str = "▀";
+
+    #[inline]
+    fn col(c: [u8; 3]) -> Color {
+        Color::Rgb(c[0], c[1], c[2])
+    }
+
+    /// Live viewport: world centre `(cx, cy)`, `scale` in cm per pixel
+    /// (one terminal sub-pixel), and the current z-slice. `home_*` hold
+    /// the auto-fit target so `r` can recompute the initial framing for
+    /// whatever the terminal size is now.
+    struct ViewState {
+        cx: f64,
+        cy: f64,
+        scale: f64,
+        z: f64,
+        home_cx: f64,
+        home_cy: f64,
+        home_w: f64,
+        home_h: f64,
+        z_min: f64,
+        z_max: f64,
+        show_legend: bool,
+        needs_fit: bool,
+        cursor: Option<(u16, u16)>,
+        drag_prev: Option<(u16, u16)>,
+        last_inner: Rect,
+    }
+
+    impl ViewState {
+        /// Re-fit `scale`/centre to frame the whole geometry inside the
+        /// current canvas (called on startup and on `r`).
+        fn fit(&mut self, inner: Rect) {
+            let pw = inner.width.max(1) as f64;
+            let ph2 = (inner.height.max(1) as f64) * 2.0;
+            self.cx = self.home_cx;
+            self.cy = self.home_cy;
+            // Fit both axes; the looser axis sets the scale so nothing
+            // is clipped. Guard against a zero-extent (single-plane)
+            // scene with a 1 cm floor.
+            let sx = (self.home_w / pw).max(1e-9);
+            let sy = (self.home_h / ph2).max(1e-9);
+            self.scale = sx.max(sy).max(1e-6);
+            self.needs_fit = false;
+        }
+
+        /// World point at the centre of terminal cell `(fx, fy)` (frame
+        /// coords). Uses the midpoint of the cell's two sub-pixels.
+        fn world_at(&self, fx: u16, fy: u16) -> (f64, f64) {
+            let inner = self.last_inner;
+            let pw = inner.width.max(1) as f64;
+            let ph2 = (inner.height.max(1) as f64) * 2.0;
+            let sx = (fx.saturating_sub(inner.x)) as f64 + 0.5;
+            let sy = ((fy.saturating_sub(inner.y)) as f64) * 2.0 + 1.0;
+            let wx = self.cx + (sx - pw * 0.5) * self.scale;
+            let wy = self.cy - (sy - ph2 * 0.5) * self.scale;
+            (wx, wy)
+        }
+
+        /// Multiply `scale` by `factor`, holding the world point under
+        /// the given cursor cell fixed (zoom-at-cursor). `factor < 1`
+        /// zooms in.
+        fn zoom_at(&mut self, factor: f64, anchor: Option<(u16, u16)>) {
+            let inner = self.last_inner;
+            let pw = inner.width.max(1) as f64;
+            let ph2 = (inner.height.max(1) as f64) * 2.0;
+            // Anchor sub-pixel: cursor cell centre, else viewport centre.
+            let (sx, sy) = match anchor {
+                Some((fx, fy)) => (
+                    (fx.saturating_sub(inner.x)) as f64 + 0.5,
+                    ((fy.saturating_sub(inner.y)) as f64) * 2.0 + 1.0,
+                ),
+                None => (pw * 0.5, ph2 * 0.5),
+            };
+            let wx = self.cx + (sx - pw * 0.5) * self.scale;
+            let wy = self.cy - (sy - ph2 * 0.5) * self.scale;
+            self.scale = (self.scale * factor).max(1e-6);
+            self.cx = wx - (sx - pw * 0.5) * self.scale;
+            self.cy = wy + (sy - ph2 * 0.5) * self.scale;
+        }
+    }
+
+    /// Describe the cell under a world point: material name + colour, or
+    /// void / leak. Drives the status-bar probe and legend highlighting.
+    fn probe(
+        geom: &Geometry,
+        palette: &[[u8; 3]],
+        names: &[String],
+        void: [u8; 3],
+        wx: f64,
+        wy: f64,
+        z: f64,
+    ) -> (String, Color) {
+        match find_cell_recursive(Vec3::new(wx, wy, z), geom) {
+            Some(stack) => {
+                let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                match geom.cells[deepest].fill {
+                    CellFill::Material(m) => {
+                        let idx = m as usize;
+                        let name = names.get(idx).map(String::as_str).unwrap_or("material");
+                        let c = palette.get(idx).copied().unwrap_or(void);
+                        (format!("{name} (#{idx})"), col(c))
+                    }
+                    _ => ("void (non-material fill)".to_string(), col(void)),
+                }
+            }
+            None => ("leak — outside geometry".to_string(), col(void)),
+        }
+    }
+
+    pub fn run(args: &Args) -> std::io::Result<()> {
+        let LoadedPreview {
+            geometry,
+            palette,
+            void,
+            names,
+        } = load_preview(args);
+        let (x_min, x_max, y_min, y_max, z0) = auto_bounds(&geometry, args);
+        // z extent for slice stepping / clamping.
+        let (z_min, z_max) = world_bounds_xy(&geometry)
+            .map(|b| (b.z_min, b.z_max))
+            .unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+
+        let title = resolve_case_path(&args.case_json)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("scene")
+            .to_string();
+
+        let mut state = ViewState {
+            cx: 0.5 * (x_min + x_max),
+            cy: 0.5 * (y_min + y_max),
+            scale: 0.0,
+            z: z0,
+            home_cx: 0.5 * (x_min + x_max),
+            home_cy: 0.5 * (y_min + y_max),
+            home_w: x_max - x_min,
+            home_h: y_max - y_min,
+            z_min,
+            z_max,
+            show_legend: true,
+            needs_fit: true,
+            cursor: None,
+            drag_prev: None,
+            last_inner: Rect::ZERO,
+        };
+
+        let mut terminal = ratatui::init();
+        // ratatui::init() handles raw mode + alternate screen + a
+        // panic hook that restores them. Mouse capture is on top of
+        // that; disable it explicitly before restore so the host
+        // terminal isn't left swallowing clicks.
+        let _ = execute!(std::io::stdout(), EnableMouseCapture);
+
+        let result = event_loop(&mut terminal, &mut state, &geometry, &palette, &void, &names, &title);
+
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event_loop(
+        terminal: &mut ratatui::DefaultTerminal,
+        state: &mut ViewState,
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        void: &[u8; 3],
+        names: &[String],
+        title: &str,
+    ) -> std::io::Result<()> {
+        let mut dirty = true;
+        loop {
+            if dirty {
+                terminal.draw(|frame| {
+                    ui(frame, state, geometry, palette, *void, names, title);
+                })?;
+                dirty = false;
+            }
+            // Block up to 250 ms for input; redraw only when something
+            // actually changed so an idle viewer doesn't burn CPU
+            // re-walking the geometry.
+            if !event::poll(Duration::from_millis(250))? {
+                continue;
+            }
+            match event::read()? {
+                Event::Resize(_, _) => dirty = true,
+                Event::Key(k) if k.kind != KeyEventKind::Release => {
+                    if handle_key(k.code, state) {
+                        return Ok(());
+                    }
+                    dirty = true;
+                }
+                Event::Mouse(m) => {
+                    handle_mouse(m, state);
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns `true` when the key requests quit.
+    fn handle_key(code: KeyCode, state: &mut ViewState) -> bool {
+        // Pan one-tenth of the visible span per press.
+        let step_x = 0.1 * state.last_inner.width.max(1) as f64 * state.scale;
+        let step_y = 0.1 * (state.last_inner.height.max(1) as f64 * 2.0) * state.scale;
+        // z step: 2% of the axial extent, floored at 1 cm.
+        let dz = if state.z_min.is_finite() && state.z_max.is_finite() {
+            (1.0_f64).max((state.z_max - state.z_min).abs() * 0.02)
+        } else {
+            1.0
+        };
+        match code {
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return true,
+            KeyCode::Left | KeyCode::Char('h') => state.cx -= step_x,
+            KeyCode::Right | KeyCode::Char('l') => state.cx += step_x,
+            KeyCode::Up | KeyCode::Char('k') => state.cy += step_y,
+            KeyCode::Down | KeyCode::Char('j') => state.cy -= step_y,
+            KeyCode::Char('+') | KeyCode::Char('=') => state.zoom_at(0.8, state.cursor),
+            KeyCode::Char('-') | KeyCode::Char('_') => state.zoom_at(1.25, state.cursor),
+            KeyCode::Char('[') => {
+                state.z -= dz;
+                if state.z_min.is_finite() {
+                    state.z = state.z.max(state.z_min);
+                }
+            }
+            KeyCode::Char(']') => {
+                state.z += dz;
+                if state.z_max.is_finite() {
+                    state.z = state.z.min(state.z_max);
+                }
+            }
+            KeyCode::Char('L') => state.show_legend = !state.show_legend,
+            KeyCode::Char('r') | KeyCode::Char('R') => state.needs_fit = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_mouse(m: event::MouseEvent, state: &mut ViewState) {
+        state.cursor = Some((m.column, m.row));
+        match m.kind {
+            MouseEventKind::ScrollUp => state.zoom_at(0.8, Some((m.column, m.row))),
+            MouseEventKind::ScrollDown => state.zoom_at(1.25, Some((m.column, m.row))),
+            MouseEventKind::Down(MouseButton::Left) => state.drag_prev = Some((m.column, m.row)),
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((px, py)) = state.drag_prev {
+                    let dx = (m.column as f64 - px as f64) * state.scale;
+                    // Two world-pixels per row vertically.
+                    let dy = (m.row as f64 - py as f64) * 2.0 * state.scale;
+                    state.cx -= dx;
+                    state.cy += dy;
+                }
+                state.drag_prev = Some((m.column, m.row));
+            }
+            MouseEventKind::Up(MouseButton::Left) => state.drag_prev = None,
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ui(
+        frame: &mut ratatui::Frame,
+        state: &mut ViewState,
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        void: [u8; 3],
+        names: &[String],
+        title: &str,
+    ) {
+        let area = frame.area();
+        // body (canvas + optional legend) over a 3-line status strip.
+        let [body, status_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(area);
+        let legend_w: u16 = if state.show_legend {
+            // Widest material name + swatch + padding, clamped.
+            let longest = names.iter().map(String::len).max().unwrap_or(4) as u16;
+            (longest + 8).clamp(16, 36)
+        } else {
+            0
+        };
+        let [canvas_area, legend_area] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(legend_w)]).areas(body);
+
+        // ── Canvas ──────────────────────────────────────────────────
+        let canvas_block = Block::bordered().title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]));
+        let inner = canvas_block.inner(canvas_area);
+        frame.render_widget(canvas_block, canvas_area);
+
+        if state.needs_fit {
+            state.fit(inner);
+        }
+        state.last_inner = inner;
+        paint_canvas(frame, inner, state, geometry, palette, void);
+
+        // ── Legend ──────────────────────────────────────────────────
+        if legend_w > 0 {
+            let mut lines: Vec<Line> = Vec::with_capacity(names.len() + 1);
+            for (i, name) in names.iter().enumerate() {
+                let c = palette.get(i).copied().unwrap_or(void);
+                lines.push(Line::from(vec![
+                    Span::styled("██ ", Style::default().fg(col(c))),
+                    Span::raw(name.clone()),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("██ ", Style::default().fg(col(void))),
+                Span::raw("void / leak"),
+            ]));
+            let legend = Paragraph::new(lines).block(Block::bordered().title(" Materials "));
+            frame.render_widget(legend, legend_area);
+        }
+
+        // ── Status ──────────────────────────────────────────────────
+        let pw = inner.width.max(1) as f64;
+        let ph2 = inner.height.max(1) as f64 * 2.0;
+        let view_w = pw * state.scale;
+        let view_h = ph2 * state.scale;
+        let line1 = Line::from(format!(
+            " z={:.2} cm   scale={:.4} cm/px   view {:.1}×{:.1} cm   centre ({:.2}, {:.2}) ",
+            state.z, state.scale, view_w, view_h, state.cx, state.cy
+        ));
+
+        let line2 = match state.cursor {
+            Some((fx, fy)) if rect_contains(inner, fx, fy) => {
+                let (wx, wy) = state.world_at(fx, fy);
+                let (label, c) = probe(geometry, palette, names, void, wx, wy, state.z);
+                Line::from(vec![
+                    Span::raw(format!(" ({wx:+.2}, {wy:+.2}) → ")),
+                    Span::styled("██ ", Style::default().fg(c)),
+                    Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+                ])
+            }
+            _ => Line::from(
+                " arrows/hjkl pan · +/- zoom · scroll zoom@cursor · [ ] z-slice · L legend · r reset · q quit",
+            )
+            .style(Style::default().dim()),
+        };
+        let status = Paragraph::new(vec![line1, line2]).block(Block::new().borders(
+            ratatui::widgets::Borders::TOP,
+        ));
+        frame.render_widget(status, status_area);
+    }
+
+    fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
+        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+    }
+
+    /// Sample the geometry over `inner` at 2× vertical resolution and
+    /// write half-block cells straight into the frame buffer. The
+    /// per-pixel `find_cell_recursive` walk is parallelised across
+    /// sub-rows with rayon (the same trick the PNG renderer uses) so
+    /// pan/zoom stays responsive on deep recursive lattices.
+    fn paint_canvas(
+        frame: &mut ratatui::Frame,
+        inner: Rect,
+        state: &ViewState,
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        void: [u8; 3],
+    ) {
+        use rayon::prelude::*;
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let pw = inner.width as usize;
+        let ph2 = inner.height as usize * 2;
+        let (cx, cy, scale, z) = (state.cx, state.cy, state.scale, state.z);
+        let pw_f = pw as f64;
+        let ph2_f = ph2 as f64;
+
+        // Color grid in scan order, sub-row major. rayon's flat_map
+        // preserves ordering on collect.
+        let grid: Vec<[u8; 3]> = (0..ph2)
+            .into_par_iter()
+            .flat_map(|sr| {
+                (0..pw)
+                    .map(|px| {
+                        let wx = cx + (px as f64 + 0.5 - pw_f * 0.5) * scale;
+                        let wy = cy - (sr as f64 + 0.5 - ph2_f * 0.5) * scale;
+                        match find_cell_recursive(Vec3::new(wx, wy, z), geometry) {
+                            Some(stack) => {
+                                let d = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                                match geometry.cells[d].fill {
+                                    CellFill::Material(m) => {
+                                        palette.get(m as usize).copied().unwrap_or(void)
+                                    }
+                                    _ => void,
+                                }
+                            }
+                            None => void,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let buf = frame.buffer_mut();
+        for r in 0..inner.height {
+            for c in 0..inner.width {
+                let top = grid[(2 * r as usize) * pw + c as usize];
+                let bot = grid[(2 * r as usize + 1) * pw + c as usize];
+                if let Some(cell) = buf.cell_mut((inner.x + c, inner.y + r)) {
+                    cell.set_symbol(HALF_BLOCK);
+                    cell.set_fg(col(top));
+                    cell.set_bg(col(bot));
+                }
+            }
+        }
+
+        // Crosshair marker at the cursor cell (keeps the lower-pixel
+        // colour as the background so the probe stays legible).
+        if let Some((fx, fy)) = state.cursor {
+            if rect_contains(inner, fx, fy) {
+                if let Some(cell) = buf.cell_mut((fx, fy)) {
+                    cell.set_symbol("+");
+                    cell.set_fg(Color::Yellow);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn test_state() -> ViewState {
+            ViewState {
+                cx: 5.0,
+                cy: -3.0,
+                scale: 0.0,
+                z: 0.0,
+                home_cx: 5.0,
+                home_cy: -3.0,
+                home_w: 40.0,
+                home_h: 20.0,
+                z_min: -10.0,
+                z_max: 10.0,
+                show_legend: true,
+                needs_fit: true,
+                cursor: None,
+                drag_prev: None,
+                last_inner: Rect::new(1, 1, 80, 24),
+            }
+        }
+
+        #[test]
+        fn fit_frames_the_whole_geometry() {
+            let mut s = test_state();
+            let inner = Rect::new(0, 0, 80, 25); // 80 cols × 50 sub-rows
+            s.fit(inner);
+            // Looser axis sets the scale: width 40/80 = 0.5, height
+            // 20/50 = 0.4 → 0.5 cm/px so nothing is clipped.
+            assert!((s.scale - 0.5).abs() < 1e-9, "scale = {}", s.scale);
+            assert!(!s.needs_fit);
+            // Whole geometry must fit inside the rendered span.
+            assert!(80.0 * s.scale >= s.home_w - 1e-9);
+            assert!((25.0 * 2.0) * s.scale >= s.home_h - 1e-9);
+        }
+
+        #[test]
+        fn world_at_centre_returns_view_centre() {
+            let mut s = test_state();
+            s.scale = 0.5;
+            s.needs_fit = false;
+            let inner = s.last_inner;
+            // Centre cell of an 80×24 inner area.
+            let (wx, wy) = s.world_at(inner.x + inner.width / 2, inner.y + inner.height / 2);
+            assert!((wx - s.cx).abs() < s.scale, "wx={wx} cx={}", s.cx);
+            assert!((wy - s.cy).abs() < 2.0 * s.scale, "wy={wy} cy={}", s.cy);
+        }
+
+        #[test]
+        fn zoom_at_cursor_pins_the_anchor_world_point() {
+            let mut s = test_state();
+            s.scale = 0.5;
+            s.needs_fit = false;
+            let anchor = (20u16, 8u16); // some off-centre cell
+            let before = s.world_at(anchor.0, anchor.1);
+            s.zoom_at(0.8, Some(anchor));
+            let after = s.world_at(anchor.0, anchor.1);
+            // The world point under the cursor must stay put across zoom.
+            assert!((before.0 - after.0).abs() < 1e-6, "x drift {before:?} {after:?}");
+            assert!((before.1 - after.1).abs() < 1e-6, "y drift {before:?} {after:?}");
+            assert!(s.scale < 0.5, "zoom-in must shrink scale");
+        }
+
+        #[test]
+        fn paint_canvas_writes_half_blocks_without_a_real_terminal() {
+            use open_rust_mc::geometry::Geometry;
+            use ratatui::backend::TestBackend;
+            use ratatui::Terminal;
+
+            // Empty geometry → every sample leaks → void fill. We're
+            // exercising the buffer-write path + half-block math, not
+            // the physics: the whole canvas must be painted with the
+            // half-block glyph (no untouched cells).
+            let geom = Geometry::flat(Vec::new(), Vec::new()).expect("empty geometry");
+            let palette: Vec<[u8; 3]> = vec![[10, 20, 30]];
+            let void = [255, 0, 220];
+            let names = vec!["only-mat".to_string()];
+
+            let mut s = test_state();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+            terminal
+                .draw(|f| ui(f, &mut s, &geom, &palette, void, &names, "unit-test"))
+                .expect("draw");
+
+            let buf = terminal.backend().buffer();
+            // The canvas interior (inside the border) must be half-blocks.
+            let inner = s.last_inner;
+            assert!(inner.width > 0 && inner.height > 0);
+            let mid = buf[(inner.x + inner.width / 2, inner.y + inner.height / 2)]
+                .symbol()
+                .to_string();
+            assert_eq!(mid, HALF_BLOCK, "canvas interior should be half-blocks");
+        }
+    }
+}
+
+// ── 3D ray-cast geometry view ───────────────────────────────────────
+//
+// A real perspective-3D render of the CSG, built on the very same
+// geometry walk the Monte Carlo transport uses: cast one camera ray
+// per pixel, step through cells with `trace_step_recursive` until the
+// first *opaque* material (air / void / vacuum are skipped so you see
+// the solids inside them), estimate a surface normal from the gradient
+// of the occupancy field, and shade with Lambert lighting tinted by
+// the material's palette colour.
+//
+// No GPU, no wgpu, no 3D engine — the scenes are small (a handful of
+// surfaces) so a rayon-parallel CPU cast renders an orbit frame in a
+// fraction of a second. The shading path is a pure function of
+// `(geometry, camera)`, so a CUDA ray-cast kernel reusing the device
+// CSG in `geom_recursive.cu` could later drop in behind this same API.
+mod render3d {
+    use super::{load_preview, world_bounds_xy, Args, LoadedPreview};
+    use open_rust_mc::geometry::cell::CellFill;
+    use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
+    use open_rust_mc::geometry::{Geometry, Vec3};
+    use std::path::Path;
+
+    /// Orbit camera: spherical position about `target`, +z up.
+    struct Camera {
+        pos: Vec3,
+        forward: Vec3,
+        right: Vec3,
+        up: Vec3,
+        tan_half_fov: f64,
+    }
+
+    impl Camera {
+        fn orbit(target: Vec3, azim_rad: f64, elev_rad: f64, radius: f64, fov_deg: f64) -> Self {
+            let ce = elev_rad.cos();
+            let dir = Vec3::new(ce * azim_rad.cos(), ce * azim_rad.sin(), elev_rad.sin());
+            let pos = target + dir * radius;
+            let forward = (target - pos).normalized();
+            let world_up = Vec3::new(0.0, 0.0, 1.0);
+            // Guard against gimbal lock when looking straight down/up.
+            let right = {
+                let r = forward.cross(world_up);
+                if r.length() < 1e-6 {
+                    Vec3::new(1.0, 0.0, 0.0)
+                } else {
+                    r.normalized()
+                }
+            };
+            let up = right.cross(forward).normalized();
+            Self {
+                pos,
+                forward,
+                right,
+                up,
+                tan_half_fov: (fov_deg.to_radians() * 0.5).tan(),
+            }
+        }
+
+        /// Primary ray direction through pixel `(px, py)` of a `w × h`
+        /// image (pixel centres, y flipped so row 0 is the top).
+        fn ray_dir(&self, px: usize, py: usize, w: usize, h: usize) -> Vec3 {
+            let aspect = w as f64 / h as f64;
+            let ndc_x = ((px as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+            let ndc_y = 1.0 - ((py as f64 + 0.5) / h as f64) * 2.0;
+            let d = self.forward
+                + self.right * (ndc_x * aspect * self.tan_half_fov)
+                + self.up * (ndc_y * self.tan_half_fov);
+            d.normalized()
+        }
+    }
+
+    /// Axis-aligned bounds of the geometry (xy from surfaces/lattices,
+    /// z from PlaneZ / lattice extents), padded 6%. Falls back to a
+    /// cube around the z-slice when the axial extent is unbounded.
+    fn scene_aabb(geom: &Geometry) -> (Vec3, Vec3) {
+        match world_bounds_xy(geom) {
+            Some(b) => {
+                let (zmin, zmax) = if b.z_min.is_finite() && b.z_max.is_finite() && b.z_max > b.z_min
+                {
+                    (b.z_min, b.z_max)
+                } else {
+                    let c = b.default_z();
+                    let e = 0.5 * b.xy_extent().max(1.0);
+                    (c - e, c + e)
+                };
+                let min = Vec3::new(b.x_min, b.y_min, zmin);
+                let max = Vec3::new(b.x_max, b.y_max, zmax);
+                let pad = (max - min) * 0.06;
+                (min - pad, max + pad)
+            }
+            None => (Vec3::new(-10.0, -10.0, -10.0), Vec3::new(10.0, 10.0, 10.0)),
+        }
+    }
+
+    /// Per-axis slab clip. Returns the `(t_near, t_far)` overlap of the
+    /// ray with `[lo, hi]`; an empty interval encodes a miss.
+    #[inline]
+    fn slab(o: f64, d: f64, lo: f64, hi: f64) -> (f64, f64) {
+        if d.abs() < 1e-12 {
+            if o < lo || o > hi {
+                (f64::INFINITY, f64::NEG_INFINITY)
+            } else {
+                (f64::NEG_INFINITY, f64::INFINITY)
+            }
+        } else {
+            let inv = 1.0 / d;
+            let t1 = (lo - o) * inv;
+            let t2 = (hi - o) * inv;
+            if t1 <= t2 { (t1, t2) } else { (t2, t1) }
+        }
+    }
+
+    /// Ray vs AABB. `Some((t_enter, t_exit))` with `t_exit >= t_enter`
+    /// and `t_exit >= 0`, else `None`.
+    fn ray_aabb(o: Vec3, d: Vec3, min: Vec3, max: Vec3) -> Option<(f64, f64)> {
+        let (ax0, ax1) = slab(o.x, d.x, min.x, max.x);
+        let (ay0, ay1) = slab(o.y, d.y, min.y, max.y);
+        let (az0, az1) = slab(o.z, d.z, min.z, max.z);
+        let t_enter = ax0.max(ay0).max(az0);
+        let t_exit = ax1.min(ay1).min(az1);
+        if t_exit >= t_enter && t_exit >= 0.0 {
+            Some((t_enter, t_exit))
+        } else {
+            None
+        }
+    }
+
+    /// `true` for materials that should be drawn solid. Air / void /
+    /// vacuum (and the no-material `Void` fill) are transparent so the
+    /// camera sees the objects suspended inside them.
+    fn opaque_mask(names: &[String]) -> Vec<bool> {
+        names
+            .iter()
+            .map(|n| {
+                let n = n.to_lowercase();
+                !(n.contains("air") || n.contains("void") || n.contains("vacuum"))
+            })
+            .collect()
+    }
+
+    /// Occupancy field: 1.0 inside an opaque material, 0.0 elsewhere.
+    #[inline]
+    fn occ(p: Vec3, geom: &Geometry, opaque: &[bool]) -> f64 {
+        match find_cell_recursive(p, geom) {
+            Some(stack) => {
+                let ci = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                if let CellFill::Material(m) = geom.cells[ci].fill {
+                    if opaque.get(m as usize).copied().unwrap_or(true) {
+                        return 1.0;
+                    }
+                }
+                0.0
+            }
+            None => 0.0,
+        }
+    }
+
+    struct Hit {
+        mat: usize,
+        normal: Vec3,
+    }
+
+    /// March a camera ray to the first opaque material. Exact DDA via
+    /// `trace_step_recursive` while inside a cell; small fixed micro-
+    /// steps only to cross genuine void/leak gaps (where the geometry
+    /// walk has no cell to step from). Returns the material index + an
+    /// outward surface normal estimated from the occupancy gradient.
+    fn cast_ray(o: Vec3, d: Vec3, geom: &Geometry, opaque: &[bool], aabb: (Vec3, Vec3)) -> Option<Hit> {
+        let (t_enter, t_exit) = ray_aabb(o, d, aabb.0, aabb.1)?;
+        let diag = (aabb.1 - aabb.0).length();
+        let micro = (diag / 1024.0).max(1e-6);
+        let eps = (diag * 1e-7).max(1e-9);
+
+        let mut t = t_enter.max(0.0) + eps;
+        let mut pos = o + d * t;
+        let mut stack = find_cell_recursive(pos, geom);
+        // Bound the walk so a degenerate geometry can't spin forever.
+        for _ in 0..8192 {
+            if t > t_exit {
+                return None;
+            }
+            match stack {
+                Some(ref s) => {
+                    let ci = s.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                    if let CellFill::Material(m) = geom.cells[ci].fill {
+                        if opaque.get(m as usize).copied().unwrap_or(true) {
+                            return Some(Hit {
+                                mat: m as usize,
+                                normal: surface_normal(pos, ci, d, geom, opaque, micro),
+                            });
+                        }
+                    }
+                    // Transparent cell — jump to the next surface exactly.
+                    match trace_step_recursive(s, pos, d, geom) {
+                        Some(h) if h.distance.is_finite() => {
+                            t += h.distance + eps;
+                            pos = o + d * t;
+                            stack = h.next_stack;
+                        }
+                        _ => return None,
+                    }
+                }
+                None => {
+                    // In a vacuum/leak gap: creep forward until we enter
+                    // a cell again or exit the box.
+                    t += micro;
+                    pos = o + d * t;
+                    stack = find_cell_recursive(pos, geom);
+                }
+            }
+        }
+        None
+    }
+
+    /// Camera-facing surface normal at a hit point. Prefers the
+    /// analytic normal of whichever of the hit cell's bounding surfaces
+    /// the point lies on (crisp on planes/quadrics, no occupancy-
+    /// quantisation banding); falls back to the occupancy gradient when
+    /// the cell has no surface that `p` sits on (e.g. a lattice element
+    /// in a frame this flat-evaluation doesn't capture). The result is
+    /// flipped to face the incoming ray so visible surfaces are lit.
+    fn surface_normal(
+        p: Vec3,
+        cell_idx: usize,
+        view_dir: Vec3,
+        geom: &Geometry,
+        opaque: &[bool],
+        micro: f64,
+    ) -> Vec3 {
+        let mut idxs = Vec::new();
+        geom.cells[cell_idx].region.surface_indices(&mut idxs);
+        idxs.sort_unstable();
+        idxs.dedup();
+
+        // Surface the point lies on = smallest |evaluate|. The hit
+        // point sits on a cell boundary by construction (we just
+        // crossed into this cell, or micro-stepped to its edge), so the
+        // nearest bounding surface is the visible one. `evaluate` is not
+        // a metric distance — for a cylinder it's x²+y²−r² (cm²) — so we
+        // compare magnitudes only to *rank* surfaces, never threshold
+        // against a length.
+        let mut best: Option<usize> = None;
+        let mut best_abs = f64::INFINITY;
+        for &si in &idxs {
+            let v = geom.surfaces[si].evaluate(p).abs();
+            if v < best_abs {
+                best_abs = v;
+                best = Some(si);
+            }
+        }
+        if let Some(si) = best {
+            let mut n = geom.surfaces[si].normal_at(p);
+            let len = n.length();
+            if len > 1e-12 {
+                n = n * (1.0 / len);
+                // Face the camera: flip if it points along the ray.
+                if n.dot(view_dir) > 0.0 {
+                    n = -n;
+                }
+                return n;
+            }
+        }
+        occ_normal(p, view_dir, geom, opaque, micro)
+    }
+
+    /// Outward normal from the gradient of the occupancy field. The
+    /// gradient points into the solid, so the outward normal is its
+    /// negation; degenerate (zero-gradient) samples fall back to facing
+    /// the camera.
+    fn occ_normal(p: Vec3, view_dir: Vec3, geom: &Geometry, opaque: &[bool], micro: f64) -> Vec3 {
+        let h = micro * 2.0;
+        let dx = occ(p + Vec3::new(h, 0.0, 0.0), geom, opaque)
+            - occ(p - Vec3::new(h, 0.0, 0.0), geom, opaque);
+        let dy = occ(p + Vec3::new(0.0, h, 0.0), geom, opaque)
+            - occ(p - Vec3::new(0.0, h, 0.0), geom, opaque);
+        let dz = occ(p + Vec3::new(0.0, 0.0, h), geom, opaque)
+            - occ(p - Vec3::new(0.0, 0.0, h), geom, opaque);
+        let g = Vec3::new(dx, dy, dz);
+        let len = g.length();
+        if len > 1e-9 {
+            g * (-1.0 / len)
+        } else {
+            -view_dir
+        }
+    }
+
+    /// Lambert shade: a fixed key light plus a softer head-light so
+    /// camera-facing back surfaces aren't pure black. Returns sRGB-ish
+    /// 8-bit colour tinted by the material.
+    fn shade(base: [u8; 3], n: Vec3, view_dir: Vec3) -> [u8; 3] {
+        let key = Vec3::new(0.35, 0.45, 0.82).normalized();
+        let kd = n.dot(key).max(0.0);
+        let hd = n.dot(-view_dir).max(0.0);
+        let diff = 0.55 * kd + 0.45 * hd;
+        let lit = (0.18 + 0.82 * diff).min(1.15);
+        [
+            ((base[0] as f64) * lit).round().clamp(0.0, 255.0) as u8,
+            ((base[1] as f64) * lit).round().clamp(0.0, 255.0) as u8,
+            ((base[2] as f64) * lit).round().clamp(0.0, 255.0) as u8,
+        ]
+    }
+
+    /// Background gradient: dark slate, slightly lighter toward the
+    /// bottom so the silhouette reads against it.
+    #[inline]
+    fn background(py: usize, h: usize) -> [u8; 3] {
+        let f = py as f64 / (h.max(1) as f64);
+        let top = [16.0, 17.0, 23.0];
+        let bot = [30.0, 33.0, 42.0];
+        [
+            (top[0] + (bot[0] - top[0]) * f) as u8,
+            (top[1] + (bot[1] - top[1]) * f) as u8,
+            (top[2] + (bot[2] - top[2]) * f) as u8,
+        ]
+    }
+
+    /// Render one `w × h` RGB frame. Parallel across rows; each ray is
+    /// independent so this is embarrassingly parallel.
+    fn render_frame(
+        geom: &Geometry,
+        palette: &[[u8; 3]],
+        opaque: &[bool],
+        aabb: (Vec3, Vec3),
+        cam: &Camera,
+        w: usize,
+        h: usize,
+    ) -> Vec<[u8; 3]> {
+        use rayon::prelude::*;
+        let rows: Vec<Vec<[u8; 3]>> = (0..h)
+            .into_par_iter()
+            .map(|py| {
+                (0..w)
+                    .map(|px| {
+                        let dir = cam.ray_dir(px, py, w, h);
+                        match cast_ray(cam.pos, dir, geom, opaque, aabb) {
+                            Some(hit) => {
+                                let base = palette.get(hit.mat).copied().unwrap_or([200, 200, 200]);
+                                shade(base, hit.normal, dir)
+                            }
+                            None => background(py, h),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut buf = Vec::with_capacity(w * h);
+        for row in &rows {
+            buf.extend_from_slice(row);
+        }
+        buf
+    }
+
+    /// Headless: ray-cast a single frame from the CLI camera angle and
+    /// write it to PNG.
+    pub fn render_to_png(args: &Args, out: &Path) {
+        let LoadedPreview {
+            geometry,
+            palette,
+            names,
+            ..
+        } = load_preview(args);
+        let opaque = opaque_mask(&names);
+        let aabb = scene_aabb(&geometry);
+        let target = (aabb.0 + aabb.1) * 0.5;
+        let radius = (aabb.1 - aabb.0).length() * 0.9;
+        let cam = Camera::orbit(
+            target,
+            args.cam_azim.to_radians(),
+            args.cam_elev.to_radians(),
+            radius,
+            45.0,
+        );
+        let w = args.resolution as usize;
+        let h = args.resolution as usize;
+        let buf = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
+        write_png_wh(out, &buf, w as u32, h as u32);
+        eprintln!(
+            "wrote {} ({}×{})  azim={:.1}° elev={:.1}°",
+            out.display(),
+            w,
+            h,
+            args.cam_azim,
+            args.cam_elev
+        );
+    }
+
+    /// PNG writer for an arbitrary `w × h` RGB buffer (the shared
+    /// `write_image` helper only handles square images).
+    fn write_png_wh(path: &Path, buf: &[[u8; 3]], w: u32, h: u32) {
+        let file = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let flat: &[u8] = bytemuck::cast_slice(buf);
+        writer.write_image_data(flat).expect("png data");
+    }
+
+    /// Interactive orbit-camera window (minifb). Left-drag rotates,
+    /// scroll zooms, right-drag pans the target, `r` resets, Escape
+    /// quits. Re-renders only when the camera actually moves.
+    #[cfg(feature = "preview")]
+    pub fn run_window(args: &Args) {
+        use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+
+        let LoadedPreview {
+            geometry,
+            palette,
+            names,
+            ..
+        } = load_preview(args);
+        let opaque = opaque_mask(&names);
+        let aabb = scene_aabb(&geometry);
+        let target0 = (aabb.0 + aabb.1) * 0.5;
+        let radius0 = (aabb.1 - aabb.0).length() * 0.9;
+
+        // Print the legend once — minifb can't draw text.
+        eprintln!("── materials ──");
+        for (i, n) in names.iter().enumerate() {
+            let c = palette.get(i).copied().unwrap_or([200, 200, 200]);
+            let solid = if opaque.get(i).copied().unwrap_or(true) {
+                "solid"
+            } else {
+                "transparent"
+            };
+            eprintln!("  [{i}] {n}  rgb({},{},{})  {solid}", c[0], c[1], c[2]);
+        }
+        eprintln!(
+            "controls: left-drag orbit · scroll zoom · right-drag pan · r reset · Esc quit"
+        );
+
+        let (mut w, mut h) = (820usize, 600usize);
+        let mut azim = args.cam_azim.to_radians();
+        let mut elev = args.cam_elev.to_radians();
+        let mut radius = radius0;
+        let mut target = target0;
+
+        let mut window = Window::new(
+            &format!(
+                "preview_scene 3D — {}",
+                super::resolve_case_path(&args.case_json)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("scene")
+            ),
+            w,
+            h,
+            WindowOptions {
+                resize: true,
+                ..WindowOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("preview_scene 3D window: {e}"));
+        window.set_target_fps(60);
+
+        let frame_u32 = |w: usize,
+                         h: usize,
+                         azim: f64,
+                         elev: f64,
+                         radius: f64,
+                         target: Vec3|
+         -> Vec<u32> {
+            let cam = Camera::orbit(target, azim, elev, radius, 45.0);
+            let rgb = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
+            rgb.iter()
+                .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
+                .collect()
+        };
+
+        let mut buf = frame_u32(w, h, azim, elev, radius, target);
+        window.update_with_buffer(&buf, w, h).ok();
+
+        let mut last_size = (w, h);
+        let mut prev_left: Option<(f32, f32)> = None;
+        let mut prev_right: Option<(f32, f32)> = None;
+        let mut prev_r = false;
+
+        while window.is_open() && !window.is_key_down(Key::Escape) {
+            let mut dirty = false;
+
+            let cur = window.get_size();
+            if cur != last_size && cur.0 > 0 && cur.1 > 0 {
+                w = cur.0;
+                h = cur.1;
+                last_size = cur;
+                dirty = true;
+            }
+
+            let mouse = window.get_mouse_pos(MouseMode::Discard);
+
+            // Left-drag = orbit.
+            if window.get_mouse_down(MouseButton::Left) {
+                if let (Some((mx, my)), Some((px, py))) = (mouse, prev_left) {
+                    azim += (mx - px) as f64 * 0.01;
+                    elev = (elev - (my - py) as f64 * 0.01).clamp(-1.5, 1.5);
+                    dirty = true;
+                }
+                prev_left = mouse;
+            } else {
+                prev_left = None;
+            }
+
+            // Right-drag = pan the target across the camera plane.
+            if window.get_mouse_down(MouseButton::Right) {
+                if let (Some((mx, my)), Some((px, py))) = (mouse, prev_right) {
+                    let cam = Camera::orbit(target, azim, elev, radius, 45.0);
+                    let scale = radius * 0.0015;
+                    target = target + cam.right * (-(mx - px) as f64 * scale)
+                        + cam.up * ((my - py) as f64 * scale);
+                    dirty = true;
+                }
+                prev_right = mouse;
+            } else {
+                prev_right = None;
+            }
+
+            // Scroll = zoom (dolly).
+            if let Some((_, sy)) = window.get_scroll_wheel() {
+                if sy.abs() > 0.05 {
+                    let mag = (sy.abs() as f64).min(1.0);
+                    let step = 0.85_f64.powf(mag);
+                    radius = (radius * if sy > 0.0 { step } else { 1.0 / step })
+                        .clamp(1e-3, 1e7);
+                    dirty = true;
+                }
+            }
+
+            let r_now = window.is_key_down(Key::R);
+            if r_now && !prev_r {
+                azim = args.cam_azim.to_radians();
+                elev = args.cam_elev.to_radians();
+                radius = radius0;
+                target = target0;
+                dirty = true;
+            }
+            prev_r = r_now;
+
+            if dirty {
+                buf = frame_u32(w, h, azim, elev, radius, target);
+            }
+            window.update_with_buffer(&buf, w, h).ok();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ray_aabb_hits_and_misses() {
+            let min = Vec3::new(-1.0, -1.0, -1.0);
+            let max = Vec3::new(1.0, 1.0, 1.0);
+            // Ray straight down +x through the box.
+            let hit = ray_aabb(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), min, max);
+            let (t0, t1) = hit.expect("should hit");
+            assert!((t0 - 4.0).abs() < 1e-9 && (t1 - 6.0).abs() < 1e-9, "{t0} {t1}");
+            // Parallel ray that misses entirely.
+            let miss = ray_aabb(Vec3::new(-5.0, 5.0, 0.0), Vec3::new(1.0, 0.0, 0.0), min, max);
+            assert!(miss.is_none());
+        }
+
+        #[test]
+        fn camera_ray_centre_points_at_target() {
+            let cam = Camera::orbit(Vec3::new(0.0, 0.0, 0.0), 0.7, 0.4, 10.0, 45.0);
+            // The centre pixel ray should be (within fov) the forward
+            // axis, i.e. roughly antiparallel to the camera position.
+            let dir = cam.ray_dir(50, 50, 100, 100);
+            let to_target = (Vec3::new(0.0, 0.0, 0.0) - cam.pos).normalized();
+            assert!(dir.dot(to_target) > 0.999, "centre ray should aim at target");
+        }
+
+        #[test]
+        fn opaque_mask_marks_air_transparent() {
+            let names = vec![
+                "Air".to_string(),
+                "Depleted Uranium".to_string(),
+                "vacuum gap".to_string(),
+            ];
+            let m = opaque_mask(&names);
+            assert_eq!(m, vec![false, true, false]);
+        }
+
+        #[test]
+        fn renders_a_concentric_sphere_scene() {
+            use open_rust_mc::geometry::cell::{inside, intersect_all, outside, Cell};
+            use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+            use open_rust_mc::geometry::CellId;
+
+            // Inner solid sphere (material 0, surface 0) inside an outer
+            // shell (material 1, between surfaces 0 and 1), both centred
+            // at origin. Built with the same CSG region helpers the
+            // scene loader uses (surfaces referenced by vec index).
+            let s_inner = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 2.0,
+                bc: BoundaryCondition::Transmission,
+            };
+            let s_outer = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 4.0,
+                bc: BoundaryCondition::Vacuum,
+            };
+            let inner = Cell::new(CellId(0), inside(0), CellFill::Material(0));
+            let shell = Cell::new(
+                CellId(1),
+                intersect_all(vec![inside(1), outside(0)]),
+                CellFill::Material(1),
+            );
+            let geom = Geometry::flat(vec![s_inner, s_outer], vec![inner, shell])
+                .expect("two-sphere geometry");
+
+            let palette = vec![[220u8, 80, 60], [90, 160, 220]];
+            let opaque = vec![true, true];
+            let aabb = scene_aabb(&geom);
+            let target = (aabb.0 + aabb.1) * 0.5;
+            let radius = (aabb.1 - aabb.0).length() * 0.9;
+            let cam = Camera::orbit(target, 0.6, 0.3, radius, 45.0);
+            let buf = render_frame(&geom, &palette, &opaque, aabb, &cam, 64, 64);
+
+            // The centre pixel must land on the sphere (a shaded
+            // material colour), not the dark background.
+            let centre = buf[32 * 64 + 32];
+            let bg = background(32, 64);
+            assert_ne!(centre, bg, "centre of frame should hit the sphere");
+            // And at least a quarter of the frame should be covered by
+            // the object (sanity that it isn't a single stray pixel).
+            let hits = buf.iter().filter(|&&p| p != background(0, 64) ).count();
+            assert!(hits > 64 * 64 / 8, "object coverage too small: {hits}");
+        }
+    }
 }
