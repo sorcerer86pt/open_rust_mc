@@ -2,3 +2,5 @@
 # Ignore temp/intermediate files only
 *.tmp
 *.log
+# Nsight Compute profiles are large binaries — keep local
+*.ncu-rep
