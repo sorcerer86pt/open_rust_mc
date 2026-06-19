@@ -202,9 +202,10 @@ mod cuda_main {
                 };
 
                 let (basis, coeffs, n_e, rank) = match kernel {
-                    xs_provider::ReactionKernel::Svd { kernel: k, coeffs: c } => {
-                        (k.basis_f64(), c, k.n_energy(), k.rank())
-                    }
+                    xs_provider::ReactionKernel::Svd {
+                        kernel: k,
+                        coeffs: c,
+                    } => (k.basis_f64(), c, k.n_energy(), k.rank()),
                     xs_provider::ReactionKernel::Table { .. } => continue,
                 };
 

@@ -135,15 +135,19 @@ pub fn log_startup_banner() {
     let p = hardware_profile();
     eprintln!("┌─ open_rust_mc — hardware profile ─");
     eprintln!("│ {}", p.one_line_summary());
-    let avx = if p.supports_avx2_fma() { "avx2+fma" } else { "scalar" };
+    let avx = if p.supports_avx2_fma() {
+        "avx2+fma"
+    } else {
+        "scalar"
+    };
     eprintln!(
         "│ Rayon pool: {} threads (logical cores). SIMD path: {}.",
         p.cpu_logical_cores.max(1),
         avx,
     );
-    let nuclide_cache_gb =
-        crate::transport::nuclide_cache::l1_memory::L1MemoryStore::new().budget_bytes() as f64
-            / GIB as f64;
+    let nuclide_cache_gb = crate::transport::nuclide_cache::l1_memory::L1MemoryStore::new()
+        .budget_bytes() as f64
+        / GIB as f64;
     eprintln!(
         "│ Host nuclide cache budget: {:.1} GB ({}× detected RAM).",
         nuclide_cache_gb,
@@ -235,8 +239,8 @@ fn query_profile() -> HardwareProfile {
     // VRAM: Win32_VideoController.AdapterRAM is a 32-bit DWORD.
     // RTX 3080 (10 GB) overflows it and wraps to ~4 GB.
     // Prefer CUDA driver API which uses 64-bit size_t throughout.
-    let gpu_vram_bytes = detect_vram_bytes_cuda()
-        .or_else(|| cuda_gpu.map(|g| g.memory_mb() * MIB as u64));
+    let gpu_vram_bytes =
+        detect_vram_bytes_cuda().or_else(|| cuda_gpu.map(|g| g.memory_mb() * MIB as u64));
     let cuda_capability = cuda_gpu.and_then(|g| g.cuda_capability().map(String::from));
 
     HardwareProfile {
@@ -269,9 +273,15 @@ fn query_profile() -> HardwareProfile {
 struct CacheTotalsKb([u32; 4]);
 
 impl CacheTotalsKb {
-    fn l2(&self) -> Option<u32> { (self.0[2] > 0).then_some(self.0[2]) }
-    fn l3(&self) -> Option<u32> { (self.0[3] > 0).then_some(self.0[3]) }
-    fn any(&self) -> bool { self.0.iter().any(|&v| v > 0) }
+    fn l2(&self) -> Option<u32> {
+        (self.0[2] > 0).then_some(self.0[2])
+    }
+    fn l3(&self) -> Option<u32> {
+        (self.0[3] > 0).then_some(self.0[3])
+    }
+    fn any(&self) -> bool {
+        self.0.iter().any(|&v| v > 0)
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -294,10 +304,7 @@ fn detect_cache_totals_kb() -> CacheTotalsKb {
             let partitions = ((res.ebx >> 12) & 0x3FF) + 1;
             let ways = ((res.ebx >> 22) & 0x3FF) + 1;
             let sets = res.ecx + 1;
-            let size_kb = ((line_size as u64)
-                * (partitions as u64)
-                * (ways as u64)
-                * (sets as u64)
+            let size_kb = ((line_size as u64) * (partitions as u64) * (ways as u64) * (sets as u64)
                 / 1024) as u32;
             if let Some(slot) = totals.0.get_mut(level) {
                 *slot = slot.saturating_add(size_kb);
@@ -306,7 +313,9 @@ fn detect_cache_totals_kb() -> CacheTotalsKb {
         totals.any().then_some(totals)
     }
 
-    walk(0x8000_001D).or_else(|| walk(0x0000_0004)).unwrap_or_default()
+    walk(0x8000_001D)
+        .or_else(|| walk(0x0000_0004))
+        .unwrap_or_default()
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -379,7 +388,7 @@ mod tests {
             ..p
         };
         let cap = p2.estimated_bundle_capacity(0.75, 1_400_000_000);
-        assert!(cap >= 7 && cap <= 9, "got {cap}");
+        assert!((7..=9).contains(&cap), "got {cap}");
     }
 
     /// L2 / L3 cache detection via CPUID should return a non-zero
@@ -391,7 +400,13 @@ mod tests {
         let totals = super::detect_cache_totals_kb();
         let l2 = totals.l2().expect("L2 absent from CPUID on x86_64");
         let l3 = totals.l3().expect("L3 absent from CPUID on x86_64");
-        eprintln!("L2 = {} KB ({} MB), L3 = {} KB ({} MB)", l2, l2 / 1024, l3, l3 / 1024);
+        eprintln!(
+            "L2 = {} KB ({} MB), L3 = {} KB ({} MB)",
+            l2,
+            l2 / 1024,
+            l3,
+            l3 / 1024
+        );
         assert!(l2 > 0);
         assert!(l3 > 0);
     }
@@ -409,13 +424,18 @@ mod tests {
     fn profile_at_least_cpuid_values() {
         let p = hardware_profile();
         let totals = super::detect_cache_totals_kb();
-        if let Some(_) = totals.l2() {
+        if totals.l2().is_some() {
             assert!(p.cpu_l2_kb > 0, "profile L2 must be nonzero on x86_64");
         }
         if let Some(kb) = totals.l3() {
             // L3 is shared, so CPUID is consistent across cores —
             // strict `>=` is safe here.
-            assert!(p.cpu_l3_kb >= kb, "profile L3 ({} KB) < CPUID ({} KB)", p.cpu_l3_kb, kb);
+            assert!(
+                p.cpu_l3_kb >= kb,
+                "profile L3 ({} KB) < CPUID ({} KB)",
+                p.cpu_l3_kb,
+                kb
+            );
         }
     }
 
@@ -434,7 +454,11 @@ mod tests {
              CUDA driver init failed or API call regressed"
         );
         let bytes = vram.unwrap();
-        eprintln!("cuda VRAM = {} bytes ({:.2} GB)", bytes, bytes as f64 / GIB as f64);
+        eprintln!(
+            "cuda VRAM = {} bytes ({:.2} GB)",
+            bytes,
+            bytes as f64 / GIB as f64
+        );
         assert!(bytes > 0, "cuda VRAM returned 0 bytes");
     }
 
@@ -468,14 +492,41 @@ mod tests {
         let summary = p.one_line_summary();
         eprintln!("\n=== Hardware self-test ===");
         eprintln!("Summary: {summary}");
-        eprintln!("Total RAM: {} bytes ({:.2} GB)", p.total_ram_bytes, p.total_ram_bytes as f64 / GIB as f64);
-        eprintln!("Available RAM: {} bytes ({:.2} GB)", p.available_ram_bytes, p.available_ram_bytes as f64 / GIB as f64);
-        eprintln!("CPU cores: {} physical / {} logical", p.cpu_physical_cores, p.cpu_logical_cores);
-        eprintln!("CPU cache: L1 {} KB / L2 {} KB / L3 {} KB", p.cpu_l1_kb, p.cpu_l2_kb, p.cpu_l3_kb);
-        eprintln!("CPU features ({}): {}", p.cpu_features.len(), p.cpu_features.join(", "));
-        eprintln!("AVX2: {}, FMA: {}, AVX2+FMA: {}", p.supports_avx2, p.supports_fma, p.supports_avx2_fma());
+        eprintln!(
+            "Total RAM: {} bytes ({:.2} GB)",
+            p.total_ram_bytes,
+            p.total_ram_bytes as f64 / GIB as f64
+        );
+        eprintln!(
+            "Available RAM: {} bytes ({:.2} GB)",
+            p.available_ram_bytes,
+            p.available_ram_bytes as f64 / GIB as f64
+        );
+        eprintln!(
+            "CPU cores: {} physical / {} logical",
+            p.cpu_physical_cores, p.cpu_logical_cores
+        );
+        eprintln!(
+            "CPU cache: L1 {} KB / L2 {} KB / L3 {} KB",
+            p.cpu_l1_kb, p.cpu_l2_kb, p.cpu_l3_kb
+        );
+        eprintln!(
+            "CPU features ({}): {}",
+            p.cpu_features.len(),
+            p.cpu_features.join(", ")
+        );
+        eprintln!(
+            "AVX2: {}, FMA: {}, AVX2+FMA: {}",
+            p.supports_avx2,
+            p.supports_fma,
+            p.supports_avx2_fma()
+        );
         if let Some(vram) = p.gpu_vram_bytes {
-            eprintln!("GPU VRAM: {} bytes ({:.2} GB)", vram, vram as f64 / GIB as f64);
+            eprintln!(
+                "GPU VRAM: {} bytes ({:.2} GB)",
+                vram,
+                vram as f64 / GIB as f64
+            );
             if let Some(cap) = &p.cuda_capability {
                 eprintln!("CUDA compute capability: sm_{}", cap.replace('.', ""));
             }

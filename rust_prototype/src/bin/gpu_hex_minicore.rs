@@ -325,7 +325,8 @@ mod cuda_main {
                             .sab_temperature_tolerance,
                     );
                     println!("  S(α,β): loaded c_H_in_H2O.h5, t_idx = {t_idx}");
-                    gpu.upload_sab_data(&tsl, t_idx, 3, n_nuc).expect("upload S(α,β)")
+                    gpu.upload_sab_data(&tsl, t_idx, 3, n_nuc)
+                        .expect("upload S(α,β)")
                 }
                 Err(e) => {
                     eprintln!("  WARN: S(α,β) load failed: {e} — using empty");
@@ -394,7 +395,7 @@ mod cuda_main {
                 fis_capacity: args.particles as usize * 4,
                 initial_source: make_initial_source_factory(args.rings, args.reflective_z),
                 buffers: std::cell::RefCell::new(None),
-        refill: std::cell::RefCell::new(None),
+                refill: std::cell::RefCell::new(None),
                 nxn_mode: 0,
             };
 

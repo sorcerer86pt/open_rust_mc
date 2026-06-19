@@ -10,9 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::binary_format::{
-    EncodeError, decode_nuclide_kernels, encode_nuclide_kernels,
-};
+use super::binary_format::{EncodeError, decode_nuclide_kernels, encode_nuclide_kernels};
 use super::{NuclideKey, NuclideStore};
 use crate::transport::xs_provider::NuclideKernels;
 
@@ -49,7 +47,6 @@ impl L2DiskStore {
     fn path_for(&self, key: &NuclideKey) -> PathBuf {
         self.dir.join(key.disk_filename())
     }
-
 }
 
 impl NuclideStore for L2DiskStore {
@@ -175,4 +172,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-

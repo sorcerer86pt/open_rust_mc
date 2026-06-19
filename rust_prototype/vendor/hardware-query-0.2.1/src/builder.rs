@@ -27,8 +27,7 @@ pub struct HardwareQueryBuilder {
     include_pci: bool,
     include_usb: bool,
     include_virtualization: bool,
-    include_capabilities: bool,
-    
+
     #[cfg(feature = "monitoring")]
     include_power: bool,
 }
@@ -72,8 +71,7 @@ impl HardwareQueryBuilder {
             include_pci: false,
             include_usb: false,
             include_virtualization: false,
-            include_capabilities: false,
-            
+
             #[cfg(feature = "monitoring")]
             include_power: false,
         }

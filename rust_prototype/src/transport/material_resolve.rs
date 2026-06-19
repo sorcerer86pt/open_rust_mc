@@ -56,7 +56,11 @@ fn load_thermal_scattering_cached(
 ) -> Result<Arc<ThermalScatteringData>, crate::error::SvdError> {
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // Fast path: read-lock and return existing Arc.
-    if let Some(arc) = thermal_cache().read().unwrap().get(&key) {
+    if let Some(arc) = thermal_cache()
+        .read()
+        .expect("thermal cache lock poisoned")
+        .get(&key)
+    {
         return Ok(Arc::clone(arc));
     }
     // Miss — load outside the write lock to keep the critical
@@ -65,7 +69,9 @@ fn load_thermal_scattering_cached(
     // dropped. Acceptable since both parses produce equivalent data.
     let data = hdf5_reader::load_thermal_scattering(path)?;
     let arc = Arc::new(data);
-    let mut w = thermal_cache().write().unwrap();
+    let mut w = thermal_cache()
+        .write()
+        .expect("thermal cache lock poisoned");
     let entry = w.entry(key).or_insert_with(|| Arc::clone(&arc));
     Ok(Arc::clone(entry))
 }
@@ -74,7 +80,10 @@ fn load_thermal_scattering_cached(
 /// shared state on disk (rare) call this between cases.
 #[doc(hidden)]
 pub fn _thermal_cache_clear_for_tests() {
-    thermal_cache().write().unwrap().clear();
+    thermal_cache()
+        .write()
+        .expect("thermal cache lock poisoned")
+        .clear();
 }
 
 pub struct ResolvedMaterials {
@@ -130,11 +139,10 @@ pub enum ResolveError {
         path: String,
         reason: String,
     },
-    #[error("material {material}: S(α,β) file {path:?} has unrecognised name (expected `c_<Symbol>_…` or `c_<Symbol><Mass>_…`)")]
-    UnparseableThermalName {
-        material: String,
-        path: String,
-    },
+    #[error(
+        "material {material}: S(α,β) file {path:?} has unrecognised name (expected `c_<Symbol>_…` or `c_<Symbol><Mass>_…`)"
+    )]
+    UnparseableThermalName { material: String, path: String },
     #[error(
         "material {material}: S(α,β) file {path:?} targets element {target_symbol} (Z={target_z}) \
          but the material has no matching nuclide"
@@ -273,11 +281,7 @@ pub fn resolve_materials_with_data_dir(
             let idx = if let Some(&i) = kernel_idx.get(&key) {
                 i
             } else {
-                let kernel = load_kernel_for(
-                    &resolved,
-                    svd_rank,
-                    keys_with_thermal.contains(&key),
-                );
+                let kernel = load_kernel_for(&resolved, svd_rank, keys_with_thermal.contains(&key));
                 let i = kernels.len();
                 kernels.push(kernel);
                 kernel_idx.insert(key, i);
@@ -413,11 +417,10 @@ fn expand_natural_elements(materials: &[MaterialDto], lib: &NuclideLibrary) -> V
                 .zaid
                 .filter(|z| *z > 0 && z % 1000 == 0)
                 .filter(|z| !lib.has_natural_file(*z))
-                .and_then(crate::transport::nuclides::natural_isotopic_split);
-            if let Some(split) = should_split {
-                // SAFETY: `should_split` only returns Some when zaid
-                // is set; unwrap is unconditional here.
-                let nat_zaid = n.zaid.unwrap();
+                .and_then(|z| {
+                    crate::transport::nuclides::natural_isotopic_split(z).map(|split| (z, split))
+                });
+            if let Some((nat_zaid, split)) = should_split {
                 let z = nat_zaid / 1000;
                 let symbol = crate::transport::nuclides::symbol_for_z(z).unwrap_or("?");
                 for &(iso_a, fraction) in split {
@@ -471,9 +474,9 @@ pub fn parse_thermal_target(name: &str) -> Option<(u32, Option<u32>)> {
     // specific mass because their single-letter symbols denote H-2
     // and H-3 by convention.
     match body {
-        "Graphite" => return Some((6, None)),         // C (natural)
-        "C6H6" => return Some((1, None)),             // natural H in benzene
-        "SiO2_alpha" => return Some((14, None)),      // Si (α-quartz)
+        "Graphite" => return Some((6, None)),    // C (natural)
+        "C6H6" => return Some((1, None)),        // natural H in benzene
+        "SiO2_alpha" => return Some((14, None)), // Si (α-quartz)
         "ortho_H" | "para_H" => return Some((1, None)),
         "ortho_D" | "para_D" => return Some((1, Some(2))),
         _ => {}
@@ -519,10 +522,30 @@ pub fn parse_thermal_target(name: &str) -> Option<(u32, Option<u32>)> {
 
 fn symbol_for_z(z: u32) -> Option<&'static str> {
     const TABLE: &[(u32, &str)] = &[
-        (1, "H"), (2, "He"), (3, "Li"), (4, "Be"), (5, "B"), (6, "C"),
-        (7, "N"), (8, "O"), (9, "F"), (11, "Na"), (12, "Mg"), (13, "Al"),
-        (14, "Si"), (16, "S"), (17, "Cl"), (24, "Cr"), (26, "Fe"), (40, "Zr"),
-        (47, "Ag"), (48, "Cd"), (74, "W"), (82, "Pb"), (90, "Th"), (92, "U"),
+        (1, "H"),
+        (2, "He"),
+        (3, "Li"),
+        (4, "Be"),
+        (5, "B"),
+        (6, "C"),
+        (7, "N"),
+        (8, "O"),
+        (9, "F"),
+        (11, "Na"),
+        (12, "Mg"),
+        (13, "Al"),
+        (14, "Si"),
+        (16, "S"),
+        (17, "Cl"),
+        (24, "Cr"),
+        (26, "Fe"),
+        (40, "Zr"),
+        (47, "Ag"),
+        (48, "Cd"),
+        (74, "W"),
+        (82, "Pb"),
+        (90, "Th"),
+        (92, "U"),
         (94, "Pu"),
     ];
     TABLE.iter().find(|(zz, _)| *zz == z).map(|(_, s)| *s)
@@ -537,12 +560,10 @@ fn resolve_zaid(
         return Ok(z);
     }
     if let Some(path) = &nuc.hdf5_file {
-        return zaid_from_hdf5_filename(path).ok_or_else(|| {
-            ResolveError::UnparseableHdf5Path {
-                material: material_name.to_string(),
-                nuclide_idx: nuc_idx,
-                path: path.clone(),
-            }
+        return zaid_from_hdf5_filename(path).ok_or_else(|| ResolveError::UnparseableHdf5Path {
+            material: material_name.to_string(),
+            nuclide_idx: nuc_idx,
+            path: path.clone(),
         });
     }
     Err(ResolveError::MissingNuclideIdentifier {
@@ -580,22 +601,100 @@ pub fn zaid_from_hdf5_filename(path: &str) -> Option<u32> {
 fn symbol_to_z(sym: &str) -> Option<u32> {
     // Compact PT lookup — covers everything in our nuclide catalog.
     Some(match sym {
-        "H" => 1, "He" => 2, "Li" => 3, "Be" => 4, "B" => 5, "C" => 6,
-        "N" => 7, "O" => 8, "F" => 9, "Ne" => 10, "Na" => 11, "Mg" => 12,
-        "Al" => 13, "Si" => 14, "P" => 15, "S" => 16, "Cl" => 17, "Ar" => 18,
-        "K" => 19, "Ca" => 20, "Sc" => 21, "Ti" => 22, "V" => 23, "Cr" => 24,
-        "Mn" => 25, "Fe" => 26, "Co" => 27, "Ni" => 28, "Cu" => 29, "Zn" => 30,
-        "Ga" => 31, "Ge" => 32, "As" => 33, "Se" => 34, "Br" => 35, "Kr" => 36,
-        "Rb" => 37, "Sr" => 38, "Y" => 39, "Zr" => 40, "Nb" => 41, "Mo" => 42,
-        "Tc" => 43, "Ru" => 44, "Rh" => 45, "Pd" => 46, "Ag" => 47, "Cd" => 48,
-        "In" => 49, "Sn" => 50, "Sb" => 51, "Te" => 52, "I" => 53, "Xe" => 54,
-        "Cs" => 55, "Ba" => 56, "La" => 57, "Ce" => 58, "Pr" => 59, "Nd" => 60,
-        "Pm" => 61, "Sm" => 62, "Eu" => 63, "Gd" => 64, "Tb" => 65, "Dy" => 66,
-        "Ho" => 67, "Er" => 68, "Tm" => 69, "Yb" => 70, "Lu" => 71, "Hf" => 72,
-        "Ta" => 73, "W" => 74, "Re" => 75, "Os" => 76, "Ir" => 77, "Pt" => 78,
-        "Au" => 79, "Hg" => 80, "Tl" => 81, "Pb" => 82, "Bi" => 83,
-        "Th" => 90, "Pa" => 91, "U" => 92, "Np" => 93, "Pu" => 94,
-        "Am" => 95, "Cm" => 96, "Bk" => 97, "Cf" => 98, "Es" => 99, "Fm" => 100,
+        "H" => 1,
+        "He" => 2,
+        "Li" => 3,
+        "Be" => 4,
+        "B" => 5,
+        "C" => 6,
+        "N" => 7,
+        "O" => 8,
+        "F" => 9,
+        "Ne" => 10,
+        "Na" => 11,
+        "Mg" => 12,
+        "Al" => 13,
+        "Si" => 14,
+        "P" => 15,
+        "S" => 16,
+        "Cl" => 17,
+        "Ar" => 18,
+        "K" => 19,
+        "Ca" => 20,
+        "Sc" => 21,
+        "Ti" => 22,
+        "V" => 23,
+        "Cr" => 24,
+        "Mn" => 25,
+        "Fe" => 26,
+        "Co" => 27,
+        "Ni" => 28,
+        "Cu" => 29,
+        "Zn" => 30,
+        "Ga" => 31,
+        "Ge" => 32,
+        "As" => 33,
+        "Se" => 34,
+        "Br" => 35,
+        "Kr" => 36,
+        "Rb" => 37,
+        "Sr" => 38,
+        "Y" => 39,
+        "Zr" => 40,
+        "Nb" => 41,
+        "Mo" => 42,
+        "Tc" => 43,
+        "Ru" => 44,
+        "Rh" => 45,
+        "Pd" => 46,
+        "Ag" => 47,
+        "Cd" => 48,
+        "In" => 49,
+        "Sn" => 50,
+        "Sb" => 51,
+        "Te" => 52,
+        "I" => 53,
+        "Xe" => 54,
+        "Cs" => 55,
+        "Ba" => 56,
+        "La" => 57,
+        "Ce" => 58,
+        "Pr" => 59,
+        "Nd" => 60,
+        "Pm" => 61,
+        "Sm" => 62,
+        "Eu" => 63,
+        "Gd" => 64,
+        "Tb" => 65,
+        "Dy" => 66,
+        "Ho" => 67,
+        "Er" => 68,
+        "Tm" => 69,
+        "Yb" => 70,
+        "Lu" => 71,
+        "Hf" => 72,
+        "Ta" => 73,
+        "W" => 74,
+        "Re" => 75,
+        "Os" => 76,
+        "Ir" => 77,
+        "Pt" => 78,
+        "Au" => 79,
+        "Hg" => 80,
+        "Tl" => 81,
+        "Pb" => 82,
+        "Bi" => 83,
+        "Th" => 90,
+        "Pa" => 91,
+        "U" => 92,
+        "Np" => 93,
+        "Pu" => 94,
+        "Am" => 95,
+        "Cm" => 96,
+        "Bk" => 97,
+        "Cf" => 98,
+        "Es" => 99,
+        "Fm" => 100,
         _ => return None,
     })
 }
@@ -769,16 +868,19 @@ mod tests {
     /// symbols mean H-2 and H-3 by convention.
     #[test]
     fn thermal_target_x_in_compound() {
-        assert_eq!(parse_thermal_target("c_H_in_H2O.h5"),       Some((1, None)));
-        assert_eq!(parse_thermal_target("c_D_in_D2O.h5"),       Some((1, Some(2))));
-        assert_eq!(parse_thermal_target("c_H_in_ZrH.h5"),       Some((1, None)));
-        assert_eq!(parse_thermal_target("c_Zr_in_ZrH.h5"),      Some((40, None)));
-        assert_eq!(parse_thermal_target("c_Be_in_BeO.h5"),      Some((4, None)));
-        assert_eq!(parse_thermal_target("c_O_in_BeO.h5"),       Some((8, None)));
-        assert_eq!(parse_thermal_target("c_O_in_UO2.h5"),       Some((8, None)));
-        assert_eq!(parse_thermal_target("c_U_in_UO2.h5"),       Some((92, None)));
-        assert_eq!(parse_thermal_target("c_H_in_CH2.h5"),       Some((1, None)));
-        assert_eq!(parse_thermal_target("c_H_in_CH4_liquid.h5"), Some((1, None)));
+        assert_eq!(parse_thermal_target("c_H_in_H2O.h5"), Some((1, None)));
+        assert_eq!(parse_thermal_target("c_D_in_D2O.h5"), Some((1, Some(2))));
+        assert_eq!(parse_thermal_target("c_H_in_ZrH.h5"), Some((1, None)));
+        assert_eq!(parse_thermal_target("c_Zr_in_ZrH.h5"), Some((40, None)));
+        assert_eq!(parse_thermal_target("c_Be_in_BeO.h5"), Some((4, None)));
+        assert_eq!(parse_thermal_target("c_O_in_BeO.h5"), Some((8, None)));
+        assert_eq!(parse_thermal_target("c_O_in_UO2.h5"), Some((8, None)));
+        assert_eq!(parse_thermal_target("c_U_in_UO2.h5"), Some((92, None)));
+        assert_eq!(parse_thermal_target("c_H_in_CH2.h5"), Some((1, None)));
+        assert_eq!(
+            parse_thermal_target("c_H_in_CH4_liquid.h5"),
+            Some((1, None))
+        );
     }
 
     /// `c_<Symbol><Mass>` — isotope-specific files (metallic Al-27,
@@ -795,8 +897,8 @@ mod tests {
     /// isotope glyph (D / T).
     #[test]
     fn thermal_target_compound_only() {
-        assert_eq!(parse_thermal_target("c_Graphite.h5"),   Some((6, None)));
-        assert_eq!(parse_thermal_target("c_C6H6.h5"),       Some((1, None)));
+        assert_eq!(parse_thermal_target("c_Graphite.h5"), Some((6, None)));
+        assert_eq!(parse_thermal_target("c_C6H6.h5"), Some((1, None)));
         assert_eq!(parse_thermal_target("c_SiO2_alpha.h5"), Some((14, None)));
     }
 
@@ -806,9 +908,9 @@ mod tests {
     #[test]
     fn thermal_target_cold_sources() {
         assert_eq!(parse_thermal_target("c_ortho_H.h5"), Some((1, None)));
-        assert_eq!(parse_thermal_target("c_para_H.h5"),  Some((1, None)));
+        assert_eq!(parse_thermal_target("c_para_H.h5"), Some((1, None)));
         assert_eq!(parse_thermal_target("c_ortho_D.h5"), Some((1, Some(2))));
-        assert_eq!(parse_thermal_target("c_para_D.h5"),  Some((1, Some(2))));
+        assert_eq!(parse_thermal_target("c_para_D.h5"), Some((1, Some(2))));
     }
 
     /// Non-thermal filenames (regular nuclide files, malformed names)
@@ -839,10 +941,8 @@ mod tests {
         // thread pool, and a previous failure pinned a global path
         // because `passes_through` (alphabetically earlier) was
         // creating `C0.h5` before `splits_when` ran.
-        let dir = std::env::temp_dir().join(format!(
-            "orm_nat_expand_{}_{tag}",
-            std::process::id(),
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("orm_nat_expand_{}_{tag}", std::process::id(),));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -882,7 +982,10 @@ mod tests {
         assert_eq!(nuclides[0].zaid, Some(6012));
         assert_eq!(nuclides[1].zaid, Some(6013));
         let sum = nuclides[0].atom_density + nuclides[1].atom_density;
-        assert!((sum - 0.00054977).abs() < 1e-12, "split must conserve atom density (sum = {sum})");
+        assert!(
+            (sum - 0.00054977).abs() < 1e-12,
+            "split must conserve atom density (sum = {sum})"
+        );
     }
 
     /// Library WITH `C0.h5` (VII.1 layout) → expansion skipped.

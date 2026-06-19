@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use open_rust_mc::hdf5_reader::{read_fission_energy_dist, TabularEnergyDist};
+use open_rust_mc::hdf5_reader::{TabularEnergyDist, read_fission_energy_dist};
 use open_rust_mc::transport::rng::Rng;
 
 fn data_dir() -> PathBuf {
@@ -154,12 +154,12 @@ fn moments(samples: &[f64]) -> (f64, f64) {
     (mean, var.sqrt())
 }
 
-fn run_bin(dist: &TabularEnergyDist, label: &str) {
+fn run_bin(dist: &TabularEnergyDist, label: &str) -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== {label} ===");
     println!(
         "  e_out range = [{:.3e}, {:.3e}] eV, {} pts; pdf.len = {}",
         dist.e_out[0],
-        dist.e_out.last().unwrap(),
+        dist.e_out.last().ok_or("empty e_out grid")?,
         dist.e_out.len(),
         dist.pdf.len()
     );
@@ -178,9 +178,18 @@ fn run_bin(dist: &TabularEnergyDist, label: &str) {
     let (mean_cpu, std_cpu) = moments(&s_cpu);
     let (mean_lin, std_lin) = moments(&s_lin);
     let (mean_gpu, std_gpu) = moments(&s_gpu);
-    println!("  CPU quadratic : ⟨E⟩ = {:.4e}  σ = {:.4e}", mean_cpu, std_cpu);
-    println!("  Linear-CDF    : ⟨E⟩ = {:.4e}  σ = {:.4e}", mean_lin, std_lin);
-    println!("  GPU quadratic : ⟨E⟩ = {:.4e}  σ = {:.4e}", mean_gpu, std_gpu);
+    println!(
+        "  CPU quadratic : ⟨E⟩ = {:.4e}  σ = {:.4e}",
+        mean_cpu, std_cpu
+    );
+    println!(
+        "  Linear-CDF    : ⟨E⟩ = {:.4e}  σ = {:.4e}",
+        mean_lin, std_lin
+    );
+    println!(
+        "  GPU quadratic : ⟨E⟩ = {:.4e}  σ = {:.4e}",
+        mean_gpu, std_gpu
+    );
 
     // Bit-for-bit check on the first 8 samples.
     println!("  First 8 samples (same ξ stream, fresh rng):");
@@ -196,20 +205,19 @@ fn run_bin(dist: &TabularEnergyDist, label: &str) {
             xi, v_cpu, v_gpu, cpu_gpu_diff, v_lin
         );
     }
+    Ok(())
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = data_dir();
     let path = data_dir.join("U235.h5");
     println!("Loading {}", path.display());
-    let edist = read_fission_energy_dist(&path)
-        .expect("U235 χ load")
-        .expect("U235 must have χ");
+    let edist = read_fission_energy_dist(&path)?.ok_or("U235 must have χ")?;
     println!(
         "U-235 χ: {} incident-energy bins, range [{:.3e}, {:.3e}] eV",
         edist.energies.len(),
         edist.energies[0],
-        edist.energies.last().unwrap()
+        edist.energies.last().ok_or("empty energies grid")?
     );
 
     // Pick representative E_in indices.
@@ -218,6 +226,7 @@ fn main() {
         run_bin(
             &edist.distributions[idx],
             &format!("E_in = {:.3e} eV (bin {idx})", edist.energies[idx]),
-        );
+        )?;
     }
+    Ok(())
 }

@@ -800,7 +800,9 @@ impl RingLattice {
     /// `background_universe` when the point lies outside any pin.
     pub fn universe_at(&self, p: Vec3) -> UniverseId {
         match self.pin_at(p) {
-            Some((usize::MAX, _)) => self.center_universe.expect("centre slot but no centre universe"),
+            Some((usize::MAX, _)) => self
+                .center_universe
+                .expect("centre slot but no centre universe"),
             Some((ring, pin)) => self.ring_universes[ring][pin],
             None => self.background_universe,
         }

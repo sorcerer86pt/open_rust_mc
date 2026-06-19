@@ -46,6 +46,36 @@ cuda_bench/*.exe
 cuda_bench/*.exp
 cuda_bench/*.lib
 
+# Compiled binaries and build artefacts — never committed. CI builds
+# release binaries and attaches them to a release; they don't live in
+# git. Source (.rs/.cu/.py/.toml), docs, and small result CSV/PNG/PDF
+# for the paper are tracked; everything that is a build output is not.
+*.exe
+*.dll
+*.so
+*.so.*
+*.dylib
+*.a
+*.rlib
+*.o
+*.obj
+*.lib
+*.exp
+*.pdb
+*.ptx
+*.cubin
+*.fatbin
+*.bin
+*.out
+*.app
+
+# Profiling / diagnostic captures (Nsight Compute / Systems). Large
+# binaries — keep local or attach to a release, never in git.
+*.ncu-rep
+*.nsys-rep
+*.qdrep
+*.7z
+
 # OS
 .DS_Store
 Thumbs.db

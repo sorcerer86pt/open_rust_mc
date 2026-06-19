@@ -19,7 +19,6 @@
 //! same controls `pwr_assembly --preview` uses.
 
 #![allow(dead_code)]
-
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -39,7 +38,9 @@ fn resolve_case_path(name: &Path) -> PathBuf {
     }
     let candidates_relative_to = [
         std::env::current_dir().ok(),
-        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf)),
     ];
     for start in candidates_relative_to.into_iter().flatten() {
         let mut cur: Option<&Path> = Some(&start);
@@ -73,7 +74,9 @@ fn resolve_data_dir(name: &Path) -> PathBuf {
     }
     let candidates_relative_to = [
         std::env::current_dir().ok(),
-        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf)),
     ];
     for start in candidates_relative_to.into_iter().flatten() {
         let mut cur: Option<&Path> = Some(&start);
@@ -267,16 +270,14 @@ struct Args {
 
 #[cfg(feature = "preview")]
 fn run_preview(args: &Args) {
+    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
     use open_rust_mc::geometry::scene_io;
-    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::transport::material::Material;
     use open_rust_mc::transport::material_resolve;
     use open_rust_mc::transport::nuclides::NuclideLibrary;
-    use rust_mc_sim::preview::{
-        auto_color_from_name, LegendEntry, MaterialPalette, Viewport,
-    };
+    use rust_mc_sim::preview::{LegendEntry, MaterialPalette, Viewport, auto_color_from_name};
 
     let case_path = resolve_case_path(&args.case_json);
     let data_dir = resolve_data_dir(&args.data_dir);
@@ -287,8 +288,7 @@ fn run_preview(args: &Args) {
             args.case_json.display()
         )
     });
-    let value: serde_json::Value =
-        serde_json::from_str(&text).expect("scene JSON parse failed");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("scene JSON parse failed");
     let scene = value
         .get("scene")
         .expect("case JSON has no `scene` block — this is a CLI-runner manifest");
@@ -343,7 +343,9 @@ fn run_preview(args: &Args) {
     // helpers so interactive and PPM modes produce pixel-identical
     // viewports by default.
     let bounds = world_bounds_xy(&geometry);
-    let z_slice = args.z.unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
+    let z_slice = args
+        .z
+        .unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
     let initial = match (args.half_size, bounds.as_ref()) {
         (Some(h), _) => Viewport::square_centered(h, z_slice, args.resolution),
         (None, Some(b)) => {
@@ -351,17 +353,42 @@ fn run_preview(args: &Args) {
             let cy = b.cy();
             let rough_half = 0.5 * b.xy_extent();
             let origin = open_rust_mc::geometry::Vec3::new(cx, cy, 0.0);
-            let probe_x_pos = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new( 1.0,  0.0, 0.0), z_slice, rough_half);
-            let probe_x_neg = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new(-1.0,  0.0, 0.0), z_slice, rough_half);
-            let probe_y_pos = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new( 0.0,  1.0, 0.0), z_slice, rough_half);
-            let probe_y_neg = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new( 0.0, -1.0, 0.0), z_slice, rough_half);
+            let probe_x_pos = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(1.0, 0.0, 0.0),
+                z_slice,
+                rough_half,
+            );
+            let probe_x_neg = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(-1.0, 0.0, 0.0),
+                z_slice,
+                rough_half,
+            );
+            let probe_y_pos = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(0.0, 1.0, 0.0),
+                z_slice,
+                rough_half,
+            );
+            let probe_y_neg = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(0.0, -1.0, 0.0),
+                z_slice,
+                rough_half,
+            );
             let tight = [probe_x_pos, probe_x_neg, probe_y_pos, probe_y_neg]
-                .iter().fold(0.0_f64, |a, &b| a.max(b));
-            let half_raw = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b));
+            let half_raw = if tight > 0.0 {
+                tight * 1.05
+            } else {
+                rough_half * 1.05
+            };
             let half = half_raw * args.zoom;
             Viewport {
                 x_min: cx - half,
@@ -390,29 +417,35 @@ fn run_preview(args: &Args) {
         let h = vp.height as usize;
         let dx = (vp.x_max - vp.x_min) / vp.width as f64;
         let dy = (vp.y_max - vp.y_min) / vp.height as f64;
-        let rows: Vec<Vec<u32>> = (0..vp.height).into_par_iter().map(|py| {
-            let world_y = vp.y_max - (py as f64 + 0.5) * dy;
-            (0..vp.width).map(|px| {
-                let world_x = vp.x_min + (px as f64 + 0.5) * dx;
-                let pos = Vec3::new(world_x, world_y, vp.z_slice);
-                let color = match find_cell_recursive(pos, &geometry) {
-                    Some(stack) => {
-                        let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
-                        match geometry.cells[deepest].fill {
-                            CellFill::Material(m) => palette
-                                .colors
-                                .get(m as usize)
-                                .copied()
-                                .unwrap_or(palette.void),
-                            _ => palette.void,
-                        }
-                    }
-                    None => palette.void,
-                };
-                let [r, g, b] = color;
-                ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-            }).collect()
-        }).collect();
+        let rows: Vec<Vec<u32>> = (0..vp.height)
+            .into_par_iter()
+            .map(|py| {
+                let world_y = vp.y_max - (py as f64 + 0.5) * dy;
+                (0..vp.width)
+                    .map(|px| {
+                        let world_x = vp.x_min + (px as f64 + 0.5) * dx;
+                        let pos = Vec3::new(world_x, world_y, vp.z_slice);
+                        let color = match find_cell_recursive(pos, &geometry) {
+                            Some(stack) => {
+                                let deepest =
+                                    stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                                match geometry.cells[deepest].fill {
+                                    CellFill::Material(m) => palette
+                                        .colors
+                                        .get(m as usize)
+                                        .copied()
+                                        .unwrap_or(palette.void),
+                                    _ => palette.void,
+                                }
+                            }
+                            None => palette.void,
+                        };
+                        let [r, g, b] = color;
+                        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+                    })
+                    .collect()
+            })
+            .collect();
         let mut buf = Vec::with_capacity(w * h);
         for row in &rows {
             buf.extend_from_slice(row);
@@ -455,8 +488,7 @@ fn show_window_cursor_zoom<F>(
     title: &str,
     _legend: Vec<rust_mc_sim::preview::LegendEntry>,
     mut render: F,
-)
-where
+) where
     F: FnMut(&rust_mc_sim::preview::Viewport) -> Vec<u32>,
 {
     use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
@@ -658,11 +690,8 @@ fn tighten_along_axis(
     let mut consecutive_misses = 0_usize;
     for i in 1..=AXIS_PROBE_STEPS {
         let r = max_extent * i as f64 / AXIS_PROBE_STEPS as f64;
-        let probe = open_rust_mc::geometry::Vec3::new(
-            origin.x + dir.x * r,
-            origin.y + dir.y * r,
-            z_slice,
-        );
+        let probe =
+            open_rust_mc::geometry::Vec3::new(origin.x + dir.x * r, origin.y + dir.y * r, z_slice);
         if find_cell_recursive(probe, geom).is_some() {
             last_hit = r;
             consecutive_misses = 0;
@@ -680,9 +709,12 @@ const AXIS_PROBE_STEPS: usize = 200;
 const AXIS_PROBE_MAX_MISS_RUN: usize = 6;
 
 struct GeomBounds {
-    x_min: f64, x_max: f64,
-    y_min: f64, y_max: f64,
-    z_min: f64, z_max: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    z_min: f64,
+    z_max: f64,
     /// Sorted distinct PlaneZ `z0` values. Used by `default_z` to
     /// pick a sensible slice when the explicit `(z_min, z_max)`
     /// midpoint lands in a void / air region (PST-012 has floor
@@ -696,8 +728,12 @@ impl GeomBounds {
     fn xy_extent(&self) -> f64 {
         (self.x_max - self.x_min).max(self.y_max - self.y_min)
     }
-    fn cx(&self) -> f64 { 0.5 * (self.x_min + self.x_max) }
-    fn cy(&self) -> f64 { 0.5 * (self.y_min + self.y_max) }
+    fn cx(&self) -> f64 {
+        0.5 * (self.x_min + self.x_max)
+    }
+    fn cy(&self) -> f64 {
+        0.5 * (self.y_min + self.y_max)
+    }
     /// Sensible z-slice when the user didn't pass `--z`. Prefers the
     /// **midpoint of the two median consecutive PlaneZ positions**
     /// over the (z_min, z_max) midpoint:
@@ -737,9 +773,8 @@ impl GeomBounds {
             // explicit (z_min + z_max) / 2 — biases toward the
             // CENTRE while still avoiding cells that lie on a
             // surface boundary.
-            let mut gaps: Vec<(usize, f64)> = (0..zs.len() - 1)
-                .map(|i| (i, zs[i + 1] - zs[i]))
-                .collect();
+            let mut gaps: Vec<(usize, f64)> =
+                (0..zs.len() - 1).map(|i| (i, zs[i + 1] - zs[i])).collect();
             // Sort by gap size ascending; keep the smaller half.
             gaps.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             let keep = (gaps.len() / 2).max(1);
@@ -751,10 +786,12 @@ impl GeomBounds {
             };
             // Pick the candidate whose midpoint is closest to the
             // geometry centre.
-            let best = candidates.iter()
+            let best = candidates
+                .iter()
                 .map(|&(i, _)| (i, 0.5 * (zs[i] + zs[i + 1])))
                 .min_by(|a, b| {
-                    (a.1 - geom_centre_z).abs()
+                    (a.1 - geom_centre_z)
+                        .abs()
                         .partial_cmp(&(b.1 - geom_centre_z).abs())
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
@@ -777,27 +814,40 @@ impl GeomBounds {
     }
 }
 
-fn world_bounds_xy(
-    geom: &open_rust_mc::geometry::Geometry,
-) -> Option<GeomBounds> {
+fn world_bounds_xy(geom: &open_rust_mc::geometry::Geometry) -> Option<GeomBounds> {
     let mut b = GeomBounds {
-        x_min: f64::INFINITY, x_max: f64::NEG_INFINITY,
-        y_min: f64::INFINITY, y_max: f64::NEG_INFINITY,
-        z_min: f64::INFINITY, z_max: f64::NEG_INFINITY,
+        x_min: f64::INFINITY,
+        x_max: f64::NEG_INFINITY,
+        y_min: f64::INFINITY,
+        y_max: f64::NEG_INFINITY,
+        z_min: f64::INFINITY,
+        z_max: f64::NEG_INFINITY,
         z_plane_positions: Vec::new(),
     };
     let mut touched = false;
     let update_x = |b: &mut GeomBounds, lo: f64, hi: f64| {
-        if lo.is_finite() && lo < b.x_min { b.x_min = lo; }
-        if hi.is_finite() && hi > b.x_max { b.x_max = hi; }
+        if lo.is_finite() && lo < b.x_min {
+            b.x_min = lo;
+        }
+        if hi.is_finite() && hi > b.x_max {
+            b.x_max = hi;
+        }
     };
     let update_y = |b: &mut GeomBounds, lo: f64, hi: f64| {
-        if lo.is_finite() && lo < b.y_min { b.y_min = lo; }
-        if hi.is_finite() && hi > b.y_max { b.y_max = hi; }
+        if lo.is_finite() && lo < b.y_min {
+            b.y_min = lo;
+        }
+        if hi.is_finite() && hi > b.y_max {
+            b.y_max = hi;
+        }
     };
     let update_z = |b: &mut GeomBounds, lo: f64, hi: f64| {
-        if lo.is_finite() && lo < b.z_min { b.z_min = lo; }
-        if hi.is_finite() && hi > b.z_max { b.z_max = hi; }
+        if lo.is_finite() && lo < b.z_min {
+            b.z_min = lo;
+        }
+        if hi.is_finite() && hi > b.z_max {
+            b.z_max = hi;
+        }
     };
     use open_rust_mc::geometry::surface::Surface;
     for s in &geom.surfaces {
@@ -842,7 +892,8 @@ fn world_bounds_xy(
         }
     }
     // Dedup + sort for stable median lookup.
-    b.z_plane_positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    b.z_plane_positions
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     b.z_plane_positions.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     for lat in &geom.lattices {
         let x_hi = lat.origin.x + lat.shape[0] as f64 * lat.pitch.x;
@@ -886,22 +937,22 @@ fn auto_color(name: &str) -> [u8; 3] {
 /// saturation + ≥ 60% lightness so cell boundaries are always
 /// legible against neighbours and against the magenta void.
 const INDEX_PALETTE: [[u8; 3]; 16] = [
-    [220,  70,  70],  // red
-    [240, 140,  50],  // orange
-    [240, 200,  60],  // yellow
-    [150, 210,  60],  // lime
-    [ 60, 200, 100],  // green
-    [ 60, 200, 180],  // teal
-    [ 60, 160, 220],  // sky blue
-    [ 80, 110, 220],  // blue
-    [140,  80, 220],  // violet
-    [200,  80, 200],  // pink
-    [240, 160, 180],  // rose
-    [180, 180, 100],  // olive
-    [110, 180, 110],  // mint
-    [180, 140,  80],  // sand
-    [200, 200, 220],  // pearl
-    [120, 140, 180],  // slate
+    [220, 70, 70],   // red
+    [240, 140, 50],  // orange
+    [240, 200, 60],  // yellow
+    [150, 210, 60],  // lime
+    [60, 200, 100],  // green
+    [60, 200, 180],  // teal
+    [60, 160, 220],  // sky blue
+    [80, 110, 220],  // blue
+    [140, 80, 220],  // violet
+    [200, 80, 200],  // pink
+    [240, 160, 180], // rose
+    [180, 180, 100], // olive
+    [110, 180, 110], // mint
+    [180, 140, 80],  // sand
+    [200, 200, 220], // pearl
+    [120, 140, 180], // slate
 ];
 
 /// Pick a material colour by SEMANTIC mapping first (water → blue,
@@ -922,23 +973,23 @@ fn semantic_or_index_color(name: &str, index: usize) -> Option<[u8; 3]> {
     // physically. Air gets an obviously-different colour from any
     // structural metal.
     if n.contains("water") && !n.contains("heavy") {
-        return Some([ 80, 150, 230]);  // blue
+        return Some([80, 150, 230]); // blue
     }
     if n.contains("heavy water") || n.contains("d2o") {
-        return Some([ 40,  80, 180]);  // deep blue
+        return Some([40, 80, 180]); // deep blue
     }
     if n.contains("concrete") {
-        return Some([180, 160, 120]);  // tan
+        return Some([180, 160, 120]); // tan
     }
     if n.contains("air") || n.contains("void") || n.contains("vacuum") {
-        return Some([220, 230, 240]);  // pale blue-white — visibly
-                                       // NOT a structural material
+        return Some([220, 230, 240]); // pale blue-white — visibly
+        // NOT a structural material
     }
     if n.contains("plutonium") || n.contains("mox") {
-        return Some([240, 140,  50]);  // orange
+        return Some([240, 140, 50]); // orange
     }
     if n.contains("uranium") || n.contains("uo2") || n.contains("fuel") {
-        return Some([200,  80,  60]);  // red
+        return Some([200, 80, 60]); // red
     }
     // Everything else: cycle through the index palette so that
     // (e.g.) "Stainless steel" and "Steel (pool wall)" get DIFFERENT
@@ -969,14 +1020,10 @@ fn load_preview(args: &Args) -> LoadedPreview {
 
     let case_path = resolve_case_path(&args.case_json);
     let data_dir = resolve_data_dir(&args.data_dir);
-    let text = std::fs::read_to_string(&case_path).unwrap_or_else(|e| {
-        panic!("read {}: {e}", case_path.display())
-    });
-    let value: serde_json::Value =
-        serde_json::from_str(&text).expect("scene JSON parse failed");
-    let scene = value
-        .get("scene")
-        .expect("case JSON has no `scene` block");
+    let text = std::fs::read_to_string(&case_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", case_path.display()));
+    let value: serde_json::Value = serde_json::from_str(&text).expect("scene JSON parse failed");
+    let scene = value.get("scene").expect("case JSON has no `scene` block");
     let loaded = scene_io::load_scene_from_json(&scene.to_string())
         .expect("scene_io::load_scene_from_json failed");
     let lib = NuclideLibrary::from_data_dir(&data_dir);
@@ -992,13 +1039,15 @@ fn load_preview(args: &Args) -> LoadedPreview {
     let palette: Vec<[u8; 3]> = materials
         .iter()
         .enumerate()
-        .map(|(i, m)| semantic_or_index_color(&m.name, i).unwrap_or_else(|| {
-            // Final fallback: cycle through INDEX_PALETTE by index
-            // mod len. semantic_or_index_color already does this when
-            // its semantic-map misses, so this branch is unreachable
-            // in practice — kept for type-safety.
-            INDEX_PALETTE[i % INDEX_PALETTE.len()]
-        }))
+        .map(|(i, m)| {
+            semantic_or_index_color(&m.name, i).unwrap_or_else(|| {
+                // Final fallback: cycle through INDEX_PALETTE by index
+                // mod len. semantic_or_index_color already does this when
+                // its semantic-map misses, so this branch is unreachable
+                // in practice — kept for type-safety.
+                INDEX_PALETTE[i % INDEX_PALETTE.len()]
+            })
+        })
         .collect();
     let names: Vec<String> = materials.iter().map(|m| m.name.clone()).collect();
 
@@ -1031,7 +1080,9 @@ fn auto_bounds(
     args: &Args,
 ) -> (f64, f64, f64, f64, f64) {
     let bounds = world_bounds_xy(geometry);
-    let z_slice = args.z.unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
+    let z_slice = args
+        .z
+        .unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
     let (x_min, x_max, y_min, y_max) = match (args.half_size, bounds.as_ref()) {
         (Some(h), _) => (-h, h, -h, h),
         (None, Some(b)) => {
@@ -1055,22 +1106,36 @@ fn auto_bounds(
             // 0 (centre is void), fall back to the rough half — the
             // user can always pass --half-size explicitly.
             let tight = [probe_x_pos, probe_x_neg, probe_y_pos, probe_y_neg]
-                .iter().fold(0.0_f64, |a, &b| a.max(b));
-            let half_raw = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b));
+            let half_raw = if tight > 0.0 {
+                tight * 1.05
+            } else {
+                rough_half * 1.05
+            };
             let half = half_raw * args.zoom;
             (cx - half, cx + half, cy - half, cy + half)
         }
-        (None, None) => (-10.0 * args.zoom, 10.0 * args.zoom,
-                         -10.0 * args.zoom, 10.0 * args.zoom),
+        (None, None) => (
+            -10.0 * args.zoom,
+            10.0 * args.zoom,
+            -10.0 * args.zoom,
+            10.0 * args.zoom,
+        ),
     };
     (x_min, x_max, y_min, y_max, z_slice)
 }
 
 fn render_ppm(args: &Args, ppm_path: &Path) {
-    use open_rust_mc::geometry::ray::find_cell_recursive;
     use open_rust_mc::geometry::Vec3;
+    use open_rust_mc::geometry::ray::find_cell_recursive;
 
-    let LoadedPreview { geometry, palette, void, names: _ } = load_preview(args);
+    let LoadedPreview {
+        geometry,
+        palette,
+        void,
+        names: _,
+    } = load_preview(args);
     let (x_min, x_max, y_min, y_max, z_slice) = auto_bounds(&geometry, args);
     let res = args.resolution;
     let buf = render_frame(
@@ -1118,8 +1183,14 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
 
     // Write the frame to disk in the requested format.
     write_image(ppm_path, &buf, res);
-    eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
-        ppm_path.display(), res, res, 0.5 * (x_max - x_min), z_slice);
+    eprintln!(
+        "wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
+        ppm_path.display(),
+        res,
+        res,
+        0.5 * (x_max - x_min),
+        z_slice
+    );
 
     // Optional multi-stage emit. Each stage scales the auto-half by
     // a user-supplied factor and writes <stem>_zoom<factor>.ppm.
@@ -1150,8 +1221,14 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             .unwrap_or("ppm");
         let stage_path = parent.join(format!("{stem}_zoom{factor}.{ext}"));
         write_image(&stage_path, &s_buf, res);
-        eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
-            stage_path.display(), res, res, stage_half, z_slice);
+        eprintln!(
+            "wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
+            stage_path.display(),
+            res,
+            res,
+            stage_half,
+            z_slice
+        );
     }
 }
 
@@ -1171,14 +1248,16 @@ fn render_frame(
     geom: &open_rust_mc::geometry::Geometry,
     palette: &[[u8; 3]],
     void: [u8; 3],
-    x_min: f64, x_max: f64,
-    y_min: f64, y_max: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
     z_slice: f64,
     res: u32,
 ) -> Vec<[u8; 3]> {
+    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
-    use open_rust_mc::geometry::Vec3;
     use rayon::prelude::*;
 
     let dx = (x_max - x_min) / res as f64;
@@ -1189,26 +1268,30 @@ fn render_frame(
     // flatten. The two-level Vec avoids needing to declare the full
     // framebuffer up front and lets each worker thread write into
     // its own allocation (cache-friendly).
-    let rows: Vec<Vec<[u8; 3]>> = (0..res).into_par_iter().map(|py| {
-        let world_y = y_max - (py as f64 + 0.5) * dy;
-        (0..res).map(|px| {
-            let world_x = x_min + (px as f64 + 0.5) * dx;
-            let pos = Vec3::new(world_x, world_y, z_slice);
-            match find_cell_recursive(pos, geom) {
-                Some(stack) => {
-                    let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
-                    match geom.cells[deepest].fill {
-                        CellFill::Material(m) => palette
-                            .get(m as usize)
-                            .copied()
-                            .unwrap_or(void),
-                        _ => void,
+    let rows: Vec<Vec<[u8; 3]>> = (0..res)
+        .into_par_iter()
+        .map(|py| {
+            let world_y = y_max - (py as f64 + 0.5) * dy;
+            (0..res)
+                .map(|px| {
+                    let world_x = x_min + (px as f64 + 0.5) * dx;
+                    let pos = Vec3::new(world_x, world_y, z_slice);
+                    match find_cell_recursive(pos, geom) {
+                        Some(stack) => {
+                            let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                            match geom.cells[deepest].fill {
+                                CellFill::Material(m) => {
+                                    palette.get(m as usize).copied().unwrap_or(void)
+                                }
+                                _ => void,
+                            }
+                        }
+                        None => void,
                     }
-                }
-                None => void,
-            }
-        }).collect()
-    }).collect();
+                })
+                .collect()
+        })
+        .collect();
 
     // Flatten Vec<Vec<…>> to Vec<…> in scan order. Pre-allocate so
     // we know the exact final capacity; `extend_from_slice` is a
@@ -1313,8 +1396,10 @@ fn spawn_in_new_window() -> bool {
             if let Ok(t) = std::env::var("TERMINAL") {
                 v.push((t, vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()]));
             }
-            v.push(("x-terminal-emulator".into(),
-                    vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()]));
+            v.push((
+                "x-terminal-emulator".into(),
+                vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()],
+            ));
             v
         };
         for (term, targs) in terminals {
@@ -1352,7 +1437,9 @@ fn main() {
         #[cfg(not(feature = "raster3d"))]
         {
             let _ = out;
-            eprintln!("--raster-out needs the `raster3d` feature (cargo run --features raster3d ...)");
+            eprintln!(
+                "--raster-out needs the `raster3d` feature (cargo run --features raster3d ...)"
+            );
             std::process::exit(2);
         }
     }
@@ -1447,7 +1534,7 @@ fn main() {
 #[cfg(feature = "tui")]
 mod tui_preview {
     use super::{
-        auto_bounds, load_preview, resolve_case_path, world_bounds_xy, Args, LoadedPreview,
+        Args, LoadedPreview, auto_bounds, load_preview, resolve_case_path, world_bounds_xy,
     };
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
@@ -1618,7 +1705,15 @@ mod tui_preview {
         // terminal isn't left swallowing clicks.
         let _ = execute!(std::io::stdout(), EnableMouseCapture);
 
-        let result = event_loop(&mut terminal, &mut state, &geometry, &palette, &void, &names, &title);
+        let result = event_loop(
+            &mut terminal,
+            &mut state,
+            &geometry,
+            &palette,
+            &void,
+            &names,
+            &title,
+        );
 
         let _ = execute!(std::io::stdout(), DisableMouseCapture);
         ratatui::restore();
@@ -1807,9 +1902,8 @@ mod tui_preview {
             )
             .style(Style::default().dim()),
         };
-        let status = Paragraph::new(vec![line1, line2]).block(Block::new().borders(
-            ratatui::widgets::Borders::TOP,
-        ));
+        let status = Paragraph::new(vec![line1, line2])
+            .block(Block::new().borders(ratatui::widgets::Borders::TOP));
         frame.render_widget(status, status_area);
     }
 
@@ -1951,16 +2045,22 @@ mod tui_preview {
             s.zoom_at(0.8, Some(anchor));
             let after = s.world_at(anchor.0, anchor.1);
             // The world point under the cursor must stay put across zoom.
-            assert!((before.0 - after.0).abs() < 1e-6, "x drift {before:?} {after:?}");
-            assert!((before.1 - after.1).abs() < 1e-6, "y drift {before:?} {after:?}");
+            assert!(
+                (before.0 - after.0).abs() < 1e-6,
+                "x drift {before:?} {after:?}"
+            );
+            assert!(
+                (before.1 - after.1).abs() < 1e-6,
+                "y drift {before:?} {after:?}"
+            );
             assert!(s.scale < 0.5, "zoom-in must shrink scale");
         }
 
         #[test]
         fn paint_canvas_writes_half_blocks_without_a_real_terminal() {
             use open_rust_mc::geometry::Geometry;
-            use ratatui::backend::TestBackend;
             use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
 
             // Empty geometry → every sample leaks → void fill. We're
             // exercising the buffer-write path + half-block math, not
@@ -2005,7 +2105,7 @@ mod tui_preview {
 // `(geometry, camera)`, so a CUDA ray-cast kernel reusing the device
 // CSG in `geom_recursive.cu` could later drop in behind this same API.
 mod render3d {
-    use super::{load_preview, world_bounds_xy, Args, LoadedPreview};
+    use super::{Args, LoadedPreview, load_preview, world_bounds_xy};
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
     use open_rust_mc::geometry::{Geometry, Vec3};
@@ -2067,14 +2167,14 @@ mod render3d {
     pub(crate) fn scene_aabb(geom: &Geometry) -> (Vec3, Vec3) {
         match world_bounds_xy(geom) {
             Some(b) => {
-                let (zmin, zmax) = if b.z_min.is_finite() && b.z_max.is_finite() && b.z_max > b.z_min
-                {
-                    (b.z_min, b.z_max)
-                } else {
-                    let c = b.default_z();
-                    let e = 0.5 * b.xy_extent().max(1.0);
-                    (c - e, c + e)
-                };
+                let (zmin, zmax) =
+                    if b.z_min.is_finite() && b.z_max.is_finite() && b.z_max > b.z_min {
+                        (b.z_min, b.z_max)
+                    } else {
+                        let c = b.default_z();
+                        let e = 0.5 * b.xy_extent().max(1.0);
+                        (c - e, c + e)
+                    };
                 let min = Vec3::new(b.x_min, b.y_min, zmin);
                 let max = Vec3::new(b.x_max, b.y_max, zmax);
                 let pad = (max - min) * 0.06;
@@ -2157,7 +2257,13 @@ mod render3d {
     /// steps only to cross genuine void/leak gaps (where the geometry
     /// walk has no cell to step from). Returns the material index + an
     /// outward surface normal estimated from the occupancy gradient.
-    fn cast_ray(o: Vec3, d: Vec3, geom: &Geometry, opaque: &[bool], aabb: (Vec3, Vec3)) -> Option<Hit> {
+    fn cast_ray(
+        o: Vec3,
+        d: Vec3,
+        geom: &Geometry,
+        opaque: &[bool],
+        aabb: (Vec3, Vec3),
+    ) -> Option<Hit> {
         let (t_enter, t_exit) = ray_aabb(o, d, aabb.0, aabb.1)?;
         let diag = (aabb.1 - aabb.0).length();
         let micro = (diag / 1024.0).max(1e-6);
@@ -2420,15 +2526,18 @@ mod render3d {
             #[cfg(feature = "cuda")]
             {
                 match GpuRecursiveContext::build(&geometry, 1) {
-                    Ok(ctx) => match ctx
-                        .raycast_buffers()
-                        .and_then(|mut b| gpu_frame(&palette, &opaque, aabb, &cam, w, h, &ctx, &mut b))
-                    {
+                    Ok(ctx) => match ctx.raycast_buffers().and_then(|mut b| {
+                        gpu_frame(&palette, &opaque, aabb, &cam, w, h, &ctx, &mut b)
+                    }) {
                         Ok(buf) => {
                             write_png_wh(out, &u32_to_rgb(&buf), w as u32, h as u32);
                             eprintln!(
                                 "wrote {} ({}×{}) [GPU]  azim={:.1}° elev={:.1}°",
-                                out.display(), w, h, args.cam_azim, args.cam_elev
+                                out.display(),
+                                w,
+                                h,
+                                args.cam_azim,
+                                args.cam_elev
                             );
                             return;
                         }
@@ -2495,9 +2604,7 @@ mod render3d {
             };
             eprintln!("  [{i}] {n}  rgb({},{},{})  {solid}", c[0], c[1], c[2]);
         }
-        eprintln!(
-            "controls: left-drag orbit · scroll zoom · right-drag pan · r reset · Esc quit"
-        );
+        eprintln!("controls: left-drag orbit · scroll zoom · right-drag pan · r reset · Esc quit");
 
         // Build the GPU ray-cast context ONCE (NVRTC compile is slow);
         // the frame closure reuses it every redraw. None ⇒ CPU path.
@@ -2551,26 +2658,21 @@ mod render3d {
         .unwrap_or_else(|e| panic!("preview_scene 3D window: {e}"));
         window.set_target_fps(60);
 
-        let mut frame_u32 = |w: usize,
-                             h: usize,
-                             azim: f64,
-                             elev: f64,
-                             radius: f64,
-                             target: Vec3|
-         -> Vec<u32> {
-            let cam = Camera::orbit(target, azim, elev, radius, 45.0);
-            #[cfg(feature = "cuda")]
-            if let (Some(ctx), Some(bufs)) = (&gpu_ctx, &mut gpu_buffers) {
-                match gpu_frame(&palette, &opaque, aabb, &cam, w, h, ctx, bufs) {
-                    Ok(buf) => return buf,
-                    Err(e) => eprintln!("[GPU] frame failed ({e}); CPU this frame"),
+        let mut frame_u32 =
+            |w: usize, h: usize, azim: f64, elev: f64, radius: f64, target: Vec3| -> Vec<u32> {
+                let cam = Camera::orbit(target, azim, elev, radius, 45.0);
+                #[cfg(feature = "cuda")]
+                if let (Some(ctx), Some(bufs)) = (&gpu_ctx, &mut gpu_buffers) {
+                    match gpu_frame(&palette, &opaque, aabb, &cam, w, h, ctx, bufs) {
+                        Ok(buf) => return buf,
+                        Err(e) => eprintln!("[GPU] frame failed ({e}); CPU this frame"),
+                    }
                 }
-            }
-            let rgb = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
-            rgb.iter()
-                .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
-                .collect()
-        };
+                let rgb = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
+                rgb.iter()
+                    .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
+                    .collect()
+            };
 
         let mut buf = frame_u32(w, h, azim, elev, radius, target);
         window.update_with_buffer(&buf, w, h).ok();
@@ -2610,7 +2712,8 @@ mod render3d {
                 if let (Some((mx, my)), Some((px, py))) = (mouse, prev_right) {
                     let cam = Camera::orbit(target, azim, elev, radius, 45.0);
                     let scale = radius * 0.0015;
-                    target = target + cam.right * (-(mx - px) as f64 * scale)
+                    target = target
+                        + cam.right * (-(mx - px) as f64 * scale)
                         + cam.up * ((my - py) as f64 * scale);
                     dirty = true;
                 }
@@ -2624,8 +2727,7 @@ mod render3d {
                 if sy.abs() > 0.05 {
                     let mag = (sy.abs() as f64).min(1.0);
                     let step = 0.85_f64.powf(mag);
-                    radius = (radius * if sy > 0.0 { step } else { 1.0 / step })
-                        .clamp(1e-3, 1e7);
+                    radius = (radius * if sy > 0.0 { step } else { 1.0 / step }).clamp(1e-3, 1e7);
                     dirty = true;
                 }
             }
@@ -2656,11 +2758,24 @@ mod render3d {
             let min = Vec3::new(-1.0, -1.0, -1.0);
             let max = Vec3::new(1.0, 1.0, 1.0);
             // Ray straight down +x through the box.
-            let hit = ray_aabb(Vec3::new(-5.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), min, max);
+            let hit = ray_aabb(
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                min,
+                max,
+            );
             let (t0, t1) = hit.expect("should hit");
-            assert!((t0 - 4.0).abs() < 1e-9 && (t1 - 6.0).abs() < 1e-9, "{t0} {t1}");
+            assert!(
+                (t0 - 4.0).abs() < 1e-9 && (t1 - 6.0).abs() < 1e-9,
+                "{t0} {t1}"
+            );
             // Parallel ray that misses entirely.
-            let miss = ray_aabb(Vec3::new(-5.0, 5.0, 0.0), Vec3::new(1.0, 0.0, 0.0), min, max);
+            let miss = ray_aabb(
+                Vec3::new(-5.0, 5.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                min,
+                max,
+            );
             assert!(miss.is_none());
         }
 
@@ -2671,7 +2786,10 @@ mod render3d {
             // axis, i.e. roughly antiparallel to the camera position.
             let dir = cam.ray_dir(50, 50, 100, 100);
             let to_target = (Vec3::new(0.0, 0.0, 0.0) - cam.pos).normalized();
-            assert!(dir.dot(to_target) > 0.999, "centre ray should aim at target");
+            assert!(
+                dir.dot(to_target) > 0.999,
+                "centre ray should aim at target"
+            );
         }
 
         #[test]
@@ -2687,9 +2805,9 @@ mod render3d {
 
         #[test]
         fn renders_a_concentric_sphere_scene() {
-            use open_rust_mc::geometry::cell::{inside, intersect_all, outside, Cell};
-            use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
             use open_rust_mc::geometry::CellId;
+            use open_rust_mc::geometry::cell::{Cell, inside, intersect_all, outside};
+            use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 
             // Inner solid sphere (material 0, surface 0) inside an outer
             // shell (material 1, between surfaces 0 and 1), both centred
@@ -2729,7 +2847,7 @@ mod render3d {
             assert_ne!(centre, bg, "centre of frame should hit the sphere");
             // And at least a quarter of the frame should be covered by
             // the object (sanity that it isn't a single stray pixel).
-            let hits = buf.iter().filter(|&&p| p != background(0, 64) ).count();
+            let hits = buf.iter().filter(|&&p| p != background(0, 64)).count();
             assert!(hits > 64 * 64 / 8, "object coverage too small: {hits}");
         }
     }
@@ -2750,9 +2868,9 @@ mod render3d {
 #[cfg(feature = "mesh3d")]
 pub mod mesh3d {
     use super::render3d::{opaque_mask, scene_aabb};
-    use super::{load_preview, Args, LoadedPreview};
+    use super::{Args, LoadedPreview, load_preview};
     use fast_surface_nets::ndshape::{RuntimeShape, Shape};
-    use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
+    use fast_surface_nets::{SurfaceNetsBuffer, surface_nets};
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
     use open_rust_mc::geometry::{Geometry, Vec3};
@@ -2899,17 +3017,28 @@ pub mod mesh3d {
             }
             let color = palette
                 .get(m)
-                .map(|c| [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0])
+                .map(|c| {
+                    [
+                        c[0] as f32 / 255.0,
+                        c[1] as f32 / 255.0,
+                        c[2] as f32 / 255.0,
+                    ]
+                })
                 .unwrap_or([0.8, 0.8, 0.8]);
             let base = mesh.positions.len() as u32;
             for pos in &buffer.positions {
                 // Surface-nets positions are in voxel space [0, n-1].
                 let wp = world_of(0, 0, 0)
-                    + Vec3::new(pos[0] as f64 * vs.x, pos[1] as f64 * vs.y, pos[2] as f64 * vs.z);
+                    + Vec3::new(
+                        pos[0] as f64 * vs.x,
+                        pos[1] as f64 * vs.y,
+                        pos[2] as f64 * vs.z,
+                    );
                 mesh.positions.push([wp.x as f32, wp.y as f32, wp.z as f32]);
                 mesh.colors.push(color);
             }
-            mesh.indices.extend(buffer.indices.iter().map(|&i| base + i));
+            mesh.indices
+                .extend(buffer.indices.iter().map(|&i| base + i));
         }
         // Smooth normals from the merged topology (one pass over all
         // materials' triangles).
@@ -2934,9 +3063,9 @@ pub mod mesh3d {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use open_rust_mc::geometry::cell::{inside, intersect_all, outside, Cell};
-        use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
         use open_rust_mc::geometry::CellId;
+        use open_rust_mc::geometry::cell::{Cell, inside, intersect_all, outside};
+        use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
 
         fn two_sphere() -> Geometry {
             let s_inner = Surface::Sphere {
@@ -2997,8 +3126,8 @@ pub mod mesh3d {
 // math.
 #[cfg(feature = "raster3d")]
 pub mod raster3d {
-    use super::mesh3d::{build_scene_mesh, SceneMesh};
     use super::Args;
+    use super::mesh3d::{SceneMesh, build_scene_mesh};
     use std::path::Path;
     use std::sync::Arc;
     use wgpu::util::DeviceExt;
@@ -3075,10 +3204,18 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
     fn normalize(v: [f32; 3]) -> [f32; 3] {
         let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-        if l > 1e-12 { [v[0] / l, v[1] / l, v[2] / l] } else { v }
+        if l > 1e-12 {
+            [v[0] / l, v[1] / l, v[2] / l]
+        } else {
+            v
+        }
     }
     fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-        [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
     }
     fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
         a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -3090,10 +3227,22 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         let s = normalize(cross(f, up));
         let u = cross(s, f);
         [
-            s[0], u[0], -f[0], 0.0,
-            s[1], u[1], -f[1], 0.0,
-            s[2], u[2], -f[2], 0.0,
-            -dot(s, eye), -dot(u, eye), dot(f, eye), 1.0,
+            s[0],
+            u[0],
+            -f[0],
+            0.0,
+            s[1],
+            u[1],
+            -f[1],
+            0.0,
+            s[2],
+            u[2],
+            -f[2],
+            0.0,
+            -dot(s, eye),
+            -dot(u, eye),
+            dot(f, eye),
+            1.0,
         ]
     }
 
@@ -3202,9 +3351,21 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 array_stride: 9 * 4,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 0, shader_location: 0 },
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 12, shader_location: 1 },
-                    wgpu::VertexAttribute { format: wgpu::VertexFormat::Float32x3, offset: 24, shader_location: 2 },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 24,
+                        shader_location: 2,
+                    },
                 ],
             };
             let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -3272,7 +3433,8 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         }
 
         pub fn set_mvp(&self, mvp: &Mat4) {
-            self.queue.write_buffer(&self.uniform, 0, bytemuck::cast_slice(mvp));
+            self.queue
+                .write_buffer(&self.uniform, 0, bytemuck::cast_slice(mvp));
         }
 
         /// Record a render pass drawing the mesh into `color`/`resolve`
@@ -3323,7 +3485,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         h: u32,
         color_format: wgpu::TextureFormat,
     ) -> (wgpu::TextureView, wgpu::TextureView) {
-        let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+        let extent = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
         let color = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("raster-msaa-color"),
             size: extent,
@@ -3378,7 +3544,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         // Single-sample resolve target we can copy out of.
         let resolve_tex = renderer.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("raster-resolve"),
-            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -3398,13 +3568,20 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
         let mut encoder = renderer
             .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("raster-enc") });
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raster-enc"),
+            });
         renderer.draw(
             &mut encoder,
             &color_msaa,
             &resolve_view,
             &depth,
-            wgpu::Color { r: 0.06, g: 0.066, b: 0.09, a: 1.0 },
+            wgpu::Color {
+                r: 0.06,
+                g: 0.066,
+                b: 0.09,
+                a: 1.0,
+            },
         );
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
@@ -3421,7 +3598,11 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                     rows_per_image: Some(h),
                 },
             },
-            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
         );
         renderer.queue.submit(std::iter::once(encoder.finish()));
 
@@ -3430,7 +3611,10 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = tx.send(r);
         });
-        renderer.device.poll(wgpu::PollType::wait_indefinitely()).ok();
+        renderer
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .ok();
         rx.recv().expect("map channel").expect("map failed");
 
         let data = slice.get_mapped_range();
@@ -3453,7 +3637,13 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
         }
         let w = args.resolution;
         let h = args.resolution;
-        let mvp = camera_mvp(&mesh, args.cam_azim, args.cam_elev, 0.9, w as f32 / h as f32);
+        let mvp = camera_mvp(
+            &mesh,
+            args.cam_azim,
+            args.cam_elev,
+            0.9,
+            w as f32 / h as f32,
+        );
         let rgba = pollster::block_on(render_offscreen(&mesh, w, h, mvp));
         write_png_rgba(out, &rgba, w, h);
         eprintln!(
@@ -3529,7 +3719,14 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
             let renderer = Renderer::new(device, queue, mesh, config.format);
             let (msaa, depth) = make_targets(&renderer.device, w, h, config.format);
-            Self { window, surface, config, renderer, msaa, depth }
+            Self {
+                window,
+                surface,
+                config,
+                renderer,
+                msaa,
+                depth,
+            }
         }
 
         fn resize(&mut self, w: u32, h: u32) {
@@ -3549,8 +3746,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 wgpu::CurrentSurfaceTexture::Success(f)
                 | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
                 // Surface needs reconfiguring; do it and skip this frame.
-                wgpu::CurrentSurfaceTexture::Outdated
-                | wgpu::CurrentSurfaceTexture::Lost => {
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                     let (w, h) = (self.config.width, self.config.height);
                     self.surface.configure(&self.renderer.device, &self.config);
                     let _ = (w, h);
@@ -3560,20 +3756,27 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
             };
             let view = frame.texture.create_view(&Default::default());
             self.renderer.set_mvp(mvp);
-            let mut encoder = self
-                .renderer
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("raster-window-enc"),
-                });
+            let mut encoder =
+                self.renderer
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("raster-window-enc"),
+                    });
             self.renderer.draw(
                 &mut encoder,
                 &self.msaa,
                 &view,
                 &self.depth,
-                wgpu::Color { r: 0.06, g: 0.066, b: 0.09, a: 1.0 },
+                wgpu::Color {
+                    r: 0.06,
+                    g: 0.066,
+                    b: 0.09,
+                    a: 1.0,
+                },
             );
-            self.renderer.queue.submit(std::iter::once(encoder.finish()));
+            self.renderer
+                .queue
+                .submit(std::iter::once(encoder.finish()));
             self.window.pre_present_notify();
             frame.present();
         }
@@ -3644,7 +3847,12 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
 
         fn mvp(&self, aspect: f32) -> Mat4 {
             let (eye, _, _) = self.basis();
-            let proj = perspective(45.0_f32.to_radians(), aspect, self.radius * 0.02, self.radius * 8.0);
+            let proj = perspective(
+                45.0_f32.to_radians(),
+                aspect,
+                self.radius * 0.02,
+                self.radius * 8.0,
+            );
             let view = look_at(eye, self.center, [0.0, 0.0, 1.0]);
             mat_mul(&proj, &view)
         }
@@ -3670,11 +3878,7 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
                 use winit::platform::windows::WindowAttributesExtWindows;
                 attrs.with_drag_and_drop(false)
             };
-            let window = Arc::new(
-                event_loop
-                    .create_window(attrs)
-                    .expect("create window"),
-            );
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
             let gfx = pollster::block_on(Gfx::new(window, &self.mesh));
             gfx.window.request_redraw();
             self.gfx = Some(gfx);

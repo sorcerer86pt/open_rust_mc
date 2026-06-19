@@ -36,9 +36,7 @@ use crate::geometry::{Geometry, Vec3};
 /// Defaults to `sm_86` (this dev box's Ampere) if the attribute
 /// query fails — strictly more permissive than panicking and lets
 /// older drivers limp through.
-pub fn device_nvrtc_arch(
-    ctx: &Arc<CudaContext>,
-) -> Result<String, Box<dyn std::error::Error>> {
+pub fn device_nvrtc_arch(ctx: &Arc<CudaContext>) -> Result<String, Box<dyn std::error::Error>> {
     use cudarc::driver::sys::CUdevice_attribute as Attr;
     let major = ctx
         .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
@@ -974,11 +972,15 @@ impl GpuRecursiveContext {
         // right; palette / opaque re-upload only on a length change.
         let need_evals = self.n_surfaces.max(1) as usize * n_pixels;
         if need_evals > buf.evals_cap {
-            buf.evals = stream.alloc_zeros::<f64>(need_evals).map_err(|e| e.to_string())?;
+            buf.evals = stream
+                .alloc_zeros::<f64>(need_evals)
+                .map_err(|e| e.to_string())?;
             buf.evals_cap = need_evals;
         }
         if n_pixels != buf.out_pixels {
-            buf.out = stream.alloc_zeros::<u32>(n_pixels).map_err(|e| e.to_string())?;
+            buf.out = stream
+                .alloc_zeros::<u32>(n_pixels)
+                .map_err(|e| e.to_string())?;
             buf.out_pixels = n_pixels;
         }
         if palette.len() != buf.pal_len {
@@ -1016,37 +1018,71 @@ impl GpuRecursiveContext {
         let mut launch = stream.launch_builder(&self.k_raycast);
         launch
             // camera
-            .arg(&cpx).arg(&cpy).arg(&cpz)
-            .arg(&fx).arg(&fy).arg(&fz)
-            .arg(&rx).arg(&ry).arg(&rz)
-            .arg(&ux).arg(&uy).arg(&uz)
-            .arg(&thf).arg(&asp)
-            .arg(&w_i).arg(&h_i)
+            .arg(&cpx)
+            .arg(&cpy)
+            .arg(&cpz)
+            .arg(&fx)
+            .arg(&fy)
+            .arg(&fz)
+            .arg(&rx)
+            .arg(&ry)
+            .arg(&rz)
+            .arg(&ux)
+            .arg(&uy)
+            .arg(&uz)
+            .arg(&thf)
+            .arg(&asp)
+            .arg(&w_i)
+            .arg(&h_i)
             // aabb
-            .arg(&amnx).arg(&amny).arg(&amnz)
-            .arg(&amxx).arg(&amxy).arg(&amxz)
+            .arg(&amnx)
+            .arg(&amny)
+            .arg(&amnz)
+            .arg(&amxx)
+            .arg(&amxy)
+            .arg(&amxz)
             // shading
-            .arg(&buf.palette).arg(&buf.opaque).arg(&n_mat)
+            .arg(&buf.palette)
+            .arg(&buf.opaque)
+            .arg(&n_mat)
             // surfaces
-            .arg(&self.surf_type).arg(&self.surf_params).arg(&self.surf_bc).arg(&n_surf)
+            .arg(&self.surf_type)
+            .arg(&self.surf_params)
+            .arg(&self.surf_bc)
+            .arg(&n_surf)
             // cells
-            .arg(&self.cell_region_off).arg(&self.cell_region_len)
-            .arg(&self.cell_fill_type).arg(&self.cell_fill_data)
-            .arg(&self.cell_aabb_min).arg(&self.cell_aabb_max)
+            .arg(&self.cell_region_off)
+            .arg(&self.cell_region_len)
+            .arg(&self.cell_fill_type)
+            .arg(&self.cell_fill_data)
+            .arg(&self.cell_aabb_min)
+            .arg(&self.cell_aabb_max)
             // region tree
-            .arg(&self.region_op).arg(&self.region_arg)
+            .arg(&self.region_op)
+            .arg(&self.region_arg)
             // universes
-            .arg(&self.univ_cells_off).arg(&self.univ_cells_len)
-            .arg(&self.univ_surfaces_off).arg(&self.univ_surfaces_len)
-            .arg(&self.univ_cell_indices).arg(&self.univ_surface_indices)
+            .arg(&self.univ_cells_off)
+            .arg(&self.univ_cells_len)
+            .arg(&self.univ_surfaces_off)
+            .arg(&self.univ_surfaces_len)
+            .arg(&self.univ_cell_indices)
+            .arg(&self.univ_surface_indices)
             .arg(&root)
             // lattices
-            .arg(&self.lat_origin).arg(&self.lat_pitch).arg(&self.lat_shape)
-            .arg(&self.lat_universes_off).arg(&self.lat_universes)
+            .arg(&self.lat_origin)
+            .arg(&self.lat_pitch)
+            .arg(&self.lat_shape)
+            .arg(&self.lat_universes_off)
+            .arg(&self.lat_universes)
             // hex lattices
-            .arg(&self.hex_center).arg(&self.hex_pitch_xy).arg(&self.hex_pitch_z)
-            .arg(&self.hex_n_rings).arg(&self.hex_n_axial).arg(&self.hex_orientation)
-            .arg(&self.hex_universes_off).arg(&self.hex_universes)
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
             // scratch + output
             .arg(&mut buf.evals)
             .arg(&mut buf.out);
@@ -1087,8 +1123,18 @@ impl GpuRecursiveContext {
     ) -> Result<Vec<u32>, String> {
         let mut buf = self.raycast_buffers()?;
         self.raycast_reuse(
-            &mut buf, cam_pos, cam_fwd, cam_right, cam_up, tan_half_fov, width, height, aabb_min,
-            aabb_max, palette, opaque,
+            &mut buf,
+            cam_pos,
+            cam_fwd,
+            cam_right,
+            cam_up,
+            tan_half_fov,
+            width,
+            height,
+            aabb_min,
+            aabb_max,
+            palette,
+            opaque,
         )
     }
 }
@@ -2010,17 +2056,13 @@ impl TransportBuffers {
             // (nuc_local * 16 + ebin) is packed into d_event_ebin so
             // the kernel signatures don't change.
             d_event_ebin: mk_i(n)?,
-            d_type_count: mk_i(
-                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
-            )?,
+            d_type_count: mk_i(EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS)?,
             d_type_offsets: mk_i(
                 EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS + 1,
             )?,
             d_type_class_total: mk_i(EV_TYPE_COUNT)?,
             d_type_class_offsets: mk_i(EV_TYPE_COUNT)?,
-            d_type_scatter: mk_i(
-                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
-            )?,
+            d_type_scatter: mk_i(EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS)?,
             d_sorted_idx: mk_i(n)?,
             d_type_total: mk_i(1)?,
         })
@@ -2163,8 +2205,12 @@ pub fn recommend_refill_factor(
 ) -> Option<f64> {
     use cudarc::driver::sys::CUdevice_attribute as Attr;
 
-    let sm_count = ctx.attribute(Attr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).ok()? as usize;
-    let cc_major = ctx.attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR).ok()?;
+    let sm_count = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+        .ok()? as usize;
+    let cc_major = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .ok()?;
     let max_threads_per_sm = ctx
         .attribute(Attr::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR)
         .ok()? as usize;
@@ -2547,7 +2593,9 @@ impl GpuRecursiveContext {
                 .arg(&mut buffers.d_cnt_leak);
             // SAFETY: kernel signature matches the argument list
             // (gr_init_stacks in transport_event_based.cu).
-            unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+            unsafe {
+                launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+            }
         }
 
         // Event loop. One iteration = one geom step + one reaction
@@ -2673,7 +2721,9 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_fis_in_sq);
                 // SAFETY: kernel signature matches the argument list
                 // (gr_trace_and_sample in transport_event_based.cu).
-                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
             }
 
             // Step 3: device-side prefix sum over the 80 (class,bin)
@@ -2695,7 +2745,9 @@ impl GpuRecursiveContext {
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                unsafe { launch.launch(one_thread).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch.launch(one_thread).map_err(|e| e.to_string())?;
+                }
             }
 
             // Step 4: DtoH the 5 per-class totals (20 bytes) for
@@ -2705,7 +2757,9 @@ impl GpuRecursiveContext {
                 .clone_dtoh(&buffers.d_type_class_total)
                 .map_err(|e| e.to_string())?;
             let total: i32 = class_totals.iter().sum();
-            if total == 0 { break; }
+            if total == 0 {
+                break;
+            }
 
             // Step 5: gr_partition — scatter alive indices into
             // d_sorted_idx by (class, energy_bin), reading
@@ -2720,11 +2774,13 @@ impl GpuRecursiveContext {
                     .arg(&buffers.d_type_offsets)
                     .arg(&mut buffers.d_type_scatter)
                     .arg(&mut buffers.d_sorted_idx);
-                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
             }
 
-            let c_el  = class_totals[0];
-            let c_in  = class_totals[1];
+            let c_el = class_totals[0];
+            let c_in = class_totals[1];
             let c_fis = class_totals[2];
             let c_n2n = class_totals[3];
             let c_n3n = class_totals[4];
@@ -2754,7 +2810,11 @@ impl GpuRecursiveContext {
                     .arg(&sab_nuc_idx)
                     .arg(&mut buffers.d_cnt_el)
                     .arg(&mut buffers.d_cnt_therm);
-                unsafe { launch.launch(cfg_n(c_el as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_el as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
             if c_in > 0 {
                 let mut launch = stream.launch_builder(&self.k_eb_inelastic);
@@ -2775,7 +2835,11 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_inel_in_sq)
                     .arg(&mut buffers.d_e_inel_out)
                     .arg(&mut buffers.d_q_inel);
-                unsafe { launch.launch(cfg_n(c_in as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_in as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
             // In survival-biasing mode `gr_trace_and_sample` banks
             // expected fissions in-place (implicit capture), so no
@@ -2816,7 +2880,11 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_cnt_fis)
                     .arg(&mut buffers.d_e_fis_in)
                     .arg(&mut buffers.d_e_fis_in_sq);
-                unsafe { launch.launch(cfg_n(c_fis as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_fis as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
             if c_multi > 0 {
                 let mut launch = stream.launch_builder(&self.k_eb_multi);
@@ -2859,7 +2927,11 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_sec_rng_inc)
                     .arg(&mut buffers.d_sec_write)
                     .arg(&n_i32);
-                unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_multi as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
 
             // PHYSOR 2022 Optimization F (opt-in via the `refill` arg).
@@ -3037,38 +3109,90 @@ impl GpuRecursiveContext {
             }
         }
 
-        let fis_count =
-            stream.clone_dtoh(&buffers.d_fis_count).map_err(|e| e.to_string())?[0].max(0) as usize;
+        let fis_count = stream
+            .clone_dtoh(&buffers.d_fis_count)
+            .map_err(|e| e.to_string())?[0]
+            .max(0) as usize;
         let n_banked = fis_count.min(fis_capacity);
-        let fx = stream.clone_dtoh(&buffers.d_fis_x).map_err(|e| e.to_string())?;
-        let fy = stream.clone_dtoh(&buffers.d_fis_y).map_err(|e| e.to_string())?;
-        let fz = stream.clone_dtoh(&buffers.d_fis_z).map_err(|e| e.to_string())?;
-        let fe = stream.clone_dtoh(&buffers.d_fis_e).map_err(|e| e.to_string())?;
+        let fx = stream
+            .clone_dtoh(&buffers.d_fis_x)
+            .map_err(|e| e.to_string())?;
+        let fy = stream
+            .clone_dtoh(&buffers.d_fis_y)
+            .map_err(|e| e.to_string())?;
+        let fz = stream
+            .clone_dtoh(&buffers.d_fis_z)
+            .map_err(|e| e.to_string())?;
+        let fe = stream
+            .clone_dtoh(&buffers.d_fis_e)
+            .map_err(|e| e.to_string())?;
         let fission_bank: Vec<(f64, f64, f64, f64)> = (0..n_banked)
             .map(|i| (fx[i], fy[i], fz[i], fe[i]))
             .collect();
 
-        let cnt_coll = stream.clone_dtoh(&buffers.d_cnt_coll).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_fis = stream.clone_dtoh(&buffers.d_cnt_fis).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_leak = stream.clone_dtoh(&buffers.d_cnt_leak).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_surf = stream.clone_dtoh(&buffers.d_cnt_surf).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_el = stream.clone_dtoh(&buffers.d_cnt_el).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_inel = stream.clone_dtoh(&buffers.d_cnt_inel).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_cap = stream.clone_dtoh(&buffers.d_cnt_cap).map_err(|e| e.to_string())?[0] as u64;
-        let e_fis_in = stream.clone_dtoh(&buffers.d_e_fis_in).map_err(|e| e.to_string())?[0];
-        let e_el_in = stream.clone_dtoh(&buffers.d_e_el_in).map_err(|e| e.to_string())?[0];
-        let e_inel_in = stream.clone_dtoh(&buffers.d_e_inel_in).map_err(|e| e.to_string())?[0];
-        let e_inel_out = stream.clone_dtoh(&buffers.d_e_inel_out).map_err(|e| e.to_string())?[0];
-        let e_fis_in_sq = stream.clone_dtoh(&buffers.d_e_fis_in_sq).map_err(|e| e.to_string())?[0];
-        let e_el_in_sq = stream.clone_dtoh(&buffers.d_e_el_in_sq).map_err(|e| e.to_string())?[0];
-        let e_inel_in_sq = stream.clone_dtoh(&buffers.d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
-        let q_inel = stream.clone_dtoh(&buffers.d_q_inel).map_err(|e| e.to_string())?[0];
-        let cnt_n2n = stream.clone_dtoh(&buffers.d_cnt_n2n).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_n3n = stream.clone_dtoh(&buffers.d_cnt_n3n).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_nxn_out = stream.clone_dtoh(&buffers.d_cnt_nxn_out).map_err(|e| e.to_string())?[0] as u64;
-        let e_nxn_out = stream.clone_dtoh(&buffers.d_e_nxn_out).map_err(|e| e.to_string())?[0];
-        let e_nxn_out_sq = stream.clone_dtoh(&buffers.d_e_nxn_out_sq).map_err(|e| e.to_string())?[0];
-        let cnt_therm = stream.clone_dtoh(&buffers.d_cnt_therm).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_coll = stream
+            .clone_dtoh(&buffers.d_cnt_coll)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_fis = stream
+            .clone_dtoh(&buffers.d_cnt_fis)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_leak = stream
+            .clone_dtoh(&buffers.d_cnt_leak)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_surf = stream
+            .clone_dtoh(&buffers.d_cnt_surf)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_el = stream
+            .clone_dtoh(&buffers.d_cnt_el)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_inel = stream
+            .clone_dtoh(&buffers.d_cnt_inel)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_cap = stream
+            .clone_dtoh(&buffers.d_cnt_cap)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let e_fis_in = stream
+            .clone_dtoh(&buffers.d_e_fis_in)
+            .map_err(|e| e.to_string())?[0];
+        let e_el_in = stream
+            .clone_dtoh(&buffers.d_e_el_in)
+            .map_err(|e| e.to_string())?[0];
+        let e_inel_in = stream
+            .clone_dtoh(&buffers.d_e_inel_in)
+            .map_err(|e| e.to_string())?[0];
+        let e_inel_out = stream
+            .clone_dtoh(&buffers.d_e_inel_out)
+            .map_err(|e| e.to_string())?[0];
+        let e_fis_in_sq = stream
+            .clone_dtoh(&buffers.d_e_fis_in_sq)
+            .map_err(|e| e.to_string())?[0];
+        let e_el_in_sq = stream
+            .clone_dtoh(&buffers.d_e_el_in_sq)
+            .map_err(|e| e.to_string())?[0];
+        let e_inel_in_sq = stream
+            .clone_dtoh(&buffers.d_e_inel_in_sq)
+            .map_err(|e| e.to_string())?[0];
+        let q_inel = stream
+            .clone_dtoh(&buffers.d_q_inel)
+            .map_err(|e| e.to_string())?[0];
+        let cnt_n2n = stream
+            .clone_dtoh(&buffers.d_cnt_n2n)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_n3n = stream
+            .clone_dtoh(&buffers.d_cnt_n3n)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_nxn_out = stream
+            .clone_dtoh(&buffers.d_cnt_nxn_out)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let e_nxn_out = stream
+            .clone_dtoh(&buffers.d_e_nxn_out)
+            .map_err(|e| e.to_string())?[0];
+        let e_nxn_out_sq = stream
+            .clone_dtoh(&buffers.d_e_nxn_out_sq)
+            .map_err(|e| e.to_string())?[0];
+        let cnt_therm = stream
+            .clone_dtoh(&buffers.d_cnt_therm)
+            .map_err(|e| e.to_string())?[0] as u64;
 
         // k_eff = fission_bank.len() / total_histories. When refill is
         // active, total_histories = n + refilled_count (host reads the
@@ -3173,9 +3297,9 @@ impl GpuRecursiveContext {
 #[cfg(test)]
 mod raycast_tests {
     use super::*;
-    use crate::geometry::cell::{inside, intersect_all, outside, Cell};
-    use crate::geometry::surface::{BoundaryCondition, Surface};
     use crate::geometry::CellId;
+    use crate::geometry::cell::{Cell, inside, intersect_all, outside};
+    use crate::geometry::surface::{BoundaryCondition, Surface};
 
     /// Background colour the kernel paints for pixel-row `py` of `h`
     /// (must match `geom_recursive_raycast.cu`).

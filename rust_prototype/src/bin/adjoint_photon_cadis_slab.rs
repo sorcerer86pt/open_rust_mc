@@ -135,7 +135,10 @@ fn main() -> Result<(), String> {
     let t0 = std::time::Instant::now();
     let map = adjoint_slab_walk(&cfg, &material, args.response_energy_ev, &mut rng);
     let dt = t0.elapsed().as_secs_f64();
-    println!("Done in {dt:.2}s ({:.0} hist/s).", args.n_histories as f64 / dt);
+    println!(
+        "Done in {dt:.2}s ({:.0} hist/s).",
+        args.n_histories as f64 / dt
+    );
 
     // Sum over E → ψ̂*(z). Walker stores `flux[iz * n_e_bins + ie]`.
     let mut z_profile = vec![0.0_f64; args.n_z_bins];

@@ -5,7 +5,9 @@ the engine's tabular-law reader is dropping it on the floor.
 
 Usage:  python scripts/u233_layout_probe.py [data_dir]
 """
-import sys, h5py, pathlib
+import sys
+import h5py
+import pathlib
 
 data_dir = pathlib.Path(sys.argv[1] if len(sys.argv) > 1
                         else "data/endfb-vii.1-hdf5/neutron")

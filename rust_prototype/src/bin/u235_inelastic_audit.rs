@@ -38,7 +38,7 @@ use std::process::ExitCode;
 
 use open_rust_mc::data_paths;
 use open_rust_mc::transport::xs_provider::{
-    load_nuclide_table, load_nuclide_with_policy, RankPolicy, ReactionKernel,
+    RankPolicy, ReactionKernel, load_nuclide_table, load_nuclide_with_policy,
 };
 
 const DEFAULT_RANK: usize = 15;
@@ -225,7 +225,14 @@ fn main() -> ExitCode {
         args.points, args.e_lo, args.e_hi
     );
     println!("  out:       {}", args.out.display());
-    println!("  MT=91 fix: {}", if args.mt91_table { "Table (bypass SVD)" } else { "SVD (default)" });
+    println!(
+        "  MT=91 fix: {}",
+        if args.mt91_table {
+            "Table (bypass SVD)"
+        } else {
+            "SVD (default)"
+        }
+    );
 
     let mut policy = RankPolicy::new(args.rank);
     if args.mt91_table {
@@ -364,26 +371,20 @@ fn main() -> ExitCode {
 
         for i in 0..n_levels {
             let info = &svd.discrete_levels[i].info;
-            let s = svd.discrete_levels[i]
-                .kernel
-                .as_ref()
-                .map_or(0.0, |k| {
-                    if e < info.threshold {
-                        0.0
-                    } else {
-                        k.reconstruct_interp(idx, log_frac)
-                    }
-                });
-            let t = tab.discrete_levels[i]
-                .table
-                .as_ref()
-                .map_or(0.0, |t| {
-                    if e < info.threshold {
-                        0.0
-                    } else {
-                        t.lookup_at_idx(e, idx)
-                    }
-                });
+            let s = svd.discrete_levels[i].kernel.as_ref().map_or(0.0, |k| {
+                if e < info.threshold {
+                    0.0
+                } else {
+                    k.reconstruct_interp(idx, log_frac)
+                }
+            });
+            let t = tab.discrete_levels[i].table.as_ref().map_or(0.0, |t| {
+                if e < info.threshold {
+                    0.0
+                } else {
+                    t.lookup_at_idx(e, idx)
+                }
+            });
             let abs_d = s - t;
             let denom = t.abs().max(s.abs());
             let rel_d = if denom > 1e-30 { abs_d / denom } else { 0.0 };
@@ -393,9 +394,7 @@ fn main() -> ExitCode {
                 e, info.mt, info.threshold, s, t, abs_d, rel_d
             )
             .unwrap();
-            let entry = worst_per_mt
-                .entry(info.mt)
-                .or_insert((0.0, 0.0, e, s, t));
+            let entry = worst_per_mt.entry(info.mt).or_insert((0.0, 0.0, e, s, t));
             if rel_d.abs() > entry.0 {
                 *entry = (rel_d.abs(), rel_d, e, s, t);
             }

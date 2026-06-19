@@ -5,29 +5,37 @@
 
 use std::path::PathBuf;
 
-use open_rust_mc::geometry::{Vec3, scene_io};
 use open_rust_mc::geometry::ray::find_cell_recursive;
+use open_rust_mc::geometry::{Vec3, scene_io};
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-    while p.parent().is_some() && !p.join("bench/icsbep").is_dir() {
-        p = p.parent().unwrap().to_path_buf();
+    while !p.join("bench/icsbep").is_dir() {
+        let Some(parent) = p.parent() else {
+            return Err("could not locate bench/icsbep above CARGO_MANIFEST_DIR".into());
+        };
+        p = parent.to_path_buf();
     }
     let case_file = p.join("bench/icsbep/leu-comp-therm-008_case-1.json");
-    let text = std::fs::read_to_string(&case_file).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let loaded = scene_io::load_scene_from_json(&value["scene"].to_string()).unwrap();
+    let text = std::fs::read_to_string(&case_file)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let loaded = scene_io::load_scene_from_json(&value["scene"].to_string())?;
     let geom = &loaded.geometry;
 
-    println!("Geometry: {} cells, {} universes, {} rect lattices, root_universe = {:?}",
-             geom.cells.len(), geom.universes.len(), geom.lattices.len(), geom.root_universe);
+    println!(
+        "Geometry: {} cells, {} universes, {} rect lattices, root_universe = {:?}",
+        geom.cells.len(),
+        geom.universes.len(),
+        geom.lattices.len(),
+        geom.root_universe
+    );
     println!("Surfaces:");
     for (i, s) in geom.surfaces.iter().enumerate() {
         println!("  s{i}: {s:?}");
     }
     println!("Per-universe surfaces:");
     for (u_idx, surfs) in geom.universe_surfaces.iter().enumerate() {
-        let cells: Vec<usize> = geom.universes[u_idx].cell_indices.iter().copied().collect();
+        let cells: Vec<usize> = geom.universes[u_idx].cell_indices.to_vec();
         let has_bvh = geom.universe_bvhs[u_idx].is_some();
         println!("  univ {u_idx}: cells {cells:?}, surfaces {surfs:?}, has_bvh = {has_bvh}");
     }
@@ -51,14 +59,14 @@ fn main() {
     println!("Cell 28 contains origin? {}", root_cell.contains(&evals));
 
     let test_points = [
-        Vec3::new(0.0, 0.0, 0.0),         // origin — central pin
-        Vec3::new(5.0, 5.0, 0.0),         // peripheral
-        Vec3::new(0.4, 0.0, 0.0),         // inside one pin radius
-        Vec3::new(2.0, 0.0, 0.0),         // in water between pins
-        Vec3::new(40.0, 0.0, 0.0),        // far peripheral
-        Vec3::new(80.0, 0.0, 0.0),        // near cylinder boundary
-        Vec3::new(0.0, 0.0, 80.0),        // top
-        Vec3::new(0.0, 0.0, -80.0),       // bottom
+        Vec3::new(0.0, 0.0, 0.0),   // origin — central pin
+        Vec3::new(5.0, 5.0, 0.0),   // peripheral
+        Vec3::new(0.4, 0.0, 0.0),   // inside one pin radius
+        Vec3::new(2.0, 0.0, 0.0),   // in water between pins
+        Vec3::new(40.0, 0.0, 0.0),  // far peripheral
+        Vec3::new(80.0, 0.0, 0.0),  // near cylinder boundary
+        Vec3::new(0.0, 0.0, 80.0),  // top
+        Vec3::new(0.0, 0.0, -80.0), // bottom
     ];
 
     for pos in test_points {
@@ -70,14 +78,23 @@ fn main() {
                 for frame in &stack {
                     print!("[univ {:?} cell {}] ", frame.universe, frame.cell_idx);
                 }
-                let deepest = stack.last().unwrap().cell_idx as usize;
-                if let Some(c) = geom.cells.get(deepest) {
-                    println!("leaf fill = {:?}", c.fill);
-                } else {
-                    println!("DEEPEST {deepest} OUT OF RANGE (n_cells={})", geom.cells.len());
+                match stack.last() {
+                    Some(frame) => {
+                        let deepest = frame.cell_idx as usize;
+                        if let Some(c) = geom.cells.get(deepest) {
+                            println!("leaf fill = {:?}", c.fill);
+                        } else {
+                            println!(
+                                "DEEPEST {deepest} OUT OF RANGE (n_cells={})",
+                                geom.cells.len()
+                            );
+                        }
+                    }
+                    None => println!("empty stack"),
                 }
             }
             None => println!("None (no cell)"),
         }
     }
+    Ok(())
 }

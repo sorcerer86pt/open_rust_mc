@@ -427,7 +427,10 @@ mod tests {
             MU_AXIAL_FORWARD,
             NEE_NO_EXCLUSION,
         );
-        assert!(v.is_finite(), "NEE underflowed to non-finite at deep z: {v}");
+        assert!(
+            v.is_finite(),
+            "NEE underflowed to non-finite at deep z: {v}"
+        );
         assert!(
             v > 0.0,
             "NEE returned zero contribution at z=295/300 — coverage gap",

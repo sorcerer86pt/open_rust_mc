@@ -155,24 +155,50 @@ fn run_anisotropic_ab(e_in: f64, a: f64, n: usize, label: &str) {
     let (mg, sg) = moments(&e_gpu);
     let (mmc, _) = moments(&mu_cpu);
     let (mmg, _) = moments(&mu_gpu);
-    println!("  ⟨E_out⟩       : cpu = {:.4e}   gpu = {:.4e}   Δ = {:+.2e}   ({:+.3}%)",
-             mc, mg, mg - mc, if mc != 0.0 { (mg - mc) / mc * 100.0 } else { 0.0 });
+    println!(
+        "  ⟨E_out⟩       : cpu = {:.4e}   gpu = {:.4e}   Δ = {:+.2e}   ({:+.3}%)",
+        mc,
+        mg,
+        mg - mc,
+        if mc != 0.0 {
+            (mg - mc) / mc * 100.0
+        } else {
+            0.0
+        }
+    );
     println!("  σ(E_out)      : cpu = {:.4e}   gpu = {:.4e}", sc, sg);
-    println!("  ⟨μ_lab⟩       : cpu = {:.5}    gpu = {:.5}    Δ = {:+.2e}", mmc, mmg, mmg - mmc);
-    println!("  ⟨E_out/E_in⟩  : cpu = {:.5}    gpu = {:.5}", mc / e_in, mg / e_in);
+    println!(
+        "  ⟨μ_lab⟩       : cpu = {:.5}    gpu = {:.5}    Δ = {:+.2e}",
+        mmc,
+        mmg,
+        mmg - mmc
+    );
+    println!(
+        "  ⟨E_out/E_in⟩  : cpu = {:.5}    gpu = {:.5}",
+        mc / e_in,
+        mg / e_in
+    );
     let mut bit_for_bit_ok = true;
     for (a_v, b_v) in e_cpu.iter().take(8).zip(e_gpu.iter()) {
         if (a_v - b_v).abs() > 1e-18 {
             bit_for_bit_ok = false;
         }
     }
-    println!("  first-8 bit-for-bit : {}", if bit_for_bit_ok { "MATCH" } else { "DIVERGE" });
+    println!(
+        "  first-8 bit-for-bit : {}",
+        if bit_for_bit_ok { "MATCH" } else { "DIVERGE" }
+    );
 }
 
 fn run_free_gas_ab(e_in: f64, a: f64, kt_ev: f64, n: usize, label: &str) {
     println!("\n=== Free-gas elastic: {label} ===");
-    println!("  E_in = {:.3e} eV,  A = {:.3},  kT = {:.3e} eV   (E/kT = {:.1})",
-             e_in, a, kt_ev, e_in / kt_ev);
+    println!(
+        "  E_in = {:.3e} eV,  A = {:.3},  kT = {:.3e} eV   (E/kT = {:.1})",
+        e_in,
+        a,
+        kt_ev,
+        e_in / kt_ev
+    );
     let mut rng = Rng::new(42, 0);
     let mut e_out = Vec::with_capacity(n);
     let mut mu_lab = Vec::with_capacity(n);
@@ -185,12 +211,16 @@ fn run_free_gas_ab(e_in: f64, a: f64, kt_ev: f64, n: usize, label: &str) {
     let (mm, _) = moments(&mu_lab);
     println!("  ⟨E_out⟩       : {:.4e} eV   σ = {:.4e}", me, se);
     println!("  ⟨μ_lab⟩       : {:.5}", mm);
-    println!("  ⟨E_out/E_in⟩  : {:.5}   (≈ ((A²+1)/(A+1)²) for analog = {:.5})",
-             me / e_in,
-             (a * a + 1.0) / ((a + 1.0) * (a + 1.0)));
-    println!("  threshold note: GPU uses E < 400·kT  → {} kT bin, free-gas branch {} engaged",
-             (e_in / kt_ev) as i32,
-             if e_in < 400.0 * kt_ev { "IS" } else { "is NOT" });
+    println!(
+        "  ⟨E_out/E_in⟩  : {:.5}   (≈ ((A²+1)/(A+1)²) for analog = {:.5})",
+        me / e_in,
+        (a * a + 1.0) / ((a + 1.0) * (a + 1.0))
+    );
+    println!(
+        "  threshold note: GPU uses E < 400·kT  → {} kT bin, free-gas branch {} engaged",
+        (e_in / kt_ev) as i32,
+        if e_in < 400.0 * kt_ev { "IS" } else { "is NOT" }
+    );
 }
 
 fn main() {
@@ -211,7 +241,10 @@ fn main() {
     // cutoff (~10 eV at room temperature), so free-gas is not engaged
     // for the bulk of Godiva histories. Just confirm the gate boundary.
     let kt_room = 294.0 * 8.617_333_262e-5;
-    println!("\n  Free-gas branch threshold: E < 400·kT = {:.4e} eV at 294 K", 400.0 * kt_room);
+    println!(
+        "\n  Free-gas branch threshold: E < 400·kT = {:.4e} eV at 294 K",
+        400.0 * kt_room
+    );
     println!("  Godiva spectrum is mostly E > 10 keV → free-gas not engaged for fast metal.");
 
     // ── Real U-235 elastic angular data: quadratic-PDF vs linear-CDF ──
@@ -247,7 +280,10 @@ fn run_real_u235_angular_ab(e_in: f64, n: usize) {
         }
     };
 
-    println!("\n=== Real U-235 elastic angular A/B @ E_in = {:.3e} eV ===", e_in);
+    println!(
+        "\n=== Real U-235 elastic angular A/B @ E_in = {:.3e} eV ===",
+        e_in
+    );
 
     let a_awr = 233.025_f64;
     let alpha = ((a_awr - 1.0) / (a_awr + 1.0)).powi(2);
@@ -274,12 +310,28 @@ fn run_real_u235_angular_ab(e_in: f64, n: usize) {
     let (mmg, _) = moments(&mu_gpu);
     let (mec, _) = moments(&e_cpu);
     let (meg, _) = moments(&e_gpu);
-    println!("  ⟨μ_cm⟩   : cpu(quad) = {:+.5}   gpu(lin) = {:+.5}   Δ = {:+.2e}",
-             mmc, mmg, mmg - mmc);
-    println!("  ⟨E_out⟩  : cpu(quad) = {:.5e}   gpu(lin) = {:.5e}   Δ = {:+.3e}   ({:+.4}%)",
-             mec, meg, meg - mec, if mec != 0.0 { (meg - mec) / mec * 100.0 } else { 0.0 });
-    println!("  ⟨1-E_out/E_in⟩ (energy loss/scatter): cpu = {:.5}   gpu = {:.5}",
-             1.0 - mec / e_in, 1.0 - meg / e_in);
+    println!(
+        "  ⟨μ_cm⟩   : cpu(quad) = {:+.5}   gpu(lin) = {:+.5}   Δ = {:+.2e}",
+        mmc,
+        mmg,
+        mmg - mmc
+    );
+    println!(
+        "  ⟨E_out⟩  : cpu(quad) = {:.5e}   gpu(lin) = {:.5e}   Δ = {:+.3e}   ({:+.4}%)",
+        mec,
+        meg,
+        meg - mec,
+        if mec != 0.0 {
+            (meg - mec) / mec * 100.0
+        } else {
+            0.0
+        }
+    );
+    println!(
+        "  ⟨1-E_out/E_in⟩ (energy loss/scatter): cpu = {:.5}   gpu = {:.5}",
+        1.0 - mec / e_in,
+        1.0 - meg / e_in
+    );
 }
 
 fn pick_bin(energies: &[f64], e: f64, xi_bin: f64) -> usize {
@@ -290,7 +342,9 @@ fn pick_bin(energies: &[f64], e: f64, xi_bin: f64) -> usize {
     if e >= energies[n - 1] {
         return n - 1;
     }
-    let idx = match energies.binary_search_by(|x| x.partial_cmp(&e).unwrap_or(std::cmp::Ordering::Less)) {
+    let idx = match energies
+        .binary_search_by(|x| x.partial_cmp(&e).unwrap_or(std::cmp::Ordering::Less))
+    {
         Ok(i) => return i,
         Err(i) => i.saturating_sub(1),
     };
@@ -298,11 +352,7 @@ fn pick_bin(energies: &[f64], e: f64, xi_bin: f64) -> usize {
         return idx;
     }
     let r = (e - energies[idx]) / (energies[idx + 1] - energies[idx]);
-    if xi_bin < r {
-        idx + 1
-    } else {
-        idx
-    }
+    if xi_bin < r { idx + 1 } else { idx }
 }
 
 /// CPU quadratic lin-lin μ inversion — verbatim port of
@@ -314,7 +364,8 @@ fn sample_mu_quadratic_cpu(xi: f64, mu: &[f64], pdf: &[f64], cd: &[f64]) -> f64 
     if n < 2 {
         return 2.0 * xi - 1.0;
     }
-    let idx = match cd.binary_search_by(|c| c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less)) {
+    let idx = match cd.binary_search_by(|c| c.partial_cmp(&xi).unwrap_or(std::cmp::Ordering::Less))
+    {
         Ok(i) => i,
         Err(i) => i.saturating_sub(1),
     };
@@ -366,8 +417,9 @@ fn sample_mu_linear_cdf(xi: f64, mu: &[f64], cd: &[f64]) -> f64 {
 
 fn workspace_root() -> std::path::PathBuf {
     let mut p: std::path::PathBuf = env!("CARGO_MANIFEST_DIR").into();
-    while p.parent().is_some() && !p.join("bench/icsbep").is_dir() {
-        p = p.parent().unwrap().to_path_buf();
+    while !p.join("bench/icsbep").is_dir() {
+        let Some(parent) = p.parent() else { break };
+        p = parent.to_path_buf();
     }
     p
 }

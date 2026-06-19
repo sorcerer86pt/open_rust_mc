@@ -27,7 +27,7 @@
 
 use std::path::PathBuf;
 
-use open_rust_mc::transport::xs_provider::{load_nuclide, NuclideKernels};
+use open_rust_mc::transport::xs_provider::{NuclideKernels, load_nuclide};
 
 const TEST_E_EV: &[f64] = &[
     2.53e-2, 1.0e3, 1.0e4, 1.0e5, 5.0e5, 1.0e6, 1.611e6, 1.826e6, 2.0e6, 3.0e6, 5.0e6, 1.0e7,

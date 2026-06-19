@@ -133,16 +133,32 @@ impl Region {
                 // can't overlap on some axis — caller treats that as
                 // an unbounded fallback.
                 Aabb::new(
-                    Vec3::new(aa.min.x.max(bb.min.x), aa.min.y.max(bb.min.y), aa.min.z.max(bb.min.z)),
-                    Vec3::new(aa.max.x.min(bb.max.x), aa.max.y.min(bb.max.y), aa.max.z.min(bb.max.z)),
+                    Vec3::new(
+                        aa.min.x.max(bb.min.x),
+                        aa.min.y.max(bb.min.y),
+                        aa.min.z.max(bb.min.z),
+                    ),
+                    Vec3::new(
+                        aa.max.x.min(bb.max.x),
+                        aa.max.y.min(bb.max.y),
+                        aa.max.z.min(bb.max.z),
+                    ),
                 )
             }
             Self::Union(a, b) => {
                 let aa = a.world_aabb(surfaces);
                 let bb = b.world_aabb(surfaces);
                 Aabb::new(
-                    Vec3::new(aa.min.x.min(bb.min.x), aa.min.y.min(bb.min.y), aa.min.z.min(bb.min.z)),
-                    Vec3::new(aa.max.x.max(bb.max.x), aa.max.y.max(bb.max.y), aa.max.z.max(bb.max.z)),
+                    Vec3::new(
+                        aa.min.x.min(bb.min.x),
+                        aa.min.y.min(bb.min.y),
+                        aa.min.z.min(bb.min.z),
+                    ),
+                    Vec3::new(
+                        aa.max.x.max(bb.max.x),
+                        aa.max.y.max(bb.max.y),
+                        aa.max.z.max(bb.max.z),
+                    ),
                 )
             }
             // The complement of a bounded region is unbounded; let

@@ -127,8 +127,7 @@ pub struct GpuTransportContext {
 }
 
 use crate::transport::nuclide_cache::eviction::{
-    EvictionStats, LfuEntries, LfuEntriesMut, DEFAULT_AGE_DECAY,
-    evict_to_budget,
+    DEFAULT_AGE_DECAY, EvictionStats, LfuEntries, LfuEntriesMut, evict_to_budget,
 };
 
 struct PerNuclideCache {
@@ -702,8 +701,7 @@ impl GpuNuclideData {
             &s.inel_cdf_n_e,
             &s.inel_cdf_n_t,
         ];
-        let f64_extra: [&CudaSlice<f64>; 2] =
-            [&s.inel_cdf_log_e_min, &s.inel_cdf_log_e_max];
+        let f64_extra: [&CudaSlice<f64>; 2] = [&s.inel_cdf_log_e_min, &s.inel_cdf_log_e_max];
         let i32_extra2: [&CudaSlice<i32>; 1] = [&s.inel_cdf_n_lev];
         // (n,2n)/(n,3n) continuum-edist offset metadata (i32).
         let nxn_i32: [&CudaSlice<i32>; 8] = [
@@ -978,7 +976,10 @@ fn pack_sab_elastic(
     use crate::thermal::ElasticThermal;
     let elastic = tsl.elastic.as_ref().and_then(|v| v.get(temp_idx));
     match elastic {
-        Some(ElasticThermal::Coherent { bragg_edges, factors }) => {
+        Some(ElasticThermal::Coherent {
+            bragg_edges,
+            factors,
+        }) => {
             let off = coh_bragg_edges_flat.len() as i32;
             let n = bragg_edges.len() as i32;
             coh_bragg_edges_flat.extend_from_slice(bragg_edges);
@@ -993,9 +994,14 @@ fn pack_sab_elastic(
                  elastic, {n} Bragg edges"
             );
         }
-        Some(ElasticThermal::Incoherent { bound_xs, debye_waller })
+        Some(ElasticThermal::Incoherent {
+            bound_xs,
+            debye_waller,
+        })
         | Some(ElasticThermal::IncoherentDiscrete {
-            bound_xs, debye_waller, ..
+            bound_xs,
+            debye_waller,
+            ..
         }) => {
             slot_elastic_mode.push(2);
             slot_coh_off.push(-1);
@@ -1148,8 +1154,7 @@ impl GpuTransportContext {
     /// retry-on-error works because the error path doesn't write to
     /// the OnceLock; only a successful init seals the slot.
     pub fn shared() -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        static SHARED: std::sync::OnceLock<Arc<GpuTransportContext>> =
-            std::sync::OnceLock::new();
+        static SHARED: std::sync::OnceLock<Arc<GpuTransportContext>> = std::sync::OnceLock::new();
         if let Some(arc) = SHARED.get() {
             return Ok(Arc::clone(arc));
         }
@@ -1770,9 +1775,8 @@ impl GpuTransportContext {
         rank: usize,
     ) -> Result<Arc<GpuNuclideData>, Box<dyn std::error::Error>> {
         use crate::gpu_per_nuclide::{
-            assemble_a4_cat, assemble_a5_cat, assemble_a6_cat, assemble_a7_cat,
-            assemble_a8_cat, assemble_a_cat, assemble_b_cat, assemble_c_cat,
-            upload_one_nuclide, PerNuclideGpu,
+            PerNuclideGpu, assemble_a_cat, assemble_a4_cat, assemble_a5_cat, assemble_a6_cat,
+            assemble_a7_cat, assemble_a8_cat, assemble_b_cat, assemble_c_cat, upload_one_nuclide,
         };
 
         // Pre-flight: if VRAM is critically low (driver-reported free
@@ -1826,13 +1830,8 @@ impl GpuTransportContext {
                     .expect("per_nuclide_cache poisoned");
                 let now = guard.counter;
                 let mut adapter = PerNuclideCacheAdapter { inner: &mut guard };
-                let evicted = evict_to_budget(
-                    &mut adapter,
-                    predicted,
-                    budget,
-                    now,
-                    DEFAULT_AGE_DECAY,
-                );
+                let evicted =
+                    evict_to_budget(&mut adapter, predicted, budget, now, DEFAULT_AGE_DECAY);
                 evicted > 0
             };
             if evicted_any {
@@ -1866,13 +1865,7 @@ impl GpuTransportContext {
                 {
                     let now = guard.counter;
                     let mut adapter = PerNuclideCacheAdapter { inner: &mut guard };
-                    let _ = evict_to_budget(
-                        &mut adapter,
-                        bytes,
-                        budget,
-                        now,
-                        DEFAULT_AGE_DECAY,
-                    );
+                    let _ = evict_to_budget(&mut adapter, bytes, budget, now, DEFAULT_AGE_DECAY);
                 }
                 let counter = guard.counter;
                 guard.counter = guard.counter.wrapping_add(1);
@@ -1961,15 +1954,8 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.inel_cdf.as_ref().map(|c| &c.data),
         )?;
-        let (
-            level_basis_ptrs,
-            level_coeffs_ptrs,
-            level_basis_local_off,
-            level_coeffs_local_off,
-        ) = crate::gpu_per_nuclide::build_per_nuc_level_ptr_and_offsets(
-            &self.stream,
-            &per_nucs,
-        )?;
+        let (level_basis_ptrs, level_coeffs_ptrs, level_basis_local_off, level_coeffs_local_off) =
+            crate::gpu_per_nuclide::build_per_nuc_level_ptr_and_offsets(&self.stream, &per_nucs)?;
         let ang_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
             &self.stream,
             &per_nucs,
@@ -2035,10 +2021,8 @@ impl GpuTransportContext {
             },
         )?;
         let ang_dist_local_off = self.stream.clone_htod(&a4.ang_dist_local_off_vec)?;
-        let lev_ang_lev_local_off =
-            self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
-        let lev_ang_dist_local_off =
-            self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
+        let lev_ang_lev_local_off = self.stream.clone_htod(&c.lev_ang_lev_local_off_vec)?;
+        let lev_ang_dist_local_off = self.stream.clone_htod(&c.lev_ang_dist_local_off_vec)?;
         let fis_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
             &self.stream,
             &per_nucs,
@@ -2092,20 +2076,16 @@ impl GpuTransportContext {
             &per_nucs,
             |p| p.inel91.as_ref().map(|t| &t.pdf),
         )?;
-        let inel91_dist_local_off =
-            self.stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
+        let inel91_dist_local_off = self.stream.clone_htod(&a6.inel91_dist_local_off_vec)?;
         // MT=91 Law 61 mu coupling — host-side vecs assembled in
         // `assemble_a6_cat`; upload the three pointer arrays + the
         // mu_has flag to the device. The per-nuclide mu_data /
         // mu_offsets / mu_e_in_starts slabs the pointers reference
         // live in `per_nucs[...]::inel91` and are kept alive by
         // `per_nucs` (see the doc on `GpuNuclideData::inel91_mu_has`).
-        let inel91_mu_has =
-            self.stream.clone_htod(&a6.inel91_mu_has_vec)?;
-        let inel91_mu_data_ptrs =
-            self.stream.clone_htod(&a6.inel91_mu_data_ptrs_vec)?;
-        let inel91_mu_offsets_ptrs =
-            self.stream.clone_htod(&a6.inel91_mu_offsets_ptrs_vec)?;
+        let inel91_mu_has = self.stream.clone_htod(&a6.inel91_mu_has_vec)?;
+        let inel91_mu_data_ptrs = self.stream.clone_htod(&a6.inel91_mu_data_ptrs_vec)?;
+        let inel91_mu_offsets_ptrs = self.stream.clone_htod(&a6.inel91_mu_offsets_ptrs_vec)?;
         let inel91_mu_e_in_start_ptrs =
             self.stream.clone_htod(&a6.inel91_mu_e_in_starts_ptrs_vec)?;
 
@@ -2115,14 +2095,12 @@ impl GpuTransportContext {
         // metadata. `assemble_tabular_cat_offsets` produces the metadata
         // vecs; the data slabs live in `per_nucs` (kept alive by the
         // bundle's `per_nucs` Arc clone).
-        let n2n_cat = crate::gpu_per_nuclide::assemble_tabular_cat_offsets(
-            &per_nucs,
-            |p| p.n2n_edist.as_ref(),
-        );
-        let n3n_cat = crate::gpu_per_nuclide::assemble_tabular_cat_offsets(
-            &per_nucs,
-            |p| p.n3n_edist.as_ref(),
-        );
+        let n2n_cat = crate::gpu_per_nuclide::assemble_tabular_cat_offsets(&per_nucs, |p| {
+            p.n2n_edist.as_ref()
+        });
+        let n3n_cat = crate::gpu_per_nuclide::assemble_tabular_cat_offsets(&per_nucs, |p| {
+            p.n3n_edist.as_ref()
+        });
         let n2n_nuc_offsets = self.stream.clone_htod(&n2n_cat.nuc_offsets_vec)?;
         let n2n_nuc_n_inc = self.stream.clone_htod(&n2n_cat.nuc_n_inc_vec)?;
         let n2n_dist_local_off = self.stream.clone_htod(&n2n_cat.dist_local_off_vec)?;
@@ -2132,57 +2110,103 @@ impl GpuTransportContext {
         let n3n_dist_local_off = self.stream.clone_htod(&n3n_cat.dist_local_off_vec)?;
         let n3n_dist_sizes = self.stream.clone_htod(&n3n_cat.dist_sizes_vec)?;
         let n2n_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.inc_energies),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().map(|t| &t.inc_energies),
         )?;
         let n2n_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.e_out),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().map(|t| &t.e_out),
         )?;
         let n2n_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.cdf),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().map(|t| &t.cdf),
         )?;
         let n2n_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().map(|t| &t.pdf),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().map(|t| &t.pdf),
         )?;
         let n3n_inc_e_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.inc_energies),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().map(|t| &t.inc_energies),
         )?;
         let n3n_e_out_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.e_out),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().map(|t| &t.e_out),
         )?;
         let n3n_cdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.cdf),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().map(|t| &t.cdf),
         )?;
         let n3n_pdf_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().map(|t| &t.pdf),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().map(|t| &t.pdf),
         )?;
         // (n,2n)/(n,3n) File-6 correlated mu coupling — per-nuclide
         // pointer arrays into the n2n/n3n edist mu slabs (built by
         // `build_tabular_edist` when the evaluation ships `mu_dist`).
         // `*_mu_has` is 1 where the slab exists; the device sampler
         // (`sample_corr_mu_at`) falls back to isotropic where it's 0.
-        let n2n_mu_has_vec: Vec<i32> = per_nucs.iter().map(|p|
-            i32::from(p.n2n_edist.as_ref().and_then(|t| t.mu_data.as_ref()).is_some())).collect();
+        let n2n_mu_has_vec: Vec<i32> = per_nucs
+            .iter()
+            .map(|p| {
+                i32::from(
+                    p.n2n_edist
+                        .as_ref()
+                        .and_then(|t| t.mu_data.as_ref())
+                        .is_some(),
+                )
+            })
+            .collect();
         let n2n_mu_has = self.stream.clone_htod(&n2n_mu_has_vec)?;
         let n2n_mu_data_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().and_then(|t| t.mu_data.as_ref()),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().and_then(|t| t.mu_data.as_ref()),
         )?;
         let n2n_mu_offsets_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().and_then(|t| t.mu_offsets.as_ref()),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().and_then(|t| t.mu_offsets.as_ref()),
         )?;
         let n2n_mu_e_in_start_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n2n_edist.as_ref().and_then(|t| t.mu_e_in_starts.as_ref()),
+            &self.stream,
+            &per_nucs,
+            |p| p.n2n_edist.as_ref().and_then(|t| t.mu_e_in_starts.as_ref()),
         )?;
-        let n3n_mu_has_vec: Vec<i32> = per_nucs.iter().map(|p|
-            i32::from(p.n3n_edist.as_ref().and_then(|t| t.mu_data.as_ref()).is_some())).collect();
+        let n3n_mu_has_vec: Vec<i32> = per_nucs
+            .iter()
+            .map(|p| {
+                i32::from(
+                    p.n3n_edist
+                        .as_ref()
+                        .and_then(|t| t.mu_data.as_ref())
+                        .is_some(),
+                )
+            })
+            .collect();
         let n3n_mu_has = self.stream.clone_htod(&n3n_mu_has_vec)?;
         let n3n_mu_data_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().and_then(|t| t.mu_data.as_ref()),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().and_then(|t| t.mu_data.as_ref()),
         )?;
         let n3n_mu_offsets_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().and_then(|t| t.mu_offsets.as_ref()),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().and_then(|t| t.mu_offsets.as_ref()),
         )?;
         let n3n_mu_e_in_start_ptrs = crate::gpu_per_nuclide::build_per_nuc_optional_ptr_array(
-            &self.stream, &per_nucs, |p| p.n3n_edist.as_ref().and_then(|t| t.mu_e_in_starts.as_ref()),
+            &self.stream,
+            &per_nucs,
+            |p| p.n3n_edist.as_ref().and_then(|t| t.mu_e_in_starts.as_ref()),
         )?;
 
         Ok(Arc::new(GpuNuclideData {
@@ -2276,9 +2300,7 @@ impl GpuTransportContext {
             nu_bar_sizes: self.stream.clone_htod(&a.nu_bar_sizes_vec)?,
             delayed_nu_bar_energies: a.delayed_nu_bar_energies,
             delayed_nu_bar_values: a.delayed_nu_bar_values,
-            delayed_nu_bar_offsets: self
-                .stream
-                .clone_htod(&a.delayed_nu_bar_offsets_vec)?,
+            delayed_nu_bar_offsets: self.stream.clone_htod(&a.delayed_nu_bar_offsets_vec)?,
             delayed_nu_bar_sizes: self.stream.clone_htod(&a.delayed_nu_bar_sizes_vec)?,
             level_q_values: c.level_q_values,
             level_thresholds: c.level_thresholds,
@@ -2569,7 +2591,9 @@ impl GpuTransportContext {
             if mat.nuclides.len() > MAX_NUC {
                 return Err(format!(
                     "upload_material_data: material {} has {} nuclides, GPU stride MAX_NUC = {}",
-                    m, mat.nuclides.len(), MAX_NUC
+                    m,
+                    mat.nuclides.len(),
+                    MAX_NUC
                 )
                 .into());
             }
@@ -2676,10 +2700,9 @@ impl GpuTransportContext {
 
         for (tsl, nuc_idx) in slots.iter().copied() {
             if nuc_idx >= n_nuc {
-                return Err(format!(
-                    "upload_sab_data_multi: nuc_idx {nuc_idx} >= n_nuc {n_nuc}"
-                )
-                .into());
+                return Err(
+                    format!("upload_sab_data_multi: nuc_idx {nuc_idx} >= n_nuc {n_nuc}").into(),
+                );
             }
             if slot_per_nuc[nuc_idx] >= 0 {
                 return Err(format!(
@@ -2693,117 +2716,118 @@ impl GpuTransportContext {
 
             // Iterate every kT column of this TSL — one slot per temp.
             for temp_idx in 0..tsl.kts.len() {
-            let slot_id = slot_inc_e_off.len() as i32;
-            slot_kt.push(tsl.kts[temp_idx]);
+                let slot_id = slot_inc_e_off.len() as i32;
+                slot_kt.push(tsl.kts[temp_idx]);
 
-            let inel = &tsl.inelastic[temp_idx];
-            match &inel.dist {
-                crate::thermal::InelasticDist::Continuous(c) => {
-                    // Inc-energy block (and parallel xs).
-                    let inc_e_off = inc_e_flat.len() as i32;
-                    let n_inc_this = inel.energy.len() as i32;
-                    inc_e_flat.extend_from_slice(&inel.energy);
-                    xs_flat.extend_from_slice(&inel.xs);
+                let inel = &tsl.inelastic[temp_idx];
+                match &inel.dist {
+                    crate::thermal::InelasticDist::Continuous(c) => {
+                        // Inc-energy block (and parallel xs).
+                        let inc_e_off = inc_e_flat.len() as i32;
+                        let n_inc_this = inel.energy.len() as i32;
+                        inc_e_flat.extend_from_slice(&inel.energy);
+                        xs_flat.extend_from_slice(&inel.xs);
 
-                    // E_out block, with per-inc-energy table offsets.
-                    let eout_table_off = eout_offsets_flat.len() as i32;
-                    let e_out_base = e_out_flat.len() as i32;
-                    for i in 0..c.n_inc {
-                        let start = c.offsets[i];
-                        let end = if i + 1 < c.offsets.len() {
-                            c.offsets[i + 1]
-                        } else {
-                            c.e_out.len()
-                        };
-                        eout_offsets_flat.push(e_out_base + start as i32);
-                        eout_sizes_flat.push((end - start) as i32);
-                    }
-                    e_out_flat.extend_from_slice(&c.e_out);
-                    cdf_e_flat.extend_from_slice(&c.cdf_e);
-                    pdf_e_flat.extend_from_slice(&c.pdf_e);
+                        // E_out block, with per-inc-energy table offsets.
+                        let eout_table_off = eout_offsets_flat.len() as i32;
+                        let e_out_base = e_out_flat.len() as i32;
+                        for i in 0..c.n_inc {
+                            let start = c.offsets[i];
+                            let end = if i + 1 < c.offsets.len() {
+                                c.offsets[i + 1]
+                            } else {
+                                c.e_out.len()
+                            };
+                            eout_offsets_flat.push(e_out_base + start as i32);
+                            eout_sizes_flat.push((end - start) as i32);
+                        }
+                        e_out_flat.extend_from_slice(&c.e_out);
+                        cdf_e_flat.extend_from_slice(&c.cdf_e);
+                        pdf_e_flat.extend_from_slice(&c.pdf_e);
 
-                    // Mu block, with per-eout-bin table offsets.
-                    let mu_table_off = mu_offsets_flat.len() as i32;
-                    let mu_base = mu_flat.len() as i32;
-                    for i in 0..c.mu_offsets.len() {
-                        let start = c.mu_offsets[i];
-                        let end = if i + 1 < c.mu_offsets.len() {
-                            c.mu_offsets[i + 1]
-                        } else {
-                            c.mu.len()
-                        };
-                        mu_offsets_flat.push(mu_base + start as i32);
-                        mu_sizes_flat.push((end - start) as i32);
-                    }
-                    mu_flat.extend_from_slice(&c.mu);
-                    cdf_mu_flat.extend_from_slice(&c.cdf_mu);
+                        // Mu block, with per-eout-bin table offsets.
+                        let mu_table_off = mu_offsets_flat.len() as i32;
+                        let mu_base = mu_flat.len() as i32;
+                        for i in 0..c.mu_offsets.len() {
+                            let start = c.mu_offsets[i];
+                            let end = if i + 1 < c.mu_offsets.len() {
+                                c.mu_offsets[i + 1]
+                            } else {
+                                c.mu.len()
+                            };
+                            mu_offsets_flat.push(mu_base + start as i32);
+                            mu_sizes_flat.push((end - start) as i32);
+                        }
+                        mu_flat.extend_from_slice(&c.mu);
+                        cdf_mu_flat.extend_from_slice(&c.cdf_mu);
 
-                    slot_inc_e_off.push(inc_e_off);
-                    slot_n_inc.push(n_inc_this);
-                    slot_eout_table_off.push(eout_table_off);
-                    slot_mu_table_off.push(mu_table_off);
-                    slot_emax.push(tsl.energy_max);
+                        slot_inc_e_off.push(inc_e_off);
+                        slot_n_inc.push(n_inc_this);
+                        slot_eout_table_off.push(eout_table_off);
+                        slot_mu_table_off.push(mu_table_off);
+                        slot_emax.push(tsl.energy_max);
 
-                    // Pack the elastic channel for this slot — see
-                    // `slot_elastic_mode` doc.
-                    pack_sab_elastic(
-                        tsl,
-                        temp_idx,
-                        nuc_idx,
-                        slot_id,
-                        &mut slot_elastic_mode,
-                        &mut slot_coh_off,
-                        &mut slot_coh_n,
-                        &mut slot_inc_bound_xs,
-                        &mut slot_inc_debye_waller,
-                        &mut coh_bragg_edges_flat,
-                        &mut coh_factors_flat,
-                    );
+                        // Pack the elastic channel for this slot — see
+                        // `slot_elastic_mode` doc.
+                        pack_sab_elastic(
+                            tsl,
+                            temp_idx,
+                            nuc_idx,
+                            slot_id,
+                            &mut slot_elastic_mode,
+                            &mut slot_coh_off,
+                            &mut slot_coh_n,
+                            &mut slot_inc_bound_xs,
+                            &mut slot_inc_debye_waller,
+                            &mut coh_bragg_edges_flat,
+                            &mut coh_factors_flat,
+                        );
 
-                    println!(
-                        "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): {n_inc_this} inc \
+                        println!(
+                            "  GPU S(α,β) slot {slot_id} (nuc {nuc_idx}): {n_inc_this} inc \
                          energies, {} E_out pts, {} mu pts",
-                        c.e_out.len(),
-                        c.mu.len()
-                    );
-                }
-                crate::thermal::InelasticDist::Discrete(_) => {
-                    // Discrete S(α,β) inelastic (NJOY iwt=0/1) is not
-                    // implemented on the GPU device sampler. The CPU
-                    // path lives at `thermal.rs::sample_discrete_inelastic`
-                    // (called from `simulate.rs` thermal branch); the
-                    // GPU would need an equivalent device-side sampler
-                    // plus uploads of the `energy_out[n_inc][n_out]` and
-                    // `mu_out[n_inc][n_out][n_mu]` tensors. The OpenMC
-                    // ENDF/B-VII.1 HDF5 distribution ships every TSL
-                    // as `incoherent_inelastic` (continuous), so no
-                    // case in the current ICSBEP / KARMA corpus hits
-                    // this branch — but custom ACE→HDF5 conversions
-                    // can produce discrete TSLs and would silently
-                    // mis-sample on the GPU. Fail loud here instead.
-                    return Err(format!(
-                        "upload_sab_data_multi: nuc {nuc_idx} TSL uses \
+                            c.e_out.len(),
+                            c.mu.len()
+                        );
+                    }
+                    crate::thermal::InelasticDist::Discrete(_) => {
+                        // Discrete S(α,β) inelastic (NJOY iwt=0/1) is not
+                        // implemented on the GPU device sampler. The CPU
+                        // path lives at `thermal.rs::sample_discrete_inelastic`
+                        // (called from `simulate.rs` thermal branch); the
+                        // GPU would need an equivalent device-side sampler
+                        // plus uploads of the `energy_out[n_inc][n_out]` and
+                        // `mu_out[n_inc][n_out][n_mu]` tensors. The OpenMC
+                        // ENDF/B-VII.1 HDF5 distribution ships every TSL
+                        // as `incoherent_inelastic` (continuous), so no
+                        // case in the current ICSBEP / KARMA corpus hits
+                        // this branch — but custom ACE→HDF5 conversions
+                        // can produce discrete TSLs and would silently
+                        // mis-sample on the GPU. Fail loud here instead.
+                        return Err(format!(
+                            "upload_sab_data_multi: nuc {nuc_idx} TSL uses \
                          discrete inelastic (NJOY iwt=0/1) which is not \
                          implemented on the GPU device sampler. Use \
                          Runner.Cpu, or rebuild this TSL with the \
                          continuous (iwt=2) inelastic format."
-                    ).into());
-                    #[allow(unreachable_code)]
-                    pack_sab_elastic(
-                        tsl,
-                        temp_idx,
-                        nuc_idx,
-                        slot_id,
-                        &mut slot_elastic_mode,
-                        &mut slot_coh_off,
-                        &mut slot_coh_n,
-                        &mut slot_inc_bound_xs,
-                        &mut slot_inc_debye_waller,
-                        &mut coh_bragg_edges_flat,
-                        &mut coh_factors_flat,
-                    );
+                        )
+                        .into());
+                        #[allow(unreachable_code)]
+                        pack_sab_elastic(
+                            tsl,
+                            temp_idx,
+                            nuc_idx,
+                            slot_id,
+                            &mut slot_elastic_mode,
+                            &mut slot_coh_off,
+                            &mut slot_coh_n,
+                            &mut slot_inc_bound_xs,
+                            &mut slot_inc_debye_waller,
+                            &mut coh_bragg_edges_flat,
+                            &mut coh_factors_flat,
+                        );
+                    }
                 }
-            }
             } // end inner `for temp_idx in 0..tsl.kts.len()`
         }
 
@@ -3276,9 +3300,8 @@ impl GpuTransportContext {
                 .launch(cfg_full)?;
         }
 
-        let params_vec = self.build_transport_params_vec(
-            nuc_data, mat_data, sab_data, wmp_data, geom_type,
-        );
+        let params_vec =
+            self.build_transport_params_vec(nuc_data, mat_data, sab_data, wmp_data, geom_type);
 
         assert_eq!(params_vec.len(), N_PARAMS);
         let d_params = self.stream.clone_htod(&params_vec)?;

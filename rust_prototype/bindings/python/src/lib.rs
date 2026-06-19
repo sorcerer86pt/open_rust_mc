@@ -52,9 +52,9 @@ use pyo3::prelude::*;
 use open_rust_mc::geometry::cell::{self, Cell, CellFill, CellId, Region};
 use open_rust_mc::geometry::lattice::HexOrientation;
 use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
-use open_rust_mc::geometry::{ray, Aabb, Vec3};
 #[cfg(feature = "cuda")]
 use open_rust_mc::geometry::Geometry;
+use open_rust_mc::geometry::{ray, Aabb, Vec3};
 use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
 use open_rust_mc::photon::electron::{radiation_length_cm, track_integrate_electron_csg_with_ms};
 use open_rust_mc::photon::material::PhotonMaterial as RustPhotonMaterial;
@@ -1858,10 +1858,7 @@ fn run_gpu_eigenvalue(
         .collect();
     // sab_nuc_idx is retained for compatibility with the CudaRunner
     // field but is no longer authoritative — the slot table is.
-    let sab_nuc_idx: i32 = sab_slots
-        .first()
-        .map(|(_, idx)| *idx as i32)
-        .unwrap_or(-1);
+    let sab_nuc_idx: i32 = sab_slots.first().map(|(_, idx)| *idx as i32).unwrap_or(-1);
     let sab_data = gpu
         .upload_sab_data_multi_cached(&sab_slots, n_nuc)
         .map_err(|e| gpu_err("upload S(α,β)", e))?;
@@ -1875,9 +1872,8 @@ fn run_gpu_eigenvalue(
             .map_err(|e| gpu_err("upload empty WMP", e))?
     };
 
-    let recursive = GpuRecursiveContext::build(&geometry, n).map_err(|e| {
-        PyValueError::new_err(format!("GPU recursive context build failed: {e}"))
-    })?;
+    let recursive = GpuRecursiveContext::build(&geometry, n)
+        .map_err(|e| PyValueError::new_err(format!("GPU recursive context build failed: {e}")))?;
 
     // Per-material kT in eV (Boltzmann constant in eV/K).
     const K_B_EV_PER_K: f64 = 8.617_333_262e-5;
@@ -2590,7 +2586,9 @@ impl PyNuclideFile {
     fn open(path: &str) -> PyResult<Self> {
         let p = PathBuf::from(path);
         if !p.exists() {
-            return Err(PyFileNotFoundError::new_err(format!("no such file: {path}")));
+            return Err(PyFileNotFoundError::new_err(format!(
+                "no such file: {path}"
+            )));
         }
         NuclideFileReader::open(&p)
             .map(|reader| Self { reader })
@@ -2666,13 +2664,12 @@ impl PyNuclideFile {
             .reader
             .fission_energy_dist()
             .ok_or_else(|| PyValueError::new_err("no fission energy distribution in this file"))?;
-        let d = ed
-            .distributions
-            .get(i)
-            .ok_or_else(|| PyValueError::new_err(format!(
+        let d = ed.distributions.get(i).ok_or_else(|| {
+            PyValueError::new_err(format!(
                 "index {i} out of range (have {} incident-energy nodes)",
                 ed.energies.len()
-            )))?;
+            ))
+        })?;
         Ok((d.e_out.clone(), d.pdf.clone(), d.cdf.clone()))
     }
 
@@ -2882,61 +2879,61 @@ fn run_icsbep_case(
     //   4. benchmark.k_eff_reference           — handbook experimental k
     // σ for tiers 1-3 is max(σ_pub, handbook_sigma) so the envelope never
     // under-states uncertainty when a published σ_calc is artificially tight.
-    let (k_ref, sigma_exp, ref_source): (f64, f64, String) =
-        match benchmark.get("local_validation") {
-            None => (
-                handbook_k,
-                handbook_sigma,
-                "k_eff_reference (ICSBEP handbook)".to_string(),
-            ),
-            Some(lv) => {
-                let viii1 = lv.get("viii1");
-                let lanl = viii1
-                    .and_then(|v| v.get("lanl_k_eff"))
-                    .and_then(serde_json::Value::as_f64);
-                let viii1_omc = viii1
-                    .and_then(|v| v.get("openmc_k_eff"))
-                    .and_then(serde_json::Value::as_f64);
-                let legacy_omc = lv.get("openmc_k_eff").and_then(serde_json::Value::as_f64);
-                if let Some(k) = lanl {
-                    let s = viii1
-                        .and_then(|v| v.get("lanl_sigma"))
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(0.0);
-                    (
-                        k,
-                        s.max(handbook_sigma),
-                        "local_validation.viii1 (LANL Table LIX)".to_string(),
-                    )
-                } else if let Some(k) = viii1_omc {
-                    let s = viii1
-                        .and_then(|v| v.get("openmc_sigma_seeds"))
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(0.0);
-                    (
-                        k,
-                        s.max(handbook_sigma),
-                        "local_validation.viii1 (OpenMC on this scene)".to_string(),
-                    )
-                } else if let Some(k) = legacy_omc {
-                    let s = lv
-                        .get("openmc_k_sigma_seeds")
-                        .and_then(serde_json::Value::as_f64)
-                        .unwrap_or(0.001);
-                    (
-                        k,
-                        s.max(handbook_sigma),
-                        "local_validation (legacy OpenMC)".to_string(),
-                    )
-                } else {
-                    (
-                        handbook_k,
-                        handbook_sigma,
-                        "k_eff_reference (ICSBEP handbook)".to_string(),
-                    )
-                }
+    let (k_ref, sigma_exp, ref_source): (f64, f64, String) = match benchmark.get("local_validation")
+    {
+        None => (
+            handbook_k,
+            handbook_sigma,
+            "k_eff_reference (ICSBEP handbook)".to_string(),
+        ),
+        Some(lv) => {
+            let viii1 = lv.get("viii1");
+            let lanl = viii1
+                .and_then(|v| v.get("lanl_k_eff"))
+                .and_then(serde_json::Value::as_f64);
+            let viii1_omc = viii1
+                .and_then(|v| v.get("openmc_k_eff"))
+                .and_then(serde_json::Value::as_f64);
+            let legacy_omc = lv.get("openmc_k_eff").and_then(serde_json::Value::as_f64);
+            if let Some(k) = lanl {
+                let s = viii1
+                    .and_then(|v| v.get("lanl_sigma"))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                (
+                    k,
+                    s.max(handbook_sigma),
+                    "local_validation.viii1 (LANL Table LIX)".to_string(),
+                )
+            } else if let Some(k) = viii1_omc {
+                let s = viii1
+                    .and_then(|v| v.get("openmc_sigma_seeds"))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0);
+                (
+                    k,
+                    s.max(handbook_sigma),
+                    "local_validation.viii1 (OpenMC on this scene)".to_string(),
+                )
+            } else if let Some(k) = legacy_omc {
+                let s = lv
+                    .get("openmc_k_sigma_seeds")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.001);
+                (
+                    k,
+                    s.max(handbook_sigma),
+                    "local_validation (legacy OpenMC)".to_string(),
+                )
+            } else {
+                (
+                    handbook_k,
+                    handbook_sigma,
+                    "k_eff_reference (ICSBEP handbook)".to_string(),
+                )
             }
-        };
+        }
+    };
 
     let t_load_start = std::time::Instant::now();
     let loaded = scene_io::load_scene_from_json(&scene.to_string())
@@ -3020,39 +3017,38 @@ fn run_icsbep_case(
         PyRunner::Cpu => "CPU",
         PyRunner::GpuCuda => "GPU",
     };
-    let sim_result = panic::catch_unwind(AssertUnwindSafe(|| -> PyResult<(
-        Vec<open_rust_mc::transport::simulate::BatchResult>,
-        f64,
-    )> {
-        match runner {
-            PyRunner::Cpu => {
-                let provider = &resolved.provider;
-                let materials = &resolved.materials;
-                let geometry = &loaded.geometry;
-                let out = py.allow_threads(|| {
-                    simulate::run_eigenvalue_with_geometry(
-                        &config, geometry, materials, provider,
-                    )
-                });
-                Ok(out)
-            }
-            PyRunner::GpuCuda => {
-                #[cfg(not(feature = "cuda"))]
-                {
-                    let _ = (&resolved, &loaded, &config, settings);
-                    return Err(PyValueError::new_err(
-                        "Runner.GpuCuda was requested but these bindings were built without \
+    let sim_result = panic::catch_unwind(AssertUnwindSafe(
+        || -> PyResult<(Vec<open_rust_mc::transport::simulate::BatchResult>, f64)> {
+            match runner {
+                PyRunner::Cpu => {
+                    let provider = &resolved.provider;
+                    let materials = &resolved.materials;
+                    let geometry = &loaded.geometry;
+                    let out = py.allow_threads(|| {
+                        simulate::run_eigenvalue_with_geometry(
+                            &config, geometry, materials, provider,
+                        )
+                    });
+                    Ok(out)
+                }
+                PyRunner::GpuCuda => {
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        let _ = (&resolved, &loaded, &config, settings);
+                        return Err(PyValueError::new_err(
+                            "Runner.GpuCuda was requested but these bindings were built without \
                          the cuda feature. Rebuild with `maturin develop --features cuda` \
                          (CUDA toolkit + an sm_86+ GPU required) or select Runner.Cpu.",
-                    ));
-                }
-                #[cfg(feature = "cuda")]
-                {
-                    run_gpu_icsbep(&config, &loaded.geometry, &resolved)
+                        ));
+                    }
+                    #[cfg(feature = "cuda")]
+                    {
+                        run_gpu_icsbep(&config, &loaded.geometry, &resolved)
+                    }
                 }
             }
-        }
-    }));
+        },
+    ));
     let (batch_results, _k_running) = match sim_result {
         Ok(Ok(pair)) => pair,
         Ok(Err(e)) => return Err(e),
@@ -3140,10 +3136,7 @@ fn run_gpu_icsbep(
     config: &SimConfig,
     geometry: &Geometry,
     resolved: &open_rust_mc::transport::material_resolve::ResolvedMaterials,
-) -> PyResult<(
-    Vec<open_rust_mc::transport::simulate::BatchResult>,
-    f64,
-)> {
+) -> PyResult<(Vec<open_rust_mc::transport::simulate::BatchResult>, f64)> {
     use open_rust_mc::gpu_recursive::GpuRecursiveContext;
     use open_rust_mc::gpu_transport::GpuTransportContext;
     use open_rust_mc::transport::dispatch::{CudaRunner, EigenvalueRunner};
@@ -3164,11 +3157,7 @@ fn run_gpu_icsbep(
         .map_err(|e| gpu_err("upload nuclides", e))?;
 
     let awrs: Vec<f64> = provider.nuclides.iter().map(|n| n.awr).collect();
-    let nu_bars: Vec<f64> = provider
-        .nuclides
-        .iter()
-        .map(|n| n.nu_bar_const)
-        .collect();
+    let nu_bars: Vec<f64> = provider.nuclides.iter().map(|n| n.nu_bar_const).collect();
     let q_n2ns: Vec<f64> = provider.nuclides.iter().map(|n| n.q_n2n).collect();
     let q_n3ns: Vec<f64> = provider.nuclides.iter().map(|n| n.q_n3n).collect();
     let mat_data = gpu
@@ -3182,13 +3171,13 @@ fn run_gpu_icsbep(
     // shortcut locked the GPU to materials_rt[0].temperature and
     // mis-sampled cells whose material temp differed.
     let _ = limits.sab_temperature_tolerance; // no longer consulted here
-    // Pass Arc<ThermalScatteringData> to the cached entry point so the
-    // device-side `sab_buffer_cache` can dedupe across (case, seed)
-    // pairs by pointer identity. `provider.thermal` already carries
-    // Arc's that come out of `material_resolve::thermal_cache`, so two
-    // cases sharing `c_Be.h5` upload the SAB payload to the device
-    // exactly once per process — same trick the per-nuclide kernel
-    // cache already plays for the much bigger nuclide payloads.
+                                              // Pass Arc<ThermalScatteringData> to the cached entry point so the
+                                              // device-side `sab_buffer_cache` can dedupe across (case, seed)
+                                              // pairs by pointer identity. `provider.thermal` already carries
+                                              // Arc's that come out of `material_resolve::thermal_cache`, so two
+                                              // cases sharing `c_Be.h5` upload the SAB payload to the device
+                                              // exactly once per process — same trick the per-nuclide kernel
+                                              // cache already plays for the much bigger nuclide payloads.
     let sab_slots: Vec<(
         std::sync::Arc<open_rust_mc::thermal::ThermalScatteringData>,
         usize,
@@ -3198,10 +3187,7 @@ fn run_gpu_icsbep(
         .enumerate()
         .filter_map(|(i, t)| t.as_ref().map(|tsl| (std::sync::Arc::clone(tsl), i)))
         .collect();
-    let sab_nuc_idx: i32 = sab_slots
-        .first()
-        .map(|(_, idx)| *idx as i32)
-        .unwrap_or(-1);
+    let sab_nuc_idx: i32 = sab_slots.first().map(|(_, idx)| *idx as i32).unwrap_or(-1);
     let sab_data = gpu
         .upload_sab_data_multi_cached(&sab_slots, n_nuc)
         .map_err(|e| gpu_err("upload S(α,β)", e))?;
@@ -3210,9 +3196,8 @@ fn run_gpu_icsbep(
         .upload_wmp_data_empty(n_nuc)
         .map_err(|e| gpu_err("upload empty WMP", e))?;
 
-    let recursive = GpuRecursiveContext::build(geometry, n).map_err(|e| {
-        PyValueError::new_err(format!("GPU recursive context build failed: {e}"))
-    })?;
+    let recursive = GpuRecursiveContext::build(geometry, n)
+        .map_err(|e| PyValueError::new_err(format!("GPU recursive context build failed: {e}")))?;
 
     const K_B_EV_PER_K: f64 = 8.617_333_262e-5;
     let mat_k_t: Vec<f64> = materials_rt

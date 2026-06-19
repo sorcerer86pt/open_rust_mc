@@ -377,10 +377,18 @@ impl BatchTallies {
     /// either side is empty (disabled tally) so this stays cheap on
     /// the hot reduction path.
     pub fn accumulate(&mut self, p: &ParticleTallies) {
-        for (b, v) in self.surface_current_pos.iter_mut().zip(&p.surface_current_pos) {
+        for (b, v) in self
+            .surface_current_pos
+            .iter_mut()
+            .zip(&p.surface_current_pos)
+        {
             *b += v;
         }
-        for (b, v) in self.surface_current_neg.iter_mut().zip(&p.surface_current_neg) {
+        for (b, v) in self
+            .surface_current_neg
+            .iter_mut()
+            .zip(&p.surface_current_neg)
+        {
             *b += v;
         }
         for (b, v) in self.mesh_flux.iter_mut().zip(&p.mesh_flux) {
@@ -399,10 +407,18 @@ impl BatchTallies {
     /// `fold().reduce()` final-merge step — each worker accumulates
     /// into its own BatchTallies, then the reducer combines them.
     pub fn merge(&mut self, other: &BatchTallies) {
-        for (b, v) in self.surface_current_pos.iter_mut().zip(&other.surface_current_pos) {
+        for (b, v) in self
+            .surface_current_pos
+            .iter_mut()
+            .zip(&other.surface_current_pos)
+        {
             *b += v;
         }
-        for (b, v) in self.surface_current_neg.iter_mut().zip(&other.surface_current_neg) {
+        for (b, v) in self
+            .surface_current_neg
+            .iter_mut()
+            .zip(&other.surface_current_neg)
+        {
             *b += v;
         }
         for (b, v) in self.mesh_flux.iter_mut().zip(&other.mesh_flux) {

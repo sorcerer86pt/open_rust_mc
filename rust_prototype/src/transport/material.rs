@@ -92,8 +92,8 @@ impl Material {
     ) -> Self {
         let mut mat = Self::new(name, temperature);
         for &(kernel_idx, atomic_mass_u, weight_fraction) in entries {
-            let atom_density = density_g_per_cc * weight_fraction / atomic_mass_u
-                * AVOGADRO_PER_BARN_CM;
+            let atom_density =
+                density_g_per_cc * weight_fraction / atomic_mass_u * AVOGADRO_PER_BARN_CM;
             mat.add_nuclide(atom_density, kernel_idx);
         }
         mat
@@ -111,8 +111,8 @@ impl Material {
         for &(kernel_idx, awr, weight_fraction) in entries {
             // N = ρ · w / (AWR · m_n) · N_A / 1e24
             //   = ρ · w / AWR · AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS
-            let atom_density = density_g_per_cc * weight_fraction / awr
-                * AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS;
+            let atom_density =
+                density_g_per_cc * weight_fraction / awr * AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS;
             mat.add_nuclide(atom_density, kernel_idx);
         }
         mat
@@ -128,8 +128,7 @@ impl Material {
         entries: &[(usize, f64, f64)],
     ) -> Self {
         let mean_mass: f64 = entries.iter().map(|&(_, a, x)| a * x).sum();
-        let total_atom_density =
-            density_g_per_cc / mean_mass * AVOGADRO_PER_BARN_CM;
+        let total_atom_density = density_g_per_cc / mean_mass * AVOGADRO_PER_BARN_CM;
         let mut mat = Self::new(name, temperature);
         for &(kernel_idx, _atomic_mass_u, atom_fraction) in entries {
             mat.add_nuclide(atom_fraction * total_atom_density, kernel_idx);
@@ -143,8 +142,7 @@ pub const NEUTRON_MASS_U: f64 = 1.008_664_916;
 /// Post-2019-SI exact: `N_A · 1e-24`.
 pub const AVOGADRO_PER_BARN_CM: f64 = 0.602_214_076;
 /// `const` division so the two can never drift.
-pub const AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS: f64 =
-    AVOGADRO_PER_BARN_CM / NEUTRON_MASS_U;
+pub const AVOGADRO_PER_BARN_CM_OVER_NEUTRON_MASS: f64 = AVOGADRO_PER_BARN_CM / NEUTRON_MASS_U;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

@@ -8,7 +8,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   rust:
@@ -41,15 +40,27 @@ jobs:
 
       - name: Clippy
         working-directory: rust_prototype
-        run: cargo clippy --all-targets -- -D warnings
+        # `--no-deps`: lint workspace members strictly, but don't apply our
+        # `-D warnings` to the vendored `hardware-query` path dependency —
+        # third-party code isn't held to our lint policy (a registry dep
+        # would be `--cap-lints allow`'d automatically; vendoring by path
+        # is the only reason it'd be linted at all).
+        run: cargo clippy --all-targets --no-deps -- -D warnings
 
       - name: Build
         working-directory: rust_prototype
         run: cargo build --release
 
-      - name: Run tests
+      - name: Run unit tests
         working-directory: rust_prototype
-        run: cargo test
+        # `--lib` only: the unit suite is self-contained and needs no
+        # nuclear data. The `tests/` integration suite (ICSBEP k_eff
+        # regressions, CUDA parity) requires the ~6.5 GB ENDF/B HDF5
+        # libraries that CI does not provision — those run on
+        # data-equipped machines via the Python sweep harness. The
+        # integration targets are still compile-checked above by
+        # `cargo clippy --all-targets`.
+        run: cargo test --lib
 
   python:
     name: Python lint
@@ -78,7 +89,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
-            texlive-science texlive-bibtex-extra biber latexmk
+            texlive-fonts-extra texlive-science texlive-bibtex-extra biber latexmk
 
       - name: Compile paper
         working-directory: paper

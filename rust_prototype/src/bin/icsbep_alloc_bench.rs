@@ -32,15 +32,22 @@ static N_FREE: AtomicUsize = AtomicUsize::new(0);
 static B_ALLOC: AtomicUsize = AtomicUsize::new(0);
 static B_FREE: AtomicUsize = AtomicUsize::new(0);
 
+// SAFETY: `Counting` only forwards to the `System` allocator after
+// bumping atomic counters; it adds no invariants of its own, so it is
+// as sound as `System` itself.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         N_ALLOC.fetch_add(1, Ordering::Relaxed);
         B_ALLOC.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: forwarding `layout` unchanged to the system allocator,
+        // which has the same safety contract as this method.
         unsafe { System.alloc(layout) }
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         N_FREE.fetch_add(1, Ordering::Relaxed);
         B_FREE.fetch_add(layout.size(), Ordering::Relaxed);
+        // SAFETY: `ptr`/`layout` are forwarded unchanged from a prior
+        // `alloc` call, satisfying `System::dealloc`'s contract.
         unsafe { System.dealloc(ptr, layout) }
     }
 }
@@ -88,8 +95,9 @@ fn fmt_bytes(b: usize) -> String {
 
 fn bench_dir() -> PathBuf {
     let mut p: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-    while p.parent().is_some() && !p.join("bench/icsbep").is_dir() {
-        p = p.parent().unwrap().to_path_buf();
+    while !p.join("bench/icsbep").is_dir() {
+        let Some(parent) = p.parent() else { break };
+        p = parent.to_path_buf();
     }
     p.join("bench/icsbep")
 }
@@ -103,16 +111,15 @@ fn data_dir() -> PathBuf {
         .unwrap_or_else(|| start.join("data/endfb-viii.1-hdf5/neutron"))
 }
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let case_file = bench_dir().join("heu-met-fast-001_case-1.json");
-    let text = std::fs::read_to_string(&case_file).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let text = std::fs::read_to_string(&case_file)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
     let scene = &value["scene"];
 
-    let loaded = scene_io::load_scene_from_json(&scene.to_string()).unwrap();
-    let lib = NuclideLibrary::from_data_dir(&data_dir());
-    let resolved =
-        material_resolve::resolve_materials(&loaded.materials, &lib, 15).unwrap();
+    let loaded = scene_io::load_scene_from_json(&scene.to_string())?;
+    let lib = NuclideLibrary::from_data_dir(data_dir());
+    let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, 15)?;
 
     let mut cfg = SimConfig::default();
     cfg.batches = 80;
@@ -144,9 +151,7 @@ fn main() {
     let net_b = ba as i64 - bf as i64;
 
     println!("transport_eigenvalue allocator activity:");
-    println!(
-        "  allocations  : {na:>12}   (live at end: {net_n:+})"
-    );
+    println!("  allocations  : {na:>12}   (live at end: {net_n:+})");
     println!(
         "  bytes alloc'd: {:>12}   (live at end: {} net)",
         fmt_bytes(ba),
@@ -156,13 +161,10 @@ fn main() {
             format!("-{}", fmt_bytes((-net_b) as usize))
         }
     );
-    println!(
-        "  bytes freed  : {:>12}",
-        fmt_bytes(bf)
-    );
+    println!("  bytes freed  : {:>12}", fmt_bytes(bf));
     println!(
         "  avg alloc sz : {:>12}",
-        fmt_bytes(if na > 0 { ba / na } else { 0 })
+        fmt_bytes(ba.checked_div(na).unwrap_or(0))
     );
     println!();
 
@@ -180,17 +182,16 @@ fn main() {
 
     // Final sanity: print one k_eff so the optimiser can't dead-code-
     // eliminate the entire transport call.
-    let active: Vec<f64> = outcome
-        .batches
-        .iter()
-        .skip(20)
-        .map(|b| b.k_eff)
-        .collect();
+    let active: Vec<f64> = outcome.batches.iter().skip(20).map(|b| b.k_eff).collect();
     let mean = active.iter().sum::<f64>() / active.len() as f64;
-    println!("k_eff sanity: ⟨k⟩ = {mean:.5} (active {} batches)", active.len());
+    println!(
+        "k_eff sanity: ⟨k⟩ = {mean:.5} (active {} batches)",
+        active.len()
+    );
     println!("wall time   : {:.3} s", wall.as_secs_f64());
     println!(
         "throughput  : {:.0} histories / s",
         300_000.0 / wall.as_secs_f64()
     );
+    Ok(())
 }

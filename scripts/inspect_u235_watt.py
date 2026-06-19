@@ -6,7 +6,6 @@ on the HDF5 dataset (1=histogram, 2=lin-lin, 3=lin-log, 4=log-lin,
 5=log-log). Our Rust `WattLaw::lookup_lin_lin` is hardcoded to lin-lin.
 If U-235's Watt a/b use anything other than 2, our engine is biased.
 """
-import sys
 import h5py
 import numpy as np
 

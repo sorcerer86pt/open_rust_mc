@@ -19,7 +19,10 @@ enum Sink {
     /// progress on but stderr is being piped (cargo test --nocapture,
     /// CI logs, `tee`). Indicatif's bar collapses to nothing under a
     /// pipe, so we fall back to one log line per batch.
-    Lines { backend: String, total: u32 },
+    Lines {
+        backend: String,
+        total: u32,
+    },
     Off,
 }
 

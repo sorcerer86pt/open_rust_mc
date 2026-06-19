@@ -76,6 +76,11 @@ pub trait LfuEntries {
     /// Number of entries.
     fn len(&self) -> usize;
 
+    /// Whether the cache holds no entries.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Iterate `(key, stats)`. Used to find the eviction victim.
     fn iter_stats(&self) -> Box<dyn Iterator<Item = (&Self::Key, &EvictionStats)> + '_>;
 
@@ -95,17 +100,14 @@ pub fn evict_to_budget<C: LfuEntries>(
     decay: f64,
 ) -> usize {
     let mut evicted = 0;
-    while cache.len() > 0
-        && cache.total_bytes().saturating_add(new_bytes) > budget
-    {
+    while cache.len() > 0 && cache.total_bytes().saturating_add(new_bytes) > budget {
         let victim = {
             let mut iter = cache.iter_stats();
             let first = match iter.next() {
                 Some(x) => x,
                 None => break,
             };
-            let (mut victim_key, mut victim_score) =
-                (first.0.clone(), first.1.score(now, decay));
+            let (mut victim_key, mut victim_score) = (first.0.clone(), first.1.score(now, decay));
             for (k, s) in iter {
                 let sc = s.score(now, decay);
                 if sc < victim_score {
@@ -124,10 +126,7 @@ pub fn evict_to_budget<C: LfuEntries>(
 /// Apply preload weights to existing entries (any not yet inserted
 /// pick up their weight at insert time via the cache's own
 /// `apply_preload_to_new_entry` hook).
-pub fn apply_preload<C: LfuEntriesMut>(
-    cache: &mut C,
-    weights: &HashMap<C::Key, u64>,
-) {
+pub fn apply_preload<C: LfuEntriesMut>(cache: &mut C, weights: &HashMap<C::Key, u64>) {
     for (k, w) in weights {
         cache.set_preload_weight(k, *w);
     }

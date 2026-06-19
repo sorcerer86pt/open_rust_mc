@@ -1934,23 +1934,14 @@ fn transport_particle_delta<XS: XsProvider>(
                     if w2 < 0.999 {
                         let inv_sq = 1.0 / (1.0 - w2).sqrt();
                         particle.dir = Vec3::new(
-                            mu * d.x
-                                + sin_mu
-                                    * (d.x * d.z * phi.cos() - d.y * phi.sin())
-                                    * inv_sq,
-                            mu * d.y
-                                + sin_mu
-                                    * (d.y * d.z * phi.cos() + d.x * phi.sin())
-                                    * inv_sq,
+                            mu * d.x + sin_mu * (d.x * d.z * phi.cos() - d.y * phi.sin()) * inv_sq,
+                            mu * d.y + sin_mu * (d.y * d.z * phi.cos() + d.x * phi.sin()) * inv_sq,
                             mu * d.z - sin_mu * (1.0 - w2).sqrt() * phi.cos(),
                         );
                     } else {
                         let sign = if d.z > 0.0 { 1.0 } else { -1.0 };
-                        particle.dir = Vec3::new(
-                            sin_mu * phi.cos(),
-                            sin_mu * phi.sin() * sign,
-                            mu * sign,
-                        );
+                        particle.dir =
+                            Vec3::new(sin_mu * phi.cos(), sin_mu * phi.sin() * sign, mu * sign);
                     }
                     handled_as_thermal = true;
                 }
@@ -2318,10 +2309,7 @@ pub fn run_eigenvalue_with_geometry<XS: XsProvider>(
                 .fold(worker_init, fold_one)
                 .reduce(worker_init, reduce_op)
         } else {
-            source_bank
-                .iter()
-                .enumerate()
-                .fold(worker_init(), fold_one)
+            source_bank.iter().enumerate().fold(worker_init(), fold_one)
         };
 
         let mut fission_bank = FissionBank::new();
@@ -2587,7 +2575,12 @@ pub fn try_initial_source_in_materials(
             let dx = lat_aabb.max.x - lat_aabb.min.x;
             let dy = lat_aabb.max.y - lat_aabb.min.y;
             let dz = lat_aabb.max.z - lat_aabb.min.z;
-            if dx.is_finite() && dy.is_finite() && dz.is_finite() && dx > 0.0 && dy > 0.0 && dz > 0.0
+            if dx.is_finite()
+                && dy.is_finite()
+                && dz.is_finite()
+                && dx > 0.0
+                && dy > 0.0
+                && dz > 0.0
             {
                 table.push(CellEntry {
                     cell_idx: usize::MAX,
@@ -2622,7 +2615,11 @@ pub fn try_initial_source_in_materials(
             })
             .collect()
     };
-    let total_weight = *cumulative.last().unwrap();
+    // `table` is non-empty (the `table.is_empty()` guard above returns
+    // early), so `cumulative` has at least one element.
+    let total_weight = *cumulative
+        .last()
+        .expect("cumulative is non-empty after the empty-table guard");
 
     let max_attempts =
         crate::transport::sim_limits::SimLimits::default().initial_source_max_attempts(n);
