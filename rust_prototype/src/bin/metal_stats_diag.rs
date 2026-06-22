@@ -490,6 +490,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // low-absorption reflectors (Be), losing ~8% of thermal scatters
     // and biasing k low. Raise via `maxev=N` to test/fix.
     let mut arg_maxev: i32 = 10_000;
+    // Per-case OpenMC reference path (`openmc=<path>`); consumed only in
+    // the cuda-gated comparison block below, so the binding is unused on
+    // a default build.
+    #[cfg_attr(not(feature = "cuda"), allow(unused_assignments, unused_variables))]
+    let mut arg_openmc: Option<String> = None;
     for a in std::env::args().skip(2) {
         if let Some(v) = a.strip_prefix("b=") {
             arg_b = v.parse().unwrap_or(arg_b);
@@ -511,6 +516,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             arg_nxn_mode = 1; // legacy bank-as-fission
         } else if let Some(v) = a.strip_prefix("maxev=") {
             arg_maxev = v.parse().unwrap_or(arg_maxev);
+        } else if let Some(v) = a.strip_prefix("openmc=") {
+            #[cfg_attr(not(feature = "cuda"), allow(unused_assignments))]
+            {
+                arg_openmc = Some(v.to_string());
+            }
         }
     }
     eprintln!(
