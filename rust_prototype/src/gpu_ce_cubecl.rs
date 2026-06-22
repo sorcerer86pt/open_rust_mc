@@ -98,18 +98,35 @@ pub fn extract_ce(
         .collect()
 }
 
+/// One material = a list of (nuclide index, atom density). Mirrors the
+/// CPU `Material.nuclides` after resolution; the device sums
+/// `Σ_t(E) = Σ_nuc n_d · σ_t,nuc(E)` over these.
+#[derive(Clone)]
+pub struct MaterialCe {
+    /// `(nuclide_idx, atom_density [atoms/barn-cm])`.
+    pub nuclides: Vec<(usize, f64)>,
+}
+
 /// CE scene packed for the device: flat blobs + offset header.
 pub struct PackedCe {
-    /// f64 blob: concatenated [grid_n0, xs[0..N_RX]_n0, grid_n1, …].
+    /// f64 blob: per-nuclide [grid, xs[0..N_RX]], then the flat
+    /// material-nuclide atom-density list.
     pub fdata: Vec<f64>,
-    /// i32 header, per nuclide: [grid_off, n_e, awr_bits_unused…] — see
-    /// `pack_ce` for the exact slot map.
+    /// i32 header: per-nuclide [grid_off, n_e, xs_off], then the
+    /// material table (off/len into the mat-nuclide lists).
     pub idata: Vec<i32>,
-    /// Per-nuclide `(grid_off, n_e, xs_off)` decoded for host-side use.
     pub n_nuclides: usize,
-    /// Mirror of the per-nuclide awr / nu_bar (host-side; also in fdata).
+    pub n_materials: usize,
+    /// Mirror of the per-nuclide awr / nu_bar (host-side; also uploaded).
     pub awr: Vec<f64>,
     pub nu_bar: Vec<f64>,
+    /// Device offsets (filled by `pack_ce_scene`) into idata/fdata for
+    /// the material table and the per-nuclide awr/nu_bar arrays.
+    pub mat_table_off: usize,  // i32: per material [list_off, list_len]
+    pub mat_nuc_idx_off: usize, // i32: flat nuclide indices
+    pub mat_nuc_den_off: usize, // f64: flat atom densities
+    pub awr_off: usize,         // f64
+    pub nu_bar_off: usize,      // f64
 }
 
 // Per-nuclide i32 header stride: [grid_off, n_e, xs_off].
@@ -118,10 +135,20 @@ const H_GRID_OFF: usize = 0;
 const H_N_E: usize = 1;
 const H_XS_OFF: usize = 2;
 
-/// Pack per-nuclide CE data into device blobs. `xs_off` points at the
-/// first of `N_RX * n_e` σ values (reaction r, point i at
-/// `xs_off + r*n_e + i`); `grid_off` at the `n_e` energies.
+/// Pack per-nuclide CE data only (no material table). Used by the XS
+/// lookup A/B, which compares one nuclide at a time. The material /
+/// awr / nu_bar offsets are left at 0 with empty tables.
 pub fn pack_ce(nuclides: &[NuclideCe]) -> PackedCe {
+    pack_ce_scene(nuclides, &[])
+}
+
+/// Pack a full CE scene: per-nuclide grids+σ, then the material table
+/// (per material: a list of (nuclide_idx, atom_density)), then the
+/// per-nuclide awr / nu_bar arrays. Layout (offsets recorded in the
+/// returned struct, in *element* units):
+///   fdata: [ per-nuclide grid+xs … ][ mat atom densities ][ awr ][ nu_bar ]
+///   idata: [ per-nuclide NUC_HDR … ][ mat [off,len] table ][ flat nuclide idxs ]
+pub fn pack_ce_scene(nuclides: &[NuclideCe], materials: &[MaterialCe]) -> PackedCe {
     let mut fdata: Vec<f64> = Vec::new();
     let mut idata: Vec<i32> = vec![0; nuclides.len() * NUC_HDR];
     let mut awr = Vec::with_capacity(nuclides.len());
@@ -142,15 +169,50 @@ pub fn pack_ce(nuclides: &[NuclideCe]) -> PackedCe {
         awr.push(nuc.awr);
         nu_bar.push(nuc.nu_bar);
     }
+
+    // Material table: per material [list_off, list_len] into the flat
+    // (nuclide_idx) i32 list + parallel (atom_density) f64 list.
+    let mat_table_off = idata.len();
+    idata.extend(std::iter::repeat_n(0, materials.len() * 2));
+    let mut flat_idx: Vec<i32> = Vec::new();
+    let mut flat_den: Vec<f64> = Vec::new();
+    for (m, mat) in materials.iter().enumerate() {
+        let off = flat_idx.len();
+        for &(ni, den) in &mat.nuclides {
+            flat_idx.push(ni as i32);
+            flat_den.push(den);
+        }
+        idata[mat_table_off + m * 2] = off as i32;
+        idata[mat_table_off + m * 2 + 1] = mat.nuclides.len() as i32;
+    }
+    let mat_nuc_idx_off = idata.len();
+    idata.extend_from_slice(&flat_idx);
+
+    let mat_nuc_den_off = fdata.len();
+    fdata.extend_from_slice(&flat_den);
+    let awr_off = fdata.len();
+    fdata.extend_from_slice(&awr);
+    let nu_bar_off = fdata.len();
+    fdata.extend_from_slice(&nu_bar);
+
     if fdata.is_empty() {
         fdata.push(0.0);
+    }
+    if idata.is_empty() {
+        idata.push(0);
     }
     PackedCe {
         fdata,
         idata,
         n_nuclides: nuclides.len(),
+        n_materials: materials.len(),
         awr,
         nu_bar,
+        mat_table_off,
+        mat_nuc_idx_off,
+        mat_nuc_den_off,
+        awr_off,
+        nu_bar_off,
     }
 }
 
