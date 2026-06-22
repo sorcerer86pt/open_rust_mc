@@ -659,3 +659,484 @@ pub fn sample_mu_gpu<R: Runtime>(
     let bytes = client.read_one(out_h).expect("mu readback");
     f64::from_bytes(&bytes).to_vec()
 }
+
+// ── Fission outgoing-energy (χ) distribution ────────────────────────
+//
+// CPU source: `NuclideKernels::fission_energy_dist: Option<EnergyDistribution>`.
+// Two device paths, selected by `law`:
+//   law = 0  tabular ContinuousTabular (ENDF Law 4): per-incident-energy
+//            (e_out, pdf, cdf) tables + OpenMC stochastic-bin pick +
+//            scaled kinematic remap. Mirrors EnergyDistribution::sample.
+//   law = 1/2/3  closed-form Watt / Maxwell / Evaporation: a(E)/b(E) or
+//            θ(E) lin-lin tables, sampled by the Cranberg/Coveyou
+//            rejection samplers. Mirrors WattLaw::sample etc.
+//   law = -1 none → emit the incident energy unchanged (fallback).
+
+/// Flat per-nuclide fission-χ data, device-ready.
+#[derive(Clone, Default)]
+pub struct FissionCe {
+    /// -1 none, 0 tabular, 1 Watt, 2 Maxwell, 3 Evaporation.
+    pub law: i32,
+    pub u: f64,
+    // Tabular (law 0): incident grid + per-E (e_out,pdf,cdf) slices.
+    pub energies: Vec<f64>,
+    pub dist_off: Vec<i32>,
+    pub dist_len: Vec<i32>,
+    pub e_out: Vec<f64>,
+    pub pdf: Vec<f64>,
+    pub cdf: Vec<f64>,
+    // Closed-form param tables (law 1/2/3). Watt uses (a*, b*); Maxwell/
+    // Evaporation use (a* = θ). b* empty for non-Watt.
+    pub pa_e: Vec<f64>,
+    pub pa_v: Vec<f64>,
+    pub pb_e: Vec<f64>,
+    pub pb_v: Vec<f64>,
+}
+
+/// Extract fission-χ per nuclide (parallel to extract_ce / extract_angular).
+pub fn extract_fission(
+    nuclides: &[std::sync::Arc<crate::transport::xs_provider::NuclideKernels>],
+) -> Vec<FissionCe> {
+    use crate::hdf5_reader::FissionEnergyLaw;
+    nuclides
+        .iter()
+        .map(|nuc| {
+            let Some(ed) = nuc.fission_energy_dist.as_ref() else {
+                return FissionCe { law: -1, ..Default::default() };
+            };
+            match &ed.closed_form {
+                Some(FissionEnergyLaw::Watt(w)) => FissionCe {
+                    law: 1,
+                    u: w.u,
+                    pa_e: w.a_energies.clone(),
+                    pa_v: w.a_values.clone(),
+                    pb_e: w.b_energies.clone(),
+                    pb_v: w.b_values.clone(),
+                    ..Default::default()
+                },
+                Some(FissionEnergyLaw::Maxwell(m)) => FissionCe {
+                    law: 2,
+                    u: m.u,
+                    pa_e: m.theta_energies.clone(),
+                    pa_v: m.theta_values.clone(),
+                    ..Default::default()
+                },
+                Some(FissionEnergyLaw::Evaporation(m)) => FissionCe {
+                    law: 3,
+                    u: m.u,
+                    pa_e: m.theta_energies.clone(),
+                    pa_v: m.theta_values.clone(),
+                    ..Default::default()
+                },
+                None => {
+                    // Tabular ContinuousTabular.
+                    if ed.energies.is_empty() || ed.distributions.is_empty() {
+                        return FissionCe { law: -1, ..Default::default() };
+                    }
+                    let mut f = FissionCe {
+                        law: 0,
+                        energies: ed.energies.clone(),
+                        ..Default::default()
+                    };
+                    for d in &ed.distributions {
+                        f.dist_off.push(f.e_out.len() as i32);
+                        f.dist_len.push(d.e_out.len() as i32);
+                        f.e_out.extend_from_slice(&d.e_out);
+                        f.cdf.extend_from_slice(&d.cdf);
+                        if d.pdf.len() == d.e_out.len() {
+                            f.pdf.extend_from_slice(&d.pdf);
+                        } else {
+                            f.pdf.extend(std::iter::repeat_n(0.0, d.e_out.len()));
+                        }
+                    }
+                    f
+                }
+            }
+        })
+        .collect()
+}
+
+// ── Packed fission blob (one nuclide) ───────────────────────────────
+// idata: [ law, n_e, eoff, doff, dloff, e_out_off, pdf_off, cdf_off,
+//          pa_e_off, pa_n, pa_v_off, pb_e_off, pb_n, pb_v_off ]
+//   then dist_off / dist_len arrays inline (tabular only).
+// fdata: [ u, energies | e_out | pdf | cdf | pa_e | pa_v | pb_e | pb_v ]
+
+pub struct PackedFission {
+    pub idata: Vec<i32>,
+    pub fdata: Vec<f64>,
+}
+
+const F_LAW: usize = 0;
+const F_N_E: usize = 1;
+const F_EOFF: usize = 2;
+const F_DOFF: usize = 3;
+const F_DLOFF: usize = 4;
+const F_EOUT_OFF: usize = 5;
+const F_PDF_OFF: usize = 6;
+const F_CDF_OFF: usize = 7;
+const F_PA_E_OFF: usize = 8;
+const F_PA_N: usize = 9;
+const F_PA_V_OFF: usize = 10;
+const F_PB_E_OFF: usize = 11;
+const F_PB_N: usize = 12;
+const F_PB_V_OFF: usize = 13;
+const F_U_SLOT: usize = 0; // fdata[0] = u
+const F_HDR: usize = 14;
+
+pub fn pack_fission(f: &FissionCe) -> PackedFission {
+    let mut idata = vec![0i32; F_HDR];
+    let mut fdata: Vec<f64> = vec![f.u]; // F_U_SLOT
+    idata[F_LAW] = f.law;
+    idata[F_N_E] = f.energies.len() as i32;
+
+    idata[F_EOFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.energies);
+    idata[F_EOUT_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.e_out);
+    idata[F_PDF_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.pdf);
+    idata[F_CDF_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.cdf);
+    idata[F_PA_E_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.pa_e);
+    idata[F_PA_N] = f.pa_e.len() as i32;
+    idata[F_PA_V_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.pa_v);
+    idata[F_PB_E_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.pb_e);
+    idata[F_PB_N] = f.pb_e.len() as i32;
+    idata[F_PB_V_OFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&f.pb_v);
+
+    idata[F_DOFF] = idata.len() as i32;
+    idata.extend_from_slice(&f.dist_off);
+    idata[F_DLOFF] = idata.len() as i32;
+    idata.extend_from_slice(&f.dist_len);
+
+    if fdata.is_empty() {
+        fdata.push(0.0);
+    }
+    if idata.len() == F_HDR {
+        idata.push(0);
+    }
+    PackedFission { idata, fdata }
+}
+
+// ── Device samplers ─────────────────────────────────────────────────
+
+/// lin-lin lookup over a (grid, values) pair packed at given offsets.
+/// Mirrors WattLaw::lookup_lin_lin.
+#[cube]
+fn fis_lin_lin(fdata: &Array<f64>, goff: u32, voff: u32, n: u32, e: f64) -> f64 {
+    let mut out = f64::new(0.0);
+    if n >= 1u32 {
+        let g0 = fdata[goff as usize];
+        let glast = fdata[(goff + n - 1u32) as usize];
+        if e <= g0 {
+            out = fdata[voff as usize];
+        } else {
+            if e >= glast {
+                out = fdata[(voff + n - 1u32) as usize];
+            } else {
+                let mut lo = u32::new(0);
+                let mut hi = n - 1u32;
+                for _i in 0..32u32 {
+                    if lo + 1u32 < hi {
+                        let mid = (lo + hi) / 2u32;
+                        if fdata[(goff + mid) as usize] <= e {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                }
+                let gl = fdata[(goff + lo) as usize];
+                let gh = fdata[(goff + lo + 1u32) as usize];
+                let vl = fdata[(voff + lo) as usize];
+                let vh = fdata[(voff + lo + 1u32) as usize];
+                let frac = (e - gl) / (gh - gl);
+                out = vl + frac * (vh - vl);
+            }
+        }
+    }
+    out
+}
+
+/// Quadratic/linear CDF inversion of a tabular (e_out, cdf, pdf) slice
+/// `[doff .. doff+dlen]` for `xi`. Mirrors TabularEnergyDist::sample_with_xi.
+#[cube]
+#[allow(unused_assignments)]
+fn fis_sample_eout_bin(
+    fdata: &Array<f64>,
+    eout_off: u32,
+    cdf_off: u32,
+    pdf_off: u32,
+    doff: u32,
+    dlen: u32,
+    xi: f64,
+) -> f64 {
+    let mut out = f64::new(1.0e6);
+    if dlen >= 2u32 {
+        let mut lo = u32::new(0);
+        let mut hi = dlen - 1u32;
+        for _i in 0..32u32 {
+            if lo + 1u32 < hi {
+                let mid = (lo + hi) / 2u32;
+                if fdata[(cdf_off + doff + mid) as usize] <= xi {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        let idx = select(lo > dlen - 2u32, dlen - 2u32, lo);
+        let cdf_lo = fdata[(cdf_off + doff + idx) as usize];
+        let cdf_hi = fdata[(cdf_off + doff + idx + 1u32) as usize];
+        let e_lo = fdata[(eout_off + doff + idx) as usize];
+        let e_hi = fdata[(eout_off + doff + idx + 1u32) as usize];
+        let de = e_hi - e_lo;
+        if (cdf_hi - cdf_lo).abs() < f64::new(1e-15) {
+            out = e_lo;
+        } else {
+            let p_lo = fdata[(pdf_off + doff + idx) as usize];
+            let p_hi = fdata[(pdf_off + doff + idx + 1u32) as usize];
+            // quadratic when pdf present & de>0, else linear.
+            let use_quad = de > f64::new(0.0) && (p_lo > f64::new(0.0) || p_hi > f64::new(0.0));
+            if use_quad {
+                let m = (p_hi - p_lo) / de;
+                let dc = xi - cdf_lo;
+                if m.abs() < f64::new(1e-30) {
+                    out = e_lo + dc / p_lo;
+                } else {
+                    let disc = p_lo * p_lo + 2.0 * m * dc;
+                    let sq = select(disc > f64::new(0.0), disc, f64::new(0.0)).sqrt();
+                    out = e_lo + (sq - p_lo) / m;
+                }
+            } else {
+                let frac = (xi - cdf_lo) / (cdf_hi - cdf_lo);
+                out = e_lo + frac * de;
+            }
+        }
+    }
+    let floor = f64::new(1e-5);
+    select(out > floor, out, floor)
+}
+
+/// Sample a fission outgoing energy for the packed nuclide at incident
+/// `e_in`, drawing uniforms from the local rng. Mirrors
+/// EnergyDistribution::sample (tabular path with stochastic bin +
+/// kinematic remap) and the closed-form Watt/Maxwell/Evaporation
+/// samplers. `rng` is a length-2 u64 [state, inc].
+#[cube]
+#[allow(unused_assignments)]
+fn fis_sample_energy(idata: &Array<i32>, fdata: &Array<f64>, e_in: f64, rng: &mut Array<u64>) -> f64 {
+    let law = idata[F_LAW];
+    let u = fdata[F_U_SLOT];
+    let mut out = e_in; // law -1 fallback
+    if law == 0i32 {
+        // Tabular ContinuousTabular.
+        let n_e = u32::cast_from(idata[F_N_E]);
+        let eoff = u32::cast_from(idata[F_EOFF]);
+        let doff_base = u32::cast_from(idata[F_DOFF]);
+        let dloff_base = u32::cast_from(idata[F_DLOFF]);
+        let eout_off = u32::cast_from(idata[F_EOUT_OFF]);
+        let pdf_off = u32::cast_from(idata[F_PDF_OFF]);
+        let cdf_off = u32::cast_from(idata[F_CDF_OFF]);
+        if n_e >= 1u32 {
+            let e0 = fdata[eoff as usize];
+            let elast = fdata[(eoff + n_e - 1u32) as usize];
+            if e_in <= e0 {
+                let xi = ce_uniform_f(rng);
+                let doff = u32::cast_from(idata[(doff_base) as usize]);
+                let dlen = u32::cast_from(idata[(dloff_base) as usize]);
+                out = fis_sample_eout_bin(fdata, eout_off, cdf_off, pdf_off, doff, dlen, xi);
+            } else {
+                if e_in >= elast {
+                    let xi = ce_uniform_f(rng);
+                    let doff = u32::cast_from(idata[(doff_base + n_e - 1u32) as usize]);
+                    let dlen = u32::cast_from(idata[(dloff_base + n_e - 1u32) as usize]);
+                    out = fis_sample_eout_bin(fdata, eout_off, cdf_off, pdf_off, doff, dlen, xi);
+                } else {
+                    // bracket
+                    let mut lo = u32::new(0);
+                    let mut hi = n_e - 1u32;
+                    for _i in 0..32u32 {
+                        if lo + 1u32 < hi {
+                            let mid = (lo + hi) / 2u32;
+                            if fdata[(eoff + mid) as usize] <= e_in {
+                                lo = mid;
+                            } else {
+                                hi = mid;
+                            }
+                        }
+                    }
+                    let e_lo = fdata[(eoff + lo) as usize];
+                    let e_hi = fdata[(eoff + lo + 1u32) as usize];
+                    let r = (e_in - e_lo) / (e_hi - e_lo);
+                    let pick_hi = ce_uniform_f(rng) < r;
+                    let l = select(pick_hi, lo + 1u32, lo);
+                    let doff_l = u32::cast_from(idata[(doff_base + l) as usize]);
+                    let dlen_l = u32::cast_from(idata[(dloff_base + l) as usize]);
+                    let xi = ce_uniform_f(rng);
+                    let e_out = fis_sample_eout_bin(fdata, eout_off, cdf_off, pdf_off, doff_l, dlen_l, xi);
+                    // Scaled kinematic remap to interpolated [E1, EK].
+                    let doff_a = u32::cast_from(idata[(doff_base + lo) as usize]);
+                    let dlen_a = u32::cast_from(idata[(dloff_base + lo) as usize]);
+                    let doff_b = u32::cast_from(idata[(doff_base + lo + 1u32) as usize]);
+                    let dlen_b = u32::cast_from(idata[(dloff_base + lo + 1u32) as usize]);
+                    let ea_lo = fdata[(eout_off + doff_a) as usize];
+                    let ea_hi = fdata[(eout_off + doff_a + dlen_a - 1u32) as usize];
+                    let eb_lo = fdata[(eout_off + doff_b) as usize];
+                    let eb_hi = fdata[(eout_off + doff_b + dlen_b - 1u32) as usize];
+                    let el_lo = fdata[(eout_off + doff_l) as usize];
+                    let el_hi = fdata[(eout_off + doff_l + dlen_l - 1u32) as usize];
+                    let e1 = (f64::new(1.0) - r) * ea_lo + r * eb_lo;
+                    let ek = (f64::new(1.0) - r) * ea_hi + r * eb_hi;
+                    let span = el_hi - el_lo;
+                    let adjusted = select(
+                        span.abs() < f64::new(1e-30),
+                        e_out,
+                        e1 + (e_out - el_lo) * (ek - e1) / span,
+                    );
+                    let floor = f64::new(1e-5);
+                    out = select(adjusted > floor, adjusted, floor);
+                }
+            }
+        }
+    } else {
+        let pa_e = u32::cast_from(idata[F_PA_E_OFF]);
+        let pa_n = u32::cast_from(idata[F_PA_N]);
+        let pa_v = u32::cast_from(idata[F_PA_V_OFF]);
+        let max_e = select(e_in - u > f64::new(1e-5), e_in - u, f64::new(1e-5));
+        if law == 1i32 {
+            // Watt.
+            let pb_e = u32::cast_from(idata[F_PB_E_OFF]);
+            let pb_n = u32::cast_from(idata[F_PB_N]);
+            let pb_v = u32::cast_from(idata[F_PB_V_OFF]);
+            let a = fis_lin_lin(fdata, pa_e, pa_v, pa_n, e_in);
+            let b = fis_lin_lin(fdata, pb_e, pb_v, pb_n, e_in);
+            let mut acc = f64::new(2.0);
+            let mut done = false;
+            for _i in 0..128u32 {
+                if !done {
+                    let xi1 = fmax_small(ce_uniform_f(rng));
+                    let xi2 = ce_uniform_f(rng);
+                    let xi3 = fmax_small(ce_uniform_f(rng));
+                    let xi4 = ce_uniform_f(rng);
+                    let c = (f64::new(1.5707963267948966) * xi2).cos();
+                    let w = -a * (xi1.ln() + c * c * xi3.ln());
+                    let term = a * a * b / 4.0;
+                    let e_out = w + term + (2.0 * xi4 - 1.0) * (a * a * b * w).sqrt();
+                    if e_out > f64::new(0.0) && e_out <= max_e {
+                        acc = select(e_out > f64::new(1e-5), e_out, f64::new(1e-5));
+                        done = true;
+                    }
+                }
+            }
+            out = acc;
+        } else {
+            // Maxwell (law 2) or Evaporation (law 3): pa = θ table.
+            let theta = fis_lin_lin(fdata, pa_e, pa_v, pa_n, e_in);
+            let mut acc = f64::new(2.0);
+            let mut done = false;
+            for _i in 0..128u32 {
+                if !done {
+                    let xi1 = fmax_small(ce_uniform_f(rng));
+                    let xi2 = ce_uniform_f(rng);
+                    let xi3 = fmax_small(ce_uniform_f(rng));
+                    let e_out = select(
+                        law == 2i32,
+                        -theta * (xi1.ln() + (f64::new(1.5707963267948966) * xi2).cos() * (f64::new(1.5707963267948966) * xi2).cos() * xi3.ln()),
+                        -theta * (xi1 * xi2).ln(),
+                    );
+                    if e_out > f64::new(0.0) && e_out <= max_e {
+                        acc = select(e_out > f64::new(1e-5), e_out, f64::new(1e-5));
+                        done = true;
+                    }
+                }
+            }
+            out = acc;
+        }
+    }
+    out
+}
+
+/// uniform in [0,1) from a local [state,inc] rng (fission-module copy).
+#[cube]
+fn ce_uniform_f(rng: &mut Array<u64>) -> f64 {
+    let old0 = rng[0];
+    rng[0] = old0 * 6364136223846793005u64 + rng[1];
+    let xs0 = u32::cast_from(((old0 >> 18u64) ^ old0) >> 27u64);
+    let rot0 = u32::cast_from(old0 >> 59u64);
+    let a = u64::cast_from((xs0 >> rot0) | (xs0 << ((32u32 - rot0) & 31u32))) >> 5u64;
+    let old1 = rng[0];
+    rng[0] = old1 * 6364136223846793005u64 + rng[1];
+    let xs1 = u32::cast_from(((old1 >> 18u64) ^ old1) >> 27u64);
+    let rot1 = u32::cast_from(old1 >> 59u64);
+    let b = u64::cast_from((xs1 >> rot1) | (xs1 << ((32u32 - rot1) & 31u32))) >> 6u64;
+    f64::cast_from(a * 67108864u64 + b) * (1.0 / 9007199254740992.0)
+}
+
+#[cube]
+fn fmax_small(x: f64) -> f64 {
+    select(x > f64::new(1e-300), x, f64::new(1e-300))
+}
+
+/// Test kernel: one fission E_out per thread at the given incident
+/// energies + seeds.
+#[cube(launch)]
+fn ce_sample_fis_kernel(
+    idata: &Array<i32>,
+    fdata: &Array<f64>,
+    e_in: &Array<f64>,
+    rng: &mut Array<u64>,
+    out: &mut Array<f64>,
+) {
+    let tid = ABSOLUTE_POS;
+    if tid < out.len() {
+        let mut lrng = Array::<u64>::new(2usize);
+        lrng[0] = rng[tid * 2];
+        lrng[1] = rng[tid * 2 + 1];
+        out[tid] = fis_sample_energy(idata, fdata, e_in[tid], &mut lrng);
+        rng[tid * 2] = lrng[0];
+        rng[tid * 2 + 1] = lrng[1];
+    }
+}
+
+/// Sample fission E_out on the GPU for one packed nuclide.
+pub fn sample_fission_gpu<R: Runtime>(
+    device: &R::Device,
+    packed: &PackedFission,
+    e_in: &[f64],
+    seeds: &[(u64, u64)],
+) -> Vec<f64> {
+    let client = R::client(device);
+    let n = e_in.len();
+    let mut rng_flat = Vec::with_capacity(n * 2);
+    for s in seeds {
+        rng_flat.push(s.0);
+        rng_flat.push(s.1 | 1);
+    }
+    let idata_h = client.create_from_slice(i32::as_bytes(&packed.idata));
+    let fdata_h = client.create_from_slice(f64::as_bytes(&packed.fdata));
+    let e_h = client.create_from_slice(f64::as_bytes(e_in));
+    let rng_h = client.create_from_slice(u64::as_bytes(&rng_flat));
+    let out_h = client.empty(n * core::mem::size_of::<f64>());
+    let threads = 64u32;
+    let blocks = n.div_ceil(threads as usize) as u32;
+    unsafe {
+        ce_sample_fis_kernel::launch::<R>(
+            &client,
+            CubeCount::Static(blocks, 1, 1),
+            CubeDim::new_1d(threads),
+            ArrayArg::from_raw_parts(idata_h, packed.idata.len()),
+            ArrayArg::from_raw_parts(fdata_h, packed.fdata.len()),
+            ArrayArg::from_raw_parts(e_h, n),
+            ArrayArg::from_raw_parts(rng_h, n * 2),
+            ArrayArg::from_raw_parts(out_h.clone(), n),
+        );
+    }
+    let bytes = client.read_one(out_h).expect("fis readback");
+    f64::from_bytes(&bytes).to_vec()
+}
