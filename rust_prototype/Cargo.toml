@@ -175,6 +175,10 @@ workspace = true
 # --- Binaries ---
 
 [[bin]]
+name = "cubecl_vs_cu_keff"
+required-features = ["cuda"]
+
+[[bin]]
 name = "gpu_photon_features"
 required-features = ["cuda"]
 

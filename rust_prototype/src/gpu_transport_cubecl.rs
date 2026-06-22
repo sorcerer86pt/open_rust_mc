@@ -842,6 +842,12 @@ fn const_xs_kernel(
             for _i in 0..4096u32 {
                 if local_alive == 1u32 && ev < max_events {
                     ev += 1;
+                    // Only a transmission crossing moves the particle into a
+                    // new cell; collision / scatter / reflection keep the
+                    // current stack. Re-finding the cell after a reflection
+                    // is numerically unstable (the point sits exactly on the
+                    // surface) and was producing spurious leaks.
+                    let mut need_refind = false;
                     let ci = st_cell[(depth - 1) as usize];
                     let ft = idata[(cell_fill_type_a + u32::cast_from(ci)) as usize];
                     let mut mat = i32::new(-1);
@@ -872,6 +878,12 @@ fn const_xs_kernel(
                             );
                             if bc == BC_VACUUM {
                                 lc_leak += 1;
+                            }
+                            // Transmission moved us across a surface into a
+                            // (possibly) new cell — re-resolve. Reflection
+                            // stays in the same cell.
+                            if bc == BC_TRANSMISSION {
+                                need_refind = true;
                             }
                         }
                     } else {
@@ -946,12 +958,15 @@ fn const_xs_kernel(
                                     if bc == BC_VACUUM {
                                         lc_leak += 1;
                                     }
+                                    if bc == BC_TRANSMISSION {
+                                        need_refind = true;
+                                    }
                                 }
                             }
                         }
                     }
 
-                    if local_alive == 1u32 {
+                    if local_alive == 1u32 && need_refind {
                         depth = find_cell(
                             idata, fdata, surf_params_off, surf_type_off, region_op_off, region_arg_off,
                             cell_region_off_a, cell_region_len_a, cell_fill_type_a, cell_fill_data_a,
