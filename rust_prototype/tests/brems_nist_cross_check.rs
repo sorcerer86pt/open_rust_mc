@@ -163,7 +163,6 @@ fn brems_sigma_rad_vs_nist_estar_at_1mev() {
 /// relevant range. This is the *production* path for emission
 /// probability, not the unscreened σ_rad above.
 #[test]
-#[allow(clippy::unwrap_used)]
 fn radiative_yield_approx_is_well_behaved() {
     use open_rust_mc::photon::bremsstrahlung::MaterialBremss;
     use open_rust_mc::photon::material::PhotonMaterial;

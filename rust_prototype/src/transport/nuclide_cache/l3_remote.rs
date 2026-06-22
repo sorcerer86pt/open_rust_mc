@@ -50,9 +50,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::binary_format::{decode_nuclide_kernels, encode_nuclide_kernels};
-use super::wire_protocol::{
-    OP_GET, OP_PUT, STATUS_HIT, STATUS_OK, read_response, write_request,
-};
+use super::wire_protocol::{OP_GET, OP_PUT, STATUS_HIT, STATUS_OK, read_response, write_request};
 use super::{NuclideKey, NuclideStore};
 use crate::transport::xs_provider::NuclideKernels;
 
@@ -105,9 +103,9 @@ impl L3RemoteStore {
                     addr,
                     label: format!("tcp://{addr}"),
                 }),
-                None => eprintln!(
-                    "warning: nuclide-cache peer {url:?} could not be resolved; dropped."
-                ),
+                None => {
+                    eprintln!("warning: nuclide-cache peer {url:?} could not be resolved; dropped.")
+                }
             }
         }
         if peers.is_empty() {
@@ -152,7 +150,9 @@ impl L3RemoteStore {
     }
 
     /// Number of peers configured. Diagnostic only.
-    pub fn peer_count(&self) -> usize { self.peers.len() }
+    pub fn peer_count(&self) -> usize {
+        self.peers.len()
+    }
 }
 
 impl NuclideStore for L3RemoteStore {
@@ -161,12 +161,16 @@ impl NuclideStore for L3RemoteStore {
     /// first HIT.
     fn try_get(&self, key: &NuclideKey) -> Option<Arc<NuclideKernels>> {
         for peer in &self.peers {
-            let Some(mut sock) = peer.open() else { continue; };
+            let Some(mut sock) = peer.open() else {
+                continue;
+            };
             if write_request(&mut sock, OP_GET, key, &[]).is_err() {
                 continue;
             }
             let _ = sock.flush();
-            let Ok((status, payload)) = read_response(&mut sock) else { continue; };
+            let Ok((status, payload)) = read_response(&mut sock) else {
+                continue;
+            };
             if status != STATUS_HIT || payload.is_empty() {
                 continue;
             }
@@ -197,7 +201,9 @@ impl NuclideStore for L3RemoteStore {
             }
         };
         for peer in &self.peers {
-            let Some(mut sock) = peer.open() else { continue; };
+            let Some(mut sock) = peer.open() else {
+                continue;
+            };
             if write_request(&mut sock, OP_PUT, &key, &bytes).is_err() {
                 continue;
             }
@@ -342,7 +348,9 @@ mod tests {
         let parts: Vec<&str> = dead_first.split(',').collect();
         let client = L3RemoteStore::with_peers(&parts).expect("at least one peer resolves");
         assert_eq!(client.peer_count(), 2);
-        let hit = client.try_get(&key).expect("live peer must HIT after dead peer skipped");
+        let hit = client
+            .try_get(&key)
+            .expect("live peer must HIT after dead peer skipped");
         assert_eq!(hit.awr, 56.0);
 
         let _ = std::fs::remove_file(&tmp);

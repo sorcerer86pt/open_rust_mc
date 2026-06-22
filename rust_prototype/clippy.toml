@@ -1,0 +1,8 @@
+# A failed `unwrap`/`expect` inside a test IS the desired outcome — it
+# fails the test at the exact line. The workspace denies `unwrap_used`
+# to force real error handling (`?`, `ok_or`) in library and binary
+# code, but that policy is noise in test bodies. This is clippy's
+# first-class switch for exactly that, and it replaces the ~20 scattered
+# `#[allow(clippy::unwrap_used)]` attributes that used to sit on
+# individual test modules.
+allow-unwrap-in-tests = true

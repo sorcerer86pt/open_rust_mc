@@ -263,22 +263,22 @@ fn binary_path(bin_dir: &Path, name: &str) -> PathBuf {
 /// repeating the full 15-field struct literal at every early return.
 fn empty_result(case: &CaseFile) -> CaseResult {
     CaseResult {
-        case_id:        case.benchmark.case_id.clone(),
-        suite:          case.benchmark.suite.clone(),
-        category:       case.benchmark.category.clone().unwrap_or_default(),
-        case_name:      case.benchmark.case_name.clone().unwrap_or_default(),
-        k_ref:          case.benchmark.k_eff_reference,
-        sigma_exp:      case.benchmark.k_eff_sigma,
-        k_calc:         None,
-        sigma_calc:     None,
-        delta_pcm:      None,
+        case_id: case.benchmark.case_id.clone(),
+        suite: case.benchmark.suite.clone(),
+        category: case.benchmark.category.clone().unwrap_or_default(),
+        case_name: case.benchmark.case_name.clone().unwrap_or_default(),
+        k_ref: case.benchmark.k_eff_reference,
+        sigma_exp: case.benchmark.k_eff_sigma,
+        k_calc: None,
+        sigma_calc: None,
+        delta_pcm: None,
         n_sigma_actual: None,
-        pass:           None,
-        skipped:        false,
-        blocked:        false,
-        wall_s:         0.0,
-        error:          None,
-        source:         case.benchmark.source.clone().unwrap_or_default(),
+        pass: None,
+        skipped: false,
+        blocked: false,
+        wall_s: 0.0,
+        error: None,
+        source: case.benchmark.source.clone().unwrap_or_default(),
     }
 }
 
@@ -288,7 +288,9 @@ fn run_case(case: &CaseFile, bin_dir: &Path, data_dir: &Path, n_sigma: f64) -> C
     if case.pending_composition {
         let mut r = empty_result(case);
         r.skipped = true;
-        r.error = Some("pending_composition gate — composition not yet entered from official handbook".into());
+        r.error = Some(
+            "pending_composition gate — composition not yet entered from official handbook".into(),
+        );
         return r;
     }
 
@@ -302,7 +304,9 @@ fn run_case(case: &CaseFile, bin_dir: &Path, data_dir: &Path, n_sigma: f64) -> C
             let mut r = empty_result(case);
             if case.scene.is_some() {
                 r.blocked = true;
-                r.error = Some("BLOCKED on Geometry::from_json — scene-only case, no runner block".into());
+                r.error = Some(
+                    "BLOCKED on Geometry::from_json — scene-only case, no runner block".into(),
+                );
             } else {
                 r.error = Some("malformed case: neither `runner` nor `scene` present".into());
             }
@@ -370,9 +374,8 @@ fn run_case(case: &CaseFile, bin_dir: &Path, data_dir: &Path, n_sigma: f64) -> C
     };
 
     let delta_pcm = (k_calc - case.benchmark.k_eff_reference) * 1.0e5;
-    let combined_sigma = (sigma_calc * sigma_calc
-        + case.benchmark.k_eff_sigma * case.benchmark.k_eff_sigma)
-        .sqrt();
+    let combined_sigma =
+        (sigma_calc * sigma_calc + case.benchmark.k_eff_sigma * case.benchmark.k_eff_sigma).sqrt();
     let n_sigma_actual = if combined_sigma > 0.0 {
         (k_calc - case.benchmark.k_eff_reference).abs() / combined_sigma
     } else {
@@ -398,7 +401,10 @@ fn write_csv(results: &[CaseResult], out: &mut dyn std::io::Write) -> std::io::R
         let k_calc = r.k_calc.map(|v| format!("{v:.6}")).unwrap_or_default();
         let sigma_calc = r.sigma_calc.map(|v| format!("{v:.6}")).unwrap_or_default();
         let delta = r.delta_pcm.map(|v| format!("{v:.1}")).unwrap_or_default();
-        let n_sigma = r.n_sigma_actual.map(|v| format!("{v:.2}")).unwrap_or_default();
+        let n_sigma = r
+            .n_sigma_actual
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_default();
         let pass = match r.pass {
             Some(true) => "PASS",
             Some(false) => "FAIL",
@@ -441,11 +447,17 @@ fn write_csv(results: &[CaseResult], out: &mut dyn std::io::Write) -> std::io::R
 /// and (b) make the 367 scene-only cases visible as `BLOCKED` rather
 /// than silently absent.
 fn status_label(r: &CaseResult) -> &'static str {
-    if r.blocked { "BLOCK" }
-    else if r.skipped { "SKIP" }
-    else if r.error.is_some() { "ERR" }
-    else if r.pass == Some(true) { "PASS" }
-    else { "FAIL" }
+    if r.blocked {
+        "BLOCK"
+    } else if r.skipped {
+        "SKIP"
+    } else if r.error.is_some() {
+        "ERR"
+    } else if r.pass == Some(true) {
+        "PASS"
+    } else {
+        "FAIL"
+    }
 }
 
 fn human_summary(results: &[CaseResult]) {
@@ -460,15 +472,24 @@ fn human_summary(results: &[CaseResult]) {
         let lbl = status_label(r);
         let counts = by_suite.entry(r.suite.clone()).or_default();
         match lbl {
-            "PASS"  => counts[0] += 1,
-            "FAIL"  => counts[1] += 1,
-            "SKIP"  => counts[2] += 1,
+            "PASS" => counts[0] += 1,
+            "FAIL" => counts[1] += 1,
+            "SKIP" => counts[2] += 1,
             "BLOCK" => counts[3] += 1,
-            _       => counts[4] += 1,
+            _ => counts[4] += 1,
         }
-        let k_calc_str = r.k_calc.map(|v| format!("{v:.5}")).unwrap_or_else(|| "—".into());
-        let delta_str  = r.delta_pcm.map(|v| format!("{v:+.0}")).unwrap_or_else(|| "—".into());
-        let n_sig_str  = r.n_sigma_actual.map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into());
+        let k_calc_str = r
+            .k_calc
+            .map(|v| format!("{v:.5}"))
+            .unwrap_or_else(|| "—".into());
+        let delta_str = r
+            .delta_pcm
+            .map(|v| format!("{v:+.0}"))
+            .unwrap_or_else(|| "—".into());
+        let n_sig_str = r
+            .n_sigma_actual
+            .map(|v| format!("{v:.2}"))
+            .unwrap_or_else(|| "—".into());
         println!(
             "{:<5} {:<32} {:<14} {:>10} {:>10.5} {:>10} {:>8} {:>5.1}s",
             lbl, r.case_id, r.suite, k_calc_str, r.k_ref, delta_str, n_sig_str, r.wall_s,
@@ -484,7 +505,13 @@ fn human_summary(results: &[CaseResult]) {
     for (suite, c) in &by_suite {
         println!(
             "  {:<14}  {:>3} PASS  {:>3} FAIL  {:>3} SKIP  {:>4} BLOCK  {:>3} ERR  ({} total)",
-            suite, c[0], c[1], c[2], c[3], c[4], c.iter().sum::<usize>(),
+            suite,
+            c[0],
+            c[1],
+            c[2],
+            c[3],
+            c[4],
+            c.iter().sum::<usize>(),
         );
     }
 }
@@ -600,7 +627,6 @@ fn main() {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -702,7 +728,12 @@ mod tests {
         assert!(case.runner.is_none());
         assert!(case.scene.is_some());
         // run_case() with absent runner should return blocked, not error.
-        let r = run_case(&case, Path::new("/nonexistent"), Path::new("/nonexistent"), 2.0);
+        let r = run_case(
+            &case,
+            Path::new("/nonexistent"),
+            Path::new("/nonexistent"),
+            2.0,
+        );
         assert!(r.blocked, "scene-only case should be blocked");
         assert!(r.error.as_deref().unwrap_or("").contains("BLOCKED"));
         assert_eq!(status_label(&r), "BLOCK");
@@ -720,7 +751,12 @@ mod tests {
             "pending_composition": true
         }"#;
         let case: CaseFile = serde_json::from_str(s).unwrap();
-        let r = run_case(&case, Path::new("/nonexistent"), Path::new("/nonexistent"), 2.0);
+        let r = run_case(
+            &case,
+            Path::new("/nonexistent"),
+            Path::new("/nonexistent"),
+            2.0,
+        );
         assert!(r.skipped);
         assert_eq!(status_label(&r), "SKIP");
     }
@@ -736,7 +772,12 @@ mod tests {
             }
         }"#;
         let case: CaseFile = serde_json::from_str(s).unwrap();
-        let r = run_case(&case, Path::new("/nonexistent"), Path::new("/nonexistent"), 2.0);
+        let r = run_case(
+            &case,
+            Path::new("/nonexistent"),
+            Path::new("/nonexistent"),
+            2.0,
+        );
         assert!(!r.blocked);
         assert!(!r.skipped);
         assert!(r.error.is_some());

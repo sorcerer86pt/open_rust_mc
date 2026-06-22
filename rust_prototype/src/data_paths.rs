@@ -30,11 +30,7 @@ use std::path::{Path, PathBuf};
 /// Library probe order: highest-priority first. Mirrors the
 /// `setup_nuclear_data.ps1` default. VIII.1 wins, with VIII.0 and
 /// VII.1 as fallbacks so partial installs keep working.
-const LIBRARY_PRIORITY: &[&str] = &[
-    "endfb-viii.1-hdf5",
-    "endfb-viii.0-hdf5",
-    "endfb-vii.1-hdf5",
-];
+const LIBRARY_PRIORITY: &[&str] = &["endfb-viii.1-hdf5", "endfb-viii.0-hdf5", "endfb-vii.1-hdf5"];
 
 /// Resolve a bare thermal-scattering filename (e.g. `"c_H_in_H2O.h5"`)
 /// to an absolute path. Path semantics, in priority order:
@@ -101,7 +97,6 @@ fn discover_subdir(start: &Path, subdir: &str) -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use std::fs;

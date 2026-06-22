@@ -305,11 +305,9 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
             // RefillBuffers::reset() before each transport call.
             let mut refill_guard = self.refill.borrow_mut();
             if use_refill && refill_guard.is_none() {
-                let refill = crate::gpu_recursive::RefillBuffers::new(
-                    &self.recursive.stream,
-                    n_overflow,
-                )
-                .expect("RefillBuffers::new failed");
+                let refill =
+                    crate::gpu_recursive::RefillBuffers::new(&self.recursive.stream, n_overflow)
+                        .expect("RefillBuffers::new failed");
                 *refill_guard = Some(refill);
             }
 
@@ -332,10 +330,7 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                 // distinct RNG stream so the overflow draws don't
                 // collide with the active-slot resampling done in
                 // normalize_gpu_bank.
-                let mut rng = Rng::new(
-                    batch_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15),
-                    1,
-                );
+                let mut rng = Rng::new(batch_seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), 1);
                 (0..n_overflow)
                     .map(|_| {
                         let bank = &source;
@@ -367,12 +362,24 @@ impl<'a> EigenvalueRunner for CudaRunner<'a> {
                     rrs.push(p.state());
                     rri.push(p.stream());
                 }
-                stream.memcpy_htod(&rx, &mut refill.d_refill_pos_x).expect("htod refill x");
-                stream.memcpy_htod(&ry, &mut refill.d_refill_pos_y).expect("htod refill y");
-                stream.memcpy_htod(&rz, &mut refill.d_refill_pos_z).expect("htod refill z");
-                stream.memcpy_htod(&re, &mut refill.d_refill_energy).expect("htod refill e");
-                stream.memcpy_htod(&rrs, &mut refill.d_refill_rng_state).expect("htod refill rs");
-                stream.memcpy_htod(&rri, &mut refill.d_refill_rng_inc).expect("htod refill ri");
+                stream
+                    .memcpy_htod(&rx, &mut refill.d_refill_pos_x)
+                    .expect("htod refill x");
+                stream
+                    .memcpy_htod(&ry, &mut refill.d_refill_pos_y)
+                    .expect("htod refill y");
+                stream
+                    .memcpy_htod(&rz, &mut refill.d_refill_pos_z)
+                    .expect("htod refill z");
+                stream
+                    .memcpy_htod(&re, &mut refill.d_refill_energy)
+                    .expect("htod refill e");
+                stream
+                    .memcpy_htod(&rrs, &mut refill.d_refill_rng_state)
+                    .expect("htod refill rs");
+                stream
+                    .memcpy_htod(&rri, &mut refill.d_refill_rng_inc)
+                    .expect("htod refill ri");
 
                 let r = self
                     .recursive

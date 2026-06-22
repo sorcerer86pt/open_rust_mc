@@ -29,8 +29,8 @@ pub mod l3_remote;
 pub mod wire_protocol;
 
 use std::path::Path;
-use std::sync::OnceLock;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::transport::xs_provider::{NuclideKernels, RankPolicy};
@@ -104,14 +104,24 @@ pub struct CacheStatsSnapshot {
 impl CacheStatsSnapshot {
     /// L1 / L2 / L3 hit rate as a fraction in `[0, 1]`. Returns
     /// `None` when the tier has seen no traffic (no hits + no misses).
-    pub fn l1_hit_rate(&self) -> Option<f64> { hit_rate(self.l1_hits, self.l1_misses) }
-    pub fn l2_hit_rate(&self) -> Option<f64> { hit_rate(self.l2_hits, self.l2_misses) }
-    pub fn l3_hit_rate(&self) -> Option<f64> { hit_rate(self.l3_hits, self.l3_misses) }
+    pub fn l1_hit_rate(&self) -> Option<f64> {
+        hit_rate(self.l1_hits, self.l1_misses)
+    }
+    pub fn l2_hit_rate(&self) -> Option<f64> {
+        hit_rate(self.l2_hits, self.l2_misses)
+    }
+    pub fn l3_hit_rate(&self) -> Option<f64> {
+        hit_rate(self.l3_hits, self.l3_misses)
+    }
 }
 
 fn hit_rate(hits: u64, misses: u64) -> Option<f64> {
     let total = hits + misses;
-    if total == 0 { None } else { Some(hits as f64 / total as f64) }
+    if total == 0 {
+        None
+    } else {
+        Some(hits as f64 / total as f64)
+    }
 }
 
 /// Process-wide stats handle. Lives for the life of the process; same
@@ -143,8 +153,8 @@ impl TieredStore {
     pub fn new() -> Self {
         let l2 = l2_disk::L2DiskStore::from_env();
         #[cfg(feature = "cache-remote")]
-        let l3: Option<Box<dyn NuclideStore>> = l3_remote::L3RemoteStore::from_env()
-            .map(|s| Box::new(s) as Box<dyn NuclideStore>);
+        let l3: Option<Box<dyn NuclideStore>> =
+            l3_remote::L3RemoteStore::from_env().map(|s| Box::new(s) as Box<dyn NuclideStore>);
         #[cfg(not(feature = "cache-remote"))]
         let l3: Option<Box<dyn NuclideStore>> = None;
         Self {
@@ -268,7 +278,9 @@ mod tests {
         let key = NuclideKey::from_inputs(&path, &policy, 0).unwrap();
         let kernel = Arc::new(NuclideKernels::empty(238.0, 2.43));
         store.put(key.clone(), Arc::clone(&kernel));
-        let hit = store.try_get(&key).expect("L1 store should return cached kernel");
+        let hit = store
+            .try_get(&key)
+            .expect("L1 store should return cached kernel");
         assert!(Arc::ptr_eq(&hit, &kernel));
         let _ = std::fs::remove_file(&path);
     }
@@ -303,7 +315,8 @@ mod tests {
         assert!(
             after_miss.l1_misses > before.l1_misses,
             "L1 miss must increment l1_misses (before={} after={})",
-            before.l1_misses, after_miss.l1_misses,
+            before.l1_misses,
+            after_miss.l1_misses,
         );
 
         // Put path.

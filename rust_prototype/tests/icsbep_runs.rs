@@ -102,18 +102,28 @@ const CPU_DEFAULT_SEEDS: &[u64] = &[42, 43, 44];
 /// gap (wrong fission spectrum, ν̄ interpolation, missing channel,
 /// benchmark-spec mismatch). Used as a one-off diagnostic, not a
 /// regression test.
-fn rank_sweep(case_file: &Path, ranks: &[usize]) -> Vec<(usize, f64, f64)> {
-    let text = std::fs::read_to_string(case_file).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let scene = value.get("scene").unwrap();
+/// Per-rank `(rank, k_calc, sigma_calc)` rows from an SVD-rank sweep.
+type RankSweepRows = Vec<(usize, f64, f64)>;
+
+/// `(k_calc, sigma_calc, k_ref, sigma_exp)` plus per-batch
+/// `(source, leak, fis, coll)` accounting counts.
+type CaseWithCounts = (f64, f64, f64, f64, u64, u64, u64, u64);
+
+fn rank_sweep(
+    case_file: &Path,
+    ranks: &[usize],
+) -> Result<RankSweepRows, Box<dyn std::error::Error>> {
+    let text = std::fs::read_to_string(case_file)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let scene = value.get("scene").ok_or("case JSON missing 'scene' key")?;
     let scene_str = scene.to_string();
-    let loaded = scene_io::load_scene_from_json(&scene_str).unwrap();
+    let loaded = scene_io::load_scene_from_json(&scene_str)?;
     let data_dir = data_dir();
     let lib = NuclideLibrary::from_data_dir(&data_dir);
 
     let mut results = Vec::new();
     for &rank in ranks {
-        let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, rank).unwrap();
+        let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, rank)?;
         let mut cfg = SimConfig::default();
         cfg.batches = 80;
         cfg.inactive = 20;
@@ -133,7 +143,7 @@ fn rank_sweep(case_file: &Path, ranks: &[usize]) -> Vec<(usize, f64, f64)> {
         let stderr = (variance / n).sqrt();
         results.push((rank, mean, stderr));
     }
-    results
+    Ok(results)
 }
 
 /// SVD-rank sweep on HEU-SOL-THERM-001 to isolate whether the
@@ -144,11 +154,13 @@ fn rank_sweep(case_file: &Path, ranks: &[usize]) -> Vec<(usize, f64, f64)> {
 #[ignore = "diagnostic: SVD rank sweep on HEU-SOL-THERM-001 — opt in via --ignored"]
 fn heu_sol_therm_001_rank_sweep_diagnostic() {
     let case = bench_dir().join("heu-sol-therm-001_case-1.json");
-    let results = rank_sweep(&case, &[5, 15, 30]);
+    let results = rank_sweep(&case, &[5, 15, 30]).unwrap();
     println!("\nHEU-SOL-THERM-001 SVD rank sweep (k_ref = 1.0004 ± 0.0006):");
     for (rank, k, sigma) in &results {
         let delta_pcm = (k - 1.0004) * 1.0e5;
-        println!("  rank={rank:>3}: k_calc = {k:.5} ± {sigma:.5}  (Δ_ICSBEP = {delta_pcm:+.0} pcm)");
+        println!(
+            "  rank={rank:>3}: k_calc = {k:.5} ± {sigma:.5}  (Δ_ICSBEP = {delta_pcm:+.0} pcm)"
+        );
     }
 }
 
@@ -170,7 +182,7 @@ fn heu_sol_therm_001_highstat_diagnostic() {
     let mut tot_col = 0_u64;
     for seed in [42u64, 43, 44] {
         let (k, sigma, _k_ref, _sigma_exp, src, leak, fis, col) =
-            run_case_e2e_with_counts(&case, 100, 20, 50_000, seed);
+            run_case_e2e_with_counts(&case, 100, 20, 50_000, seed).unwrap();
         let leak_frac = (leak as f64) / (src as f64);
         println!(
             "  seed={seed}: k = {k:.5} ± {sigma:.5}   leakage = {leak_frac:.4}   \
@@ -195,9 +207,7 @@ fn heu_sol_therm_001_highstat_diagnostic() {
         "  aggregate leakage = {leak_frac:.4}   total source = {tot_src}   \
          total fissions = {tot_fis}   total collisions = {tot_col}"
     );
-    println!(
-        "  OpenMC reference on same JSON: k = 0.99734 ± 0.00062  leakage = 0.4487"
-    );
+    println!("  OpenMC reference on same JSON: k = 0.99734 ± 0.00062  leakage = 0.4487");
 }
 
 fn run_case_e2e_with_counts(
@@ -206,17 +216,19 @@ fn run_case_e2e_with_counts(
     inactive: u32,
     particles: u32,
     seed: u64,
-) -> (f64, f64, f64, f64, u64, u64, u64, u64) {
+) -> Result<CaseWithCounts, Box<dyn std::error::Error>> {
     let (k, sigma, k_ref, sigma_exp) = run_case_e2e(case_file, batches, inactive, particles, seed);
     // run_case_e2e doesn't return per-batch stats yet; re-run a single
     // small accounting pass and grab leak/fis/coll from BatchResult.
-    let text = std::fs::read_to_string(case_file).unwrap();
-    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let scene_str = value.get("scene").unwrap().to_string();
-    let loaded = scene_io::load_scene_from_json(&scene_str).unwrap();
-    let lib = NuclideLibrary::from_data_dir(&data_dir());
-    let resolved =
-        material_resolve::resolve_materials(&loaded.materials, &lib, DEFAULT_RANK).unwrap();
+    let text = std::fs::read_to_string(case_file)?;
+    let value: serde_json::Value = serde_json::from_str(&text)?;
+    let scene_str = value
+        .get("scene")
+        .ok_or("case JSON missing 'scene' key")?
+        .to_string();
+    let loaded = scene_io::load_scene_from_json(&scene_str)?;
+    let lib = NuclideLibrary::from_data_dir(data_dir());
+    let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, DEFAULT_RANK)?;
     let mut cfg = SimConfig::default();
     cfg.batches = batches;
     cfg.inactive = inactive;
@@ -240,18 +252,20 @@ fn run_case_e2e_with_counts(
         fis += b.fissions as u64;
         col += b.collisions as u64;
     }
-    (k, sigma, k_ref, sigma_exp, src, leak, fis, col)
+    Ok((k, sigma, k_ref, sigma_exp, src, leak, fis, col))
 }
 
 #[test]
 #[ignore = "diagnostic: SVD rank sweep on U-233 — opt in via --ignored"]
 fn u233_rank_sweep_diagnostic() {
     let case = bench_dir().join("u233-met-fast-001.json");
-    let results = rank_sweep(&case, &[5, 15, 30]);
+    let results = rank_sweep(&case, &[5, 15, 30]).unwrap();
     println!("\nU-233 SVD rank sweep:");
     for (rank, k, sigma) in &results {
         let delta_pcm = (k - 1.0) * 1.0e5;
-        println!("  rank={rank:>3}: k_calc = {k:.5} ± {sigma:.5}  (Δ_ICSBEP = {delta_pcm:+.0} pcm)");
+        println!(
+            "  rank={rank:>3}: k_calc = {k:.5} ± {sigma:.5}  (Δ_ICSBEP = {delta_pcm:+.0} pcm)"
+        );
     }
     // No assertion — pure diagnostic. Slope of k vs rank tells us
     // whether SVD compression is the bias source.
@@ -259,7 +273,13 @@ fn u233_rank_sweep_diagnostic() {
 
 /// Run the full pipeline on the named ICSBEP case file. Returns
 /// `(k_calc, sigma_calc, k_ref, sigma_exp)`.
-fn run_case_e2e(case_file: &Path, batches: u32, inactive: u32, particles: u32, seed: u64) -> (f64, f64, f64, f64) {
+fn run_case_e2e(
+    case_file: &Path,
+    batches: u32,
+    inactive: u32,
+    particles: u32,
+    seed: u64,
+) -> (f64, f64, f64, f64) {
     let text = std::fs::read_to_string(case_file)
         .unwrap_or_else(|e| panic!("read {}: {e}", case_file.display()));
 
@@ -305,17 +325,20 @@ fn run_case_e2e(case_file: &Path, batches: u32, inactive: u32, particles: u32, s
     // `local_validation` block should be refreshed via
     // `scripts/openmc_scene_runner.py` — see the `_when_to_update`
     // field on the block itself.
-    let handbook_k = benchmark["k_eff_reference"].as_f64().unwrap_or_else(|| {
-        panic!("{}: benchmark.k_eff_reference not f64", case_file.display())
-    });
-    let handbook_sigma = benchmark["k_eff_sigma"].as_f64().unwrap_or_else(|| {
-        panic!("{}: benchmark.k_eff_sigma not f64", case_file.display())
-    });
+    let handbook_k = benchmark["k_eff_reference"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{}: benchmark.k_eff_reference not f64", case_file.display()));
+    let handbook_sigma = benchmark["k_eff_sigma"]
+        .as_f64()
+        .unwrap_or_else(|| panic!("{}: benchmark.k_eff_sigma not f64", case_file.display()));
     let (k_ref, sigma_exp, ref_source) =
         resolve_acceptance_target(benchmark, handbook_k, handbook_sigma);
     println!(
         "  [{}] acceptance reference: {ref_source}; handbook k = {handbook_k:.5} ± {handbook_sigma:.5}",
-        case_file.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
+        case_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
     );
 
     // ── Geometry ──────────────────────────────────────────────────────
@@ -449,8 +472,7 @@ fn run_case_e2e_seeds(
             i + 1,
             seeds.len(),
         );
-        let (k, sigma_calc, kr, se) =
-            run_case_e2e(case_file, batches, inactive, particles, seed);
+        let (k, sigma_calc, kr, se) = run_case_e2e(case_file, batches, inactive, particles, seed);
         eprintln!(
             "[icsbep] {case_label} — seed {}/{} done in {:.1}s: k={k:.5} +/- {sigma_calc:.5}",
             i + 1,
@@ -481,8 +503,7 @@ fn run_case_e2e_seeds(
 #[ignore = "ICSBEP regression — opt in via --ignored"]
 fn heu_met_fast_001_case_1_godiva() {
     let case = bench_dir().join("heu-met-fast-001_case-1.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("HEU-MET-FAST-001.case-1", k, sigma, k_ref, sigma_exp);
 }
 
@@ -493,8 +514,7 @@ fn heu_met_fast_001_case_1_godiva() {
 #[ignore = "ICSBEP regression — opt in via --ignored"]
 fn pu_met_fast_001_jezebel() {
     let case = bench_dir().join("pu-met-fast-001.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("PU-MET-FAST-001", k, sigma, k_ref, sigma_exp);
 }
 
@@ -504,8 +524,7 @@ fn pu_met_fast_001_jezebel() {
 #[ignore = "ICSBEP regression — opt in via --ignored"]
 fn pu_met_fast_002() {
     let case = bench_dir().join("pu-met-fast-002.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("PU-MET-FAST-002", k, sigma, k_ref, sigma_exp);
 }
 
@@ -614,8 +633,7 @@ fn pu_met_fast_002() {
 #[ignore = "ICSBEP regression — opt in via --ignored. PASSES (−308 pcm) after delta-tracking S(α,β) fix; matches OpenMC on same data."]
 fn heu_sol_therm_001_case_1_uranyl_nitrate() {
     let case = bench_dir().join("heu-sol-therm-001_case-1.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 50_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 50_000, CPU_DEFAULT_SEEDS);
     assert_passes("HEU-SOL-THERM-001.case-1", k, sigma, k_ref, sigma_exp);
 }
 
@@ -650,8 +668,7 @@ fn heu_sol_therm_001_case_1_uranyl_nitrate() {
 #[ignore = "ICSBEP regression — opt in via --ignored. PASSES (−481 pcm) after Watt χ fix."]
 fn u233_met_fast_001() {
     let case = bench_dir().join("u233-met-fast-001.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("U233-MET-FAST-001", k, sigma, k_ref, sigma_exp);
 }
 
@@ -664,8 +681,7 @@ fn u233_met_fast_001() {
 #[ignore = "ICSBEP regression — opt in via --ignored. First LCT benchmark on the CPU path."]
 fn leu_comp_therm_008_case_1() {
     let case = bench_dir().join("leu-comp-therm-008_case-1.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("LEU-COMP-THERM-008.case-1", k, sigma, k_ref, sigma_exp);
 }
 
@@ -679,8 +695,7 @@ fn leu_comp_therm_008_case_1() {
 #[ignore = "ICSBEP regression — opt in via --ignored. Reflected fast-Pu (Flattop-Pu)."]
 fn pu_met_fast_006_flattop_pu() {
     let case = bench_dir().join("pu-met-fast-006.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("PU-MET-FAST-006", k, sigma, k_ref, sigma_exp);
 }
 
@@ -710,8 +725,7 @@ fn pu_met_fast_006_flattop_pu() {
 #[ignore = "ICSBEP regression — opt in via --ignored. Reflected HEU with Fe / Cu reflector."]
 fn heu_met_fast_008_fe_cu_reflected() {
     let case = bench_dir().join("heu-met-fast-008.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("HEU-MET-FAST-008", k, sigma, k_ref, sigma_exp);
 }
 
@@ -724,8 +738,7 @@ fn heu_met_fast_008_fe_cu_reflected() {
 #[ignore = "ICSBEP regression — opt in via --ignored. Mixed Pu / HEU fast composite."]
 fn mix_met_fast_001() {
     let case = bench_dir().join("mix-met-fast-001.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("MIX-MET-FAST-001", k, sigma, k_ref, sigma_exp);
 }
 
@@ -739,8 +752,7 @@ fn mix_met_fast_001() {
 #[ignore = "ICSBEP regression — opt in via --ignored. Bare HEU at different scale from Godiva."]
 fn heu_met_fast_018_case_2() {
     let case = bench_dir().join("heu-met-fast-018_case-2.json");
-    let (k, sigma, k_ref, sigma_exp) =
-        run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
+    let (k, sigma, k_ref, sigma_exp) = run_case_e2e_seeds(&case, 80, 20, 5_000, CPU_DEFAULT_SEEDS);
     assert_passes("HEU-MET-FAST-018.case-2", k, sigma, k_ref, sigma_exp);
 }
 
@@ -797,7 +809,13 @@ fn resolve_acceptance_target(
 ) -> (f64, f64, &'static str) {
     let lv = match benchmark.get("local_validation") {
         Some(v) => v,
-        None => return (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)"),
+        None => {
+            return (
+                handbook_k,
+                handbook_sigma,
+                "k_eff_reference (ICSBEP handbook)",
+            );
+        }
     };
     if let Some(v8) = lv.get("viii1") {
         if let Some(k) = v8.get("lanl_k_eff").and_then(|v| v.as_f64()) {
@@ -827,5 +845,9 @@ fn resolve_acceptance_target(
             .unwrap_or(0.001);
         return (k, s.max(handbook_sigma), "local_validation (legacy OpenMC)");
     }
-    (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)")
+    (
+        handbook_k,
+        handbook_sigma,
+        "k_eff_reference (ICSBEP handbook)",
+    )
 }

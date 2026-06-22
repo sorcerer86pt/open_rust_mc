@@ -711,8 +711,8 @@ pub enum ScenePathError {
 
 /// Engine-side convenience: parse scene.json from a file path.
 pub fn load_scene_from_path(path: &std::path::Path) -> Result<LoadedScene, ScenePathError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| ScenePathError::Io(path.to_path_buf(), e))?;
+    let text =
+        std::fs::read_to_string(path).map_err(|e| ScenePathError::Io(path.to_path_buf(), e))?;
     Ok(load_scene_from_json(&text)?)
 }
 
@@ -1017,7 +1017,10 @@ mod tests {
         }"#;
         let err = load_scene_from_json(json).unwrap_err();
         assert!(
-            matches!(err, SceneLoadError::Geometry(GeometryError::SurfaceIndexOutOfRange { .. })),
+            matches!(
+                err,
+                SceneLoadError::Geometry(GeometryError::SurfaceIndexOutOfRange { .. })
+            ),
             "expected SurfaceIndexOutOfRange, got: {err:?}",
         );
     }
@@ -1042,7 +1045,10 @@ mod tests {
         }"#;
         let err = load_scene_from_json(json).unwrap_err();
         assert!(
-            matches!(err, SceneLoadError::Geometry(GeometryError::RootUniverseOutOfRange(..))),
+            matches!(
+                err,
+                SceneLoadError::Geometry(GeometryError::RootUniverseOutOfRange(..))
+            ),
             "expected RootUniverseOutOfRange, got: {err:?}",
         );
     }

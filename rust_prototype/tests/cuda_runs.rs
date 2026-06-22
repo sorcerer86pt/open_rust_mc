@@ -8,14 +8,15 @@
 //! (HEU-MF-001 Godiva, U233-MF-001 Jezebel-23). Solution and Pu
 //! benchmarks need a wider `max_nuc` or sparse-material upload
 //! before they can run here.
+#![cfg(feature = "cuda")]
 
 use open_rust_mc::geometry::scene_io;
+use open_rust_mc::gpu_recursive::GpuRecursiveContext;
+use open_rust_mc::gpu_transport::GpuTransportContext;
 use open_rust_mc::transport::dispatch::{CudaRunner, EigenvalueRunner};
 use open_rust_mc::transport::material_resolve;
 use open_rust_mc::transport::nuclides::NuclideLibrary;
 use open_rust_mc::transport::simulate::{SimConfig, SurvivalBiasing};
-use open_rust_mc::gpu_transport::GpuTransportContext;
-use open_rust_mc::gpu_recursive::GpuRecursiveContext;
 use std::path::{Path, PathBuf};
 
 const K_B_EV_PER_K: f64 = 8.617_333_262e-5;
@@ -61,23 +62,47 @@ fn resolve_acceptance_target(
 ) -> (f64, f64, &'static str) {
     let lv = match benchmark.get("local_validation") {
         Some(v) => v,
-        None => return (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)"),
+        None => {
+            return (
+                handbook_k,
+                handbook_sigma,
+                "k_eff_reference (ICSBEP handbook)",
+            );
+        }
     };
     if let Some(v8) = lv.get("viii1") {
         if let Some(k) = v8.get("lanl_k_eff").and_then(|v| v.as_f64()) {
             let s = v8.get("lanl_sigma").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            return (k, s.max(handbook_sigma), "local_validation.viii1 (LANL Table LIX)");
+            return (
+                k,
+                s.max(handbook_sigma),
+                "local_validation.viii1 (LANL Table LIX)",
+            );
         }
         if let Some(k) = v8.get("openmc_k_eff").and_then(|v| v.as_f64()) {
-            let s = v8.get("openmc_sigma_seeds").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            return (k, s.max(handbook_sigma), "local_validation.viii1 (OpenMC on this scene)");
+            let s = v8
+                .get("openmc_sigma_seeds")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            return (
+                k,
+                s.max(handbook_sigma),
+                "local_validation.viii1 (OpenMC on this scene)",
+            );
         }
     }
     if let Some(k) = lv.get("openmc_k_eff").and_then(|v| v.as_f64()) {
-        let s = lv.get("openmc_k_sigma_seeds").and_then(|v| v.as_f64()).unwrap_or(0.001);
+        let s = lv
+            .get("openmc_k_sigma_seeds")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.001);
         return (k, s.max(handbook_sigma), "local_validation (legacy OpenMC)");
     }
-    (handbook_k, handbook_sigma, "k_eff_reference (ICSBEP handbook)")
+    (
+        handbook_k,
+        handbook_sigma,
+        "k_eff_reference (ICSBEP handbook)",
+    )
 }
 
 fn run_case_cuda(
@@ -130,7 +155,8 @@ fn run_case_cuda(
     // OpenMC were ever measured at low statistics.
     let handbook_k = benchmark["k_eff_reference"].as_f64().unwrap();
     let handbook_sigma = benchmark["k_eff_sigma"].as_f64().unwrap();
-    let (k_ref, sigma_exp, ref_source) = resolve_acceptance_target(benchmark, handbook_k, handbook_sigma);
+    let (k_ref, sigma_exp, ref_source) =
+        resolve_acceptance_target(benchmark, handbook_k, handbook_sigma);
     // `ref_source` is documented inline above (PRIMARY / SECONDARY)
     // and printed when this run logs (see further below).  Held in a
     // sink to avoid an unused-warning while keeping the variable for
@@ -138,13 +164,15 @@ fn run_case_cuda(
     let _ = ref_source;
     println!(
         "  [{}] acceptance reference: {ref_source}; handbook k = {handbook_k:.5} ± {handbook_sigma:.5}",
-        case_file.file_stem().and_then(|s| s.to_str()).unwrap_or("?")
+        case_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("?")
     );
 
     let loaded = scene_io::load_scene_from_json(&scene.to_string()).unwrap();
     let lib = NuclideLibrary::from_data_dir(&data_dir());
-    let resolved =
-        material_resolve::resolve_materials(&loaded.materials, &lib, rank).unwrap();
+    let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, rank).unwrap();
 
     // Per-nuclide AWR + ν̄ constants — the device kernel reads these
     // from flat arrays indexed by `xs_kernel_idx`.
@@ -175,8 +203,7 @@ fn run_case_cuda(
         .map_or(-1, |i| i as i32);
 
     // Build GPU contexts.
-    let gpu =
-        GpuTransportContext::new().expect("GpuTransportContext::new (no CUDA device?)");
+    let gpu = GpuTransportContext::new().expect("GpuTransportContext::new (no CUDA device?)");
     let nuc_data = gpu
         .upload_nuclide_data(&resolved.provider.nuclides, rank)
         .expect("upload nuclides");
@@ -207,8 +234,8 @@ fn run_case_cuda(
         .upload_wmp_data_empty(resolved.provider.nuclides.len())
         .expect("upload empty WMP");
 
-    let rec =
-        GpuRecursiveContext::build(&loaded.geometry, particles as usize).expect("GpuRecursiveContext::build");
+    let rec = GpuRecursiveContext::build(&loaded.geometry, particles as usize)
+        .expect("GpuRecursiveContext::build");
 
     let mut cfg = SimConfig::default();
     cfg.batches = batches;
@@ -239,9 +266,7 @@ fn run_case_cuda(
         max_events_per_history: 10_000,
         fis_capacity: (particles as usize) * 4,
         initial_source: Box::new(move |n, s| {
-            let sites = open_rust_mc::transport::simulate::initial_source(
-                n, &geometry, &cells, s,
-            );
+            let sites = open_rust_mc::transport::simulate::initial_source(n, &geometry, &cells, s);
             sites
                 .iter()
                 .map(|fs| (fs.pos.x, fs.pos.y, fs.pos.z, fs.energy))
@@ -261,11 +286,7 @@ fn run_case_cuda(
         .collect();
     let n = active.len() as f64;
     let mean = active.iter().sum::<f64>() / n;
-    let variance = active
-        .iter()
-        .map(|k| (k - mean).powi(2))
-        .sum::<f64>()
-        / (n - 1.0).max(1.0);
+    let variance = active.iter().map(|k| (k - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
     let stderr = (variance / n).sqrt();
     // The handbook (k, σ) is informational only — the test report
     // can be cross-checked by inspecting `benchmark.k_eff_reference`
@@ -391,7 +412,10 @@ fn cuda_u233_met_fast_001() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("U233-MET-FAST-001", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "U-233 Jezebel-23 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "U-233 Jezebel-23 CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// PMF-001 / Jezebel — bare δ-Pu sphere, 6.385 cm radius, vacuum BC.
@@ -406,7 +430,10 @@ fn cuda_pu_met_fast_001_jezebel() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("PU-MET-FAST-001", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "PMF-001 Jezebel CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "PMF-001 Jezebel CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// PMF-002 — bare Pu-240-enriched sphere (~6.66 cm). 6 nuclides;
@@ -420,7 +447,10 @@ fn cuda_pu_met_fast_002() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("PU-MET-FAST-002", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "PMF-002 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "PMF-002 CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// LCT-008 case-1 — LEU lattice (low-enriched pin lattice in a
@@ -437,7 +467,10 @@ fn cuda_leu_comp_therm_008_case_1() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("LEU-COMP-THERM-008.case-1", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "LCT-008 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "LCT-008 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// HEU-SOL-THERM-001 case-1 — uranyl nitrate solution. 30 nuclides
@@ -454,7 +487,10 @@ fn cuda_heu_sol_therm_001_case_1() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 50_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("HEU-SOL-THERM-001.case-1", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "HEU-SOL-THERM-001 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "HEU-SOL-THERM-001 case-1 CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// PMF-006 / Flattop-Pu on CUDA. Pu/Ga core inside a natural-U
@@ -471,7 +507,10 @@ fn cuda_pu_met_fast_006_flattop_pu() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("PU-MET-FAST-006", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "PMF-006 Flattop-Pu CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "PMF-006 Flattop-Pu CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// HMF-008 on CUDA — HEU with Fe + Cu structural reflector. Fast
@@ -504,7 +543,10 @@ fn cuda_heu_met_fast_008_fe_cu_reflected() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("HEU-MET-FAST-008", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "HMF-008 CUDA case exceeded ±max(150 pcm, 2σ) envelope vs OpenMC-on-scene");
+    assert!(
+        pass,
+        "HMF-008 CUDA case exceeded ±max(150 pcm, 2σ) envelope vs OpenMC-on-scene"
+    );
 }
 
 /// MMF-001 on CUDA — Pu/Ga core surrounded by HEU metal. Both fuels
@@ -518,7 +560,10 @@ fn cuda_mix_met_fast_001() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("MIX-MET-FAST-001", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "MMF-001 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "MMF-001 CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// HMF-018 case-2 on CUDA — bare HEU sphere at a different scale
@@ -534,7 +579,10 @@ fn cuda_heu_met_fast_018_case_2() {
     let (k, sigma, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
     let pass = report("HEU-MET-FAST-018.case-2", k, sigma, k_ref, sigma_exp);
-    assert!(pass, "HMF-018 case-2 CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass,
+        "HMF-018 case-2 CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
 }
 
 /// GPU survival-biasing parity — Godiva analog vs SB.
@@ -568,25 +616,26 @@ fn cuda_survival_biasing_unbiased_godiva() {
     let case = bench_dir().join("heu-met-fast-001_case-1.json");
 
     // Analog run.
-    unsafe { std::env::remove_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS"); }
+    unsafe {
+        std::env::remove_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS");
+    }
     let (k_analog, s_analog, k_ref, sigma_exp) =
         run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
 
     // Survival-biasing run.
-    unsafe { std::env::set_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS", "1"); }
-    let (k_sb, s_sb, _, _) =
-        run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
-    unsafe { std::env::remove_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS"); }
+    unsafe {
+        std::env::set_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS", "1");
+    }
+    let (k_sb, s_sb, _, _) = run_case_cuda_seeds(&case, 80, 20, 5_000, CUDA_DEFAULT_SEEDS, 15);
+    unsafe {
+        std::env::remove_var("OPEN_RUST_MC_TEST_SURVIVAL_BIAS");
+    }
 
     // Both runs should pass the per-case envelope vs handbook /
     // OpenMC-on-same-JSON. Use the shared `report` helper for the
     // verdict and for printing.
-    let pass_analog = report(
-        "HMF-001 analog", k_analog, s_analog, k_ref, sigma_exp,
-    );
-    let pass_sb = report(
-        "HMF-001 + SB", k_sb, s_sb, k_ref, sigma_exp,
-    );
+    let pass_analog = report("HMF-001 analog", k_analog, s_analog, k_ref, sigma_exp);
+    let pass_sb = report("HMF-001 + SB", k_sb, s_sb, k_ref, sigma_exp);
 
     // Direct analog vs SB comparison — same envelope as the
     // CPU↔GPU acceptance test (2σ_combined, 150 pcm absolute floor).
@@ -602,8 +651,14 @@ fn cuda_survival_biasing_unbiased_godiva() {
         if pass_parity { "PASS" } else { "FAIL" }
     );
 
-    assert!(pass_analog, "analog Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope");
-    assert!(pass_sb, "SB Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope");
+    assert!(
+        pass_analog,
+        "analog Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
+    assert!(
+        pass_sb,
+        "SB Godiva CUDA case exceeded ±max(150 pcm, 2σ) envelope"
+    );
     assert!(
         pass_parity,
         "GPU survival biasing biased k_eff: Δk = {:+.0} pcm > ±{:.0} pcm",

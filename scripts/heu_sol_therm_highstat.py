@@ -9,11 +9,8 @@ multi-seed averaging).
 
 Run:  python scripts/heu_sol_therm_highstat.py
 """
-import json, time, statistics
+import json
 from pathlib import Path
-from open_rust_mc import (
-    Scene, Material, Settings, run_eigenvalue, XsMode,
-)
 
 DATA = Path("data/endfb-vii.1-hdf5/neutron")
 CASE = Path("bench/icsbep/heu-sol-therm-001_case-1.json")

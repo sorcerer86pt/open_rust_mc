@@ -107,10 +107,7 @@ impl HybridSvdWmpXsProvider {
             let k_el = nuc.elastic.as_ref().map_or(0, |r| r.memory_bytes());
             let k_fis = nuc.fission.as_ref().map_or(0, |r| r.memory_bytes());
             let k_cap = nuc.capture.as_ref().map_or(0, |r| r.memory_bytes());
-            let k_in = nuc
-                .inelastic
-                .as_ref()
-                .map_or(0, |r| r.memory_bytes());
+            let k_in = nuc.inelastic.as_ref().map_or(0, |r| r.memory_bytes());
             let k_2n = nuc.n2n.as_ref().map_or(0, |r| r.memory_bytes());
             let k_3n = nuc.n3n.as_ref().map_or(0, |r| r.memory_bytes());
             let k_tt = nuc.total_table.as_ref().map_or(0, |t| t.memory_bytes());

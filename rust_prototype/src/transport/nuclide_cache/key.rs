@@ -29,11 +29,7 @@ pub struct NuclideKey {
 impl NuclideKey {
     /// `Err` only when the file can't be opened — caller skips cache
     /// and routes through the HDF5 loader directly.
-    pub fn from_inputs(
-        path: &Path,
-        policy: &RankPolicy,
-        temp_idx: usize,
-    ) -> io::Result<Self> {
+    pub fn from_inputs(path: &Path, policy: &RankPolicy, temp_idx: usize) -> io::Result<Self> {
         let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         let file_hash = hash_file(&canonical)?;
         let policy_hash = hash_policy(policy);
@@ -84,8 +80,7 @@ fn hash_file(path: &Path) -> io::Result<[u8; 32]> {
 fn hash_policy(policy: &RankPolicy) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&(policy.default as u64).to_le_bytes());
-    let sorted_per_mt: BTreeMap<u32, usize> =
-        policy.per_mt.iter().map(|(m, r)| (*m, *r)).collect();
+    let sorted_per_mt: BTreeMap<u32, usize> = policy.per_mt.iter().map(|(m, r)| (*m, *r)).collect();
     hasher.update(&(sorted_per_mt.len() as u32).to_le_bytes());
     for (mt, rank) in &sorted_per_mt {
         hasher.update(&mt.to_le_bytes());

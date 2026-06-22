@@ -211,7 +211,11 @@ impl ReactionKernel {
     /// Build a Table-variant kernel from a pointwise XS sampled on the
     /// shared union energy grid.
     pub fn from_table(energies: Vec<f64>, xs: Vec<f64>) -> Self {
-        debug_assert_eq!(energies.len(), xs.len(), "ReactionKernel::from_table — grid / xs length mismatch");
+        debug_assert_eq!(
+            energies.len(),
+            xs.len(),
+            "ReactionKernel::from_table — grid / xs length mismatch"
+        );
         ReactionKernel::Table { energies, xs }
     }
 
@@ -391,14 +395,12 @@ impl NuclideKernels {
                     // is `Vec<f64>`. Each value is 8 bytes.
                     kernel.basis_f64().len() * 8 + coeffs.len() * 8
                 }
-                ReactionKernel::Table { energies, xs } => {
-                    energies.len() * 8 + xs.len() * 8
-                }
+                ReactionKernel::Table { energies, xs } => energies.len() * 8 + xs.len() * 8,
             }
         }
 
         let mut total = std::mem::size_of::<Self>();
-        for opt in [
+        for rk in [
             &self.elastic,
             &self.inelastic,
             &self.n2n,
@@ -409,10 +411,11 @@ impl NuclideKernels {
             &self.n_nalpha,
             &self.n_2nalpha,
             &self.n_np,
-        ] {
-            if let Some(rk) = opt {
-                total += rkn_bytes(rk);
-            }
+        ]
+        .into_iter()
+        .flatten()
+        {
+            total += rkn_bytes(rk);
         }
         for lev in &self.discrete_levels {
             if let Some(rk) = &lev.kernel {
@@ -949,10 +952,7 @@ pub const TALLY_PARTIAL_MTS: &[u32] = &[103, 107];
 /// Build SVD partial kernels for `TALLY_PARTIAL_MTS`. Skips MTs the
 /// HDF5 file does not evaluate (light isotopes have no (n,α)). Empty
 /// vector when no MT in the list is evaluated.
-fn build_partial_kernels<F>(
-    reader: &NuclideFileReader,
-    builder: F,
-) -> Vec<(u32, ReactionKernel)>
+fn build_partial_kernels<F>(reader: &NuclideFileReader, builder: F) -> Vec<(u32, ReactionKernel)>
 where
     F: Fn(&NuclideFileReader, u32) -> Option<ReactionKernel>,
 {
@@ -2217,10 +2217,7 @@ impl XsProvider for TableXsProvider {
 /// Build pointwise partial tables for `TALLY_PARTIAL_MTS` (analogue of
 /// `build_partial_kernels` for the table provider). Skips MTs the
 /// HDF5 file does not evaluate.
-fn build_partial_tables<F>(
-    reader: &NuclideFileReader,
-    builder: F,
-) -> Vec<(u32, StochTempTable)>
+fn build_partial_tables<F>(reader: &NuclideFileReader, builder: F) -> Vec<(u32, StochTempTable)>
 where
     F: Fn(&NuclideFileReader, u32) -> Option<StochTempTable>,
 {

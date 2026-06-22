@@ -37,23 +37,106 @@ use crate::hdf5_reader;
 /// callers go through this function.
 pub fn symbol_for_z(z: u32) -> Option<&'static str> {
     Some(match z {
-        1 => "H",   2 => "He",  3 => "Li",  4 => "Be",  5 => "B",   6 => "C",
-        7 => "N",   8 => "O",   9 => "F",  10 => "Ne", 11 => "Na", 12 => "Mg",
-       13 => "Al", 14 => "Si", 15 => "P",  16 => "S",  17 => "Cl", 18 => "Ar",
-       19 => "K",  20 => "Ca", 21 => "Sc", 22 => "Ti", 23 => "V",  24 => "Cr",
-       25 => "Mn", 26 => "Fe", 27 => "Co", 28 => "Ni", 29 => "Cu", 30 => "Zn",
-       31 => "Ga", 32 => "Ge", 33 => "As", 34 => "Se", 35 => "Br", 36 => "Kr",
-       37 => "Rb", 38 => "Sr", 39 => "Y",  40 => "Zr", 41 => "Nb", 42 => "Mo",
-       43 => "Tc", 44 => "Ru", 45 => "Rh", 46 => "Pd", 47 => "Ag", 48 => "Cd",
-       49 => "In", 50 => "Sn", 51 => "Sb", 52 => "Te", 53 => "I",  54 => "Xe",
-       55 => "Cs", 56 => "Ba", 57 => "La", 58 => "Ce", 59 => "Pr", 60 => "Nd",
-       61 => "Pm", 62 => "Sm", 63 => "Eu", 64 => "Gd", 65 => "Tb", 66 => "Dy",
-       67 => "Ho", 68 => "Er", 69 => "Tm", 70 => "Yb", 71 => "Lu", 72 => "Hf",
-       73 => "Ta", 74 => "W",  75 => "Re", 76 => "Os", 77 => "Ir", 78 => "Pt",
-       79 => "Au", 80 => "Hg", 81 => "Tl", 82 => "Pb", 83 => "Bi", 84 => "Po",
-       85 => "At", 86 => "Rn", 87 => "Fr", 88 => "Ra", 89 => "Ac", 90 => "Th",
-       91 => "Pa", 92 => "U",  93 => "Np", 94 => "Pu", 95 => "Am", 96 => "Cm",
-       97 => "Bk", 98 => "Cf", 99 => "Es", 100 => "Fm",
+        1 => "H",
+        2 => "He",
+        3 => "Li",
+        4 => "Be",
+        5 => "B",
+        6 => "C",
+        7 => "N",
+        8 => "O",
+        9 => "F",
+        10 => "Ne",
+        11 => "Na",
+        12 => "Mg",
+        13 => "Al",
+        14 => "Si",
+        15 => "P",
+        16 => "S",
+        17 => "Cl",
+        18 => "Ar",
+        19 => "K",
+        20 => "Ca",
+        21 => "Sc",
+        22 => "Ti",
+        23 => "V",
+        24 => "Cr",
+        25 => "Mn",
+        26 => "Fe",
+        27 => "Co",
+        28 => "Ni",
+        29 => "Cu",
+        30 => "Zn",
+        31 => "Ga",
+        32 => "Ge",
+        33 => "As",
+        34 => "Se",
+        35 => "Br",
+        36 => "Kr",
+        37 => "Rb",
+        38 => "Sr",
+        39 => "Y",
+        40 => "Zr",
+        41 => "Nb",
+        42 => "Mo",
+        43 => "Tc",
+        44 => "Ru",
+        45 => "Rh",
+        46 => "Pd",
+        47 => "Ag",
+        48 => "Cd",
+        49 => "In",
+        50 => "Sn",
+        51 => "Sb",
+        52 => "Te",
+        53 => "I",
+        54 => "Xe",
+        55 => "Cs",
+        56 => "Ba",
+        57 => "La",
+        58 => "Ce",
+        59 => "Pr",
+        60 => "Nd",
+        61 => "Pm",
+        62 => "Sm",
+        63 => "Eu",
+        64 => "Gd",
+        65 => "Tb",
+        66 => "Dy",
+        67 => "Ho",
+        68 => "Er",
+        69 => "Tm",
+        70 => "Yb",
+        71 => "Lu",
+        72 => "Hf",
+        73 => "Ta",
+        74 => "W",
+        75 => "Re",
+        76 => "Os",
+        77 => "Ir",
+        78 => "Pt",
+        79 => "Au",
+        80 => "Hg",
+        81 => "Tl",
+        82 => "Pb",
+        83 => "Bi",
+        84 => "Po",
+        85 => "At",
+        86 => "Rn",
+        87 => "Fr",
+        88 => "Ra",
+        89 => "Ac",
+        90 => "Th",
+        91 => "Pa",
+        92 => "U",
+        93 => "Np",
+        94 => "Pu",
+        95 => "Am",
+        96 => "Cm",
+        97 => "Bk",
+        98 => "Cf",
+        99 => "Es",
+        100 => "Fm",
         _ => return None,
     })
 }
@@ -686,7 +769,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // Steel / alloy constituents — Cr / Mn / Co / Ni / Mo / Cu / Zn
     CatalogEntry {
         zaid: 24050,
@@ -850,7 +932,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // Zircaloy alloy add-ons — Sn isotopes
     CatalogEntry {
         zaid: 50112,
@@ -912,7 +993,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // δ-Pu stabiliser
     CatalogEntry {
         zaid: 31069,
@@ -926,7 +1006,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // Heavy reflectors — Ta / W / Au / Pb / Bi
     CatalogEntry {
         zaid: 73181,
@@ -1000,7 +1079,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // Control / poison rod materials
     CatalogEntry {
         zaid: 47107,
@@ -1110,7 +1188,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // Burnable absorbers / rare earths
     CatalogEntry {
         zaid: 63151,
@@ -1184,7 +1261,6 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // Thorium fuel cycle
     CatalogEntry {
         zaid: 90230,
@@ -1210,42 +1286,191 @@ const CATALOG: &[CatalogEntry] = &[
         filename_override: None,
         nu_bar_const: 0.0,
     },
-
     // ── ICSBEP-corpus extensions (P / Ar / Zn / Br / Sb / Ba / Sm / Dy / Gd / U-232) ─
     // Filled in after running the corpus through the resolver caught
     // these as missing. Phosphorus shows up in stainless-steel tanks;
     // the rest are fission-product or trace structural nuclides that
     // appear in solution-tank, MOX-fuel, and steel-reflector cases.
-    CatalogEntry { zaid: 15031, symbol: "P-31",   filename_override: None,   nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 18036, symbol: "Ar-36",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 18038, symbol: "Ar-38",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 18040, symbol: "Ar-40",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 30064, symbol: "Zn-64",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 30066, symbol: "Zn-66",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 30067, symbol: "Zn-67",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 30068, symbol: "Zn-68",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 30070, symbol: "Zn-70",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 35079, symbol: "Br-79",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 35081, symbol: "Br-81",  filename_override: None,  nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 51121, symbol: "Sb-121", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 51123, symbol: "Sb-123", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56130, symbol: "Ba-130", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56132, symbol: "Ba-132", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56134, symbol: "Ba-134", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56135, symbol: "Ba-135", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56136, symbol: "Ba-136", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56137, symbol: "Ba-137", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 56138, symbol: "Ba-138", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62144, symbol: "Sm-144", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62147, symbol: "Sm-147", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62148, symbol: "Sm-148", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62150, symbol: "Sm-150", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62152, symbol: "Sm-152", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 62154, symbol: "Sm-154", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 64152, symbol: "Gd-152", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 66156, symbol: "Dy-156", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 66158, symbol: "Dy-158", filename_override: None, nu_bar_const: 0.0 },
-    CatalogEntry { zaid: 92232, symbol: "U-232",  filename_override: None,  nu_bar_const: 2.49 },
+    CatalogEntry {
+        zaid: 15031,
+        symbol: "P-31",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 18036,
+        symbol: "Ar-36",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 18038,
+        symbol: "Ar-38",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 18040,
+        symbol: "Ar-40",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 30064,
+        symbol: "Zn-64",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 30066,
+        symbol: "Zn-66",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 30067,
+        symbol: "Zn-67",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 30068,
+        symbol: "Zn-68",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 30070,
+        symbol: "Zn-70",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 35079,
+        symbol: "Br-79",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 35081,
+        symbol: "Br-81",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 51121,
+        symbol: "Sb-121",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 51123,
+        symbol: "Sb-123",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56130,
+        symbol: "Ba-130",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56132,
+        symbol: "Ba-132",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56134,
+        symbol: "Ba-134",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56135,
+        symbol: "Ba-135",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56136,
+        symbol: "Ba-136",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56137,
+        symbol: "Ba-137",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 56138,
+        symbol: "Ba-138",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62144,
+        symbol: "Sm-144",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62147,
+        symbol: "Sm-147",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62148,
+        symbol: "Sm-148",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62150,
+        symbol: "Sm-150",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62152,
+        symbol: "Sm-152",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 62154,
+        symbol: "Sm-154",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 64152,
+        symbol: "Gd-152",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 66156,
+        symbol: "Dy-156",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 66158,
+        symbol: "Dy-158",
+        filename_override: None,
+        nu_bar_const: 0.0,
+    },
+    CatalogEntry {
+        zaid: 92232,
+        symbol: "U-232",
+        filename_override: None,
+        nu_bar_const: 2.49,
+    },
 ];
 
 /// Errors from `NuclideLibrary::resolve`.
@@ -1346,7 +1571,7 @@ impl NuclideLibrary {
     /// Returns `false` for any non-natural ZAID — callers should
     /// use [`Self::knows`] + the normal `resolve` flow for those.
     pub fn has_natural_file(&self, zaid: u32) -> bool {
-        if zaid == 0 || zaid % 1000 != 0 {
+        if zaid == 0 || !zaid.is_multiple_of(1000) {
             return false;
         }
         match self.by_zaid.get(&zaid) {
@@ -1461,9 +1686,9 @@ mod tests {
     fn catalog_covers_icsbep_reflectors_and_solutions() {
         let lib = NuclideLibrary::from_data_dir(".");
         let icsbep_must_have: &[u32] = &[
-            4009,  // Be-9 (Topsy-Be, BeRP)
+            4009, // Be-9 (Topsy-Be, BeRP)
             5010, 5011, // B-10/11 (control)
-            7014, 7015, // N-14/15 (uranyl nitrate, air)
+            7014, 7015,  // N-14/15 (uranyl nitrate, air)
             9019,  // F-19 (fluoride salts)
             11023, // Na-23 (sodium fast reactors)
             13027, // Al-27 (clad / structural)

@@ -332,7 +332,10 @@ pub fn process_collision(
                 energy: e_s2,
             },
         ];
-        return CollisionOutcome::Multiplicity { secondaries, mt: 17 };
+        return CollisionOutcome::Multiplicity {
+            secondaries,
+            mt: 17,
+        };
     }
 
     // (n,4n) MT=37 — four neutrons emerge. Primary continues, three
@@ -378,7 +381,10 @@ pub fn process_collision(
                 energy: e_s3,
             },
         ];
-        return CollisionOutcome::Multiplicity { secondaries, mt: 37 };
+        return CollisionOutcome::Multiplicity {
+            secondaries,
+            mt: 37,
+        };
     }
 
     // (n,nα) MT=22 — one outgoing neutron + an absorbed α particle.
@@ -636,7 +642,10 @@ pub fn process_scatter_only(
             energy: e_s2,
         },
     ];
-    CollisionOutcome::Multiplicity { secondaries, mt: 17 }
+    CollisionOutcome::Multiplicity {
+        secondaries,
+        mt: 17,
+    }
 }
 
 /// Sample which discrete inelastic level is excited and return its Q-value.
@@ -855,7 +864,17 @@ mod tests {
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(
-            &mut p, &xs, None, None, None, None, ChargedParticleEdists::default(), None, None, 0.0, &mut rng,
+            &mut p,
+            &xs,
+            None,
+            None,
+            None,
+            None,
+            ChargedParticleEdists::default(),
+            None,
+            None,
+            0.0,
+            &mut rng,
         );
         assert!(matches!(outcome, CollisionOutcome::Scatter));
         assert!(p.is_alive());
@@ -882,7 +901,17 @@ mod tests {
         };
         let mut p = Particle::new(Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(
-            &mut p, &xs, None, None, None, None, ChargedParticleEdists::default(), None, None, 0.0, &mut rng,
+            &mut p,
+            &xs,
+            None,
+            None,
+            None,
+            None,
+            ChargedParticleEdists::default(),
+            None,
+            None,
+            0.0,
+            &mut rng,
         );
         assert!(matches!(outcome, CollisionOutcome::Absorption));
         assert!(!p.is_alive());
@@ -909,7 +938,17 @@ mod tests {
         };
         let mut p = Particle::new(Vec3::new(1.0, 2.0, 3.0), Vec3::new(1.0, 0.0, 0.0), 1.0e6, 0);
         let outcome = process_collision(
-            &mut p, &xs, None, None, None, None, ChargedParticleEdists::default(), None, None, 0.0, &mut rng,
+            &mut p,
+            &xs,
+            None,
+            None,
+            None,
+            None,
+            ChargedParticleEdists::default(),
+            None,
+            None,
+            0.0,
+            &mut rng,
         );
         match outcome {
             CollisionOutcome::Fission { sites } => {

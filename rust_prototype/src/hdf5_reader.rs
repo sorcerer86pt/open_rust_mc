@@ -1187,7 +1187,11 @@ impl CorrelatedAngleEnergy {
         }
         let k_hi = (e_out_bin_lo + 1).min(row.len() - 1);
         let pick_hi = rng.uniform() < e_out_frac;
-        let mu_table = if pick_hi { &row[k_hi] } else { &row[e_out_bin_lo.min(row.len() - 1)] };
+        let mu_table = if pick_hi {
+            &row[k_hi]
+        } else {
+            &row[e_out_bin_lo.min(row.len() - 1)]
+        };
         Some(mu_table.sample(rng))
     }
 }
@@ -1311,9 +1315,9 @@ impl WattLaw {
         if e >= grid[grid.len() - 1] {
             return values[values.len() - 1];
         }
-        let i = match grid.binary_search_by(|x| {
-            x.partial_cmp(&e).unwrap_or(std::cmp::Ordering::Less)
-        }) {
+        let i = match grid
+            .binary_search_by(|x| x.partial_cmp(&e).unwrap_or(std::cmp::Ordering::Less))
+        {
             Ok(i) => return values[i],
             Err(i) => i.saturating_sub(1),
         };
@@ -3016,10 +3020,7 @@ fn read_reaction_edist_from_file(
 
 /// Helper: read a 2-row `(2, N)` Tabulated1D HDF5 dataset into
 /// `(x_grid, y_values)`. Returns `None` if the shape doesn't match.
-fn read_tabulated_1d(
-    parent: &hdf5_pure::Group<'_>,
-    name: &str,
-) -> Option<(Vec<f64>, Vec<f64>)> {
+fn read_tabulated_1d(parent: &hdf5_pure::Group<'_>, name: &str) -> Option<(Vec<f64>, Vec<f64>)> {
     let ds = parent.dataset(name).ok()?;
     let shape = ds.shape().ok()?;
     if shape.len() != 2 || shape[0] != 2 {
@@ -3109,14 +3110,13 @@ fn try_read_fission_edist_for_reaction(
                 }
                 let n_total = dist_shape[1] as usize;
                 let dist_attrs = dist_ds.attrs().unwrap_or_default();
-                let offsets: Vec<usize> = if let Some(hdf5_pure::AttrValue::I64Array(arr)) =
-                    dist_attrs.get("offsets")
-                {
-                    arr.iter().map(|&v| v as usize).collect()
-                } else {
-                    let per_e = n_total / energies.len();
-                    (0..energies.len()).map(|i| i * per_e).collect()
-                };
+                let offsets: Vec<usize> =
+                    if let Some(hdf5_pure::AttrValue::I64Array(arr)) = dist_attrs.get("offsets") {
+                        arr.iter().map(|&v| v as usize).collect()
+                    } else {
+                        let per_e = n_total / energies.len();
+                        (0..energies.len()).map(|i| i * per_e).collect()
+                    };
                 let e_out_values = &dist_raw[..n_total];
                 let pdf_values = &dist_raw[n_total..2 * n_total];
                 let cdf_values = &dist_raw[2 * n_total..3 * n_total];
@@ -4161,8 +4161,8 @@ mod mt91_mu_coupling_tests {
             return;
         };
         let file = hdf5_pure::File::open(&path).expect("open U235.h5");
-        let dist = read_reaction_edist_from_file(&file, "U235", 91)
-            .expect("MT=91 distribution must load");
+        let dist =
+            read_reaction_edist_from_file(&file, "U235", 91).expect("MT=91 distribution must load");
 
         // (1) mu_dist must be present (Law 61) for U-235 VIII.x.
         let mu_data = dist
@@ -4180,7 +4180,7 @@ mod mt91_mu_coupling_tests {
         );
 
         // (2) sample_with_mu at 5 MeV must return Some(mu).
-        let mut rng = Rng::new(1234_567, 0);
+        let mut rng = Rng::new(1_234_567, 0);
         let n = 200_000usize;
         let e_in = 5.0e6_f64;
         let mut mu_sum = 0.0_f64;
@@ -4190,14 +4190,14 @@ mod mt91_mu_coupling_tests {
         let mut bins = [0usize; 20]; // 20 bins over [-1, 1]
         for _ in 0..n {
             let (e_out, mu_opt) = dist.sample_with_mu(e_in, &mut rng);
-            assert!(e_out > 0.0 && e_out < 1.5 * e_in, "E_out={e_out} unphysical");
+            assert!(
+                e_out > 0.0 && e_out < 1.5 * e_in,
+                "E_out={e_out} unphysical"
+            );
             e_out_sum += e_out;
             match mu_opt {
                 Some(mu) => {
-                    assert!(
-                        (-1.0..=1.0).contains(&mu),
-                        "mu out of [-1, 1]: {mu}"
-                    );
+                    assert!((-1.0..=1.0).contains(&mu), "mu out of [-1, 1]: {mu}");
                     mu_sum += mu;
                     mu_sq_sum += mu * mu;
                     let bin = (((mu + 1.0) * 10.0) as usize).min(19);
@@ -4285,7 +4285,10 @@ mod mt91_mu_coupling_tests {
         for _ in 0..1_000 {
             let (e_out, mu) = dist.sample_with_mu(5.0e5, &mut rng);
             assert!(e_out > 0.0);
-            assert!(mu.is_none(), "expected None for distribution without mu_dist");
+            assert!(
+                mu.is_none(),
+                "expected None for distribution without mu_dist"
+            );
         }
     }
 }

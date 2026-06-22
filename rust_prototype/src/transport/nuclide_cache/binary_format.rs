@@ -47,9 +47,7 @@ use crate::hdf5_reader::{
 };
 use crate::kernel::SvdKernel;
 use crate::table::PointwiseTable;
-use crate::transport::xs_provider::{
-    DiscreteLevel, InelasticCdf, NuclideKernels, ReactionKernel,
-};
+use crate::transport::xs_provider::{DiscreteLevel, InelasticCdf, NuclideKernels, ReactionKernel};
 
 /// Magic bytes identifying our binary cache files. Eight ASCII bytes
 /// so simple grep finds them in mixed-content directories.
@@ -410,7 +408,11 @@ fn decode_discrete_level_info<R: Read>(r: &mut R) -> Result<DiscreteLevelInfo, D
     let mt = read_u32(r)?;
     let q_value = read_f64(r)?;
     let threshold = read_f64(r)?;
-    Ok(DiscreteLevelInfo { mt, q_value, threshold })
+    Ok(DiscreteLevelInfo {
+        mt,
+        q_value,
+        threshold,
+    })
 }
 
 fn encode_discrete_level<W: Write>(w: &mut W, d: &DiscreteLevel) -> io::Result<()> {
@@ -468,7 +470,12 @@ fn decode_tabular_mu_dist<R: Read>(r: &mut R) -> Result<TabularMuDist, DecodeErr
     let pdf = read_vec_f64(r)?;
     let cdf = read_vec_f64(r)?;
     let histogram = read_bool(r)?;
-    Ok(TabularMuDist { mu, pdf, cdf, histogram })
+    Ok(TabularMuDist {
+        mu,
+        pdf,
+        cdf,
+        histogram,
+    })
 }
 
 fn encode_angular_distribution<W: Write>(w: &mut W, a: &AngularDistribution) -> io::Result<()> {
@@ -766,8 +773,16 @@ fn encode_body<W: Write>(w: &mut W, k: &NuclideKernels) -> Result<(), EncodeErro
     }
     write_bool(w, k.has_continuum_inelastic)?;
     write_option(w, k.elastic_angle.as_ref(), encode_angular_distribution)?;
-    write_option(w, k.fission_energy_dist.as_ref(), encode_energy_distribution)?;
-    write_option(w, k.inelastic_continuum_edist.as_ref(), encode_energy_distribution)?;
+    write_option(
+        w,
+        k.fission_energy_dist.as_ref(),
+        encode_energy_distribution,
+    )?;
+    write_option(
+        w,
+        k.inelastic_continuum_edist.as_ref(),
+        encode_energy_distribution,
+    )?;
     write_option(w, k.n2n_edist.as_ref(), encode_energy_distribution)?;
     write_option(w, k.n3n_edist.as_ref(), encode_energy_distribution)?;
     // (n,nα) / (n,2nα) / (n,np) — kernels + edist + Q triples

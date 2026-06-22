@@ -142,10 +142,7 @@ impl State {
             let key = match NuclideKey::from_inputs(&path, policy, temp_idx) {
                 Ok(k) => k,
                 Err(e) => {
-                    eprintln!(
-                        "  skip {}: cannot hash file ({e})",
-                        path.display()
-                    );
+                    eprintln!("  skip {}: cannot hash file ({e})", path.display());
                     continue;
                 }
             };
@@ -162,10 +159,7 @@ impl State {
                         from_disk += 1;
                         continue;
                     }
-                    eprintln!(
-                        "  corrupt {} — re-parsing source",
-                        nuc_path.display()
-                    );
+                    eprintln!("  corrupt {} — re-parsing source", nuc_path.display());
                 }
             }
 

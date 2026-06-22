@@ -9,11 +9,9 @@
 //! Falls back to 4 GiB if RAM detection fails.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, Arc};
+use std::sync::{Arc, Mutex};
 
-use super::eviction::{
-    self, EvictionStats, LfuEntries, LfuEntriesMut, DEFAULT_AGE_DECAY,
-};
+use super::eviction::{self, DEFAULT_AGE_DECAY, EvictionStats, LfuEntries, LfuEntriesMut};
 use super::{NuclideKey, NuclideStore};
 use crate::transport::xs_provider::NuclideKernels;
 
@@ -101,13 +99,7 @@ impl L1MemoryStore {
     fn evict_with_policy(inner: &mut Inner, new_bytes: usize, budget: usize) {
         let now = inner.counter;
         let mut adapter = InnerAdapter { inner };
-        let _ = eviction::evict_to_budget(
-            &mut adapter,
-            new_bytes,
-            budget,
-            now,
-            DEFAULT_AGE_DECAY,
-        );
+        let _ = eviction::evict_to_budget(&mut adapter, new_bytes, budget, now, DEFAULT_AGE_DECAY);
     }
 }
 
@@ -115,9 +107,8 @@ impl L1MemoryStore {
 /// inserted. Picked up at insert time. Pending entries never expire
 /// — once an entry inserts they transfer, but if a key is never
 /// inserted the stash entry stays harmlessly resident.
-static PENDING_PRELOAD: std::sync::Mutex<
-    std::sync::LazyLock<HashMap<NuclideKey, u64>>,
-> = std::sync::Mutex::new(std::sync::LazyLock::new(HashMap::new));
+static PENDING_PRELOAD: std::sync::Mutex<std::sync::LazyLock<HashMap<NuclideKey, u64>>> =
+    std::sync::Mutex::new(std::sync::LazyLock::new(HashMap::new));
 
 /// Adapter exposing `Inner` to the policy without leaking its
 /// HashMap layout into the policy module.
@@ -312,7 +303,10 @@ mod tests {
 
         store.put(k_hot.clone(), Arc::new(NuclideKernels::empty(1.0, 2.43)));
         store.put(k_cold.clone(), Arc::new(NuclideKernels::empty(16.0, 2.43)));
-        store.put(k_press.clone(), Arc::new(NuclideKernels::empty(238.0, 2.43)));
+        store.put(
+            k_press.clone(),
+            Arc::new(NuclideKernels::empty(238.0, 2.43)),
+        );
 
         assert!(store.try_get(&k_hot).is_some(), "preloaded survives");
         assert!(store.try_get(&k_cold).is_none(), "cold evicts");

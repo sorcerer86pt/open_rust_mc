@@ -19,7 +19,6 @@
 //! same controls `pwr_assembly --preview` uses.
 
 #![allow(dead_code)]
-
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
@@ -39,7 +38,9 @@ fn resolve_case_path(name: &Path) -> PathBuf {
     }
     let candidates_relative_to = [
         std::env::current_dir().ok(),
-        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf)),
     ];
     for start in candidates_relative_to.into_iter().flatten() {
         let mut cur: Option<&Path> = Some(&start);
@@ -73,7 +74,9 @@ fn resolve_data_dir(name: &Path) -> PathBuf {
     }
     let candidates_relative_to = [
         std::env::current_dir().ok(),
-        std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf)),
     ];
     for start in candidates_relative_to.into_iter().flatten() {
         let mut cur: Option<&Path> = Some(&start);
@@ -195,20 +198,86 @@ struct Args {
     /// pin for the whole lattice — the "stretched pin" symptom).
     #[arg(long)]
     debug_samples: bool,
+
+    /// Render the cross-section in the *terminal* instead of a Win32
+    /// window (requires `--features tui`). Half-block truecolor cells
+    /// give 2 vertical pixels per character row; pan / zoom / z-slice
+    /// with the keyboard or mouse. Works over SSH / on headless GPU
+    /// boxes where the minifb window can't open. By default this
+    /// launches in a NEW console window so the current shell stays
+    /// free — pass `--inline` to take over the current terminal.
+    #[arg(long)]
+    tui: bool,
+
+    /// With `--tui`, run the terminal viewer in the CURRENT terminal
+    /// rather than spawning a new console window. Useful inside tmux /
+    /// an IDE terminal, or when the new-window spawn isn't wanted.
+    #[arg(long)]
+    inline: bool,
+
+    /// Interactive 3D view of the geometry (requires `--features
+    /// preview`). Ray-casts the actual CSG with the engine's geometry
+    /// walk, shading each material by colour + lighting. Orbit with
+    /// left-drag, zoom with the scroll wheel, pan with right-drag,
+    /// `r` resets, Escape quits.
+    #[arg(long = "3d")]
+    three_d: bool,
+
+    /// Headless 3D render to a PNG (no window). Ray-casts from the
+    /// camera angle given by `--cam-azim` / `--cam-elev` at
+    /// `--resolution`. Works without the `preview` feature — usable
+    /// over SSH / on headless boxes.
+    #[arg(long = "render3d-out")]
+    render3d_out: Option<PathBuf>,
+
+    /// Camera azimuth (degrees around +z) for the 3D view's initial /
+    /// headless angle.
+    #[arg(long, default_value_t = 35.0)]
+    cam_azim: f64,
+
+    /// Camera elevation (degrees above the xy-plane) for the 3D view's
+    /// initial / headless angle.
+    #[arg(long, default_value_t = 25.0)]
+    cam_elev: f64,
+
+    /// Render the 3D view on the GPU (requires `--features cuda` + a
+    /// CUDA device). Ray-casts the same device CSG the transport
+    /// kernels use. Falls back to the CPU ray-caster with a warning if
+    /// the GPU context can't be built. No effect without `--3d` /
+    /// `--render3d-out`.
+    #[arg(long)]
+    gpu: bool,
+
+    /// Interactive GPU *rasterized* 3D view (requires `--features
+    /// raster3d`). The CSG is meshed (surface nets) and drawn with a
+    /// real GPU pipeline — depth buffer + MSAA — in a winit orbit
+    /// window. Smoother than the ray-cast `--3d` view; the mesh is an
+    /// approximation at the `--mesh-grid` resolution.
+    #[arg(long)]
+    raster: bool,
+
+    /// Headless rasterized render to PNG (no window; requires
+    /// `--features raster3d`). Meshes + rasterizes from the
+    /// `--cam-azim` / `--cam-elev` angle.
+    #[arg(long = "raster-out")]
+    raster_out: Option<PathBuf>,
+
+    /// Grid resolution per axis for the rasterizer's surface-nets
+    /// meshing. Higher = finer mesh (slower build, more triangles).
+    #[arg(long = "mesh-grid", default_value_t = 128)]
+    mesh_grid: usize,
 }
 
 #[cfg(feature = "preview")]
 fn run_preview(args: &Args) {
+    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
     use open_rust_mc::geometry::scene_io;
-    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::transport::material::Material;
     use open_rust_mc::transport::material_resolve;
     use open_rust_mc::transport::nuclides::NuclideLibrary;
-    use rust_mc_sim::preview::{
-        auto_color_from_name, LegendEntry, MaterialPalette, Viewport,
-    };
+    use rust_mc_sim::preview::{LegendEntry, MaterialPalette, Viewport, auto_color_from_name};
 
     let case_path = resolve_case_path(&args.case_json);
     let data_dir = resolve_data_dir(&args.data_dir);
@@ -219,8 +288,7 @@ fn run_preview(args: &Args) {
             args.case_json.display()
         )
     });
-    let value: serde_json::Value =
-        serde_json::from_str(&text).expect("scene JSON parse failed");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("scene JSON parse failed");
     let scene = value
         .get("scene")
         .expect("case JSON has no `scene` block — this is a CLI-runner manifest");
@@ -275,7 +343,9 @@ fn run_preview(args: &Args) {
     // helpers so interactive and PPM modes produce pixel-identical
     // viewports by default.
     let bounds = world_bounds_xy(&geometry);
-    let z_slice = args.z.unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
+    let z_slice = args
+        .z
+        .unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
     let initial = match (args.half_size, bounds.as_ref()) {
         (Some(h), _) => Viewport::square_centered(h, z_slice, args.resolution),
         (None, Some(b)) => {
@@ -283,17 +353,42 @@ fn run_preview(args: &Args) {
             let cy = b.cy();
             let rough_half = 0.5 * b.xy_extent();
             let origin = open_rust_mc::geometry::Vec3::new(cx, cy, 0.0);
-            let probe_x_pos = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new( 1.0,  0.0, 0.0), z_slice, rough_half);
-            let probe_x_neg = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new(-1.0,  0.0, 0.0), z_slice, rough_half);
-            let probe_y_pos = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new( 0.0,  1.0, 0.0), z_slice, rough_half);
-            let probe_y_neg = tighten_along_axis(&geometry, origin,
-                open_rust_mc::geometry::Vec3::new( 0.0, -1.0, 0.0), z_slice, rough_half);
+            let probe_x_pos = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(1.0, 0.0, 0.0),
+                z_slice,
+                rough_half,
+            );
+            let probe_x_neg = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(-1.0, 0.0, 0.0),
+                z_slice,
+                rough_half,
+            );
+            let probe_y_pos = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(0.0, 1.0, 0.0),
+                z_slice,
+                rough_half,
+            );
+            let probe_y_neg = tighten_along_axis(
+                &geometry,
+                origin,
+                open_rust_mc::geometry::Vec3::new(0.0, -1.0, 0.0),
+                z_slice,
+                rough_half,
+            );
             let tight = [probe_x_pos, probe_x_neg, probe_y_pos, probe_y_neg]
-                .iter().fold(0.0_f64, |a, &b| a.max(b));
-            let half_raw = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b));
+            let half_raw = if tight > 0.0 {
+                tight * 1.05
+            } else {
+                rough_half * 1.05
+            };
             let half = half_raw * args.zoom;
             Viewport {
                 x_min: cx - half,
@@ -322,29 +417,35 @@ fn run_preview(args: &Args) {
         let h = vp.height as usize;
         let dx = (vp.x_max - vp.x_min) / vp.width as f64;
         let dy = (vp.y_max - vp.y_min) / vp.height as f64;
-        let rows: Vec<Vec<u32>> = (0..vp.height).into_par_iter().map(|py| {
-            let world_y = vp.y_max - (py as f64 + 0.5) * dy;
-            (0..vp.width).map(|px| {
-                let world_x = vp.x_min + (px as f64 + 0.5) * dx;
-                let pos = Vec3::new(world_x, world_y, vp.z_slice);
-                let color = match find_cell_recursive(pos, &geometry) {
-                    Some(stack) => {
-                        let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
-                        match geometry.cells[deepest].fill {
-                            CellFill::Material(m) => palette
-                                .colors
-                                .get(m as usize)
-                                .copied()
-                                .unwrap_or(palette.void),
-                            _ => palette.void,
-                        }
-                    }
-                    None => palette.void,
-                };
-                let [r, g, b] = color;
-                ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-            }).collect()
-        }).collect();
+        let rows: Vec<Vec<u32>> = (0..vp.height)
+            .into_par_iter()
+            .map(|py| {
+                let world_y = vp.y_max - (py as f64 + 0.5) * dy;
+                (0..vp.width)
+                    .map(|px| {
+                        let world_x = vp.x_min + (px as f64 + 0.5) * dx;
+                        let pos = Vec3::new(world_x, world_y, vp.z_slice);
+                        let color = match find_cell_recursive(pos, &geometry) {
+                            Some(stack) => {
+                                let deepest =
+                                    stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                                match geometry.cells[deepest].fill {
+                                    CellFill::Material(m) => palette
+                                        .colors
+                                        .get(m as usize)
+                                        .copied()
+                                        .unwrap_or(palette.void),
+                                    _ => palette.void,
+                                }
+                            }
+                            None => palette.void,
+                        };
+                        let [r, g, b] = color;
+                        ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
+                    })
+                    .collect()
+            })
+            .collect();
         let mut buf = Vec::with_capacity(w * h);
         for row in &rows {
             buf.extend_from_slice(row);
@@ -387,8 +488,7 @@ fn show_window_cursor_zoom<F>(
     title: &str,
     _legend: Vec<rust_mc_sim::preview::LegendEntry>,
     mut render: F,
-)
-where
+) where
     F: FnMut(&rust_mc_sim::preview::Viewport) -> Vec<u32>,
 {
     use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
@@ -590,11 +690,8 @@ fn tighten_along_axis(
     let mut consecutive_misses = 0_usize;
     for i in 1..=AXIS_PROBE_STEPS {
         let r = max_extent * i as f64 / AXIS_PROBE_STEPS as f64;
-        let probe = open_rust_mc::geometry::Vec3::new(
-            origin.x + dir.x * r,
-            origin.y + dir.y * r,
-            z_slice,
-        );
+        let probe =
+            open_rust_mc::geometry::Vec3::new(origin.x + dir.x * r, origin.y + dir.y * r, z_slice);
         if find_cell_recursive(probe, geom).is_some() {
             last_hit = r;
             consecutive_misses = 0;
@@ -612,9 +709,12 @@ const AXIS_PROBE_STEPS: usize = 200;
 const AXIS_PROBE_MAX_MISS_RUN: usize = 6;
 
 struct GeomBounds {
-    x_min: f64, x_max: f64,
-    y_min: f64, y_max: f64,
-    z_min: f64, z_max: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
+    z_min: f64,
+    z_max: f64,
     /// Sorted distinct PlaneZ `z0` values. Used by `default_z` to
     /// pick a sensible slice when the explicit `(z_min, z_max)`
     /// midpoint lands in a void / air region (PST-012 has floor
@@ -628,8 +728,12 @@ impl GeomBounds {
     fn xy_extent(&self) -> f64 {
         (self.x_max - self.x_min).max(self.y_max - self.y_min)
     }
-    fn cx(&self) -> f64 { 0.5 * (self.x_min + self.x_max) }
-    fn cy(&self) -> f64 { 0.5 * (self.y_min + self.y_max) }
+    fn cx(&self) -> f64 {
+        0.5 * (self.x_min + self.x_max)
+    }
+    fn cy(&self) -> f64 {
+        0.5 * (self.y_min + self.y_max)
+    }
     /// Sensible z-slice when the user didn't pass `--z`. Prefers the
     /// **midpoint of the two median consecutive PlaneZ positions**
     /// over the (z_min, z_max) midpoint:
@@ -669,9 +773,8 @@ impl GeomBounds {
             // explicit (z_min + z_max) / 2 — biases toward the
             // CENTRE while still avoiding cells that lie on a
             // surface boundary.
-            let mut gaps: Vec<(usize, f64)> = (0..zs.len() - 1)
-                .map(|i| (i, zs[i + 1] - zs[i]))
-                .collect();
+            let mut gaps: Vec<(usize, f64)> =
+                (0..zs.len() - 1).map(|i| (i, zs[i + 1] - zs[i])).collect();
             // Sort by gap size ascending; keep the smaller half.
             gaps.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             let keep = (gaps.len() / 2).max(1);
@@ -683,10 +786,12 @@ impl GeomBounds {
             };
             // Pick the candidate whose midpoint is closest to the
             // geometry centre.
-            let best = candidates.iter()
+            let best = candidates
+                .iter()
                 .map(|&(i, _)| (i, 0.5 * (zs[i] + zs[i + 1])))
                 .min_by(|a, b| {
-                    (a.1 - geom_centre_z).abs()
+                    (a.1 - geom_centre_z)
+                        .abs()
                         .partial_cmp(&(b.1 - geom_centre_z).abs())
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
@@ -709,27 +814,40 @@ impl GeomBounds {
     }
 }
 
-fn world_bounds_xy(
-    geom: &open_rust_mc::geometry::Geometry,
-) -> Option<GeomBounds> {
+fn world_bounds_xy(geom: &open_rust_mc::geometry::Geometry) -> Option<GeomBounds> {
     let mut b = GeomBounds {
-        x_min: f64::INFINITY, x_max: f64::NEG_INFINITY,
-        y_min: f64::INFINITY, y_max: f64::NEG_INFINITY,
-        z_min: f64::INFINITY, z_max: f64::NEG_INFINITY,
+        x_min: f64::INFINITY,
+        x_max: f64::NEG_INFINITY,
+        y_min: f64::INFINITY,
+        y_max: f64::NEG_INFINITY,
+        z_min: f64::INFINITY,
+        z_max: f64::NEG_INFINITY,
         z_plane_positions: Vec::new(),
     };
     let mut touched = false;
     let update_x = |b: &mut GeomBounds, lo: f64, hi: f64| {
-        if lo.is_finite() && lo < b.x_min { b.x_min = lo; }
-        if hi.is_finite() && hi > b.x_max { b.x_max = hi; }
+        if lo.is_finite() && lo < b.x_min {
+            b.x_min = lo;
+        }
+        if hi.is_finite() && hi > b.x_max {
+            b.x_max = hi;
+        }
     };
     let update_y = |b: &mut GeomBounds, lo: f64, hi: f64| {
-        if lo.is_finite() && lo < b.y_min { b.y_min = lo; }
-        if hi.is_finite() && hi > b.y_max { b.y_max = hi; }
+        if lo.is_finite() && lo < b.y_min {
+            b.y_min = lo;
+        }
+        if hi.is_finite() && hi > b.y_max {
+            b.y_max = hi;
+        }
     };
     let update_z = |b: &mut GeomBounds, lo: f64, hi: f64| {
-        if lo.is_finite() && lo < b.z_min { b.z_min = lo; }
-        if hi.is_finite() && hi > b.z_max { b.z_max = hi; }
+        if lo.is_finite() && lo < b.z_min {
+            b.z_min = lo;
+        }
+        if hi.is_finite() && hi > b.z_max {
+            b.z_max = hi;
+        }
     };
     use open_rust_mc::geometry::surface::Surface;
     for s in &geom.surfaces {
@@ -774,7 +892,8 @@ fn world_bounds_xy(
         }
     }
     // Dedup + sort for stable median lookup.
-    b.z_plane_positions.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    b.z_plane_positions
+        .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     b.z_plane_positions.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
     for lat in &geom.lattices {
         let x_hi = lat.origin.x + lat.shape[0] as f64 * lat.pitch.x;
@@ -818,22 +937,22 @@ fn auto_color(name: &str) -> [u8; 3] {
 /// saturation + ≥ 60% lightness so cell boundaries are always
 /// legible against neighbours and against the magenta void.
 const INDEX_PALETTE: [[u8; 3]; 16] = [
-    [220,  70,  70],  // red
-    [240, 140,  50],  // orange
-    [240, 200,  60],  // yellow
-    [150, 210,  60],  // lime
-    [ 60, 200, 100],  // green
-    [ 60, 200, 180],  // teal
-    [ 60, 160, 220],  // sky blue
-    [ 80, 110, 220],  // blue
-    [140,  80, 220],  // violet
-    [200,  80, 200],  // pink
-    [240, 160, 180],  // rose
-    [180, 180, 100],  // olive
-    [110, 180, 110],  // mint
-    [180, 140,  80],  // sand
-    [200, 200, 220],  // pearl
-    [120, 140, 180],  // slate
+    [220, 70, 70],   // red
+    [240, 140, 50],  // orange
+    [240, 200, 60],  // yellow
+    [150, 210, 60],  // lime
+    [60, 200, 100],  // green
+    [60, 200, 180],  // teal
+    [60, 160, 220],  // sky blue
+    [80, 110, 220],  // blue
+    [140, 80, 220],  // violet
+    [200, 80, 200],  // pink
+    [240, 160, 180], // rose
+    [180, 180, 100], // olive
+    [110, 180, 110], // mint
+    [180, 140, 80],  // sand
+    [200, 200, 220], // pearl
+    [120, 140, 180], // slate
 ];
 
 /// Pick a material colour by SEMANTIC mapping first (water → blue,
@@ -854,23 +973,23 @@ fn semantic_or_index_color(name: &str, index: usize) -> Option<[u8; 3]> {
     // physically. Air gets an obviously-different colour from any
     // structural metal.
     if n.contains("water") && !n.contains("heavy") {
-        return Some([ 80, 150, 230]);  // blue
+        return Some([80, 150, 230]); // blue
     }
     if n.contains("heavy water") || n.contains("d2o") {
-        return Some([ 40,  80, 180]);  // deep blue
+        return Some([40, 80, 180]); // deep blue
     }
     if n.contains("concrete") {
-        return Some([180, 160, 120]);  // tan
+        return Some([180, 160, 120]); // tan
     }
     if n.contains("air") || n.contains("void") || n.contains("vacuum") {
-        return Some([220, 230, 240]);  // pale blue-white — visibly
-                                       // NOT a structural material
+        return Some([220, 230, 240]); // pale blue-white — visibly
+        // NOT a structural material
     }
     if n.contains("plutonium") || n.contains("mox") {
-        return Some([240, 140,  50]);  // orange
+        return Some([240, 140, 50]); // orange
     }
     if n.contains("uranium") || n.contains("uo2") || n.contains("fuel") {
-        return Some([200,  80,  60]);  // red
+        return Some([200, 80, 60]); // red
     }
     // Everything else: cycle through the index palette so that
     // (e.g.) "Stainless steel" and "Steel (pool wall)" get DIFFERENT
@@ -878,30 +997,39 @@ fn semantic_or_index_color(name: &str, index: usize) -> Option<[u8; 3]> {
     Some(INDEX_PALETTE[index % INDEX_PALETTE.len()])
 }
 
-fn render_ppm(args: &Args, ppm_path: &Path) {
-    use open_rust_mc::geometry::ray::find_cell_recursive;
+/// Everything `preview_scene` needs to draw a cross-section, loaded
+/// once: the resolved geometry, an index→colour palette, the void
+/// colour, and the per-material names (for the TUI legend). Shared by
+/// the PPM/PNG renderer and the `--tui` terminal viewer so both paths
+/// produce identical colours from identical inputs.
+struct LoadedPreview {
+    geometry: open_rust_mc::geometry::Geometry,
+    palette: Vec<[u8; 3]>,
+    void: [u8; 3],
+    names: Vec<String>,
+}
+
+/// Load a scene JSON + ENDF materials and build the distinct-colour
+/// palette. Factored out of `render_ppm` so the terminal viewer
+/// reuses the exact same colour logic (semantic anchor → 16-hue
+/// index cycle) without duplicating the load/resolve/palette code.
+fn load_preview(args: &Args) -> LoadedPreview {
     use open_rust_mc::geometry::scene_io;
-    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::transport::material_resolve;
     use open_rust_mc::transport::nuclides::NuclideLibrary;
 
     let case_path = resolve_case_path(&args.case_json);
     let data_dir = resolve_data_dir(&args.data_dir);
-    let text = std::fs::read_to_string(&case_path).unwrap_or_else(|e| {
-        panic!("read {}: {e}", case_path.display())
-    });
-    let value: serde_json::Value =
-        serde_json::from_str(&text).expect("scene JSON parse failed");
-    let scene = value
-        .get("scene")
-        .expect("case JSON has no `scene` block");
+    let text = std::fs::read_to_string(&case_path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", case_path.display()));
+    let value: serde_json::Value = serde_json::from_str(&text).expect("scene JSON parse failed");
+    let scene = value.get("scene").expect("case JSON has no `scene` block");
     let loaded = scene_io::load_scene_from_json(&scene.to_string())
         .expect("scene_io::load_scene_from_json failed");
     let lib = NuclideLibrary::from_data_dir(&data_dir);
     let resolved = material_resolve::resolve_materials(&loaded.materials, &lib, args.rank)
         .expect("material_resolve failed");
     let materials = &resolved.materials;
-    let geometry = loaded.geometry;
 
     // Distinct-colour palette (same logic as the interactive path):
     // semantic colour when the name is recognized, otherwise a
@@ -911,30 +1039,50 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
     let palette: Vec<[u8; 3]> = materials
         .iter()
         .enumerate()
-        .map(|(i, m)| semantic_or_index_color(&m.name, i).unwrap_or_else(|| {
-            // Final fallback: cycle through INDEX_PALETTE by index
-            // mod len. semantic_or_index_color already does this when
-            // its semantic-map misses, so this branch is unreachable
-            // in practice — kept for type-safety.
-            INDEX_PALETTE[i % INDEX_PALETTE.len()]
-        }))
+        .map(|(i, m)| {
+            semantic_or_index_color(&m.name, i).unwrap_or_else(|| {
+                // Final fallback: cycle through INDEX_PALETTE by index
+                // mod len. semantic_or_index_color already does this when
+                // its semantic-map misses, so this branch is unreachable
+                // in practice — kept for type-safety.
+                INDEX_PALETTE[i % INDEX_PALETTE.len()]
+            })
+        })
         .collect();
-    // Bright magenta — outside any plausible material colour, so
-    // void is unambiguous in the rendered image.
-    let void = [255_u8, 0, 220];
+    let names: Vec<String> = materials.iter().map(|m| m.name.clone()).collect();
 
-    // Auto-viewport + auto-z + outward-probe tightening.
-    //
-    // Step 1: explicit bounds via `world_bounds_xy` (lattices,
-    // surface AABBs, PlaneX/Y/Z z0). Step 2: pick z_slice = midpoint
-    // of z-extent so stacked-can experiments render where geometry
-    // exists. Step 3: sample outward from the bound centre on
-    // +x/-x/+y/-y axes until we see a long enough miss run — that
-    // tightens the box for cases where explicit bounds are wider
-    // than the actual fissile / structural material (LCT-008 has
-    // reflective boundaries at ±280 cm but the rod array is ~30 cm).
-    let bounds = world_bounds_xy(&geometry);
-    let z_slice = args.z.unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
+    LoadedPreview {
+        geometry: loaded.geometry,
+        palette,
+        // Bright magenta — outside any plausible material colour, so
+        // void is unambiguous in the rendered image.
+        void: [255, 0, 220],
+        names,
+    }
+}
+
+/// Auto-viewport + auto-z + outward-probe tightening, returning
+/// `(x_min, x_max, y_min, y_max, z_slice)`.
+///
+/// Step 1: explicit bounds via `world_bounds_xy` (lattices, surface
+/// AABBs, PlaneX/Y/Z z0). Step 2: pick z_slice = densest-plane-gap
+/// midpoint so stacked-can experiments render where geometry exists.
+/// Step 3: sample outward from the bound centre on +x/-x/+y/-y axes
+/// until we see a long enough miss run — that tightens the box for
+/// cases where explicit bounds are wider than the actual fissile /
+/// structural material (LCT-008 has reflective boundaries at ±280 cm
+/// but the rod array is ~30 cm).
+///
+/// `--half-size` overrides everything; `--zoom` scales the auto half.
+/// Shared by `render_ppm` and the terminal viewer's initial fit.
+fn auto_bounds(
+    geometry: &open_rust_mc::geometry::Geometry,
+    args: &Args,
+) -> (f64, f64, f64, f64, f64) {
+    let bounds = world_bounds_xy(geometry);
+    let z_slice = args
+        .z
+        .unwrap_or_else(|| bounds.as_ref().map(|b| b.default_z()).unwrap_or(0.0));
     let (x_min, x_max, y_min, y_max) = match (args.half_size, bounds.as_ref()) {
         (Some(h), _) => (-h, h, -h, h),
         (None, Some(b)) => {
@@ -950,22 +1098,45 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             let dx_neg = open_rust_mc::geometry::Vec3::new(-1.0, 0.0, 0.0);
             let dy_pos = open_rust_mc::geometry::Vec3::new(0.0, 1.0, 0.0);
             let dy_neg = open_rust_mc::geometry::Vec3::new(0.0, -1.0, 0.0);
-            let probe_x_pos = tighten_along_axis(&geometry, origin, dx_pos, z_slice, rough_half);
-            let probe_x_neg = tighten_along_axis(&geometry, origin, dx_neg, z_slice, rough_half);
-            let probe_y_pos = tighten_along_axis(&geometry, origin, dy_pos, z_slice, rough_half);
-            let probe_y_neg = tighten_along_axis(&geometry, origin, dy_neg, z_slice, rough_half);
+            let probe_x_pos = tighten_along_axis(geometry, origin, dx_pos, z_slice, rough_half);
+            let probe_x_neg = tighten_along_axis(geometry, origin, dx_neg, z_slice, rough_half);
+            let probe_y_pos = tighten_along_axis(geometry, origin, dy_pos, z_slice, rough_half);
+            let probe_y_neg = tighten_along_axis(geometry, origin, dy_neg, z_slice, rough_half);
             // Take max of all 4 + 5% padding. If all probes returned
             // 0 (centre is void), fall back to the rough half — the
             // user can always pass --half-size explicitly.
             let tight = [probe_x_pos, probe_x_neg, probe_y_pos, probe_y_neg]
-                .iter().fold(0.0_f64, |a, &b| a.max(b));
-            let half_raw = if tight > 0.0 { tight * 1.05 } else { rough_half * 1.05 };
+                .iter()
+                .fold(0.0_f64, |a, &b| a.max(b));
+            let half_raw = if tight > 0.0 {
+                tight * 1.05
+            } else {
+                rough_half * 1.05
+            };
             let half = half_raw * args.zoom;
             (cx - half, cx + half, cy - half, cy + half)
         }
-        (None, None) => (-10.0 * args.zoom, 10.0 * args.zoom,
-                         -10.0 * args.zoom, 10.0 * args.zoom),
+        (None, None) => (
+            -10.0 * args.zoom,
+            10.0 * args.zoom,
+            -10.0 * args.zoom,
+            10.0 * args.zoom,
+        ),
     };
+    (x_min, x_max, y_min, y_max, z_slice)
+}
+
+fn render_ppm(args: &Args, ppm_path: &Path) {
+    use open_rust_mc::geometry::Vec3;
+    use open_rust_mc::geometry::ray::find_cell_recursive;
+
+    let LoadedPreview {
+        geometry,
+        palette,
+        void,
+        names: _,
+    } = load_preview(args);
+    let (x_min, x_max, y_min, y_max, z_slice) = auto_bounds(&geometry, args);
     let res = args.resolution;
     let buf = render_frame(
         &geometry, &palette, void, x_min, x_max, y_min, y_max, z_slice, res,
@@ -1012,8 +1183,14 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
 
     // Write the frame to disk in the requested format.
     write_image(ppm_path, &buf, res);
-    eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
-        ppm_path.display(), res, res, 0.5 * (x_max - x_min), z_slice);
+    eprintln!(
+        "wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
+        ppm_path.display(),
+        res,
+        res,
+        0.5 * (x_max - x_min),
+        z_slice
+    );
 
     // Optional multi-stage emit. Each stage scales the auto-half by
     // a user-supplied factor and writes <stem>_zoom<factor>.ppm.
@@ -1044,8 +1221,14 @@ fn render_ppm(args: &Args, ppm_path: &Path) {
             .unwrap_or("ppm");
         let stage_path = parent.join(format!("{stem}_zoom{factor}.{ext}"));
         write_image(&stage_path, &s_buf, res);
-        eprintln!("wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
-            stage_path.display(), res, res, stage_half, z_slice);
+        eprintln!(
+            "wrote {} ({}×{})  half=±{:.2} cm  z={:.2}",
+            stage_path.display(),
+            res,
+            res,
+            stage_half,
+            z_slice
+        );
     }
 }
 
@@ -1065,14 +1248,16 @@ fn render_frame(
     geom: &open_rust_mc::geometry::Geometry,
     palette: &[[u8; 3]],
     void: [u8; 3],
-    x_min: f64, x_max: f64,
-    y_min: f64, y_max: f64,
+    x_min: f64,
+    x_max: f64,
+    y_min: f64,
+    y_max: f64,
     z_slice: f64,
     res: u32,
 ) -> Vec<[u8; 3]> {
+    use open_rust_mc::geometry::Vec3;
     use open_rust_mc::geometry::cell::CellFill;
     use open_rust_mc::geometry::ray::find_cell_recursive;
-    use open_rust_mc::geometry::Vec3;
     use rayon::prelude::*;
 
     let dx = (x_max - x_min) / res as f64;
@@ -1083,26 +1268,30 @@ fn render_frame(
     // flatten. The two-level Vec avoids needing to declare the full
     // framebuffer up front and lets each worker thread write into
     // its own allocation (cache-friendly).
-    let rows: Vec<Vec<[u8; 3]>> = (0..res).into_par_iter().map(|py| {
-        let world_y = y_max - (py as f64 + 0.5) * dy;
-        (0..res).map(|px| {
-            let world_x = x_min + (px as f64 + 0.5) * dx;
-            let pos = Vec3::new(world_x, world_y, z_slice);
-            match find_cell_recursive(pos, geom) {
-                Some(stack) => {
-                    let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
-                    match geom.cells[deepest].fill {
-                        CellFill::Material(m) => palette
-                            .get(m as usize)
-                            .copied()
-                            .unwrap_or(void),
-                        _ => void,
+    let rows: Vec<Vec<[u8; 3]>> = (0..res)
+        .into_par_iter()
+        .map(|py| {
+            let world_y = y_max - (py as f64 + 0.5) * dy;
+            (0..res)
+                .map(|px| {
+                    let world_x = x_min + (px as f64 + 0.5) * dx;
+                    let pos = Vec3::new(world_x, world_y, z_slice);
+                    match find_cell_recursive(pos, geom) {
+                        Some(stack) => {
+                            let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                            match geom.cells[deepest].fill {
+                                CellFill::Material(m) => {
+                                    palette.get(m as usize).copied().unwrap_or(void)
+                                }
+                                _ => void,
+                            }
+                        }
+                        None => void,
                     }
-                }
-                None => void,
-            }
-        }).collect()
-    }).collect();
+                })
+                .collect()
+        })
+        .collect();
 
     // Flatten Vec<Vec<…>> to Vec<…> in scan order. Pre-allocate so
     // we know the exact final capacity; `extend_from_slice` is a
@@ -1144,14 +1333,2681 @@ fn write_image(path: &Path, buf: &[[u8; 3]], res: u32) {
     }
 }
 
+/// Env guard that marks the process as the already-spawned TUI child.
+/// Set on the child when `preview_scene --tui` re-execs itself into a
+/// new console window; the child sees it and runs the viewer inline
+/// instead of spawning yet another window (infinite-respawn guard).
+const TUI_CHILD_ENV: &str = "PREVIEW_SCENE_TUI_CHILD";
+
+/// Re-exec this binary with the same arguments inside a brand-new
+/// console window, then return `true` so the caller (the parent) can
+/// exit. The child carries [`TUI_CHILD_ENV`] so it runs the viewer
+/// inline rather than spawning again.
+///
+/// Windows: `CREATE_NEW_CONSOLE` (0x10) gives the child its own
+/// console window with fresh stdin/stdout — exactly what a TUI needs.
+/// Other platforms have no portable "new terminal window" primitive,
+/// so we report that and let the caller fall back to running inline.
+#[cfg(feature = "tui")]
+fn spawn_in_new_window() -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("preview_scene: cannot find own exe to relaunch ({e}); running inline");
+            return false;
+        }
+    };
+    let forwarded: Vec<String> = std::env::args().skip(1).collect();
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_CONSOLE — child gets its own console window.
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        match std::process::Command::new(&exe)
+            .args(&forwarded)
+            .env(TUI_CHILD_ENV, "1")
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+        {
+            Ok(_) => {
+                println!("preview_scene: launched terminal viewer in a new window.");
+                true
+            }
+            Err(e) => {
+                eprintln!("preview_scene: new-window spawn failed ({e}); running inline");
+                false
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        // No portable cross-terminal launcher; try a couple of common
+        // emulators, else fall back to inline. Honour $TERMINAL first.
+        let exe_str = exe.to_string_lossy().to_string();
+        let mut cmd = String::from(&exe_str);
+        for a in &forwarded {
+            cmd.push(' ');
+            cmd.push_str(a);
+        }
+        let terminals: Vec<(String, Vec<String>)> = {
+            let mut v = Vec::new();
+            if let Ok(t) = std::env::var("TERMINAL") {
+                v.push((t, vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()]));
+            }
+            v.push((
+                "x-terminal-emulator".into(),
+                vec!["-e".into(), "sh".into(), "-c".into(), cmd.clone()],
+            ));
+            v
+        };
+        for (term, targs) in terminals {
+            if std::process::Command::new(&term)
+                .args(&targs)
+                .env(TUI_CHILD_ENV, "1")
+                .spawn()
+                .is_ok()
+            {
+                println!("preview_scene: launched terminal viewer via {term}.");
+                return true;
+            }
+        }
+        eprintln!("preview_scene: no terminal emulator found; running inline");
+        false
+    }
+}
+
 fn main() {
     let args = Args::parse();
-    // Headless render: `--ppm-out` and `--png-out` both route through
+
+    // Headless 3D ray-cast render to PNG (works without `preview`).
+    if let Some(out) = args.render3d_out.as_deref() {
+        render3d::render_to_png(&args, out);
+        return;
+    }
+
+    // Headless rasterized (meshed) render to PNG.
+    if let Some(out) = args.raster_out.as_deref() {
+        #[cfg(feature = "raster3d")]
+        {
+            raster3d::render_to_png(&args, out, args.mesh_grid);
+            return;
+        }
+        #[cfg(not(feature = "raster3d"))]
+        {
+            let _ = out;
+            eprintln!(
+                "--raster-out needs the `raster3d` feature (cargo run --features raster3d ...)"
+            );
+            std::process::exit(2);
+        }
+    }
+
+    // Headless 2D render: `--ppm-out` and `--png-out` both route through
     // `render_ppm` (despite the legacy name) since the format is
     // picked up from the file extension by `write_image`.
     if let Some(out) = args.png_out.as_deref().or(args.ppm_out.as_deref()) {
         render_ppm(&args, out);
         return;
     }
+
+    // Interactive 3D orbit view (needs the graphical window).
+    if args.three_d {
+        #[cfg(feature = "preview")]
+        {
+            render3d::run_window(&args);
+            return;
+        }
+        #[cfg(not(feature = "preview"))]
+        {
+            eprintln!(
+                "preview_scene --3d needs the `preview` feature for the window. \
+                 Either re-run with `--features preview`, or use \
+                 `--render3d-out <file.png>` for a headless 3D render."
+            );
+            std::process::exit(2);
+        }
+    }
+
+    // Interactive GPU rasterizer window (meshed CSG).
+    if args.raster {
+        #[cfg(feature = "raster3d")]
+        {
+            raster3d::run_window(&args, args.mesh_grid);
+            return;
+        }
+        #[cfg(not(feature = "raster3d"))]
+        {
+            eprintln!(
+                "preview_scene --raster needs the `raster3d` feature. Re-run with:\n  \
+                 cargo run --release --features raster3d --bin preview_scene -- \
+                 --raster <scene> <data_dir>"
+            );
+            std::process::exit(2);
+        }
+    }
+
+    // Terminal viewer path.
+    if args.tui {
+        #[cfg(feature = "tui")]
+        {
+            let already_child = std::env::var_os(TUI_CHILD_ENV).is_some();
+            // Default to a new console window; `--inline` keeps it in
+            // the current terminal. Never re-spawn from the child.
+            if !args.inline && !already_child && spawn_in_new_window() {
+                return;
+            }
+            if let Err(e) = tui_preview::run(&args) {
+                eprintln!("preview_scene --tui: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
+        #[cfg(not(feature = "tui"))]
+        {
+            eprintln!(
+                "preview_scene --tui requires the `tui` feature. Re-run with:\n\
+                 cargo run --release --features tui --bin preview_scene -- \
+                 --tui <scene.json> <data_dir>"
+            );
+            std::process::exit(2);
+        }
+    }
+
     run_preview(&args);
+}
+
+// ── Terminal (ratatui) cross-section viewer ─────────────────────────
+//
+// A half-block truecolor renderer for the XY cross-section, drawn into
+// the terminal instead of a Win32 window. Each character cell carries
+// TWO vertical pixels (`▀` U+2580: foreground paints the top half,
+// background the bottom half), so a 120×40 terminal renders a
+// 120×80 image. Reuses the engine's `find_cell_recursive` walk and the
+// shared `load_preview` / `auto_bounds` machinery, so colours and the
+// default viewport match the PNG/PPM path exactly.
+//
+// Controls: arrows or hjkl pan · +/- zoom · scroll-wheel zoom-at-cursor
+// · left-drag pan · [ / ] step the z-slice · L toggle legend · r reset
+// · q / Esc quit. The status bar probes the material under the cursor.
+#[cfg(feature = "tui")]
+mod tui_preview {
+    use super::{
+        Args, LoadedPreview, auto_bounds, load_preview, resolve_case_path, world_bounds_xy,
+    };
+    use open_rust_mc::geometry::cell::CellFill;
+    use open_rust_mc::geometry::ray::find_cell_recursive;
+    use open_rust_mc::geometry::{Geometry, Vec3};
+    use ratatui::crossterm::event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseButton,
+        MouseEventKind,
+    };
+    use ratatui::crossterm::execute;
+    use ratatui::layout::{Constraint, Layout, Rect};
+    use ratatui::style::{Color, Modifier, Style};
+    use ratatui::text::{Line, Span};
+    use ratatui::widgets::{Block, Paragraph};
+    use std::time::Duration;
+
+    /// Half-block glyph: fg = upper pixel, bg = lower pixel.
+    const HALF_BLOCK: &str = "▀";
+
+    #[inline]
+    fn col(c: [u8; 3]) -> Color {
+        Color::Rgb(c[0], c[1], c[2])
+    }
+
+    /// Live viewport: world centre `(cx, cy)`, `scale` in cm per pixel
+    /// (one terminal sub-pixel), and the current z-slice. `home_*` hold
+    /// the auto-fit target so `r` can recompute the initial framing for
+    /// whatever the terminal size is now.
+    struct ViewState {
+        cx: f64,
+        cy: f64,
+        scale: f64,
+        z: f64,
+        home_cx: f64,
+        home_cy: f64,
+        home_w: f64,
+        home_h: f64,
+        z_min: f64,
+        z_max: f64,
+        show_legend: bool,
+        needs_fit: bool,
+        cursor: Option<(u16, u16)>,
+        drag_prev: Option<(u16, u16)>,
+        last_inner: Rect,
+    }
+
+    impl ViewState {
+        /// Re-fit `scale`/centre to frame the whole geometry inside the
+        /// current canvas (called on startup and on `r`).
+        fn fit(&mut self, inner: Rect) {
+            let pw = inner.width.max(1) as f64;
+            let ph2 = (inner.height.max(1) as f64) * 2.0;
+            self.cx = self.home_cx;
+            self.cy = self.home_cy;
+            // Fit both axes; the looser axis sets the scale so nothing
+            // is clipped. Guard against a zero-extent (single-plane)
+            // scene with a 1 cm floor.
+            let sx = (self.home_w / pw).max(1e-9);
+            let sy = (self.home_h / ph2).max(1e-9);
+            self.scale = sx.max(sy).max(1e-6);
+            self.needs_fit = false;
+        }
+
+        /// World point at the centre of terminal cell `(fx, fy)` (frame
+        /// coords). Uses the midpoint of the cell's two sub-pixels.
+        fn world_at(&self, fx: u16, fy: u16) -> (f64, f64) {
+            let inner = self.last_inner;
+            let pw = inner.width.max(1) as f64;
+            let ph2 = (inner.height.max(1) as f64) * 2.0;
+            let sx = (fx.saturating_sub(inner.x)) as f64 + 0.5;
+            let sy = ((fy.saturating_sub(inner.y)) as f64) * 2.0 + 1.0;
+            let wx = self.cx + (sx - pw * 0.5) * self.scale;
+            let wy = self.cy - (sy - ph2 * 0.5) * self.scale;
+            (wx, wy)
+        }
+
+        /// Multiply `scale` by `factor`, holding the world point under
+        /// the given cursor cell fixed (zoom-at-cursor). `factor < 1`
+        /// zooms in.
+        fn zoom_at(&mut self, factor: f64, anchor: Option<(u16, u16)>) {
+            let inner = self.last_inner;
+            let pw = inner.width.max(1) as f64;
+            let ph2 = (inner.height.max(1) as f64) * 2.0;
+            // Anchor sub-pixel: cursor cell centre, else viewport centre.
+            let (sx, sy) = match anchor {
+                Some((fx, fy)) => (
+                    (fx.saturating_sub(inner.x)) as f64 + 0.5,
+                    ((fy.saturating_sub(inner.y)) as f64) * 2.0 + 1.0,
+                ),
+                None => (pw * 0.5, ph2 * 0.5),
+            };
+            let wx = self.cx + (sx - pw * 0.5) * self.scale;
+            let wy = self.cy - (sy - ph2 * 0.5) * self.scale;
+            self.scale = (self.scale * factor).max(1e-6);
+            self.cx = wx - (sx - pw * 0.5) * self.scale;
+            self.cy = wy + (sy - ph2 * 0.5) * self.scale;
+        }
+    }
+
+    /// Describe the cell under a world point: material name + colour, or
+    /// void / leak. Drives the status-bar probe and legend highlighting.
+    fn probe(
+        geom: &Geometry,
+        palette: &[[u8; 3]],
+        names: &[String],
+        void: [u8; 3],
+        wx: f64,
+        wy: f64,
+        z: f64,
+    ) -> (String, Color) {
+        match find_cell_recursive(Vec3::new(wx, wy, z), geom) {
+            Some(stack) => {
+                let deepest = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                match geom.cells[deepest].fill {
+                    CellFill::Material(m) => {
+                        let idx = m as usize;
+                        let name = names.get(idx).map(String::as_str).unwrap_or("material");
+                        let c = palette.get(idx).copied().unwrap_or(void);
+                        (format!("{name} (#{idx})"), col(c))
+                    }
+                    _ => ("void (non-material fill)".to_string(), col(void)),
+                }
+            }
+            None => ("leak — outside geometry".to_string(), col(void)),
+        }
+    }
+
+    pub fn run(args: &Args) -> std::io::Result<()> {
+        let LoadedPreview {
+            geometry,
+            palette,
+            void,
+            names,
+        } = load_preview(args);
+        let (x_min, x_max, y_min, y_max, z0) = auto_bounds(&geometry, args);
+        // z extent for slice stepping / clamping.
+        let (z_min, z_max) = world_bounds_xy(&geometry)
+            .map(|b| (b.z_min, b.z_max))
+            .unwrap_or((f64::NEG_INFINITY, f64::INFINITY));
+
+        let title = resolve_case_path(&args.case_json)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("scene")
+            .to_string();
+
+        let mut state = ViewState {
+            cx: 0.5 * (x_min + x_max),
+            cy: 0.5 * (y_min + y_max),
+            scale: 0.0,
+            z: z0,
+            home_cx: 0.5 * (x_min + x_max),
+            home_cy: 0.5 * (y_min + y_max),
+            home_w: x_max - x_min,
+            home_h: y_max - y_min,
+            z_min,
+            z_max,
+            show_legend: true,
+            needs_fit: true,
+            cursor: None,
+            drag_prev: None,
+            last_inner: Rect::ZERO,
+        };
+
+        let mut terminal = ratatui::init();
+        // ratatui::init() handles raw mode + alternate screen + a
+        // panic hook that restores them. Mouse capture is on top of
+        // that; disable it explicitly before restore so the host
+        // terminal isn't left swallowing clicks.
+        let _ = execute!(std::io::stdout(), EnableMouseCapture);
+
+        let result = event_loop(
+            &mut terminal,
+            &mut state,
+            &geometry,
+            &palette,
+            &void,
+            &names,
+            &title,
+        );
+
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        ratatui::restore();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn event_loop(
+        terminal: &mut ratatui::DefaultTerminal,
+        state: &mut ViewState,
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        void: &[u8; 3],
+        names: &[String],
+        title: &str,
+    ) -> std::io::Result<()> {
+        let mut dirty = true;
+        loop {
+            if dirty {
+                terminal.draw(|frame| {
+                    ui(frame, state, geometry, palette, *void, names, title);
+                })?;
+                dirty = false;
+            }
+            // Block up to 250 ms for input; redraw only when something
+            // actually changed so an idle viewer doesn't burn CPU
+            // re-walking the geometry.
+            if !event::poll(Duration::from_millis(250))? {
+                continue;
+            }
+            match event::read()? {
+                Event::Resize(_, _) => dirty = true,
+                Event::Key(k) if k.kind != KeyEventKind::Release => {
+                    if handle_key(k.code, state) {
+                        return Ok(());
+                    }
+                    dirty = true;
+                }
+                Event::Mouse(m) => {
+                    handle_mouse(m, state);
+                    dirty = true;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Returns `true` when the key requests quit.
+    fn handle_key(code: KeyCode, state: &mut ViewState) -> bool {
+        // Pan one-tenth of the visible span per press.
+        let step_x = 0.1 * state.last_inner.width.max(1) as f64 * state.scale;
+        let step_y = 0.1 * (state.last_inner.height.max(1) as f64 * 2.0) * state.scale;
+        // z step: 2% of the axial extent, floored at 1 cm.
+        let dz = if state.z_min.is_finite() && state.z_max.is_finite() {
+            (1.0_f64).max((state.z_max - state.z_min).abs() * 0.02)
+        } else {
+            1.0
+        };
+        match code {
+            KeyCode::Char('q') | KeyCode::Char('Q') | KeyCode::Esc => return true,
+            KeyCode::Left | KeyCode::Char('h') => state.cx -= step_x,
+            KeyCode::Right | KeyCode::Char('l') => state.cx += step_x,
+            KeyCode::Up | KeyCode::Char('k') => state.cy += step_y,
+            KeyCode::Down | KeyCode::Char('j') => state.cy -= step_y,
+            KeyCode::Char('+') | KeyCode::Char('=') => state.zoom_at(0.8, state.cursor),
+            KeyCode::Char('-') | KeyCode::Char('_') => state.zoom_at(1.25, state.cursor),
+            KeyCode::Char('[') => {
+                state.z -= dz;
+                if state.z_min.is_finite() {
+                    state.z = state.z.max(state.z_min);
+                }
+            }
+            KeyCode::Char(']') => {
+                state.z += dz;
+                if state.z_max.is_finite() {
+                    state.z = state.z.min(state.z_max);
+                }
+            }
+            KeyCode::Char('L') => state.show_legend = !state.show_legend,
+            KeyCode::Char('r') | KeyCode::Char('R') => state.needs_fit = true,
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_mouse(m: event::MouseEvent, state: &mut ViewState) {
+        state.cursor = Some((m.column, m.row));
+        match m.kind {
+            MouseEventKind::ScrollUp => state.zoom_at(0.8, Some((m.column, m.row))),
+            MouseEventKind::ScrollDown => state.zoom_at(1.25, Some((m.column, m.row))),
+            MouseEventKind::Down(MouseButton::Left) => state.drag_prev = Some((m.column, m.row)),
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some((px, py)) = state.drag_prev {
+                    let dx = (m.column as f64 - px as f64) * state.scale;
+                    // Two world-pixels per row vertically.
+                    let dy = (m.row as f64 - py as f64) * 2.0 * state.scale;
+                    state.cx -= dx;
+                    state.cy += dy;
+                }
+                state.drag_prev = Some((m.column, m.row));
+            }
+            MouseEventKind::Up(MouseButton::Left) => state.drag_prev = None,
+            _ => {}
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ui(
+        frame: &mut ratatui::Frame,
+        state: &mut ViewState,
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        void: [u8; 3],
+        names: &[String],
+        title: &str,
+    ) {
+        let area = frame.area();
+        // body (canvas + optional legend) over a 3-line status strip.
+        let [body, status_area] =
+            Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(area);
+        let legend_w: u16 = if state.show_legend {
+            // Widest material name + swatch + padding, clamped.
+            let longest = names.iter().map(String::len).max().unwrap_or(4) as u16;
+            (longest + 8).clamp(16, 36)
+        } else {
+            0
+        };
+        let [canvas_area, legend_area] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(legend_w)]).areas(body);
+
+        // ── Canvas ──────────────────────────────────────────────────
+        let canvas_block = Block::bordered().title(Line::from(vec![
+            Span::raw(" "),
+            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(" "),
+        ]));
+        let inner = canvas_block.inner(canvas_area);
+        frame.render_widget(canvas_block, canvas_area);
+
+        if state.needs_fit {
+            state.fit(inner);
+        }
+        state.last_inner = inner;
+        paint_canvas(frame, inner, state, geometry, palette, void);
+
+        // ── Legend ──────────────────────────────────────────────────
+        if legend_w > 0 {
+            let mut lines: Vec<Line> = Vec::with_capacity(names.len() + 1);
+            for (i, name) in names.iter().enumerate() {
+                let c = palette.get(i).copied().unwrap_or(void);
+                lines.push(Line::from(vec![
+                    Span::styled("██ ", Style::default().fg(col(c))),
+                    Span::raw(name.clone()),
+                ]));
+            }
+            lines.push(Line::from(vec![
+                Span::styled("██ ", Style::default().fg(col(void))),
+                Span::raw("void / leak"),
+            ]));
+            let legend = Paragraph::new(lines).block(Block::bordered().title(" Materials "));
+            frame.render_widget(legend, legend_area);
+        }
+
+        // ── Status ──────────────────────────────────────────────────
+        let pw = inner.width.max(1) as f64;
+        let ph2 = inner.height.max(1) as f64 * 2.0;
+        let view_w = pw * state.scale;
+        let view_h = ph2 * state.scale;
+        let line1 = Line::from(format!(
+            " z={:.2} cm   scale={:.4} cm/px   view {:.1}×{:.1} cm   centre ({:.2}, {:.2}) ",
+            state.z, state.scale, view_w, view_h, state.cx, state.cy
+        ));
+
+        let line2 = match state.cursor {
+            Some((fx, fy)) if rect_contains(inner, fx, fy) => {
+                let (wx, wy) = state.world_at(fx, fy);
+                let (label, c) = probe(geometry, palette, names, void, wx, wy, state.z);
+                Line::from(vec![
+                    Span::raw(format!(" ({wx:+.2}, {wy:+.2}) → ")),
+                    Span::styled("██ ", Style::default().fg(c)),
+                    Span::styled(label, Style::default().add_modifier(Modifier::BOLD)),
+                ])
+            }
+            _ => Line::from(
+                " arrows/hjkl pan · +/- zoom · scroll zoom@cursor · [ ] z-slice · L legend · r reset · q quit",
+            )
+            .style(Style::default().dim()),
+        };
+        let status = Paragraph::new(vec![line1, line2])
+            .block(Block::new().borders(ratatui::widgets::Borders::TOP));
+        frame.render_widget(status, status_area);
+    }
+
+    fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
+        x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height
+    }
+
+    /// Sample the geometry over `inner` at 2× vertical resolution and
+    /// write half-block cells straight into the frame buffer. The
+    /// per-pixel `find_cell_recursive` walk is parallelised across
+    /// sub-rows with rayon (the same trick the PNG renderer uses) so
+    /// pan/zoom stays responsive on deep recursive lattices.
+    fn paint_canvas(
+        frame: &mut ratatui::Frame,
+        inner: Rect,
+        state: &ViewState,
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        void: [u8; 3],
+    ) {
+        use rayon::prelude::*;
+        if inner.width == 0 || inner.height == 0 {
+            return;
+        }
+        let pw = inner.width as usize;
+        let ph2 = inner.height as usize * 2;
+        let (cx, cy, scale, z) = (state.cx, state.cy, state.scale, state.z);
+        let pw_f = pw as f64;
+        let ph2_f = ph2 as f64;
+
+        // Color grid in scan order, sub-row major. rayon's flat_map
+        // preserves ordering on collect.
+        let grid: Vec<[u8; 3]> = (0..ph2)
+            .into_par_iter()
+            .flat_map(|sr| {
+                (0..pw)
+                    .map(|px| {
+                        let wx = cx + (px as f64 + 0.5 - pw_f * 0.5) * scale;
+                        let wy = cy - (sr as f64 + 0.5 - ph2_f * 0.5) * scale;
+                        match find_cell_recursive(Vec3::new(wx, wy, z), geometry) {
+                            Some(stack) => {
+                                let d = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                                match geometry.cells[d].fill {
+                                    CellFill::Material(m) => {
+                                        palette.get(m as usize).copied().unwrap_or(void)
+                                    }
+                                    _ => void,
+                                }
+                            }
+                            None => void,
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let buf = frame.buffer_mut();
+        for r in 0..inner.height {
+            for c in 0..inner.width {
+                let top = grid[(2 * r as usize) * pw + c as usize];
+                let bot = grid[(2 * r as usize + 1) * pw + c as usize];
+                if let Some(cell) = buf.cell_mut((inner.x + c, inner.y + r)) {
+                    cell.set_symbol(HALF_BLOCK);
+                    cell.set_fg(col(top));
+                    cell.set_bg(col(bot));
+                }
+            }
+        }
+
+        // Crosshair marker at the cursor cell (keeps the lower-pixel
+        // colour as the background so the probe stays legible).
+        if let Some((fx, fy)) = state.cursor {
+            if rect_contains(inner, fx, fy) {
+                if let Some(cell) = buf.cell_mut((fx, fy)) {
+                    cell.set_symbol("+");
+                    cell.set_fg(Color::Yellow);
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn test_state() -> ViewState {
+            ViewState {
+                cx: 5.0,
+                cy: -3.0,
+                scale: 0.0,
+                z: 0.0,
+                home_cx: 5.0,
+                home_cy: -3.0,
+                home_w: 40.0,
+                home_h: 20.0,
+                z_min: -10.0,
+                z_max: 10.0,
+                show_legend: true,
+                needs_fit: true,
+                cursor: None,
+                drag_prev: None,
+                last_inner: Rect::new(1, 1, 80, 24),
+            }
+        }
+
+        #[test]
+        fn fit_frames_the_whole_geometry() {
+            let mut s = test_state();
+            let inner = Rect::new(0, 0, 80, 25); // 80 cols × 50 sub-rows
+            s.fit(inner);
+            // Looser axis sets the scale: width 40/80 = 0.5, height
+            // 20/50 = 0.4 → 0.5 cm/px so nothing is clipped.
+            assert!((s.scale - 0.5).abs() < 1e-9, "scale = {}", s.scale);
+            assert!(!s.needs_fit);
+            // Whole geometry must fit inside the rendered span.
+            assert!(80.0 * s.scale >= s.home_w - 1e-9);
+            assert!((25.0 * 2.0) * s.scale >= s.home_h - 1e-9);
+        }
+
+        #[test]
+        fn world_at_centre_returns_view_centre() {
+            let mut s = test_state();
+            s.scale = 0.5;
+            s.needs_fit = false;
+            let inner = s.last_inner;
+            // Centre cell of an 80×24 inner area.
+            let (wx, wy) = s.world_at(inner.x + inner.width / 2, inner.y + inner.height / 2);
+            assert!((wx - s.cx).abs() < s.scale, "wx={wx} cx={}", s.cx);
+            assert!((wy - s.cy).abs() < 2.0 * s.scale, "wy={wy} cy={}", s.cy);
+        }
+
+        #[test]
+        fn zoom_at_cursor_pins_the_anchor_world_point() {
+            let mut s = test_state();
+            s.scale = 0.5;
+            s.needs_fit = false;
+            let anchor = (20u16, 8u16); // some off-centre cell
+            let before = s.world_at(anchor.0, anchor.1);
+            s.zoom_at(0.8, Some(anchor));
+            let after = s.world_at(anchor.0, anchor.1);
+            // The world point under the cursor must stay put across zoom.
+            assert!(
+                (before.0 - after.0).abs() < 1e-6,
+                "x drift {before:?} {after:?}"
+            );
+            assert!(
+                (before.1 - after.1).abs() < 1e-6,
+                "y drift {before:?} {after:?}"
+            );
+            assert!(s.scale < 0.5, "zoom-in must shrink scale");
+        }
+
+        #[test]
+        fn paint_canvas_writes_half_blocks_without_a_real_terminal() {
+            use open_rust_mc::geometry::Geometry;
+            use ratatui::Terminal;
+            use ratatui::backend::TestBackend;
+
+            // Empty geometry → every sample leaks → void fill. We're
+            // exercising the buffer-write path + half-block math, not
+            // the physics: the whole canvas must be painted with the
+            // half-block glyph (no untouched cells).
+            let geom = Geometry::flat(Vec::new(), Vec::new()).expect("empty geometry");
+            let palette: Vec<[u8; 3]> = vec![[10, 20, 30]];
+            let void = [255, 0, 220];
+            let names = vec!["only-mat".to_string()];
+
+            let mut s = test_state();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).expect("test terminal");
+            terminal
+                .draw(|f| ui(f, &mut s, &geom, &palette, void, &names, "unit-test"))
+                .expect("draw");
+
+            let buf = terminal.backend().buffer();
+            // The canvas interior (inside the border) must be half-blocks.
+            let inner = s.last_inner;
+            assert!(inner.width > 0 && inner.height > 0);
+            let mid = buf[(inner.x + inner.width / 2, inner.y + inner.height / 2)]
+                .symbol()
+                .to_string();
+            assert_eq!(mid, HALF_BLOCK, "canvas interior should be half-blocks");
+        }
+    }
+}
+
+// ── 3D ray-cast geometry view ───────────────────────────────────────
+//
+// A real perspective-3D render of the CSG, built on the very same
+// geometry walk the Monte Carlo transport uses: cast one camera ray
+// per pixel, step through cells with `trace_step_recursive` until the
+// first *opaque* material (air / void / vacuum are skipped so you see
+// the solids inside them), estimate a surface normal from the gradient
+// of the occupancy field, and shade with Lambert lighting tinted by
+// the material's palette colour.
+//
+// No GPU, no wgpu, no 3D engine — the scenes are small (a handful of
+// surfaces) so a rayon-parallel CPU cast renders an orbit frame in a
+// fraction of a second. The shading path is a pure function of
+// `(geometry, camera)`, so a CUDA ray-cast kernel reusing the device
+// CSG in `geom_recursive.cu` could later drop in behind this same API.
+mod render3d {
+    use super::{Args, LoadedPreview, load_preview, world_bounds_xy};
+    use open_rust_mc::geometry::cell::CellFill;
+    use open_rust_mc::geometry::ray::{find_cell_recursive, trace_step_recursive};
+    use open_rust_mc::geometry::{Geometry, Vec3};
+    #[cfg(feature = "cuda")]
+    use open_rust_mc::gpu_recursive::{GpuRecursiveContext, RaycastBuffers};
+    use std::path::Path;
+
+    /// Orbit camera: spherical position about `target`, +z up.
+    struct Camera {
+        pos: Vec3,
+        forward: Vec3,
+        right: Vec3,
+        up: Vec3,
+        tan_half_fov: f64,
+    }
+
+    impl Camera {
+        fn orbit(target: Vec3, azim_rad: f64, elev_rad: f64, radius: f64, fov_deg: f64) -> Self {
+            let ce = elev_rad.cos();
+            let dir = Vec3::new(ce * azim_rad.cos(), ce * azim_rad.sin(), elev_rad.sin());
+            let pos = target + dir * radius;
+            let forward = (target - pos).normalized();
+            let world_up = Vec3::new(0.0, 0.0, 1.0);
+            // Guard against gimbal lock when looking straight down/up.
+            let right = {
+                let r = forward.cross(world_up);
+                if r.length() < 1e-6 {
+                    Vec3::new(1.0, 0.0, 0.0)
+                } else {
+                    r.normalized()
+                }
+            };
+            let up = right.cross(forward).normalized();
+            Self {
+                pos,
+                forward,
+                right,
+                up,
+                tan_half_fov: (fov_deg.to_radians() * 0.5).tan(),
+            }
+        }
+
+        /// Primary ray direction through pixel `(px, py)` of a `w × h`
+        /// image (pixel centres, y flipped so row 0 is the top).
+        fn ray_dir(&self, px: usize, py: usize, w: usize, h: usize) -> Vec3 {
+            let aspect = w as f64 / h as f64;
+            let ndc_x = ((px as f64 + 0.5) / w as f64) * 2.0 - 1.0;
+            let ndc_y = 1.0 - ((py as f64 + 0.5) / h as f64) * 2.0;
+            let d = self.forward
+                + self.right * (ndc_x * aspect * self.tan_half_fov)
+                + self.up * (ndc_y * self.tan_half_fov);
+            d.normalized()
+        }
+    }
+
+    /// Axis-aligned bounds of the geometry (xy from surfaces/lattices,
+    /// z from PlaneZ / lattice extents), padded 6%. Falls back to a
+    /// cube around the z-slice when the axial extent is unbounded.
+    pub(crate) fn scene_aabb(geom: &Geometry) -> (Vec3, Vec3) {
+        match world_bounds_xy(geom) {
+            Some(b) => {
+                let (zmin, zmax) =
+                    if b.z_min.is_finite() && b.z_max.is_finite() && b.z_max > b.z_min {
+                        (b.z_min, b.z_max)
+                    } else {
+                        let c = b.default_z();
+                        let e = 0.5 * b.xy_extent().max(1.0);
+                        (c - e, c + e)
+                    };
+                let min = Vec3::new(b.x_min, b.y_min, zmin);
+                let max = Vec3::new(b.x_max, b.y_max, zmax);
+                let pad = (max - min) * 0.06;
+                (min - pad, max + pad)
+            }
+            None => (Vec3::new(-10.0, -10.0, -10.0), Vec3::new(10.0, 10.0, 10.0)),
+        }
+    }
+
+    /// Per-axis slab clip. Returns the `(t_near, t_far)` overlap of the
+    /// ray with `[lo, hi]`; an empty interval encodes a miss.
+    #[inline]
+    fn slab(o: f64, d: f64, lo: f64, hi: f64) -> (f64, f64) {
+        if d.abs() < 1e-12 {
+            if o < lo || o > hi {
+                (f64::INFINITY, f64::NEG_INFINITY)
+            } else {
+                (f64::NEG_INFINITY, f64::INFINITY)
+            }
+        } else {
+            let inv = 1.0 / d;
+            let t1 = (lo - o) * inv;
+            let t2 = (hi - o) * inv;
+            if t1 <= t2 { (t1, t2) } else { (t2, t1) }
+        }
+    }
+
+    /// Ray vs AABB. `Some((t_enter, t_exit))` with `t_exit >= t_enter`
+    /// and `t_exit >= 0`, else `None`.
+    fn ray_aabb(o: Vec3, d: Vec3, min: Vec3, max: Vec3) -> Option<(f64, f64)> {
+        let (ax0, ax1) = slab(o.x, d.x, min.x, max.x);
+        let (ay0, ay1) = slab(o.y, d.y, min.y, max.y);
+        let (az0, az1) = slab(o.z, d.z, min.z, max.z);
+        let t_enter = ax0.max(ay0).max(az0);
+        let t_exit = ax1.min(ay1).min(az1);
+        if t_exit >= t_enter && t_exit >= 0.0 {
+            Some((t_enter, t_exit))
+        } else {
+            None
+        }
+    }
+
+    /// `true` for materials that should be drawn solid. Air / void /
+    /// vacuum (and the no-material `Void` fill) are transparent so the
+    /// camera sees the objects suspended inside them.
+    pub(crate) fn opaque_mask(names: &[String]) -> Vec<bool> {
+        names
+            .iter()
+            .map(|n| {
+                let n = n.to_lowercase();
+                !(n.contains("air") || n.contains("void") || n.contains("vacuum"))
+            })
+            .collect()
+    }
+
+    /// Occupancy field: 1.0 inside an opaque material, 0.0 elsewhere.
+    #[inline]
+    fn occ(p: Vec3, geom: &Geometry, opaque: &[bool]) -> f64 {
+        match find_cell_recursive(p, geom) {
+            Some(stack) => {
+                let ci = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                if let CellFill::Material(m) = geom.cells[ci].fill {
+                    if opaque.get(m as usize).copied().unwrap_or(true) {
+                        return 1.0;
+                    }
+                }
+                0.0
+            }
+            None => 0.0,
+        }
+    }
+
+    struct Hit {
+        mat: usize,
+        normal: Vec3,
+    }
+
+    /// March a camera ray to the first opaque material. Exact DDA via
+    /// `trace_step_recursive` while inside a cell; small fixed micro-
+    /// steps only to cross genuine void/leak gaps (where the geometry
+    /// walk has no cell to step from). Returns the material index + an
+    /// outward surface normal estimated from the occupancy gradient.
+    fn cast_ray(
+        o: Vec3,
+        d: Vec3,
+        geom: &Geometry,
+        opaque: &[bool],
+        aabb: (Vec3, Vec3),
+    ) -> Option<Hit> {
+        let (t_enter, t_exit) = ray_aabb(o, d, aabb.0, aabb.1)?;
+        let diag = (aabb.1 - aabb.0).length();
+        let micro = (diag / 1024.0).max(1e-6);
+        let eps = (diag * 1e-7).max(1e-9);
+
+        let mut t = t_enter.max(0.0) + eps;
+        let mut pos = o + d * t;
+        let mut stack = find_cell_recursive(pos, geom);
+        // Bound the walk so a degenerate geometry can't spin forever.
+        for _ in 0..8192 {
+            if t > t_exit {
+                return None;
+            }
+            match stack {
+                Some(ref s) => {
+                    let ci = s.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                    if let CellFill::Material(m) = geom.cells[ci].fill {
+                        if opaque.get(m as usize).copied().unwrap_or(true) {
+                            return Some(Hit {
+                                mat: m as usize,
+                                normal: surface_normal(pos, ci, d, geom, opaque, micro),
+                            });
+                        }
+                    }
+                    // Transparent cell — jump to the next surface exactly.
+                    match trace_step_recursive(s, pos, d, geom) {
+                        Some(h) if h.distance.is_finite() => {
+                            t += h.distance + eps;
+                            pos = o + d * t;
+                            stack = h.next_stack;
+                        }
+                        _ => return None,
+                    }
+                }
+                None => {
+                    // In a vacuum/leak gap: creep forward until we enter
+                    // a cell again or exit the box.
+                    t += micro;
+                    pos = o + d * t;
+                    stack = find_cell_recursive(pos, geom);
+                }
+            }
+        }
+        None
+    }
+
+    /// Camera-facing surface normal at a hit point. Prefers the
+    /// analytic normal of whichever of the hit cell's bounding surfaces
+    /// the point lies on (crisp on planes/quadrics, no occupancy-
+    /// quantisation banding); falls back to the occupancy gradient when
+    /// the cell has no surface that `p` sits on (e.g. a lattice element
+    /// in a frame this flat-evaluation doesn't capture). The result is
+    /// flipped to face the incoming ray so visible surfaces are lit.
+    fn surface_normal(
+        p: Vec3,
+        cell_idx: usize,
+        view_dir: Vec3,
+        geom: &Geometry,
+        opaque: &[bool],
+        micro: f64,
+    ) -> Vec3 {
+        let mut idxs = Vec::new();
+        geom.cells[cell_idx].region.surface_indices(&mut idxs);
+        idxs.sort_unstable();
+        idxs.dedup();
+
+        // Surface the point lies on = smallest |evaluate|. The hit
+        // point sits on a cell boundary by construction (we just
+        // crossed into this cell, or micro-stepped to its edge), so the
+        // nearest bounding surface is the visible one. `evaluate` is not
+        // a metric distance — for a cylinder it's x²+y²−r² (cm²) — so we
+        // compare magnitudes only to *rank* surfaces, never threshold
+        // against a length.
+        let mut best: Option<usize> = None;
+        let mut best_abs = f64::INFINITY;
+        for &si in &idxs {
+            let v = geom.surfaces[si].evaluate(p).abs();
+            if v < best_abs {
+                best_abs = v;
+                best = Some(si);
+            }
+        }
+        if let Some(si) = best {
+            let mut n = geom.surfaces[si].normal_at(p);
+            let len = n.length();
+            if len > 1e-12 {
+                n = n * (1.0 / len);
+                // Face the camera: flip if it points along the ray.
+                if n.dot(view_dir) > 0.0 {
+                    n = -n;
+                }
+                return n;
+            }
+        }
+        occ_normal(p, view_dir, geom, opaque, micro)
+    }
+
+    /// Outward normal from the gradient of the occupancy field. The
+    /// gradient points into the solid, so the outward normal is its
+    /// negation; degenerate (zero-gradient) samples fall back to facing
+    /// the camera.
+    fn occ_normal(p: Vec3, view_dir: Vec3, geom: &Geometry, opaque: &[bool], micro: f64) -> Vec3 {
+        let h = micro * 2.0;
+        let dx = occ(p + Vec3::new(h, 0.0, 0.0), geom, opaque)
+            - occ(p - Vec3::new(h, 0.0, 0.0), geom, opaque);
+        let dy = occ(p + Vec3::new(0.0, h, 0.0), geom, opaque)
+            - occ(p - Vec3::new(0.0, h, 0.0), geom, opaque);
+        let dz = occ(p + Vec3::new(0.0, 0.0, h), geom, opaque)
+            - occ(p - Vec3::new(0.0, 0.0, h), geom, opaque);
+        let g = Vec3::new(dx, dy, dz);
+        let len = g.length();
+        if len > 1e-9 {
+            g * (-1.0 / len)
+        } else {
+            -view_dir
+        }
+    }
+
+    /// Lambert shade: a fixed key light plus a softer head-light so
+    /// camera-facing back surfaces aren't pure black. Returns sRGB-ish
+    /// 8-bit colour tinted by the material.
+    fn shade(base: [u8; 3], n: Vec3, view_dir: Vec3) -> [u8; 3] {
+        let key = Vec3::new(0.35, 0.45, 0.82).normalized();
+        let kd = n.dot(key).max(0.0);
+        let hd = n.dot(-view_dir).max(0.0);
+        let diff = 0.55 * kd + 0.45 * hd;
+        let lit = (0.18 + 0.82 * diff).min(1.15);
+        [
+            ((base[0] as f64) * lit).round().clamp(0.0, 255.0) as u8,
+            ((base[1] as f64) * lit).round().clamp(0.0, 255.0) as u8,
+            ((base[2] as f64) * lit).round().clamp(0.0, 255.0) as u8,
+        ]
+    }
+
+    /// Background gradient: dark slate, slightly lighter toward the
+    /// bottom so the silhouette reads against it.
+    #[inline]
+    fn background(py: usize, h: usize) -> [u8; 3] {
+        let f = py as f64 / (h.max(1) as f64);
+        let top = [16.0, 17.0, 23.0];
+        let bot = [30.0, 33.0, 42.0];
+        [
+            (top[0] + (bot[0] - top[0]) * f) as u8,
+            (top[1] + (bot[1] - top[1]) * f) as u8,
+            (top[2] + (bot[2] - top[2]) * f) as u8,
+        ]
+    }
+
+    /// Render one `w × h` RGB frame. Parallel across rows; each ray is
+    /// independent so this is embarrassingly parallel.
+    fn render_frame(
+        geom: &Geometry,
+        palette: &[[u8; 3]],
+        opaque: &[bool],
+        aabb: (Vec3, Vec3),
+        cam: &Camera,
+        w: usize,
+        h: usize,
+    ) -> Vec<[u8; 3]> {
+        use rayon::prelude::*;
+        let rows: Vec<Vec<[u8; 3]>> = (0..h)
+            .into_par_iter()
+            .map(|py| {
+                (0..w)
+                    .map(|px| {
+                        let dir = cam.ray_dir(px, py, w, h);
+                        match cast_ray(cam.pos, dir, geom, opaque, aabb) {
+                            Some(hit) => {
+                                let base = palette.get(hit.mat).copied().unwrap_or([200, 200, 200]);
+                                shade(base, hit.normal, dir)
+                            }
+                            None => background(py, h),
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut buf = Vec::with_capacity(w * h);
+        for row in &rows {
+            buf.extend_from_slice(row);
+        }
+        buf
+    }
+
+    /// Flatten an `[r,g,b]`-per-material palette to the `i32` triples
+    /// the GPU kernel expects.
+    #[cfg(feature = "cuda")]
+    fn palette_i32(palette: &[[u8; 3]]) -> Vec<i32> {
+        palette
+            .iter()
+            .flat_map(|c| [c[0] as i32, c[1] as i32, c[2] as i32])
+            .collect()
+    }
+
+    /// Unpack a `0x00RRGGBB` framebuffer to `[r,g,b]` rows for the PNG
+    /// writer.
+    fn u32_to_rgb(buf: &[u32]) -> Vec<[u8; 3]> {
+        buf.iter()
+            .map(|&p| [(p >> 16) as u8, (p >> 8) as u8, p as u8])
+            .collect()
+    }
+
+    /// GPU ray-cast one frame, reusing persistent device buffers (so an
+    /// orbit drag does no per-frame allocation).
+    #[cfg(feature = "cuda")]
+    #[allow(clippy::too_many_arguments)]
+    fn gpu_frame(
+        palette: &[[u8; 3]],
+        opaque: &[bool],
+        aabb: (Vec3, Vec3),
+        cam: &Camera,
+        w: usize,
+        h: usize,
+        ctx: &GpuRecursiveContext,
+        buffers: &mut RaycastBuffers,
+    ) -> Result<Vec<u32>, String> {
+        let pal = palette_i32(palette);
+        let opq: Vec<i32> = opaque.iter().map(|&b| i32::from(b)).collect();
+        ctx.raycast_reuse(
+            buffers,
+            [cam.pos.x, cam.pos.y, cam.pos.z],
+            [cam.forward.x, cam.forward.y, cam.forward.z],
+            [cam.right.x, cam.right.y, cam.right.z],
+            [cam.up.x, cam.up.y, cam.up.z],
+            cam.tan_half_fov,
+            w,
+            h,
+            [aabb.0.x, aabb.0.y, aabb.0.z],
+            [aabb.1.x, aabb.1.y, aabb.1.z],
+            &pal,
+            &opq,
+        )
+    }
+
+    /// Headless: ray-cast a single frame from the CLI camera angle and
+    /// write it to PNG.
+    pub fn render_to_png(args: &Args, out: &Path) {
+        let LoadedPreview {
+            geometry,
+            palette,
+            names,
+            ..
+        } = load_preview(args);
+        let opaque = opaque_mask(&names);
+        let aabb = scene_aabb(&geometry);
+        let target = (aabb.0 + aabb.1) * 0.5;
+        let radius = (aabb.1 - aabb.0).length() * 0.9;
+        let cam = Camera::orbit(
+            target,
+            args.cam_azim.to_radians(),
+            args.cam_elev.to_radians(),
+            radius,
+            45.0,
+        );
+        let w = args.resolution as usize;
+        let h = args.resolution as usize;
+
+        // GPU path (best-effort; falls back to CPU on any failure).
+        if args.gpu {
+            #[cfg(feature = "cuda")]
+            {
+                match GpuRecursiveContext::build(&geometry, 1) {
+                    Ok(ctx) => match ctx.raycast_buffers().and_then(|mut b| {
+                        gpu_frame(&palette, &opaque, aabb, &cam, w, h, &ctx, &mut b)
+                    }) {
+                        Ok(buf) => {
+                            write_png_wh(out, &u32_to_rgb(&buf), w as u32, h as u32);
+                            eprintln!(
+                                "wrote {} ({}×{}) [GPU]  azim={:.1}° elev={:.1}°",
+                                out.display(),
+                                w,
+                                h,
+                                args.cam_azim,
+                                args.cam_elev
+                            );
+                            return;
+                        }
+                        Err(e) => eprintln!("GPU raycast failed ({e}); CPU fallback"),
+                    },
+                    Err(e) => eprintln!("GPU context build failed ({e}); CPU fallback"),
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            eprintln!("--gpu needs --features cuda; rendering on CPU instead");
+        }
+
+        let buf = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
+        write_png_wh(out, &buf, w as u32, h as u32);
+        eprintln!(
+            "wrote {} ({}×{})  azim={:.1}° elev={:.1}°",
+            out.display(),
+            w,
+            h,
+            args.cam_azim,
+            args.cam_elev
+        );
+    }
+
+    /// PNG writer for an arbitrary `w × h` RGB buffer (the shared
+    /// `write_image` helper only handles square images).
+    fn write_png_wh(path: &Path, buf: &[[u8; 3]], w: u32, h: u32) {
+        let file = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        let flat: &[u8] = bytemuck::cast_slice(buf);
+        writer.write_image_data(flat).expect("png data");
+    }
+
+    /// Interactive orbit-camera window (minifb). Left-drag rotates,
+    /// scroll zooms, right-drag pans the target, `r` resets, Escape
+    /// quits. Re-renders only when the camera actually moves.
+    #[cfg(feature = "preview")]
+    pub fn run_window(args: &Args) {
+        use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
+
+        let LoadedPreview {
+            geometry,
+            palette,
+            names,
+            ..
+        } = load_preview(args);
+        let opaque = opaque_mask(&names);
+        let aabb = scene_aabb(&geometry);
+        let target0 = (aabb.0 + aabb.1) * 0.5;
+        let radius0 = (aabb.1 - aabb.0).length() * 0.9;
+
+        // Print the legend once — minifb can't draw text.
+        eprintln!("── materials ──");
+        for (i, n) in names.iter().enumerate() {
+            let c = palette.get(i).copied().unwrap_or([200, 200, 200]);
+            let solid = if opaque.get(i).copied().unwrap_or(true) {
+                "solid"
+            } else {
+                "transparent"
+            };
+            eprintln!("  [{i}] {n}  rgb({},{},{})  {solid}", c[0], c[1], c[2]);
+        }
+        eprintln!("controls: left-drag orbit · scroll zoom · right-drag pan · r reset · Esc quit");
+
+        // Build the GPU ray-cast context ONCE (NVRTC compile is slow);
+        // the frame closure reuses it every redraw. None ⇒ CPU path.
+        #[cfg(feature = "cuda")]
+        let gpu_ctx = if args.gpu {
+            match GpuRecursiveContext::build(&geometry, 1) {
+                Ok(c) => {
+                    eprintln!("[GPU] ray-cast enabled (CUDA)");
+                    Some(c)
+                }
+                Err(e) => {
+                    eprintln!("[GPU] context build failed ({e}); using CPU ray-caster");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        #[cfg(not(feature = "cuda"))]
+        if args.gpu {
+            eprintln!("--gpu needs --features cuda; using CPU ray-caster");
+        }
+
+        // Persistent GPU buffers — allocated once, reused every orbit
+        // frame so dragging does no per-frame device allocation.
+        #[cfg(feature = "cuda")]
+        let mut gpu_buffers: Option<RaycastBuffers> =
+            gpu_ctx.as_ref().and_then(|c| c.raycast_buffers().ok());
+
+        let (mut w, mut h) = (820usize, 600usize);
+        let mut azim = args.cam_azim.to_radians();
+        let mut elev = args.cam_elev.to_radians();
+        let mut radius = radius0;
+        let mut target = target0;
+
+        let mut window = Window::new(
+            &format!(
+                "preview_scene 3D — {}",
+                super::resolve_case_path(&args.case_json)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("scene")
+            ),
+            w,
+            h,
+            WindowOptions {
+                resize: true,
+                ..WindowOptions::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("preview_scene 3D window: {e}"));
+        window.set_target_fps(60);
+
+        let mut frame_u32 =
+            |w: usize, h: usize, azim: f64, elev: f64, radius: f64, target: Vec3| -> Vec<u32> {
+                let cam = Camera::orbit(target, azim, elev, radius, 45.0);
+                #[cfg(feature = "cuda")]
+                if let (Some(ctx), Some(bufs)) = (&gpu_ctx, &mut gpu_buffers) {
+                    match gpu_frame(&palette, &opaque, aabb, &cam, w, h, ctx, bufs) {
+                        Ok(buf) => return buf,
+                        Err(e) => eprintln!("[GPU] frame failed ({e}); CPU this frame"),
+                    }
+                }
+                let rgb = render_frame(&geometry, &palette, &opaque, aabb, &cam, w, h);
+                rgb.iter()
+                    .map(|c| ((c[0] as u32) << 16) | ((c[1] as u32) << 8) | (c[2] as u32))
+                    .collect()
+            };
+
+        let mut buf = frame_u32(w, h, azim, elev, radius, target);
+        window.update_with_buffer(&buf, w, h).ok();
+
+        let mut last_size = (w, h);
+        let mut prev_left: Option<(f32, f32)> = None;
+        let mut prev_right: Option<(f32, f32)> = None;
+        let mut prev_r = false;
+
+        while window.is_open() && !window.is_key_down(Key::Escape) {
+            let mut dirty = false;
+
+            let cur = window.get_size();
+            if cur != last_size && cur.0 > 0 && cur.1 > 0 {
+                w = cur.0;
+                h = cur.1;
+                last_size = cur;
+                dirty = true;
+            }
+
+            let mouse = window.get_mouse_pos(MouseMode::Discard);
+
+            // Left-drag = orbit.
+            if window.get_mouse_down(MouseButton::Left) {
+                if let (Some((mx, my)), Some((px, py))) = (mouse, prev_left) {
+                    azim += (mx - px) as f64 * 0.01;
+                    elev = (elev - (my - py) as f64 * 0.01).clamp(-1.5, 1.5);
+                    dirty = true;
+                }
+                prev_left = mouse;
+            } else {
+                prev_left = None;
+            }
+
+            // Right-drag = pan the target across the camera plane.
+            if window.get_mouse_down(MouseButton::Right) {
+                if let (Some((mx, my)), Some((px, py))) = (mouse, prev_right) {
+                    let cam = Camera::orbit(target, azim, elev, radius, 45.0);
+                    let scale = radius * 0.0015;
+                    target = target
+                        + cam.right * (-(mx - px) as f64 * scale)
+                        + cam.up * ((my - py) as f64 * scale);
+                    dirty = true;
+                }
+                prev_right = mouse;
+            } else {
+                prev_right = None;
+            }
+
+            // Scroll = zoom (dolly).
+            if let Some((_, sy)) = window.get_scroll_wheel() {
+                if sy.abs() > 0.05 {
+                    let mag = (sy.abs() as f64).min(1.0);
+                    let step = 0.85_f64.powf(mag);
+                    radius = (radius * if sy > 0.0 { step } else { 1.0 / step }).clamp(1e-3, 1e7);
+                    dirty = true;
+                }
+            }
+
+            let r_now = window.is_key_down(Key::R);
+            if r_now && !prev_r {
+                azim = args.cam_azim.to_radians();
+                elev = args.cam_elev.to_radians();
+                radius = radius0;
+                target = target0;
+                dirty = true;
+            }
+            prev_r = r_now;
+
+            if dirty {
+                buf = frame_u32(w, h, azim, elev, radius, target);
+            }
+            window.update_with_buffer(&buf, w, h).ok();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn ray_aabb_hits_and_misses() {
+            let min = Vec3::new(-1.0, -1.0, -1.0);
+            let max = Vec3::new(1.0, 1.0, 1.0);
+            // Ray straight down +x through the box.
+            let hit = ray_aabb(
+                Vec3::new(-5.0, 0.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                min,
+                max,
+            );
+            let (t0, t1) = hit.expect("should hit");
+            assert!(
+                (t0 - 4.0).abs() < 1e-9 && (t1 - 6.0).abs() < 1e-9,
+                "{t0} {t1}"
+            );
+            // Parallel ray that misses entirely.
+            let miss = ray_aabb(
+                Vec3::new(-5.0, 5.0, 0.0),
+                Vec3::new(1.0, 0.0, 0.0),
+                min,
+                max,
+            );
+            assert!(miss.is_none());
+        }
+
+        #[test]
+        fn camera_ray_centre_points_at_target() {
+            let cam = Camera::orbit(Vec3::new(0.0, 0.0, 0.0), 0.7, 0.4, 10.0, 45.0);
+            // The centre pixel ray should be (within fov) the forward
+            // axis, i.e. roughly antiparallel to the camera position.
+            let dir = cam.ray_dir(50, 50, 100, 100);
+            let to_target = (Vec3::new(0.0, 0.0, 0.0) - cam.pos).normalized();
+            assert!(
+                dir.dot(to_target) > 0.999,
+                "centre ray should aim at target"
+            );
+        }
+
+        #[test]
+        fn opaque_mask_marks_air_transparent() {
+            let names = vec![
+                "Air".to_string(),
+                "Depleted Uranium".to_string(),
+                "vacuum gap".to_string(),
+            ];
+            let m = opaque_mask(&names);
+            assert_eq!(m, vec![false, true, false]);
+        }
+
+        #[test]
+        fn renders_a_concentric_sphere_scene() {
+            use open_rust_mc::geometry::CellId;
+            use open_rust_mc::geometry::cell::{Cell, inside, intersect_all, outside};
+            use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+
+            // Inner solid sphere (material 0, surface 0) inside an outer
+            // shell (material 1, between surfaces 0 and 1), both centred
+            // at origin. Built with the same CSG region helpers the
+            // scene loader uses (surfaces referenced by vec index).
+            let s_inner = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 2.0,
+                bc: BoundaryCondition::Transmission,
+            };
+            let s_outer = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 4.0,
+                bc: BoundaryCondition::Vacuum,
+            };
+            let inner = Cell::new(CellId(0), inside(0), CellFill::Material(0));
+            let shell = Cell::new(
+                CellId(1),
+                intersect_all(vec![inside(1), outside(0)]),
+                CellFill::Material(1),
+            );
+            let geom = Geometry::flat(vec![s_inner, s_outer], vec![inner, shell])
+                .expect("two-sphere geometry");
+
+            let palette = vec![[220u8, 80, 60], [90, 160, 220]];
+            let opaque = vec![true, true];
+            let aabb = scene_aabb(&geom);
+            let target = (aabb.0 + aabb.1) * 0.5;
+            let radius = (aabb.1 - aabb.0).length() * 0.9;
+            let cam = Camera::orbit(target, 0.6, 0.3, radius, 45.0);
+            let buf = render_frame(&geom, &palette, &opaque, aabb, &cam, 64, 64);
+
+            // The centre pixel must land on the sphere (a shaded
+            // material colour), not the dark background.
+            let centre = buf[32 * 64 + 32];
+            let bg = background(32, 64);
+            assert_ne!(centre, bg, "centre of frame should hit the sphere");
+            // And at least a quarter of the frame should be covered by
+            // the object (sanity that it isn't a single stray pixel).
+            let hits = buf.iter().filter(|&&p| p != background(0, 64)).count();
+            assert!(hits > 64 * 64 / 8, "object coverage too small: {hits}");
+        }
+    }
+}
+
+// ── CSG → triangle mesh (surface nets) ──────────────────────────────
+//
+// Turns the recursive CSG into per-material triangle meshes for the
+// GPU rasterizer: sample the deepest opaque material on a regular grid
+// once, then run Naive Surface Nets per material on the binary
+// occupancy indicator. Vertex normals are pulled analytically from the
+// nearest real surface (crisp on the quadrics/planes these scenes are
+// built from), oriented to agree with the surface-nets gradient.
+//
+// The mesh is an APPROXIMATION of the geometry at the grid resolution —
+// unlike the exact ray-cast paths — but it feeds a real rasterization
+// pipeline (depth + MSAA), which is what makes the orbit buttery.
+#[cfg(feature = "mesh3d")]
+pub mod mesh3d {
+    use super::render3d::{opaque_mask, scene_aabb};
+    use super::{Args, LoadedPreview, load_preview};
+    use fast_surface_nets::ndshape::{RuntimeShape, Shape};
+    use fast_surface_nets::{SurfaceNetsBuffer, surface_nets};
+    use open_rust_mc::geometry::cell::CellFill;
+    use open_rust_mc::geometry::ray::find_cell_recursive;
+    use open_rust_mc::geometry::{Geometry, Vec3};
+
+    /// GPU-ready triangle mesh of the whole scene (all materials merged,
+    /// colour baked per vertex). SoA so each array maps to a wgpu
+    /// vertex attribute / index buffer directly.
+    pub struct SceneMesh {
+        pub positions: Vec<[f32; 3]>,
+        pub normals: Vec<[f32; 3]>,
+        pub colors: Vec<[f32; 3]>,
+        pub indices: Vec<u32>,
+        /// World-space bounds (for camera framing in the rasterizer).
+        pub aabb_min: [f32; 3],
+        pub aabb_max: [f32; 3],
+    }
+
+    impl SceneMesh {
+        pub fn is_empty(&self) -> bool {
+            self.indices.is_empty()
+        }
+        pub fn triangle_count(&self) -> usize {
+            self.indices.len() / 3
+        }
+    }
+
+    /// Deepest opaque material index at `p`, or `-1` for empty
+    /// (transparent material / void / leak).
+    fn material_at(geom: &Geometry, opaque: &[bool], p: Vec3) -> i32 {
+        match find_cell_recursive(p, geom) {
+            Some(stack) => {
+                let ci = stack.last().map(|c| c.cell_idx as usize).unwrap_or(0);
+                if let CellFill::Material(m) = geom.cells[ci].fill {
+                    if opaque.get(m as usize).copied().unwrap_or(true) {
+                        return m as i32;
+                    }
+                }
+                -1
+            }
+            None => -1,
+        }
+    }
+
+    /// Smooth per-vertex normals = area-weighted average of adjacent
+    /// face normals, computed from the mesh topology. Frame-independent
+    /// (correct for lattices too) and free of the surface-picking
+    /// ambiguity an analytic per-vertex normal would have; surface-nets
+    /// winds triangles outward, so the averaged normals point outward.
+    fn compute_smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
+        let mut normals = vec![[0.0f32; 3]; positions.len()];
+        for tri in indices.chunks_exact(3) {
+            let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
+            let p0 = positions[a];
+            let p1 = positions[b];
+            let p2 = positions[c];
+            let u = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let v = [p2[0] - p0[0], p2[1] - p0[1], p2[2] - p0[2]];
+            // Un-normalised cross product = area-weighted face normal.
+            let fnv = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ];
+            for &idx in &[a, b, c] {
+                normals[idx][0] += fnv[0];
+                normals[idx][1] += fnv[1];
+                normals[idx][2] += fnv[2];
+            }
+        }
+        for n in &mut normals {
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            if len > 1e-12 {
+                n[0] /= len;
+                n[1] /= len;
+                n[2] /= len;
+            } else {
+                *n = [0.0, 0.0, 1.0];
+            }
+        }
+        normals
+    }
+
+    /// Mesh the geometry at `grid` samples per axis (clamped to a sane
+    /// range). Pure function of `(geometry, palette, opaque, grid)` —
+    /// the unit-testable core.
+    pub fn build_mesh(
+        geometry: &Geometry,
+        palette: &[[u8; 3]],
+        opaque: &[bool],
+        grid: usize,
+    ) -> SceneMesh {
+        let (amin, amax) = scene_aabb(geometry);
+        let n = grid.clamp(16, 384) as u32;
+        let shape = RuntimeShape::<u32, 3>::new([n, n, n]);
+        let size = shape.size() as usize;
+        // Voxel spacing maps grid coord [0, n-1] across the AABB.
+        let denom = (n as f64 - 1.0).max(1.0);
+        let vs = Vec3::new(
+            (amax.x - amin.x) / denom,
+            (amax.y - amin.y) / denom,
+            (amax.z - amin.z) / denom,
+        );
+        let world_of = |x: u32, y: u32, z: u32| {
+            Vec3::new(
+                amin.x + x as f64 * vs.x,
+                amin.y + y as f64 * vs.y,
+                amin.z + z as f64 * vs.z,
+            )
+        };
+
+        // Sample the deepest opaque material at every grid point once.
+        use rayon::prelude::*;
+        let mat_grid: Vec<i32> = (0..size as u32)
+            .into_par_iter()
+            .map(|i| {
+                let [x, y, z] = shape.delinearize(i);
+                material_at(geometry, opaque, world_of(x, y, z))
+            })
+            .collect();
+
+        let mut mesh = SceneMesh {
+            positions: Vec::new(),
+            normals: Vec::new(),
+            colors: Vec::new(),
+            indices: Vec::new(),
+            aabb_min: [amin.x as f32, amin.y as f32, amin.z as f32],
+            aabb_max: [amax.x as f32, amax.y as f32, amax.z as f32],
+        };
+
+        let mut sdf = vec![1.0_f32; size];
+        for (m, &solid) in opaque.iter().enumerate() {
+            if !solid {
+                continue;
+            }
+            // Binary signed indicator: negative inside material m.
+            let mi = m as i32;
+            for (s, &g) in sdf.iter_mut().zip(mat_grid.iter()) {
+                *s = if g == mi { -1.0 } else { 1.0 };
+            }
+            let mut buffer = SurfaceNetsBuffer::default();
+            surface_nets(&sdf, &shape, [0; 3], [n - 1; 3], &mut buffer);
+            if buffer.positions.is_empty() {
+                continue;
+            }
+            let color = palette
+                .get(m)
+                .map(|c| {
+                    [
+                        c[0] as f32 / 255.0,
+                        c[1] as f32 / 255.0,
+                        c[2] as f32 / 255.0,
+                    ]
+                })
+                .unwrap_or([0.8, 0.8, 0.8]);
+            let base = mesh.positions.len() as u32;
+            for pos in &buffer.positions {
+                // Surface-nets positions are in voxel space [0, n-1].
+                let wp = world_of(0, 0, 0)
+                    + Vec3::new(
+                        pos[0] as f64 * vs.x,
+                        pos[1] as f64 * vs.y,
+                        pos[2] as f64 * vs.z,
+                    );
+                mesh.positions.push([wp.x as f32, wp.y as f32, wp.z as f32]);
+                mesh.colors.push(color);
+            }
+            mesh.indices
+                .extend(buffer.indices.iter().map(|&i| base + i));
+        }
+        // Smooth normals from the merged topology (one pass over all
+        // materials' triangles).
+        mesh.normals = compute_smooth_normals(&mesh.positions, &mesh.indices);
+        mesh
+    }
+
+    /// Mesh the scene a CLI invocation points at (loads geometry +
+    /// materials, then [`build_mesh`]). Used by the `raster3d` viewer.
+    #[allow(dead_code)]
+    pub(crate) fn build_scene_mesh(args: &Args, grid: usize) -> SceneMesh {
+        let LoadedPreview {
+            geometry,
+            palette,
+            names,
+            ..
+        } = load_preview(args);
+        let opaque = opaque_mask(&names);
+        build_mesh(&geometry, &palette, &opaque, grid)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use open_rust_mc::geometry::CellId;
+        use open_rust_mc::geometry::cell::{Cell, inside, intersect_all, outside};
+        use open_rust_mc::geometry::surface::{BoundaryCondition, Surface};
+
+        fn two_sphere() -> Geometry {
+            let s_inner = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 2.0,
+                bc: BoundaryCondition::Transmission,
+            };
+            let s_outer = Surface::Sphere {
+                center: Vec3::new(0.0, 0.0, 0.0),
+                radius: 4.0,
+                bc: BoundaryCondition::Vacuum,
+            };
+            let inner = Cell::new(CellId(0), inside(0), CellFill::Material(0));
+            let shell = Cell::new(
+                CellId(1),
+                intersect_all(vec![inside(1), outside(0)]),
+                CellFill::Material(1),
+            );
+            Geometry::flat(vec![s_inner, s_outer], vec![inner, shell]).expect("two-sphere")
+        }
+
+        #[test]
+        fn meshes_two_sphere_with_valid_topology() {
+            let geom = two_sphere();
+            let palette = vec![[220u8, 80, 60], [90, 160, 220]];
+            let opaque = vec![true, true];
+            let mesh = build_mesh(&geom, &palette, &opaque, 48);
+
+            assert!(!mesh.is_empty(), "expected a non-empty mesh");
+            assert_eq!(mesh.positions.len(), mesh.normals.len());
+            assert_eq!(mesh.positions.len(), mesh.colors.len());
+            assert_eq!(mesh.indices.len() % 3, 0, "indices must form triangles");
+            // Every index must be in range.
+            let nverts = mesh.positions.len() as u32;
+            assert!(mesh.indices.iter().all(|&i| i < nverts));
+            // Normals must be unit-length.
+            for n in &mesh.normals {
+                let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+                assert!((len - 1.0).abs() < 1e-3, "non-unit normal: {len}");
+            }
+            // Vertices must lie within the padded scene bounds.
+            for p in &mesh.positions {
+                assert!(p[0] >= mesh.aabb_min[0] - 1e-3 && p[0] <= mesh.aabb_max[0] + 1e-3);
+                assert!(p[1] >= mesh.aabb_min[1] - 1e-3 && p[1] <= mesh.aabb_max[1] + 1e-3);
+                assert!(p[2] >= mesh.aabb_min[2] - 1e-3 && p[2] <= mesh.aabb_max[2] + 1e-3);
+            }
+        }
+    }
+}
+
+// ── GPU rasterizer (wgpu) ───────────────────────────────────────────
+//
+// Draws the meshed CSG with a real GPU pipeline: depth buffer, 4× MSAA,
+// a Lambert (two directional lights + ambient) WGSL shader, per-vertex
+// colour. `render_to_png` renders headless (offscreen → texture →
+// readback) so it's verifiable without a window; the winit orbit
+// window (`run_window`) reuses the same shader / vertex layout / camera
+// math.
+#[cfg(feature = "raster3d")]
+pub mod raster3d {
+    use super::Args;
+    use super::mesh3d::{SceneMesh, build_scene_mesh};
+    use std::path::Path;
+    use std::sync::Arc;
+    use wgpu::util::DeviceExt;
+    use winit::application::ApplicationHandler;
+    use winit::dpi::LogicalSize;
+    use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+    use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+    use winit::keyboard::{Key, NamedKey};
+    use winit::window::{Window, WindowId};
+
+    const SAMPLE_COUNT: u32 = 4;
+    const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+    const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+    const SHADER: &str = r#"
+struct U { mvp: mat4x4<f32> };
+@group(0) @binding(0) var<uniform> u: U;
+
+struct VsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) normal: vec3<f32>,
+    @location(1) color: vec3<f32>,
+};
+
+@vertex
+fn vs(@location(0) pos: vec3<f32>, @location(1) nrm: vec3<f32>, @location(2) col: vec3<f32>) -> VsOut {
+    var o: VsOut;
+    o.clip = u.mvp * vec4<f32>(pos, 1.0);
+    o.normal = nrm;
+    o.color = col;
+    return o;
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+    let n = normalize(in.normal);
+    let key = normalize(vec3<f32>(0.35, 0.45, 0.82));
+    let fill = normalize(vec3<f32>(-0.3, -0.2, 0.5));
+    let kd = max(dot(n, key), 0.0);
+    let fd = max(dot(n, fill), 0.0);
+    let lit = min(0.18 + 0.62 * kd + 0.30 * fd, 1.15);
+    return vec4<f32>(in.color * lit, 1.0);
+}
+"#;
+
+    // ── small column-major 4×4 matrix helpers (avoid a glam dep) ────
+    type Mat4 = [f32; 16];
+
+    fn mat_mul(a: &Mat4, b: &Mat4) -> Mat4 {
+        let mut c = [0.0f32; 16];
+        for col in 0..4 {
+            for row in 0..4 {
+                let mut s = 0.0;
+                for k in 0..4 {
+                    s += a[k * 4 + row] * b[col * 4 + k];
+                }
+                c[col * 4 + row] = s;
+            }
+        }
+        c
+    }
+
+    /// Right-handed perspective with NDC z in [0, 1] (wgpu convention).
+    fn perspective(fovy_rad: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+        let f = 1.0 / (fovy_rad * 0.5).tan();
+        let mut m = [0.0f32; 16];
+        m[0] = f / aspect;
+        m[5] = f;
+        m[10] = far / (near - far);
+        m[11] = -1.0;
+        m[14] = (near * far) / (near - far);
+        m
+    }
+
+    fn normalize(v: [f32; 3]) -> [f32; 3] {
+        let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        if l > 1e-12 {
+            [v[0] / l, v[1] / l, v[2] / l]
+        } else {
+            v
+        }
+    }
+    fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+    fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    /// Right-handed look-at view matrix.
+    fn look_at(eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> Mat4 {
+        let f = normalize([center[0] - eye[0], center[1] - eye[1], center[2] - eye[2]]);
+        let s = normalize(cross(f, up));
+        let u = cross(s, f);
+        [
+            s[0],
+            u[0],
+            -f[0],
+            0.0,
+            s[1],
+            u[1],
+            -f[1],
+            0.0,
+            s[2],
+            u[2],
+            -f[2],
+            0.0,
+            -dot(s, eye),
+            -dot(u, eye),
+            dot(f, eye),
+            1.0,
+        ]
+    }
+
+    /// Orbit-camera eye/center for the given azimuth/elevation (degrees)
+    /// framing the mesh's bounds. Returns `(mvp, eye)`.
+    pub fn camera_mvp(
+        mesh: &SceneMesh,
+        azim_deg: f64,
+        elev_deg: f64,
+        radius_scale: f32,
+        aspect: f32,
+    ) -> Mat4 {
+        let cx = 0.5 * (mesh.aabb_min[0] + mesh.aabb_max[0]);
+        let cy = 0.5 * (mesh.aabb_min[1] + mesh.aabb_max[1]);
+        let cz = 0.5 * (mesh.aabb_min[2] + mesh.aabb_max[2]);
+        let dx = mesh.aabb_max[0] - mesh.aabb_min[0];
+        let dy = mesh.aabb_max[1] - mesh.aabb_min[1];
+        let dz = mesh.aabb_max[2] - mesh.aabb_min[2];
+        let diag = (dx * dx + dy * dy + dz * dz).sqrt().max(1.0);
+        let radius = diag * radius_scale;
+        let (az, el) = (azim_deg.to_radians() as f32, elev_deg.to_radians() as f32);
+        let ce = el.cos();
+        let eye = [
+            cx + radius * ce * az.cos(),
+            cy + radius * ce * az.sin(),
+            cz + radius * el.sin(),
+        ];
+        let proj = perspective(45.0_f32.to_radians(), aspect, diag * 0.02, diag * 8.0);
+        let view = look_at(eye, [cx, cy, cz], [0.0, 0.0, 1.0]);
+        mat_mul(&proj, &view)
+    }
+
+    /// Interleave the SoA mesh into `[pos(3), normal(3), color(3)]`
+    /// vertices for a single vertex buffer.
+    fn interleave(mesh: &SceneMesh) -> Vec<f32> {
+        let mut v = Vec::with_capacity(mesh.positions.len() * 9);
+        for i in 0..mesh.positions.len() {
+            v.extend_from_slice(&mesh.positions[i]);
+            v.extend_from_slice(&mesh.normals[i]);
+            v.extend_from_slice(&mesh.colors[i]);
+        }
+        v
+    }
+
+    /// GPU resources for drawing one mesh. Shared by the headless and
+    /// windowed paths; `render_into` draws into any provided color/depth
+    /// view pair (offscreen MSAA texture, or a surface frame).
+    pub struct Renderer {
+        pub device: wgpu::Device,
+        pub queue: wgpu::Queue,
+        pipeline: wgpu::RenderPipeline,
+        bind_group: wgpu::BindGroup,
+        uniform: wgpu::Buffer,
+        vbuf: wgpu::Buffer,
+        ibuf: wgpu::Buffer,
+        n_indices: u32,
+    }
+
+    impl Renderer {
+        /// Build the pipeline + upload the mesh. `target_format` is the
+        /// color format the pipeline renders to (offscreen sRGB, or the
+        /// surface's format).
+        pub fn new(
+            device: wgpu::Device,
+            queue: wgpu::Queue,
+            mesh: &SceneMesh,
+            target_format: wgpu::TextureFormat,
+        ) -> Self {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("raster-shader"),
+                source: wgpu::ShaderSource::Wgsl(SHADER.into()),
+            });
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("raster-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+            let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("raster-uniform"),
+                size: 64, // one mat4x4<f32>
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("raster-bg"),
+                layout: &bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                }],
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("raster-layout"),
+                bind_group_layouts: &[Some(&bgl)],
+                immediate_size: 0,
+            });
+            let vertex_layout = wgpu::VertexBufferLayout {
+                array_stride: 9 * 4,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 12,
+                        shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x3,
+                        offset: 24,
+                        shader_location: 2,
+                    },
+                ],
+            };
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("raster-pipeline"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    buffers: &[vertex_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: SAMPLE_COUNT,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            });
+
+            let verts = interleave(mesh);
+            let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("raster-vbuf"),
+                contents: bytemuck::cast_slice(&verts),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("raster-ibuf"),
+                contents: bytemuck::cast_slice(&mesh.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+            Self {
+                device,
+                queue,
+                pipeline,
+                bind_group,
+                uniform,
+                vbuf,
+                ibuf,
+                n_indices: mesh.indices.len() as u32,
+            }
+        }
+
+        pub fn set_mvp(&self, mvp: &Mat4) {
+            self.queue
+                .write_buffer(&self.uniform, 0, bytemuck::cast_slice(mvp));
+        }
+
+        /// Record a render pass drawing the mesh into `color`/`resolve`
+        /// (MSAA color + resolve target) and `depth`.
+        pub fn draw(
+            &self,
+            encoder: &mut wgpu::CommandEncoder,
+            color_msaa: &wgpu::TextureView,
+            resolve: &wgpu::TextureView,
+            depth: &wgpu::TextureView,
+            clear: wgpu::Color,
+        ) {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("raster-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_msaa,
+                    depth_slice: None,
+                    resolve_target: Some(resolve),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(clear),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind_group, &[]);
+            pass.set_vertex_buffer(0, self.vbuf.slice(..));
+            pass.set_index_buffer(self.ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..self.n_indices, 0, 0..1);
+        }
+    }
+
+    /// Make the MSAA color + depth textures for a `w × h` target.
+    pub fn make_targets(
+        device: &wgpu::Device,
+        w: u32,
+        h: u32,
+        color_format: wgpu::TextureFormat,
+    ) -> (wgpu::TextureView, wgpu::TextureView) {
+        let extent = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        let color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-msaa-color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: color_format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: SAMPLE_COUNT,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        (
+            color.create_view(&Default::default()),
+            depth.create_view(&Default::default()),
+        )
+    }
+
+    /// Headless render → tight RGBA8 bytes (`w*h*4`).
+    async fn render_offscreen(mesh: &SceneMesh, w: u32, h: u32, mvp: Mat4) -> Vec<u8> {
+        let instance = wgpu::Instance::default();
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .expect("no GPU adapter");
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("raster-device"),
+                required_features: wgpu::Features::empty(),
+                required_limits: adapter.limits(),
+                ..Default::default()
+            })
+            .await
+            .expect("device");
+
+        let renderer = Renderer::new(device, queue, mesh, COLOR_FORMAT);
+        renderer.set_mvp(&mvp);
+
+        let (color_msaa, depth) = make_targets(&renderer.device, w, h, COLOR_FORMAT);
+        // Single-sample resolve target we can copy out of.
+        let resolve_tex = renderer.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("raster-resolve"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: COLOR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let resolve_view = resolve_tex.create_view(&Default::default());
+
+        let bpr = ((w * 4 + 255) / 256) * 256; // 256-byte aligned row
+        let out_buf = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("raster-readback"),
+            size: (bpr * h) as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = renderer
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("raster-enc"),
+            });
+        renderer.draw(
+            &mut encoder,
+            &color_msaa,
+            &resolve_view,
+            &depth,
+            wgpu::Color {
+                r: 0.06,
+                g: 0.066,
+                b: 0.09,
+                a: 1.0,
+            },
+        );
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &resolve_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &out_buf,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bpr),
+                    rows_per_image: Some(h),
+                },
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        renderer.queue.submit(std::iter::once(encoder.finish()));
+
+        let slice = out_buf.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        renderer
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .ok();
+        rx.recv().expect("map channel").expect("map failed");
+
+        let data = slice.get_mapped_range();
+        let mut tight = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h {
+            let start = (row * bpr) as usize;
+            tight.extend_from_slice(&data[start..start + (w * 4) as usize]);
+        }
+        drop(data);
+        out_buf.unmap();
+        tight
+    }
+
+    /// Headless rasterized render to PNG.
+    pub(crate) fn render_to_png(args: &Args, out: &Path, grid: usize) {
+        let mesh = build_scene_mesh(args, grid);
+        if mesh.is_empty() {
+            eprintln!("raster: nothing opaque to draw (empty mesh)");
+            return;
+        }
+        let w = args.resolution;
+        let h = args.resolution;
+        let mvp = camera_mvp(
+            &mesh,
+            args.cam_azim,
+            args.cam_elev,
+            0.9,
+            w as f32 / h as f32,
+        );
+        let rgba = pollster::block_on(render_offscreen(&mesh, w, h, mvp));
+        write_png_rgba(out, &rgba, w, h);
+        eprintln!(
+            "wrote {} ({}×{}) [raster, {} tris, grid {}]  azim={:.1}° elev={:.1}°",
+            out.display(),
+            w,
+            h,
+            mesh.triangle_count(),
+            grid,
+            args.cam_azim,
+            args.cam_elev
+        );
+    }
+
+    fn write_png_rgba(path: &Path, rgba: &[u8], w: u32, h: u32) {
+        let file = std::fs::File::create(path)
+            .unwrap_or_else(|e| panic!("create {}: {e}", path.display()));
+        let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("png header");
+        writer.write_image_data(rgba).expect("png data");
+    }
+
+    // ── Interactive winit orbit window ──────────────────────────────
+
+    /// Live GPU state bound to the window's surface.
+    struct Gfx {
+        window: Arc<Window>,
+        surface: wgpu::Surface<'static>,
+        config: wgpu::SurfaceConfiguration,
+        renderer: Renderer,
+        msaa: wgpu::TextureView,
+        depth: wgpu::TextureView,
+    }
+
+    impl Gfx {
+        async fn new(window: Arc<Window>, mesh: &SceneMesh) -> Self {
+            let instance = wgpu::Instance::default();
+            let surface = instance
+                .create_surface(window.clone())
+                .expect("create surface");
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::HighPerformance,
+                    force_fallback_adapter: false,
+                    compatible_surface: Some(&surface),
+                })
+                .await
+                .expect("no GPU adapter");
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("raster-window-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: adapter.limits(),
+                    ..Default::default()
+                })
+                .await
+                .expect("device");
+
+            let size = window.inner_size();
+            let (w, h) = (size.width.max(1), size.height.max(1));
+            let mut config = surface
+                .get_default_config(&adapter, w, h)
+                .expect("surface default config");
+            // Prefer an sRGB target so the shader's linear output is
+            // gamma-encoded correctly on present.
+            let caps = surface.get_capabilities(&adapter);
+            if let Some(srgb) = caps.formats.iter().copied().find(|f| f.is_srgb()) {
+                config.format = srgb;
+            }
+            surface.configure(&device, &config);
+
+            let renderer = Renderer::new(device, queue, mesh, config.format);
+            let (msaa, depth) = make_targets(&renderer.device, w, h, config.format);
+            Self {
+                window,
+                surface,
+                config,
+                renderer,
+                msaa,
+                depth,
+            }
+        }
+
+        fn resize(&mut self, w: u32, h: u32) {
+            if w == 0 || h == 0 {
+                return;
+            }
+            self.config.width = w;
+            self.config.height = h;
+            self.surface.configure(&self.renderer.device, &self.config);
+            let (msaa, depth) = make_targets(&self.renderer.device, w, h, self.config.format);
+            self.msaa = msaa;
+            self.depth = depth;
+        }
+
+        fn render(&mut self, mvp: &Mat4) {
+            let frame = match self.surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(f)
+                | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
+                // Surface needs reconfiguring; do it and skip this frame.
+                wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                    let (w, h) = (self.config.width, self.config.height);
+                    self.surface.configure(&self.renderer.device, &self.config);
+                    let _ = (w, h);
+                    return;
+                }
+                _ => return,
+            };
+            let view = frame.texture.create_view(&Default::default());
+            self.renderer.set_mvp(mvp);
+            let mut encoder =
+                self.renderer
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("raster-window-enc"),
+                    });
+            self.renderer.draw(
+                &mut encoder,
+                &self.msaa,
+                &view,
+                &self.depth,
+                wgpu::Color {
+                    r: 0.06,
+                    g: 0.066,
+                    b: 0.09,
+                    a: 1.0,
+                },
+            );
+            self.renderer
+                .queue
+                .submit(std::iter::once(encoder.finish()));
+            self.window.pre_present_notify();
+            frame.present();
+        }
+    }
+
+    /// winit application: owns the mesh + orbit-camera state, builds the
+    /// GPU surface on `resumed`, and drives render / input.
+    struct App {
+        mesh: SceneMesh,
+        title: String,
+        center: [f32; 3],
+        azim: f64,
+        elev: f64,
+        radius: f32,
+        home: ([f32; 3], f64, f64, f32),
+        left_down: bool,
+        right_down: bool,
+        last_cursor: Option<(f64, f64)>,
+        gfx: Option<Gfx>,
+    }
+
+    impl App {
+        fn new(mesh: SceneMesh, title: String, azim: f64, elev: f64) -> Self {
+            let center = [
+                0.5 * (mesh.aabb_min[0] + mesh.aabb_max[0]),
+                0.5 * (mesh.aabb_min[1] + mesh.aabb_max[1]),
+                0.5 * (mesh.aabb_min[2] + mesh.aabb_max[2]),
+            ];
+            let d = [
+                mesh.aabb_max[0] - mesh.aabb_min[0],
+                mesh.aabb_max[1] - mesh.aabb_min[1],
+                mesh.aabb_max[2] - mesh.aabb_min[2],
+            ];
+            let radius = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(1.0) * 0.9;
+            Self {
+                mesh,
+                title,
+                center,
+                azim,
+                elev,
+                radius,
+                home: (center, azim, elev, radius),
+                left_down: false,
+                right_down: false,
+                last_cursor: None,
+                gfx: None,
+            }
+        }
+
+        /// Camera basis (eye, right, up) for the current orbit state.
+        fn basis(&self) -> ([f32; 3], [f32; 3], [f32; 3]) {
+            let (az, el) = (self.azim.to_radians() as f32, self.elev.to_radians() as f32);
+            let ce = el.cos();
+            let eye = [
+                self.center[0] + self.radius * ce * az.cos(),
+                self.center[1] + self.radius * ce * az.sin(),
+                self.center[2] + self.radius * el.sin(),
+            ];
+            let fwd = normalize([
+                self.center[0] - eye[0],
+                self.center[1] - eye[1],
+                self.center[2] - eye[2],
+            ]);
+            let right = normalize(cross(fwd, [0.0, 0.0, 1.0]));
+            let up = cross(right, fwd);
+            (eye, right, up)
+        }
+
+        fn mvp(&self, aspect: f32) -> Mat4 {
+            let (eye, _, _) = self.basis();
+            let proj = perspective(
+                45.0_f32.to_radians(),
+                aspect,
+                self.radius * 0.02,
+                self.radius * 8.0,
+            );
+            let view = look_at(eye, self.center, [0.0, 0.0, 1.0]);
+            mat_mul(&proj, &view)
+        }
+    }
+
+    impl ApplicationHandler for App {
+        fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+            if self.gfx.is_some() {
+                return;
+            }
+            let attrs = Window::default_attributes()
+                .with_title(&self.title)
+                .with_inner_size(LogicalSize::new(900.0, 680.0));
+            // On Windows, winit calls OleInitialize for drag-and-drop,
+            // which requires the thread to be in a single-threaded COM
+            // apartment (STA). Other crates pulled in here (wmi via
+            // hardware-query, the CUDA/NVML stack) may already have put
+            // the thread in MTA, making OleInitialize fail with
+            // RPC_E_CHANGED_MODE and panic. We don't need drag-and-drop,
+            // so disable it — winit then skips OleInitialize entirely.
+            #[cfg(target_os = "windows")]
+            let attrs = {
+                use winit::platform::windows::WindowAttributesExtWindows;
+                attrs.with_drag_and_drop(false)
+            };
+            let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+            let gfx = pollster::block_on(Gfx::new(window, &self.mesh));
+            gfx.window.request_redraw();
+            self.gfx = Some(gfx);
+        }
+
+        fn window_event(
+            &mut self,
+            event_loop: &ActiveEventLoop,
+            _id: WindowId,
+            event: WindowEvent,
+        ) {
+            match event {
+                WindowEvent::CloseRequested => event_loop.exit(),
+                WindowEvent::Resized(size) => {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        gfx.resize(size.width, size.height);
+                        gfx.window.request_redraw();
+                    }
+                }
+                WindowEvent::RedrawRequested => {
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        let aspect = gfx.config.width as f32 / gfx.config.height.max(1) as f32;
+                        let mvp = {
+                            // borrow self immutably for mvp before mut render
+                            let (eye, _, _) = self.basis();
+                            let proj = perspective(
+                                45.0_f32.to_radians(),
+                                aspect,
+                                self.radius * 0.02,
+                                self.radius * 8.0,
+                            );
+                            let view = look_at(eye, self.center, [0.0, 0.0, 1.0]);
+                            mat_mul(&proj, &view)
+                        };
+                        self.gfx.as_mut().unwrap().render(&mvp);
+                    }
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let down = state == ElementState::Pressed;
+                    match button {
+                        MouseButton::Left => self.left_down = down,
+                        MouseButton::Right => self.right_down = down,
+                        _ => {}
+                    }
+                    if !down {
+                        self.last_cursor = None;
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    let (x, y) = (position.x, position.y);
+                    if let Some((px, py)) = self.last_cursor {
+                        let (dx, dy) = ((x - px) as f32, (y - py) as f32);
+                        if self.left_down {
+                            self.azim += dx as f64 * 0.3;
+                            self.elev = (self.elev - dy as f64 * 0.3).clamp(-89.0, 89.0);
+                            redraw(&self.gfx);
+                        } else if self.right_down {
+                            let (_, right, up) = self.basis();
+                            let s = self.radius * 0.0015;
+                            for i in 0..3 {
+                                self.center[i] += -right[i] * dx * s + up[i] * dy * s;
+                            }
+                            redraw(&self.gfx);
+                        }
+                    }
+                    if self.left_down || self.right_down {
+                        self.last_cursor = Some((x, y));
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    let dy = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y as f64,
+                        MouseScrollDelta::PixelDelta(p) => p.y / 50.0,
+                    };
+                    if dy.abs() > 0.0 {
+                        self.radius = (self.radius * 0.9_f32.powf(dy as f32)).clamp(1e-3, 1e7);
+                        redraw(&self.gfx);
+                    }
+                }
+                WindowEvent::KeyboardInput { event, .. } => {
+                    if event.state == ElementState::Pressed {
+                        match event.logical_key {
+                            Key::Named(NamedKey::Escape) => event_loop.exit(),
+                            Key::Character(ref c) if c.as_str() == "r" || c.as_str() == "R" => {
+                                let (c0, az, el, r) = self.home;
+                                self.center = c0;
+                                self.azim = az;
+                                self.elev = el;
+                                self.radius = r;
+                                redraw(&self.gfx);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn redraw(gfx: &Option<Gfx>) {
+        if let Some(g) = gfx {
+            g.window.request_redraw();
+        }
+    }
+
+    /// Open the interactive orbit window for the meshed scene.
+    pub(crate) fn run_window(args: &Args, grid: usize) {
+        let mesh = build_scene_mesh(args, grid);
+        if mesh.is_empty() {
+            eprintln!("raster: nothing opaque to draw (empty mesh)");
+            return;
+        }
+        eprintln!(
+            "[raster] {} triangles (grid {}). controls: left-drag orbit · \
+             right-drag pan · scroll zoom · r reset · Esc quit",
+            mesh.triangle_count(),
+            grid
+        );
+        let title = format!(
+            "preview_scene raster — {}",
+            super::resolve_case_path(&args.case_json)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("scene")
+        );
+        let event_loop = EventLoop::new().expect("event loop");
+        event_loop.set_control_flow(ControlFlow::Wait);
+        let mut app = App::new(mesh, title, args.cam_azim, args.cam_elev);
+        event_loop.run_app(&mut app).expect("run_app");
+    }
 }

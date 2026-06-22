@@ -34,8 +34,9 @@ use open_rust_mc::geometry::scene_io::load_scene_from_json;
 fn pwr_assembly_path() -> PathBuf {
     // Walk up from CARGO_MANIFEST_DIR until we find bench/icsbep.
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    while p.parent().is_some() && !p.join("bench/icsbep").is_dir() {
-        p = p.parent().unwrap().to_path_buf();
+    while !p.join("bench/icsbep").is_dir() {
+        let Some(parent) = p.parent() else { break };
+        p = parent.to_path_buf();
     }
     p.join("bench/icsbep/pwr_assembly_17x17.json")
 }
@@ -47,8 +48,7 @@ fn lattice_descent_resolves_distinct_elements() {
     // ICSBEP case JSONs wrap the SceneDto under a `scene` key alongside
     // benchmark metadata. scene_io::load_scene_from_json expects the
     // SceneDto at the top level — extract the inner `scene` first.
-    let value: serde_json::Value =
-        serde_json::from_str(&text).expect("scene JSON parse");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("scene JSON parse");
     let scene = value.get("scene").expect("case JSON has no `scene` block");
     let loaded = load_scene_from_json(&scene.to_string()).expect("scene_io");
     let geom = &loaded.geometry;
@@ -92,9 +92,21 @@ fn lattice_descent_resolves_distinct_elements() {
         "lattice descent collapsed between (0,0) and (8,8): both {:?}",
         l00,
     );
-    assert_eq!(l00, [0, 0, 0], "element (0,0,0) centre should resolve to lattice index [0,0,0]");
-    assert_eq!(l_far, [16, 0, 0], "element (16,0,0) centre should resolve to [16,0,0]");
-    assert_eq!(l_mid, [8, 8, 0], "element (8,8,0) centre should resolve to [8,8,0]");
+    assert_eq!(
+        l00,
+        [0, 0, 0],
+        "element (0,0,0) centre should resolve to lattice index [0,0,0]"
+    );
+    assert_eq!(
+        l_far,
+        [16, 0, 0],
+        "element (16,0,0) centre should resolve to [16,0,0]"
+    );
+    assert_eq!(
+        l_mid,
+        [8, 8, 0],
+        "element (8,8,0) centre should resolve to [8,8,0]"
+    );
 }
 
 #[test]
@@ -104,8 +116,7 @@ fn lattice_descent_resolves_pin_internals() {
     // ICSBEP case JSONs wrap the SceneDto under a `scene` key alongside
     // benchmark metadata. scene_io::load_scene_from_json expects the
     // SceneDto at the top level — extract the inner `scene` first.
-    let value: serde_json::Value =
-        serde_json::from_str(&text).expect("scene JSON parse");
+    let value: serde_json::Value = serde_json::from_str(&text).expect("scene JSON parse");
     let scene = value.get("scene").expect("case JSON has no `scene` block");
     let loaded = load_scene_from_json(&scene.to_string()).expect("scene_io");
     let geom = &loaded.geometry;
@@ -132,9 +143,8 @@ fn lattice_descent_resolves_pin_internals() {
     let s_center = find_cell_recursive(center_pos, geom).expect("stack at element centre");
     let s_edge = find_cell_recursive(edge_pos, geom).expect("stack at element edge");
 
-    let leaf_cell = |s: &open_rust_mc::geometry::CoordStack| {
-        s.last().map(|c| c.cell_idx).unwrap_or(u32::MAX)
-    };
+    let leaf_cell =
+        |s: &open_rust_mc::geometry::CoordStack| s.last().map(|c| c.cell_idx).unwrap_or(u32::MAX);
     let c_center = leaf_cell(&s_center);
     let c_edge = leaf_cell(&s_edge);
 

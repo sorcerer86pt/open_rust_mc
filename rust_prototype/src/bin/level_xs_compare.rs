@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use open_rust_mc::transport::xs_provider::{load_nuclide, NuclideKernels, ReactionKernel};
+use open_rust_mc::transport::xs_provider::{NuclideKernels, ReactionKernel, load_nuclide};
 
 // Energies span the bulk of the Godiva fission spectrum.
 const TEST_E_EV: &[f64] = &[5.0e5, 1.0e6, 1.5e6, 2.0e6, 3.0e6, 5.0e6];
@@ -113,7 +113,9 @@ fn xs_weighted_mean_q(rows: &[(usize, u32, f64, f64, f64)]) -> (f64, f64) {
 }
 
 #[cfg(feature = "cuda")]
-fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box<dyn std::error::Error>> {
+fn gpu_round_trip_check(
+    kern: &std::sync::Arc<NuclideKernels>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use open_rust_mc::gpu_transport::GpuTransportContext;
 
     let gpu = GpuTransportContext::new()?;
@@ -130,9 +132,7 @@ fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box
     let lev_q_h = gpu.stream().clone_dtoh(&nuc_data.level_q_values)?;
     let lev_has_k_h = gpu.stream().clone_dtoh(&nuc_data.level_has_kernel)?;
     let rank = nuc_data.rank as usize;
-    let grid_offset = gpu
-        .stream()
-        .clone_dtoh(&nuc_data.grid_offsets)?[0] as usize;
+    let grid_offset = gpu.stream().clone_dtoh(&nuc_data.grid_offsets)?[0] as usize;
     let n_e = gpu.stream().clone_dtoh(&nuc_data.n_energies)?[0] as usize;
     let grid = &energies_h[grid_offset..grid_offset + n_e];
 
@@ -192,7 +192,11 @@ fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box
                     worst_rel = rel;
                     worst_label = format!(
                         "level {li} (MT={mt}, Q={:.3e}): cpu={:.3e}, gpu={:.3e}, Δ={:+.2e} ({:+.2}%)",
-                        q, xs_cpu, xs_gpu, xs_gpu - xs_cpu, (xs_gpu - xs_cpu) / xs_cpu * 100.0
+                        q,
+                        xs_cpu,
+                        xs_gpu,
+                        xs_gpu - xs_cpu,
+                        (xs_gpu - xs_cpu) / xs_cpu * 100.0
                     );
                 }
                 if !header_done && (rel > 0.01 || li < 6) {
@@ -205,8 +209,17 @@ fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box
                 if rel > 0.01 || li < 6 {
                     println!(
                         "    {:>3} {:>4} {:>10.3e} {:>10.3e}  {:>12.4e} {:>12.4e}  {:>+9.3}%",
-                        li, mt_dev, thr, q_dev, xs_cpu, xs_gpu,
-                        if xs_cpu > 0.0 { (xs_gpu - xs_cpu) / xs_cpu * 100.0 } else { 0.0 }
+                        li,
+                        mt_dev,
+                        thr,
+                        q_dev,
+                        xs_cpu,
+                        xs_gpu,
+                        if xs_cpu > 0.0 {
+                            (xs_gpu - xs_cpu) / xs_cpu * 100.0
+                        } else {
+                            0.0
+                        }
                     );
                 }
                 if mt != 91 {
@@ -228,8 +241,16 @@ fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box
                 0.0
             }
         );
-        let mq_cpu = if xs_sum_cpu > 0.0 { q_cpu / xs_sum_cpu } else { 0.0 };
-        let mq_gpu = if xs_sum_gpu > 0.0 { q_gpu / xs_sum_gpu } else { 0.0 };
+        let mq_cpu = if xs_sum_cpu > 0.0 {
+            q_cpu / xs_sum_cpu
+        } else {
+            0.0
+        };
+        let mq_gpu = if xs_sum_gpu > 0.0 {
+            q_gpu / xs_sum_gpu
+        } else {
+            0.0
+        };
         println!(
             "    ⟨|Q|⟩  cpu={:.4e} eV  gpu={:.4e} eV  Δ={:+.2}%   (cross-check via rows: {:.4e})",
             mq_cpu,
@@ -250,7 +271,9 @@ fn gpu_round_trip_check(kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box
 }
 
 #[cfg(not(feature = "cuda"))]
-fn gpu_round_trip_check(_kern: &std::sync::Arc<NuclideKernels>) -> Result<(), Box<dyn std::error::Error>> {
+fn gpu_round_trip_check(
+    _kern: &std::sync::Arc<NuclideKernels>,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("(CUDA feature disabled; build with --features cuda)");
     Ok(())
 }
@@ -268,10 +291,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_AWR);
     let path = dir.join(&nuclide_file);
-    println!("Loading {} (AWR fallback = {})", path.display(), awr_fallback);
+    println!(
+        "Loading {} (AWR fallback = {})",
+        path.display(),
+        awr_fallback
+    );
     let kern = std::sync::Arc::new(load_nuclide(&path, 15, 0, awr_fallback, 2.43));
 
-    println!("\nLevel inventory ({} discrete levels):", kern.discrete_levels.len());
+    println!(
+        "\nLevel inventory ({} discrete levels):",
+        kern.discrete_levels.len()
+    );
     for (li, lvl) in kern.discrete_levels.iter().enumerate().take(12) {
         let kernel_kind = lvl.kernel.as_ref().map_or("none", |k| match k {
             ReactionKernel::Svd { .. } => "Svd",

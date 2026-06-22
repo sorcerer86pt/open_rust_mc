@@ -8,23 +8,23 @@
 
 use std::path::PathBuf;
 
-fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| {
-            // Try common locations
-            for p in [
-                "data/endfb-viii.1-hdf5/neutron/U235.h5",
-                "../data/endfb-viii.1-hdf5/neutron/U235.h5",
-                "../../data/endfb-viii.1-hdf5/neutron/U235.h5",
-            ] {
-                if PathBuf::from(p).exists() {
-                    return p.to_string();
-                }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let path = std::env::args().nth(1).unwrap_or_else(|| {
+        // Try common locations
+        for p in [
+            "data/endfb-viii.1-hdf5/neutron/U235.h5",
+            "../data/endfb-viii.1-hdf5/neutron/U235.h5",
+            "../../data/endfb-viii.1-hdf5/neutron/U235.h5",
+        ] {
+            if PathBuf::from(p).exists() {
+                return p.to_string();
             }
-            "data/endfb-viii.1-hdf5/neutron/U235.h5".to_string()
-        });
-    let nuclide_name = std::env::args().nth(2).unwrap_or_else(|| "U235".to_string());
+        }
+        "data/endfb-viii.1-hdf5/neutron/U235.h5".to_string()
+    });
+    let nuclide_name = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "U235".to_string());
     let mt: u32 = std::env::args()
         .nth(3)
         .and_then(|s| s.parse().ok())
@@ -56,9 +56,9 @@ fn main() {
 
     // Now print energy_out shape + first rows summary.
     if datasets.iter().any(|n| n == "energy_out") {
-        let ds = dist0.dataset("energy_out").unwrap();
-        let shape = ds.shape().unwrap();
-        let raw = ds.read_f64().unwrap();
+        let ds = dist0.dataset("energy_out")?;
+        let shape = ds.shape()?;
+        let raw = ds.read_f64()?;
         println!("\nenergy_out shape: {:?}, total_len: {}", shape, raw.len());
         let dattrs = ds.attrs().unwrap_or_default();
         for (k, v) in &dattrs {
@@ -68,7 +68,10 @@ fn main() {
         let n_cols = shape[1] as usize;
         // Rows are typical layout: 0=E_out, 1=PDF, 2=CDF, 3=mu_lo or mu, 4=PDF_mu, 5=CDF_mu.
         // We'll print the per-row min/max/sum (over all bins) to see if rows 3..6 are non-zero.
-        println!("\nPer-row min / mean / max / nonzero_count over {} bins:", n_cols);
+        println!(
+            "\nPer-row min / mean / max / nonzero_count over {} bins:",
+            n_cols
+        );
         for r in 0..n_rows {
             let row = &raw[r * n_cols..(r + 1) * n_cols];
             let mut mn = f64::INFINITY;
@@ -102,7 +105,7 @@ fn main() {
         let off_attr = dattrs.get("offsets");
         if let Some(hdf5_pure::AttrValue::I64Array(offs)) = off_attr {
             // Pick offset at incident energy ~5 MeV.
-            let energies = dist0.dataset("energy").unwrap().read_f64().unwrap();
+            let energies = dist0.dataset("energy")?.read_f64()?;
             // Find bracketing index for 5 MeV.
             let mut idx = 0usize;
             for (i, &e) in energies.iter().enumerate() {
@@ -112,10 +115,7 @@ fn main() {
                 }
             }
             let start = offs[idx] as usize;
-            let end = offs
-                .get(idx + 1)
-                .copied()
-                .unwrap_or(n_cols as i64) as usize;
+            let end = offs.get(idx + 1).copied().unwrap_or(n_cols as i64) as usize;
             println!(
                 "\nSample at E_in[{}]={:.3e} eV, bin range [{}, {}), len={}",
                 idx,
@@ -142,10 +142,13 @@ fn main() {
 
             // Now dump the mu slice for first 3 outgoing E_out bins. row 4
             // of energy_out is mu-table offsets per (E_in_bin, E_out_bin).
-            println!("\nmu slices for first 3 outgoing-E_out bins at E_in[{}]={:.3e} eV:", idx, energies[idx]);
-            let mu_ds = dist0.dataset("mu").unwrap();
-            let mu_shape = mu_ds.shape().unwrap();
-            let mu_raw = mu_ds.read_f64().unwrap();
+            println!(
+                "\nmu slices for first 3 outgoing-E_out bins at E_in[{}]={:.3e} eV:",
+                idx, energies[idx]
+            );
+            let mu_ds = dist0.dataset("mu")?;
+            let mu_shape = mu_ds.shape()?;
+            let mu_raw = mu_ds.read_f64()?;
             let mu_ncols = mu_shape[1] as usize;
             for k in 0..3.min(end - start) {
                 let mu_off_lo = raw[4 * n_cols + start + k] as usize;
@@ -179,9 +182,9 @@ fn main() {
     }
 
     if datasets.iter().any(|n| n == "mu") {
-        let ds = dist0.dataset("mu").unwrap();
-        let shape = ds.shape().unwrap();
-        let raw = ds.read_f64().unwrap();
+        let ds = dist0.dataset("mu")?;
+        let shape = ds.shape()?;
+        let raw = ds.read_f64()?;
         println!("\nmu dataset shape: {:?}, total_len: {}", shape, raw.len());
         let dattrs = ds.attrs().unwrap_or_default();
         for (k, v) in &dattrs {
@@ -233,4 +236,5 @@ fn main() {
             }
         }
     }
+    Ok(())
 }

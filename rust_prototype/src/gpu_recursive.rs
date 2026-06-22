@@ -36,9 +36,7 @@ use crate::geometry::{Geometry, Vec3};
 /// Defaults to `sm_86` (this dev box's Ampere) if the attribute
 /// query fails — strictly more permissive than panicking and lets
 /// older drivers limp through.
-pub fn device_nvrtc_arch(
-    ctx: &Arc<CudaContext>,
-) -> Result<String, Box<dyn std::error::Error>> {
+pub fn device_nvrtc_arch(ctx: &Arc<CudaContext>) -> Result<String, Box<dyn std::error::Error>> {
     use cudarc::driver::sys::CUdevice_attribute as Attr;
     let major = ctx
         .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
@@ -374,6 +372,9 @@ pub struct GpuRecursiveContext {
     pub k_find_cell_batch: CudaFunction,
     pub k_trace_step_batch: CudaFunction,
     pub k_multi_step_walk: CudaFunction,
+    /// Preview-only: perspective ray-cast of the geometry (see
+    /// `gpu/cuda/geom_recursive_raycast.cu` and `raycast_image`).
+    pub k_raycast: CudaFunction,
     pub k_const_xs_transport: CudaFunction,
     // Event-based pipeline kernels (Tramm et al., PHYSOR 2022 —
     // "Toward Portable GPU Acceleration of the OpenMC Monte Carlo
@@ -440,6 +441,7 @@ pub struct GpuRecursiveContext {
 
 const RECURSIVE_DEVICE: &str = include_str!("../gpu/cuda/geom_recursive.cu");
 const RECURSIVE_KERNELS: &str = include_str!("../gpu/cuda/geom_recursive_kernels.cu");
+const RAYCAST_KERNEL: &str = include_str!("../gpu/cuda/geom_recursive_raycast.cu");
 const CONST_XS_KERNEL: &str = include_str!("../gpu/cuda/transport_recursive_const.cu");
 const TRANSPORT_KERNELS: &str = include_str!("../gpu/cuda/transport.cu");
 const TRANSPORT_EVENT_BASED: &str = include_str!("../gpu/cuda/transport_event_based.cu");
@@ -471,12 +473,32 @@ fn assemble_kernel_source() -> String {
     // come first, then the recursive geometry primitives, then the
     // kernels that consume both.
     format!(
-        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}",
+        "{}\n{RECURSIVE_DEVICE}\n{}\n{}\n{}\n{}",
         strip(TRANSPORT_KERNELS),
         strip(RECURSIVE_KERNELS),
         strip(CONST_XS_KERNEL),
         strip(TRANSPORT_EVENT_BASED),
+        // Preview ray-cast kernel — only needs the gr_* helpers from
+        // RECURSIVE_DEVICE above, so it can go last.
+        strip(RAYCAST_KERNEL),
     )
+}
+
+/// Reusable device scratch + output for repeated `raycast_reuse`
+/// calls (interactive orbiting). Holds the per-thread `evals` scratch,
+/// the `0x00RRGGBB` output framebuffer, and the uploaded palette /
+/// opaque mask. Buffers grow lazily, so a steady window size reuses
+/// them with zero per-frame `cudaMalloc` / memset — the difference
+/// between a laggy and a smooth drag.
+pub struct RaycastBuffers {
+    evals: CudaSlice<f64>,
+    out: CudaSlice<u32>,
+    palette: CudaSlice<i32>,
+    opaque: CudaSlice<i32>,
+    evals_cap: usize,
+    out_pixels: usize,
+    pal_len: usize,
+    opq_len: usize,
 }
 
 impl GpuRecursiveContext {
@@ -549,6 +571,9 @@ impl GpuRecursiveContext {
         let k_multi_step_walk = module
             .load_function("multi_step_walk")
             .map_err(|e| format!("kernel load (walk): {e}"))?;
+        let k_raycast = module
+            .load_function("raycast_preview")
+            .map_err(|e| format!("kernel load (raycast): {e}"))?;
         let k_const_xs_transport = module
             .load_function("const_xs_transport_persistent")
             .map_err(|e| format!("kernel load (const_xs): {e}"))?;
@@ -739,6 +764,7 @@ impl GpuRecursiveContext {
             k_find_cell_batch,
             k_trace_step_batch,
             k_multi_step_walk,
+            k_raycast,
             k_const_xs_transport,
             k_eb_init_stacks,
             k_eb_trace_and_sample,
@@ -879,6 +905,237 @@ impl GpuRecursiveContext {
         let host_out = self.stream.clone_dtoh(&out).map_err(|e| e.to_string())?;
         let _ = (xs, ys, zs);
         Ok(host_out)
+    }
+
+    /// Ray-cast a `width × height` 3D preview of the geometry on the
+    /// GPU and return a row-major `0x00RRGGBB` framebuffer.
+    ///
+    /// `cam_*` are the camera basis vectors (forward / right / up must
+    /// be unit-length and orthonormal) and position; `aabb_*` are the
+    /// scene bounds used for ray entry + step scaling. `palette` is
+    /// `[r,g,b]` per material (0..255, length `3 * n_materials`) and
+    /// `opaque` is 0/1 per material (air/void = 0 so the camera sees
+    /// through them). The kernel walks the same device CSG as transport
+    /// (`gr_find_cell` / `gr_trace_step`), so the image is faithful to
+    /// the real geometry.
+    /// Seed an empty [`RaycastBuffers`]. Buffers are sized to the first
+    /// `raycast_reuse` request and grown thereafter. Build one per
+    /// interactive viewer and reuse it for every orbit frame.
+    pub fn raycast_buffers(&self) -> Result<RaycastBuffers, String> {
+        let s = &self.stream;
+        Ok(RaycastBuffers {
+            evals: s.alloc_zeros::<f64>(1).map_err(|e| e.to_string())?,
+            out: s.alloc_zeros::<u32>(1).map_err(|e| e.to_string())?,
+            palette: s.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?,
+            opaque: s.alloc_zeros::<i32>(1).map_err(|e| e.to_string())?,
+            evals_cap: 0,
+            out_pixels: 0,
+            pal_len: 0,
+            opq_len: 0,
+        })
+    }
+
+    /// Ray-cast a `width × height` 3D preview into caller-owned
+    /// [`RaycastBuffers`], returning a row-major `0x00RRGGBB`
+    /// framebuffer. Device buffers are reallocated only when they need
+    /// to grow (the `evals` scratch) or the pixel count changes (the
+    /// output), and the palette / opaque mask are re-uploaded only when
+    /// their length changes — so a steady-size orbit drag does **no**
+    /// per-frame allocation, just the launch + a device→host copy.
+    ///
+    /// See [`Self::raycast_image`] for the argument semantics.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raycast_reuse(
+        &self,
+        buf: &mut RaycastBuffers,
+        cam_pos: [f64; 3],
+        cam_fwd: [f64; 3],
+        cam_right: [f64; 3],
+        cam_up: [f64; 3],
+        tan_half_fov: f64,
+        width: usize,
+        height: usize,
+        aabb_min: [f64; 3],
+        aabb_max: [f64; 3],
+        palette: &[i32],
+        opaque: &[i32],
+    ) -> Result<Vec<u32>, String> {
+        let n_pixels = width * height;
+        if n_pixels == 0 {
+            return Ok(Vec::new());
+        }
+        let stream = &self.stream;
+
+        // Grow / resize only when necessary. The evals scratch only
+        // ever grows (a smaller frame reuses the larger buffer); the
+        // output tracks the exact pixel count so the dtoh length is
+        // right; palette / opaque re-upload only on a length change.
+        let need_evals = self.n_surfaces.max(1) as usize * n_pixels;
+        if need_evals > buf.evals_cap {
+            buf.evals = stream
+                .alloc_zeros::<f64>(need_evals)
+                .map_err(|e| e.to_string())?;
+            buf.evals_cap = need_evals;
+        }
+        if n_pixels != buf.out_pixels {
+            buf.out = stream
+                .alloc_zeros::<u32>(n_pixels)
+                .map_err(|e| e.to_string())?;
+            buf.out_pixels = n_pixels;
+        }
+        if palette.len() != buf.pal_len {
+            buf.palette = stream.clone_htod(palette).map_err(|e| e.to_string())?;
+            buf.pal_len = palette.len();
+        }
+        if opaque.len() != buf.opq_len {
+            buf.opaque = stream.clone_htod(opaque).map_err(|e| e.to_string())?;
+            buf.opq_len = opaque.len();
+        }
+
+        let block = 128_u32;
+        let grid = (n_pixels as u32).div_ceil(block);
+        let cfg = LaunchConfig {
+            grid_dim: (grid, 1, 1),
+            block_dim: (block, 1, 1),
+            shared_mem_bytes: 0,
+        };
+
+        // Scalars must outlive the launch (launch_builder borrows them).
+        let (cpx, cpy, cpz) = (cam_pos[0], cam_pos[1], cam_pos[2]);
+        let (fx, fy, fz) = (cam_fwd[0], cam_fwd[1], cam_fwd[2]);
+        let (rx, ry, rz) = (cam_right[0], cam_right[1], cam_right[2]);
+        let (ux, uy, uz) = (cam_up[0], cam_up[1], cam_up[2]);
+        let thf = tan_half_fov;
+        let asp = width as f64 / height as f64;
+        let w_i = width as i32;
+        let h_i = height as i32;
+        let (amnx, amny, amnz) = (aabb_min[0], aabb_min[1], aabb_min[2]);
+        let (amxx, amxy, amxz) = (aabb_max[0], aabb_max[1], aabb_max[2]);
+        let n_mat = opaque.len() as i32;
+        let n_surf = self.n_surfaces;
+        let root = self.root_universe;
+
+        let mut launch = stream.launch_builder(&self.k_raycast);
+        launch
+            // camera
+            .arg(&cpx)
+            .arg(&cpy)
+            .arg(&cpz)
+            .arg(&fx)
+            .arg(&fy)
+            .arg(&fz)
+            .arg(&rx)
+            .arg(&ry)
+            .arg(&rz)
+            .arg(&ux)
+            .arg(&uy)
+            .arg(&uz)
+            .arg(&thf)
+            .arg(&asp)
+            .arg(&w_i)
+            .arg(&h_i)
+            // aabb
+            .arg(&amnx)
+            .arg(&amny)
+            .arg(&amnz)
+            .arg(&amxx)
+            .arg(&amxy)
+            .arg(&amxz)
+            // shading
+            .arg(&buf.palette)
+            .arg(&buf.opaque)
+            .arg(&n_mat)
+            // surfaces
+            .arg(&self.surf_type)
+            .arg(&self.surf_params)
+            .arg(&self.surf_bc)
+            .arg(&n_surf)
+            // cells
+            .arg(&self.cell_region_off)
+            .arg(&self.cell_region_len)
+            .arg(&self.cell_fill_type)
+            .arg(&self.cell_fill_data)
+            .arg(&self.cell_aabb_min)
+            .arg(&self.cell_aabb_max)
+            // region tree
+            .arg(&self.region_op)
+            .arg(&self.region_arg)
+            // universes
+            .arg(&self.univ_cells_off)
+            .arg(&self.univ_cells_len)
+            .arg(&self.univ_surfaces_off)
+            .arg(&self.univ_surfaces_len)
+            .arg(&self.univ_cell_indices)
+            .arg(&self.univ_surface_indices)
+            .arg(&root)
+            // lattices
+            .arg(&self.lat_origin)
+            .arg(&self.lat_pitch)
+            .arg(&self.lat_shape)
+            .arg(&self.lat_universes_off)
+            .arg(&self.lat_universes)
+            // hex lattices
+            .arg(&self.hex_center)
+            .arg(&self.hex_pitch_xy)
+            .arg(&self.hex_pitch_z)
+            .arg(&self.hex_n_rings)
+            .arg(&self.hex_n_axial)
+            .arg(&self.hex_orientation)
+            .arg(&self.hex_universes_off)
+            .arg(&self.hex_universes)
+            // scratch + output
+            .arg(&mut buf.evals)
+            .arg(&mut buf.out);
+        // SAFETY: argument list matches `raycast_preview`'s signature.
+        unsafe {
+            launch.launch(cfg).map_err(|e| e.to_string())?;
+        }
+
+        self.stream.clone_dtoh(&buf.out).map_err(|e| e.to_string())
+    }
+
+    /// One-shot ray-cast (headless PNG). Allocates a throwaway
+    /// [`RaycastBuffers`] and delegates to [`Self::raycast_reuse`]; for
+    /// repeated frames build buffers once and call `raycast_reuse`.
+    ///
+    /// `cam_*` are the camera basis vectors (forward / right / up must
+    /// be unit-length and orthonormal) and position; `aabb_*` are the
+    /// scene bounds used for ray entry + step scaling. `palette` is
+    /// `[r,g,b]` per material (0..255, length `3 * n_materials`) and
+    /// `opaque` is 0/1 per material (air/void = 0 so the camera sees
+    /// through them). The kernel walks the same device CSG as transport
+    /// (`gr_find_cell` / `gr_trace_step`), so the image is faithful to
+    /// the real geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn raycast_image(
+        &self,
+        cam_pos: [f64; 3],
+        cam_fwd: [f64; 3],
+        cam_right: [f64; 3],
+        cam_up: [f64; 3],
+        tan_half_fov: f64,
+        width: usize,
+        height: usize,
+        aabb_min: [f64; 3],
+        aabb_max: [f64; 3],
+        palette: &[i32],
+        opaque: &[i32],
+    ) -> Result<Vec<u32>, String> {
+        let mut buf = self.raycast_buffers()?;
+        self.raycast_reuse(
+            &mut buf,
+            cam_pos,
+            cam_fwd,
+            cam_right,
+            cam_up,
+            tan_half_fov,
+            width,
+            height,
+            aabb_min,
+            aabb_max,
+            palette,
+            opaque,
+        )
     }
 }
 
@@ -1799,17 +2056,13 @@ impl TransportBuffers {
             // (nuc_local * 16 + ebin) is packed into d_event_ebin so
             // the kernel signatures don't change.
             d_event_ebin: mk_i(n)?,
-            d_type_count: mk_i(
-                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
-            )?,
+            d_type_count: mk_i(EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS)?,
             d_type_offsets: mk_i(
                 EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS + 1,
             )?,
             d_type_class_total: mk_i(EV_TYPE_COUNT)?,
             d_type_class_offsets: mk_i(EV_TYPE_COUNT)?,
-            d_type_scatter: mk_i(
-                EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS,
-            )?,
+            d_type_scatter: mk_i(EV_TYPE_COUNT * crate::MAX_NUCLIDES_PER_MATERIAL * EB_N_EBINS)?,
             d_sorted_idx: mk_i(n)?,
             d_type_total: mk_i(1)?,
         })
@@ -1952,8 +2205,12 @@ pub fn recommend_refill_factor(
 ) -> Option<f64> {
     use cudarc::driver::sys::CUdevice_attribute as Attr;
 
-    let sm_count = ctx.attribute(Attr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT).ok()? as usize;
-    let cc_major = ctx.attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR).ok()?;
+    let sm_count = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
+        .ok()? as usize;
+    let cc_major = ctx
+        .attribute(Attr::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .ok()?;
     let max_threads_per_sm = ctx
         .attribute(Attr::CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR)
         .ok()? as usize;
@@ -2336,7 +2593,9 @@ impl GpuRecursiveContext {
                 .arg(&mut buffers.d_cnt_leak);
             // SAFETY: kernel signature matches the argument list
             // (gr_init_stacks in transport_event_based.cu).
-            unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+            unsafe {
+                launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+            }
         }
 
         // Event loop. One iteration = one geom step + one reaction
@@ -2462,7 +2721,9 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_fis_in_sq);
                 // SAFETY: kernel signature matches the argument list
                 // (gr_trace_and_sample in transport_event_based.cu).
-                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
             }
 
             // Step 3: device-side prefix sum over the 80 (class,bin)
@@ -2484,7 +2745,9 @@ impl GpuRecursiveContext {
                     block_dim: (1, 1, 1),
                     shared_mem_bytes: 0,
                 };
-                unsafe { launch.launch(one_thread).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch.launch(one_thread).map_err(|e| e.to_string())?;
+                }
             }
 
             // Step 4: DtoH the 5 per-class totals (20 bytes) for
@@ -2494,7 +2757,9 @@ impl GpuRecursiveContext {
                 .clone_dtoh(&buffers.d_type_class_total)
                 .map_err(|e| e.to_string())?;
             let total: i32 = class_totals.iter().sum();
-            if total == 0 { break; }
+            if total == 0 {
+                break;
+            }
 
             // Step 5: gr_partition — scatter alive indices into
             // d_sorted_idx by (class, energy_bin), reading
@@ -2509,11 +2774,13 @@ impl GpuRecursiveContext {
                     .arg(&buffers.d_type_offsets)
                     .arg(&mut buffers.d_type_scatter)
                     .arg(&mut buffers.d_sorted_idx);
-                unsafe { launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch.launch(cfg_n(n as u32)).map_err(|e| e.to_string())?;
+                }
             }
 
-            let c_el  = class_totals[0];
-            let c_in  = class_totals[1];
+            let c_el = class_totals[0];
+            let c_in = class_totals[1];
             let c_fis = class_totals[2];
             let c_n2n = class_totals[3];
             let c_n3n = class_totals[4];
@@ -2543,7 +2810,11 @@ impl GpuRecursiveContext {
                     .arg(&sab_nuc_idx)
                     .arg(&mut buffers.d_cnt_el)
                     .arg(&mut buffers.d_cnt_therm);
-                unsafe { launch.launch(cfg_n(c_el as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_el as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
             if c_in > 0 {
                 let mut launch = stream.launch_builder(&self.k_eb_inelastic);
@@ -2564,7 +2835,11 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_e_inel_in_sq)
                     .arg(&mut buffers.d_e_inel_out)
                     .arg(&mut buffers.d_q_inel);
-                unsafe { launch.launch(cfg_n(c_in as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_in as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
             // In survival-biasing mode `gr_trace_and_sample` banks
             // expected fissions in-place (implicit capture), so no
@@ -2605,7 +2880,11 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_cnt_fis)
                     .arg(&mut buffers.d_e_fis_in)
                     .arg(&mut buffers.d_e_fis_in_sq);
-                unsafe { launch.launch(cfg_n(c_fis as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_fis as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
             if c_multi > 0 {
                 let mut launch = stream.launch_builder(&self.k_eb_multi);
@@ -2648,7 +2927,11 @@ impl GpuRecursiveContext {
                     .arg(&mut buffers.d_sec_rng_inc)
                     .arg(&mut buffers.d_sec_write)
                     .arg(&n_i32);
-                unsafe { launch.launch(cfg_n(c_multi as u32)).map_err(|e| e.to_string())?; }
+                unsafe {
+                    launch
+                        .launch(cfg_n(c_multi as u32))
+                        .map_err(|e| e.to_string())?;
+                }
             }
 
             // PHYSOR 2022 Optimization F (opt-in via the `refill` arg).
@@ -2826,38 +3109,90 @@ impl GpuRecursiveContext {
             }
         }
 
-        let fis_count =
-            stream.clone_dtoh(&buffers.d_fis_count).map_err(|e| e.to_string())?[0].max(0) as usize;
+        let fis_count = stream
+            .clone_dtoh(&buffers.d_fis_count)
+            .map_err(|e| e.to_string())?[0]
+            .max(0) as usize;
         let n_banked = fis_count.min(fis_capacity);
-        let fx = stream.clone_dtoh(&buffers.d_fis_x).map_err(|e| e.to_string())?;
-        let fy = stream.clone_dtoh(&buffers.d_fis_y).map_err(|e| e.to_string())?;
-        let fz = stream.clone_dtoh(&buffers.d_fis_z).map_err(|e| e.to_string())?;
-        let fe = stream.clone_dtoh(&buffers.d_fis_e).map_err(|e| e.to_string())?;
+        let fx = stream
+            .clone_dtoh(&buffers.d_fis_x)
+            .map_err(|e| e.to_string())?;
+        let fy = stream
+            .clone_dtoh(&buffers.d_fis_y)
+            .map_err(|e| e.to_string())?;
+        let fz = stream
+            .clone_dtoh(&buffers.d_fis_z)
+            .map_err(|e| e.to_string())?;
+        let fe = stream
+            .clone_dtoh(&buffers.d_fis_e)
+            .map_err(|e| e.to_string())?;
         let fission_bank: Vec<(f64, f64, f64, f64)> = (0..n_banked)
             .map(|i| (fx[i], fy[i], fz[i], fe[i]))
             .collect();
 
-        let cnt_coll = stream.clone_dtoh(&buffers.d_cnt_coll).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_fis = stream.clone_dtoh(&buffers.d_cnt_fis).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_leak = stream.clone_dtoh(&buffers.d_cnt_leak).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_surf = stream.clone_dtoh(&buffers.d_cnt_surf).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_el = stream.clone_dtoh(&buffers.d_cnt_el).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_inel = stream.clone_dtoh(&buffers.d_cnt_inel).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_cap = stream.clone_dtoh(&buffers.d_cnt_cap).map_err(|e| e.to_string())?[0] as u64;
-        let e_fis_in = stream.clone_dtoh(&buffers.d_e_fis_in).map_err(|e| e.to_string())?[0];
-        let e_el_in = stream.clone_dtoh(&buffers.d_e_el_in).map_err(|e| e.to_string())?[0];
-        let e_inel_in = stream.clone_dtoh(&buffers.d_e_inel_in).map_err(|e| e.to_string())?[0];
-        let e_inel_out = stream.clone_dtoh(&buffers.d_e_inel_out).map_err(|e| e.to_string())?[0];
-        let e_fis_in_sq = stream.clone_dtoh(&buffers.d_e_fis_in_sq).map_err(|e| e.to_string())?[0];
-        let e_el_in_sq = stream.clone_dtoh(&buffers.d_e_el_in_sq).map_err(|e| e.to_string())?[0];
-        let e_inel_in_sq = stream.clone_dtoh(&buffers.d_e_inel_in_sq).map_err(|e| e.to_string())?[0];
-        let q_inel = stream.clone_dtoh(&buffers.d_q_inel).map_err(|e| e.to_string())?[0];
-        let cnt_n2n = stream.clone_dtoh(&buffers.d_cnt_n2n).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_n3n = stream.clone_dtoh(&buffers.d_cnt_n3n).map_err(|e| e.to_string())?[0] as u64;
-        let cnt_nxn_out = stream.clone_dtoh(&buffers.d_cnt_nxn_out).map_err(|e| e.to_string())?[0] as u64;
-        let e_nxn_out = stream.clone_dtoh(&buffers.d_e_nxn_out).map_err(|e| e.to_string())?[0];
-        let e_nxn_out_sq = stream.clone_dtoh(&buffers.d_e_nxn_out_sq).map_err(|e| e.to_string())?[0];
-        let cnt_therm = stream.clone_dtoh(&buffers.d_cnt_therm).map_err(|e| e.to_string())?[0] as u64;
+        let cnt_coll = stream
+            .clone_dtoh(&buffers.d_cnt_coll)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_fis = stream
+            .clone_dtoh(&buffers.d_cnt_fis)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_leak = stream
+            .clone_dtoh(&buffers.d_cnt_leak)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_surf = stream
+            .clone_dtoh(&buffers.d_cnt_surf)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_el = stream
+            .clone_dtoh(&buffers.d_cnt_el)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_inel = stream
+            .clone_dtoh(&buffers.d_cnt_inel)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_cap = stream
+            .clone_dtoh(&buffers.d_cnt_cap)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let e_fis_in = stream
+            .clone_dtoh(&buffers.d_e_fis_in)
+            .map_err(|e| e.to_string())?[0];
+        let e_el_in = stream
+            .clone_dtoh(&buffers.d_e_el_in)
+            .map_err(|e| e.to_string())?[0];
+        let e_inel_in = stream
+            .clone_dtoh(&buffers.d_e_inel_in)
+            .map_err(|e| e.to_string())?[0];
+        let e_inel_out = stream
+            .clone_dtoh(&buffers.d_e_inel_out)
+            .map_err(|e| e.to_string())?[0];
+        let e_fis_in_sq = stream
+            .clone_dtoh(&buffers.d_e_fis_in_sq)
+            .map_err(|e| e.to_string())?[0];
+        let e_el_in_sq = stream
+            .clone_dtoh(&buffers.d_e_el_in_sq)
+            .map_err(|e| e.to_string())?[0];
+        let e_inel_in_sq = stream
+            .clone_dtoh(&buffers.d_e_inel_in_sq)
+            .map_err(|e| e.to_string())?[0];
+        let q_inel = stream
+            .clone_dtoh(&buffers.d_q_inel)
+            .map_err(|e| e.to_string())?[0];
+        let cnt_n2n = stream
+            .clone_dtoh(&buffers.d_cnt_n2n)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_n3n = stream
+            .clone_dtoh(&buffers.d_cnt_n3n)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let cnt_nxn_out = stream
+            .clone_dtoh(&buffers.d_cnt_nxn_out)
+            .map_err(|e| e.to_string())?[0] as u64;
+        let e_nxn_out = stream
+            .clone_dtoh(&buffers.d_e_nxn_out)
+            .map_err(|e| e.to_string())?[0];
+        let e_nxn_out_sq = stream
+            .clone_dtoh(&buffers.d_e_nxn_out_sq)
+            .map_err(|e| e.to_string())?[0];
+        let cnt_therm = stream
+            .clone_dtoh(&buffers.d_cnt_therm)
+            .map_err(|e| e.to_string())?[0] as u64;
 
         // k_eff = fission_bank.len() / total_histories. When refill is
         // active, total_histories = n + refilled_count (host reads the
@@ -2956,5 +3291,109 @@ impl GpuRecursiveContext {
         std::mem::size_of_val(&self.surf_type)
             + std::mem::size_of_val(&self.surf_params)
             + std::mem::size_of_val(&self.surf_bc)
+    }
+}
+
+#[cfg(test)]
+mod raycast_tests {
+    use super::*;
+    use crate::geometry::CellId;
+    use crate::geometry::cell::{Cell, inside, intersect_all, outside};
+    use crate::geometry::surface::{BoundaryCondition, Surface};
+
+    /// Background colour the kernel paints for pixel-row `py` of `h`
+    /// (must match `geom_recursive_raycast.cu`).
+    fn bg(py: usize, h: usize) -> u32 {
+        let f = py as f64 / (h.max(1) as f64);
+        let r = (16.0 + 14.0 * f) as u32;
+        let g = (17.0 + 16.0 * f) as u32;
+        let b = (23.0 + 19.0 * f) as u32;
+        (r << 16) | (g << 8) | b
+    }
+
+    /// Inner solid sphere (mat 0) inside an outer shell (mat 1).
+    fn two_sphere() -> Geometry {
+        let s_inner = Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 2.0,
+            bc: BoundaryCondition::Transmission,
+        };
+        let s_outer = Surface::Sphere {
+            center: Vec3::new(0.0, 0.0, 0.0),
+            radius: 4.0,
+            bc: BoundaryCondition::Vacuum,
+        };
+        let inner = Cell::new(CellId(0), inside(0), CellFill::Material(0));
+        let shell = Cell::new(
+            CellId(1),
+            intersect_all(vec![inside(1), outside(0)]),
+            CellFill::Material(1),
+        );
+        Geometry::flat(vec![s_inner, s_outer], vec![inner, shell]).expect("two-sphere geometry")
+    }
+
+    /// The GPU ray-cast kernel renders the outer shell as a coherent
+    /// shaded object (centre pixel is the material, not background; the
+    /// object covers a meaningful fraction of the frame). Skips cleanly
+    /// when no CUDA device is present so the suite passes on GPU-less
+    /// machines.
+    #[test]
+    fn gpu_raycast_renders_two_sphere() {
+        let geom = two_sphere();
+        let ctx = match GpuRecursiveContext::build(&geom, 1) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("skipping gpu_raycast_renders_two_sphere — no CUDA device: {e}");
+                return;
+            }
+        };
+
+        // Orbit camera looking at the origin.
+        let target = Vec3::new(0.0, 0.0, 0.0);
+        let (azim, elev, radius) = (0.6_f64, 0.3_f64, 12.0_f64);
+        let ce = elev.cos();
+        let dir = Vec3::new(ce * azim.cos(), ce * azim.sin(), elev.sin());
+        let pos = target + dir * radius;
+        let fwd = (target - pos).normalized();
+        let world_up = Vec3::new(0.0, 0.0, 1.0);
+        let right = fwd.cross(world_up).normalized();
+        let up = right.cross(fwd).normalized();
+        let tan_half_fov = (45.0_f64.to_radians() * 0.5).tan();
+
+        let (w, h) = (64usize, 64usize);
+        let palette: Vec<i32> = vec![220, 80, 60, 90, 160, 220];
+        let opaque: Vec<i32> = vec![1, 1];
+
+        let buf = ctx
+            .raycast_image(
+                [pos.x, pos.y, pos.z],
+                [fwd.x, fwd.y, fwd.z],
+                [right.x, right.y, right.z],
+                [up.x, up.y, up.z],
+                tan_half_fov,
+                w,
+                h,
+                [-5.0, -5.0, -5.0],
+                [5.0, 5.0, 5.0],
+                &palette,
+                &opaque,
+            )
+            .expect("raycast_image");
+
+        assert_eq!(buf.len(), w * h);
+        // Centre pixel must hit the sphere, not background.
+        let centre = buf[(h / 2) * w + w / 2];
+        assert_ne!(
+            centre,
+            bg(h / 2, h),
+            "centre pixel should be the shaded shell, not background"
+        );
+        // Object should cover a meaningful fraction of the frame.
+        let hits = buf
+            .iter()
+            .enumerate()
+            .filter(|(i, p)| **p != bg(*i / w, h))
+            .count();
+        assert!(hits > w * h / 8, "object coverage too small: {hits}");
     }
 }

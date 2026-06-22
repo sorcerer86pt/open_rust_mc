@@ -73,9 +73,8 @@ pub fn read_key<R: Read>(r: &mut R) -> Result<NuclideKey, DecodeError> {
     let path_len = read_u32(r)? as usize;
     let mut path_bytes = vec![0_u8; path_len];
     r.read_exact(&mut path_bytes)?;
-    let path = std::path::PathBuf::from(
-        String::from_utf8(path_bytes).map_err(|_| DecodeError::BadUtf8)?,
-    );
+    let path =
+        std::path::PathBuf::from(String::from_utf8(path_bytes).map_err(|_| DecodeError::BadUtf8)?);
     let mut file_hash = [0_u8; 32];
     r.read_exact(&mut file_hash)?;
     let mut policy_hash = [0_u8; 32];

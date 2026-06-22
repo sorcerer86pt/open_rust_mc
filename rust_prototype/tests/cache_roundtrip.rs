@@ -112,7 +112,10 @@ fn byte_exact_roundtrip(file: &str, awr_fb: f64, nu_bar_fb: f64) {
             (a_law, b_law),
             (FissionEnergyLaw::Watt(_), FissionEnergyLaw::Watt(_))
                 | (FissionEnergyLaw::Maxwell(_), FissionEnergyLaw::Maxwell(_))
-                | (FissionEnergyLaw::Evaporation(_), FissionEnergyLaw::Evaporation(_))
+                | (
+                    FissionEnergyLaw::Evaporation(_),
+                    FissionEnergyLaw::Evaporation(_)
+                )
         );
         assert!(
             same_variant,
@@ -234,17 +237,8 @@ fn decoded_kernel_lookup_matches_live_load_at_off_grid_energies() {
             "total XS mismatch at E = {e:.3e}: live = {} dec = {}",
             a.total, b.total,
         );
-        assert_eq!(
-            a.fission, b.fission,
-            "fission XS mismatch at E = {e:.3e}",
-        );
-        assert_eq!(
-            a.capture, b.capture,
-            "capture XS mismatch at E = {e:.3e}",
-        );
-        assert_eq!(
-            a.elastic, b.elastic,
-            "elastic XS mismatch at E = {e:.3e}",
-        );
+        assert_eq!(a.fission, b.fission, "fission XS mismatch at E = {e:.3e}",);
+        assert_eq!(a.capture, b.capture, "capture XS mismatch at E = {e:.3e}",);
+        assert_eq!(a.elastic, b.elastic, "elastic XS mismatch at E = {e:.3e}",);
     }
 }

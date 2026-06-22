@@ -159,15 +159,16 @@ pub fn collapsed_reaction_xs(
         if !b.active {
             continue;
         }
-        if b.tallies.rr_flux.len() != n_cells
-            || b.tallies.rr_rate.len() != n_cells * stride
-        {
+        if b.tallies.rr_flux.len() != n_cells || b.tallies.rr_rate.len() != n_cells * stride {
             continue;
         }
         n_active += 1;
         flux_sum += b.tallies.rr_flux[target_cell];
         let base = target_cell * stride;
-        for (acc, &v) in rate_sum.iter_mut().zip(&b.tallies.rr_rate[base..base + stride]) {
+        for (acc, &v) in rate_sum
+            .iter_mut()
+            .zip(&b.tallies.rr_rate[base..base + stride])
+        {
             *acc += v;
         }
     }
