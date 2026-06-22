@@ -16,6 +16,14 @@ faer = "0.22"
 ndarray = "0.16"
 serde = { version = "1", features = ["derive"] }
 cudarc = { version = "0.19", features = ["cuda-version-from-build-system", "cublas", "nccl"] }
+# CubeCL — write GPU kernels once in Rust, compile to CUDA (NVIDIA),
+# HIP/ROCm (AMD), Vulkan/Metal/WebGPU (cross-vendor). The `wgpu`
+# runtime is always on so the geometry preview renders on any GPU
+# without a vendor SDK; the `cuda` runtime is additive for NVIDIA
+# fast paths. Alpha crate — pinned exact. This is the migration
+# target that replaces the hand-maintained gpu/cuda/*.cu kernels +
+# cudarc (see the transport-port + cudarc-removal tasks).
+cubecl = { version = "=0.10.0", features = ["wgpu"] }
 rayon = "1"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
@@ -63,6 +71,7 @@ thiserror = { workspace = true }
 toml = { workspace = true }
 dashmap = { workspace = true }
 raw-cpuid = { workspace = true }
+cubecl = { workspace = true }
 cudarc = { workspace = true, optional = true }
 # Direct dep on minifb for the preview_scene binary's cursor-aware
 # event loop. The upstream `rust_mc_sim::preview::show_window` zooms

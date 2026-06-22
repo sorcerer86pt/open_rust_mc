@@ -230,6 +230,16 @@ struct Args {
     #[arg(long = "render3d-out")]
     render3d_out: Option<PathBuf>,
 
+    /// Headless 3D render via the **CubeCL** GPU ray-caster (no window).
+    /// Same analytic-CSG walk as `--render3d-out` but runs the kernel on
+    /// the GPU through CubeCL — cross-vendor (Vulkan / Metal / DX12 on
+    /// any NVIDIA/AMD/Intel card, plus native CUDA/ROCm), in f64. This
+    /// is the production 3D path; the CPU `--render3d-out` is the
+    /// reference fallback. Honours `--cam-azim` / `--cam-elev` / `--zoom`
+    /// / `--resolution`.
+    #[arg(long = "cubecl-out")]
+    cubecl_out: Option<PathBuf>,
+
     /// Camera azimuth (degrees around +z) for the 3D view's initial /
     /// headless angle.
     #[arg(long, default_value_t = 35.0)]
@@ -1418,8 +1428,78 @@ fn spawn_in_new_window() -> bool {
     }
 }
 
+/// Headless 3D render via the CubeCL cross-vendor GPU ray-caster.
+/// Mirrors `render3d::render_to_png`'s framing (orbit camera around the
+/// scene AABB, `--zoom` scales the distance) but runs the analytic-CSG
+/// walk on the GPU in f64. Writes a PNG.
+fn render_cubecl_to_png(args: &Args, out: &Path) {
+    use open_rust_mc::geometry::flat::build_host_tables;
+    use open_rust_mc::gpu_render::{CameraParams, pack_scene, render_rgb_wgpu};
+
+    let LoadedPreview {
+        geometry,
+        palette,
+        names,
+        ..
+    } = load_preview(args);
+    let opaque = render3d::opaque_mask(&names);
+    let tables = build_host_tables(&geometry);
+    let packed = pack_scene(&tables, &geometry, &palette, &opaque);
+
+    let target = [
+        (packed.aabb_min[0] + packed.aabb_max[0]) * 0.5,
+        (packed.aabb_min[1] + packed.aabb_max[1]) * 0.5,
+        (packed.aabb_min[2] + packed.aabb_max[2]) * 0.5,
+    ];
+    let ex = packed.aabb_max[0] - packed.aabb_min[0];
+    let ey = packed.aabb_max[1] - packed.aabb_min[1];
+    let ez = packed.aabb_max[2] - packed.aabb_min[2];
+    let radius = (ex * ex + ey * ey + ez * ez).sqrt() * 0.9 * args.zoom;
+    let cam = CameraParams::orbit(
+        target,
+        args.cam_azim.to_radians(),
+        args.cam_elev.to_radians(),
+        radius,
+        45.0,
+        1.0,
+    );
+
+    let w = args.resolution;
+    let h = args.resolution;
+    let pixels = render_rgb_wgpu(&packed, &cam, w, h);
+
+    // u32 0xRRGGBB → RGB8 and write PNG.
+    let rgb: Vec<[u8; 3]> = pixels
+        .iter()
+        .map(|&c| [((c >> 16) & 0xff) as u8, ((c >> 8) & 0xff) as u8, (c & 0xff) as u8])
+        .collect();
+    let file = std::fs::File::create(out)
+        .unwrap_or_else(|e| panic!("create {}: {e}", out.display()));
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), w, h);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().expect("png header");
+    let flat: &[u8] = bytemuck::cast_slice(&rgb);
+    writer.write_image_data(flat).expect("png data");
+    eprintln!(
+        "wrote {} ({}×{}) [CubeCL/GPU]  azim={:.1}° elev={:.1}°  zoom={}",
+        out.display(),
+        w,
+        h,
+        args.cam_azim,
+        args.cam_elev,
+        args.zoom
+    );
+}
+
 fn main() {
     let args = Args::parse();
+
+    // Headless 3D ray-cast render to PNG via CubeCL (cross-vendor GPU).
+    if let Some(out) = args.cubecl_out.as_deref() {
+        render_cubecl_to_png(&args, out);
+        return;
+    }
 
     // Headless 3D ray-cast render to PNG (works without `preview`).
     if let Some(out) = args.render3d_out.as_deref() {
@@ -2510,7 +2590,11 @@ mod render3d {
         let opaque = opaque_mask(&names);
         let aabb = scene_aabb(&geometry);
         let target = (aabb.0 + aabb.1) * 0.5;
-        let radius = (aabb.1 - aabb.0).length() * 0.9;
+        // `--zoom` scales the orbit radius (same role as the 2D path):
+        // factors < 1 push the camera in to frame a fixture suspended
+        // inside a large containment sphere / pool, where the raw AABB
+        // diagonal would otherwise shrink it to a speck.
+        let radius = (aabb.1 - aabb.0).length() * 0.9 * args.zoom;
         let cam = Camera::orbit(
             target,
             args.cam_azim.to_radians(),
