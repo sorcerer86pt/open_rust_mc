@@ -1443,8 +1443,35 @@ fn render_cubecl_to_png(args: &Args, out: &Path) {
         ..
     } = load_preview(args);
     let opaque = render3d::opaque_mask(&names);
+    // Per-material haze (alpha-per-cm) for the transparent fluids:
+    // air / void / vacuum stay perfectly clear (0); water-like
+    // moderators / coolants / solutions get a faint absorption so the
+    // ray accumulates a tint through them and depth reads. Tuned so a
+    // typical pin pitch (~1-2 cm) stays nearly clear while a ~10 cm
+    // water span visibly dims — fuel structure shows through but the
+    // tank still reads as filled.
+    let absorb: Vec<f64> = names
+        .iter()
+        .map(|n| {
+            let n = n.to_lowercase();
+            if n.contains("air") || n.contains("void") || n.contains("vacuum") {
+                0.0
+            } else if n.contains("water")
+                || n.contains("h2o")
+                || n.contains("d2o")
+                || n.contains("moderator")
+                || n.contains("coolant")
+                || n.contains("solution")
+                || n.contains("borated")
+            {
+                0.045
+            } else {
+                0.0
+            }
+        })
+        .collect();
     let tables = build_host_tables(&geometry);
-    let packed = pack_scene(&tables, &geometry, &palette, &opaque);
+    let packed = pack_scene(&tables, &geometry, &palette, &opaque, &absorb);
 
     let target = [
         (packed.aabb_min[0] + packed.aabb_max[0]) * 0.5,
@@ -2297,15 +2324,30 @@ mod render3d {
         }
     }
 
-    /// `true` for materials that should be drawn solid. Air / void /
-    /// vacuum (and the no-material `Void` fill) are transparent so the
-    /// camera sees the objects suspended inside them.
+    /// `true` for materials that should be drawn solid. Transparent
+    /// materials let the camera see the structure suspended inside them:
+    /// not just air / void / vacuum, but also the moderating / coolant
+    /// **fluids** that otherwise wrap every lattice scene in a solid
+    /// block (water, heavy water, the borated coolant, fissile
+    /// solutions). Without this a 17×17 assembly or an LCT rod cluster
+    /// renders as an opaque striped cube; with it the fuel-pin forest
+    /// reads in 3D — the standard reactor-geometry preview convention.
     pub(crate) fn opaque_mask(names: &[String]) -> Vec<bool> {
         names
             .iter()
             .map(|n| {
                 let n = n.to_lowercase();
-                !(n.contains("air") || n.contains("void") || n.contains("vacuum"))
+                let transparent = n.contains("air")
+                    || n.contains("void")
+                    || n.contains("vacuum")
+                    || n.contains("water")
+                    || n.contains("h2o")
+                    || n.contains("d2o")
+                    || n.contains("moderator")
+                    || n.contains("coolant")
+                    || n.contains("solution")
+                    || n.contains("borated");
+                !transparent
             })
             .collect()
     }

@@ -78,6 +78,9 @@ const M_OFF_OPAQUE: usize = 28;
 const M_OFF_SURF_PARAMS: usize = 29;
 const M_OFF_LAT_ORIGIN: usize = 32;
 const M_OFF_LAT_PITCH: usize = 33;
+/// Per-material absorption coefficient (alpha-per-cm) for transparent
+/// fluids. 0 = perfectly clear (air/void); ~0.05 = water-like haze.
+const M_OFF_ABSORB: usize = 34;
 
 const META_LEN: usize = 40;
 
@@ -214,11 +217,17 @@ fn push_f64(blob: &mut Vec<f64>, src: &[f64]) -> u32 {
 }
 
 /// Pack the flattened geometry + palette into upload-ready buffers.
+///
+/// `absorb[m]` is the per-cm alpha (haze) of transparent material `m`:
+/// `0.0` = perfectly clear (air / void), a small positive value (≈0.04)
+/// gives a translucent fluid the ray accumulates through. Opaque
+/// materials ignore it. Length must match `palette` / `opaque`.
 pub fn pack_scene(
     t: &HostTables,
     geom: &Geometry,
     palette: &[[u8; 3]],
     opaque: &[bool],
+    absorb: &[f64],
 ) -> PackedScene {
     let mut idata: Vec<i32> = Vec::new();
     let mut fdata: Vec<f64> = Vec::new();
@@ -250,6 +259,7 @@ pub fn pack_scene(
     meta[M_OFF_SURF_PARAMS] = push_f64(&mut fdata, &t.surf_params);
     meta[M_OFF_LAT_ORIGIN] = push_f64(&mut fdata, &t.lat_origin);
     meta[M_OFF_LAT_PITCH] = push_f64(&mut fdata, &t.lat_pitch);
+    meta[M_OFF_ABSORB] = push_f64(&mut fdata, absorb);
 
     meta[M_N_SURFACES] = geom.surfaces.len() as u32;
     meta[M_ROOT_UNIVERSE] = geom.root_universe.0 as u32;
@@ -626,6 +636,7 @@ fn raycast(
         let surf_params_off = meta[M_OFF_SURF_PARAMS];
         let lat_origin_off = meta[M_OFF_LAT_ORIGIN];
         let lat_pitch_off = meta[M_OFF_LAT_PITCH];
+        let absorb_off = meta[M_OFF_ABSORB];
         let n_materials = meta[M_N_MATERIALS];
         let root_universe = meta[M_ROOT_UNIVERSE];
 
@@ -688,11 +699,21 @@ fn raycast(
             let mut st_lat_iz = Array::<i32>::new(MAX_DEPTH_USIZE);
             let mut normal = Array::<f64>::new(3usize);
 
+            // Front-to-back alpha compositing accumulators. The ray-march
+            // visits surfaces strictly in order, so transparency is exact
+            // (true OIT) with no depth buffer / peeling / A2C — those are
+            // rasterizer workarounds for out-of-order primitives, which a
+            // ray-marcher doesn't have. `trans` = remaining transmittance
+            // (1 → fully clear so far); `acc_*` = pre-multiplied colour.
+            let mut acc_r = f64::new(0.0);
+            let mut acc_g = f64::new(0.0);
+            let mut acc_b = f64::new(0.0);
+            let mut trans = f64::new(1.0);
+
             let mut done = false;
             for _iter in 0..4096u32 {
                 if !done {
                     if t > tmax {
-                        color = bg;
                         done = true;
                     } else {
                         let wx = ox + rdx * t;
@@ -911,7 +932,13 @@ fn raycast(
                                     gg = f64::cast_from(idata[(palette_off + u32::cast_from(m) * 3u32 + 1u32) as usize]);
                                     bb = f64::cast_from(idata[(palette_off + u32::cast_from(m) * 3u32 + 2u32) as usize]);
                                 }
-                                color = pack_rgb(rr * lit, gg * lit, bb * lit);
+                                // Composite the (fully opaque) hit under whatever
+                                // translucent fluid the ray already passed through,
+                                // then terminate this ray.
+                                acc_r = acc_r + trans * rr * lit;
+                                acc_g = acc_g + trans * gg * lit;
+                                acc_b = acc_b + trans * bb * lit;
+                                trans = f64::new(0.0);
                                 done = true;
                             } else {
                                 // Transparent (air/void) — step to next surface
@@ -967,16 +994,51 @@ fn raycast(
                                 }
 
                                 if best_dist >= f64::new(1e29) {
-                                    color = bg;
                                     done = true;
                                 } else {
+                                    // Composite the translucent fluid segment the
+                                    // ray just crossed: attenuate transmittance by
+                                    // exp(-absorb·length) and accumulate a faint
+                                    // tint of the fluid's palette colour so deeper
+                                    // structure reads dimmer (Beer-Lambert, exact
+                                    // front-to-back — no peeling needed).
+                                    let mut absb = f64::new(0.0);
+                                    let mut tr = f64::new(120.0);
+                                    let mut tg = f64::new(140.0);
+                                    let mut tbl = f64::new(190.0);
+                                    if u32::cast_from(m) < n_materials {
+                                        absb = fdata[(absorb_off + u32::cast_from(m)) as usize];
+                                        tr = f64::cast_from(idata[(palette_off + u32::cast_from(m) * 3u32) as usize]);
+                                        tg = f64::cast_from(idata[(palette_off + u32::cast_from(m) * 3u32 + 1u32) as usize]);
+                                        tbl = f64::cast_from(idata[(palette_off + u32::cast_from(m) * 3u32 + 2u32) as usize]);
+                                    }
+                                    if absb > f64::new(0.0) {
+                                        let seg_alpha = f64::new(1.0) - (-(absb * best_dist)).exp();
+                                        let contrib = trans * seg_alpha;
+                                        // Tint dimmed so the fluid reads as a haze,
+                                        // not a solid fill.
+                                        acc_r = acc_r + contrib * tr * 0.35;
+                                        acc_g = acc_g + contrib * tg * 0.35;
+                                        acc_b = acc_b + contrib * tbl * 0.35;
+                                        trans = trans - contrib;
+                                    }
                                     t = t + best_dist + eps;
+                                    if trans < f64::new(0.02) {
+                                        done = true;
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            // Final composite: accumulated colour over the background by
+            // whatever transmittance remains.
+            color = pack_rgb(
+                acc_r + trans * f64::cast_from((bg / 65536u32) % 256u32),
+                acc_g + trans * f64::cast_from((bg / 256u32) % 256u32),
+                acc_b + trans * f64::cast_from(bg % 256u32),
+            );
             let _ = surf_bc_off;
         }
         out[pid] = color;
@@ -1191,10 +1253,11 @@ mod tests {
     fn wgpu_sphere_render_smoke() {
         let geom = sphere_in_box();
         let tables = build_host_tables(&geom);
-        // Material 0 red+opaque, material 1 "air" transparent.
+        // Material 0 red+opaque, material 1 "air" transparent (clear).
         let palette = [[200u8, 60, 60], [10, 10, 10]];
         let opaque = [true, false];
-        let packed = pack_scene(&tables, &geom, &palette, &opaque);
+        let absorb = [0.0f64, 0.0];
+        let packed = pack_scene(&tables, &geom, &palette, &opaque, &absorb);
 
         let w = 96u32;
         let h = 96u32;
