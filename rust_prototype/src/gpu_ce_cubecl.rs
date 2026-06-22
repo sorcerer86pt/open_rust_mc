@@ -98,6 +98,68 @@ pub fn extract_ce(
         .collect()
 }
 
+// ── Elastic angular distribution (tabulated μ) ──────────────────────
+//
+// CPU source: `NuclideKernels::elastic_angle: Option<AngularDistribution>`
+// = { energies[N_e], distributions[N_e]: TabularMuDist{ mu, pdf, cdf,
+// histogram } }. Flattened for the device so the CubeCL sampler mirrors
+// `AngularDistribution::sample_mu` (bracket E, stochastic bin pick) +
+// `TabularMuDist::sample_with_xi` (linear or quadratic CDF inversion).
+
+/// Flat per-nuclide elastic angular data, device-ready.
+#[derive(Clone, Default)]
+pub struct AngularCe {
+    /// Incident energy grid (eV). Empty ⇒ isotropic fallback.
+    pub energies: Vec<f64>,
+    /// Per-energy μ-distribution slices into the flat mu/cdf/pdf arrays:
+    /// distribution `i` occupies `[dist_off[i] .. dist_off[i]+dist_len[i]]`.
+    pub dist_off: Vec<i32>,
+    pub dist_len: Vec<i32>,
+    /// `1` if histogram interpolation (linear CDF), `0` if lin-lin
+    /// (quadratic CDF inversion). Per energy point.
+    pub histogram: Vec<i32>,
+    /// Flat concatenated breakpoint arrays across all energy points.
+    pub mu: Vec<f64>,
+    pub cdf: Vec<f64>,
+    pub pdf: Vec<f64>,
+}
+
+/// Extract elastic angular data per nuclide (parallel to `extract_ce`).
+/// Nuclides with no elastic angular distribution get an empty
+/// `AngularCe` (isotropic fallback at sample time).
+pub fn extract_angular(
+    nuclides: &[std::sync::Arc<crate::transport::xs_provider::NuclideKernels>],
+) -> Vec<AngularCe> {
+    nuclides
+        .iter()
+        .map(|nuc| {
+            let Some(ang) = nuc.elastic_angle.as_ref() else {
+                return AngularCe::default();
+            };
+            let mut out = AngularCe {
+                energies: ang.energies.clone(),
+                ..Default::default()
+            };
+            for d in &ang.distributions {
+                out.dist_off.push(out.mu.len() as i32);
+                out.dist_len.push(d.mu.len() as i32);
+                out.histogram.push(i32::from(d.histogram));
+                out.mu.extend_from_slice(&d.mu);
+                out.cdf.extend_from_slice(&d.cdf);
+                // pdf may be empty (reader left it out) → pad to mu len
+                // with zeros so the device can read it unconditionally;
+                // the sampler treats all-zero pdf as the linear path.
+                if d.pdf.len() == d.mu.len() {
+                    out.pdf.extend_from_slice(&d.pdf);
+                } else {
+                    out.pdf.extend(std::iter::repeat_n(0.0, d.mu.len()));
+                }
+            }
+            out
+        })
+        .collect()
+}
+
 /// One material = a list of (nuclide index, atom density). Mirrors the
 /// CPU `Material.nuclides` after resolution; the device sums
 /// `Σ_t(E) = Σ_nuc n_d · σ_t,nuc(E)` over these.
@@ -337,5 +399,263 @@ pub fn total_micro_xs<R: Runtime>(
         );
     }
     let bytes = client.read_one(out_h).expect("ce readback");
+    f64::from_bytes(&bytes).to_vec()
+}
+
+// ── Packed elastic angular blob (one nuclide) ───────────────────────
+//
+// Layout mirrors the σ pack: an i32 header + i32/f64 blobs. For the
+// A/B we pack a single nuclide at a time (the kernel samples "nuclide
+// 0"), same as the σ lookup A/B.
+//
+// idata: [ n_e,
+//          eoff (energies start in fdata),
+//          doff (dist_off start in idata, len n_e),
+//          dlen (dist_len start in idata, len n_e),
+//          hoff (histogram start in idata, len n_e),
+//          muoff (mu start in fdata),
+//          cdfoff (cdf start in fdata),
+//          pdfoff (pdf start in fdata) ]
+//   then the dist_off / dist_len / histogram arrays inline.
+// fdata: [ energies | mu | cdf | pdf ].
+
+/// One-nuclide angular pack for the device sampler.
+pub struct PackedAngular {
+    pub idata: Vec<i32>,
+    pub fdata: Vec<f64>,
+}
+
+const A_N_E: usize = 0;
+const A_EOFF: usize = 1;
+const A_DOFF: usize = 2;
+const A_DLEN: usize = 3;
+const A_HOFF: usize = 4;
+const A_MUOFF: usize = 5;
+const A_CDFOFF: usize = 6;
+const A_PDFOFF: usize = 7;
+const A_HDR: usize = 8;
+
+/// Pack one nuclide's elastic angular data for the device.
+pub fn pack_angular(ang: &AngularCe) -> PackedAngular {
+    let mut idata = vec![0i32; A_HDR];
+    let mut fdata: Vec<f64> = Vec::new();
+    let n_e = ang.energies.len();
+    idata[A_N_E] = n_e as i32;
+
+    idata[A_EOFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&ang.energies);
+
+    idata[A_DOFF] = idata.len() as i32;
+    idata.extend_from_slice(&ang.dist_off);
+    idata[A_DLEN] = idata.len() as i32;
+    idata.extend_from_slice(&ang.dist_len);
+    idata[A_HOFF] = idata.len() as i32;
+    idata.extend_from_slice(&ang.histogram);
+
+    idata[A_MUOFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&ang.mu);
+    idata[A_CDFOFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&ang.cdf);
+    idata[A_PDFOFF] = fdata.len() as i32;
+    fdata.extend_from_slice(&ang.pdf);
+
+    if fdata.is_empty() {
+        fdata.push(0.0);
+    }
+    if idata.len() == A_HDR {
+        idata.push(0); // ensure non-empty blob
+    }
+    PackedAngular { idata, fdata }
+}
+
+// ── Device μ sampler (mirrors TabularMuDist::sample_with_xi) ─────────
+
+/// Invert the μ CDF of distribution at `[doff .. doff+dlen]` (slices
+/// into mu/cdf/pdf) for a pre-drawn `xi`. `hist` selects linear (1) vs
+/// quadratic (0) inversion. Mirrors `TabularMuDist::sample_with_xi`.
+#[cube]
+#[allow(unused_assignments)]
+fn sample_mu_bin(
+    fdata: &Array<f64>,
+    mu_off: u32,
+    cdf_off: u32,
+    pdf_off: u32,
+    doff: u32,
+    dlen: u32,
+    hist: i32,
+    xi: f64,
+) -> f64 {
+    let mut out = 2.0 * xi - 1.0; // n<2 fallback
+    if dlen >= 2u32 {
+        // binary search cdf for bracket idx (local within the dist).
+        let mut lo = u32::new(0);
+        let mut hi = dlen - 1u32;
+        for _i in 0..32u32 {
+            if lo + 1u32 < hi {
+                let mid = (lo + hi) / 2u32;
+                if fdata[(cdf_off + doff + mid) as usize] <= xi {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        // clamp lo to dlen-2
+        let idx = select(lo > dlen - 2u32, dlen - 2u32, lo);
+        let cdf_lo = fdata[(cdf_off + doff + idx) as usize];
+        let cdf_hi = fdata[(cdf_off + doff + idx + 1u32) as usize];
+        let mu_lo = fdata[(mu_off + doff + idx) as usize];
+        let mu_hi = fdata[(mu_off + doff + idx + 1u32) as usize];
+        let dmu = mu_hi - mu_lo;
+        let dc = cdf_hi - cdf_lo;
+        if dc.abs() < f64::new(1e-15) {
+            out = clamp_mu(mu_lo);
+        } else {
+            if dmu.abs() < f64::new(1e-15) {
+                out = clamp_mu(mu_lo);
+            } else {
+                if hist == 1i32 {
+                    let frac = (xi - cdf_lo) / dc;
+                    out = clamp_mu(mu_lo + frac * dmu);
+                } else {
+                    // quadratic lin-lin inversion.
+                    let pdf_lo = fdata[(pdf_off + doff + idx) as usize];
+                    let pdf_hi = fdata[(pdf_off + doff + idx + 1u32) as usize];
+                    let a = (pdf_hi - pdf_lo) / (2.0 * dmu);
+                    let b = pdf_lo;
+                    let c = cdf_lo - xi;
+                    let mut x = f64::new(0.0);
+                    if a.abs() < f64::new(1e-14) {
+                        if b.abs() < f64::new(1e-30) {
+                            x = (xi - cdf_lo) / dc * dmu;
+                        } else {
+                            x = -c / b;
+                        }
+                    } else {
+                        let disc = b * b - 4.0 * a * c;
+                        let sq = select(disc > f64::new(0.0), disc, f64::new(0.0)).sqrt();
+                        // physical root in [0, dmu]
+                        let x1 = (-b + sq) / (2.0 * a);
+                        let x2 = (-b - sq) / (2.0 * a);
+                        let x1_ok = x1 >= f64::new(0.0) && x1 <= dmu;
+                        x = select(x1_ok, x1, x2);
+                    }
+                    out = clamp_mu(mu_lo + x);
+                }
+            }
+        }
+    }
+    out
+}
+
+#[cube]
+fn clamp_mu(m: f64) -> f64 {
+    let lo = select(m > f64::new(-1.0), m, f64::new(-1.0));
+    select(lo < f64::new(1.0), lo, f64::new(1.0))
+}
+
+/// Sample an elastic μ at incident `energy` for the packed nuclide,
+/// given two uniforms (`xi_bin` for the stochastic energy-bin pick,
+/// `xi_mu` for the CDF inversion). Mirrors `AngularDistribution::sample_mu`.
+#[cube]
+#[allow(unused_assignments)]
+fn sample_mu_at(idata: &Array<i32>, fdata: &Array<f64>, energy: f64, xi_bin: f64, xi_mu: f64) -> f64 {
+    let n_e = u32::cast_from(idata[A_N_E]);
+    let mut out = 2.0 * xi_mu - 1.0; // isotropic fallback (no data)
+    if n_e >= 1u32 {
+        let eoff = u32::cast_from(idata[A_EOFF]);
+        let doff_base = u32::cast_from(idata[A_DOFF]);
+        let dlen_base = u32::cast_from(idata[A_DLEN]);
+        let hoff_base = u32::cast_from(idata[A_HOFF]);
+        let mu_off = u32::cast_from(idata[A_MUOFF]);
+        let cdf_off = u32::cast_from(idata[A_CDFOFF]);
+        let pdf_off = u32::cast_from(idata[A_PDFOFF]);
+
+        // bracket energy: pick a distribution index `pick`.
+        let e0 = fdata[eoff as usize];
+        let elast = fdata[(eoff + n_e - 1u32) as usize];
+        let mut pick = u32::new(0);
+        if energy <= e0 {
+            pick = u32::new(0);
+        } else {
+            if energy >= elast {
+                pick = n_e - 1u32;
+            } else {
+                // binary search for lower bracket idx
+                let mut lo = u32::new(0);
+                let mut hi = n_e - 1u32;
+                for _i in 0..32u32 {
+                    if lo + 1u32 < hi {
+                        let mid = (lo + hi) / 2u32;
+                        if fdata[(eoff + mid) as usize] <= energy {
+                            lo = mid;
+                        } else {
+                            hi = mid;
+                        }
+                    }
+                }
+                let e_lo = fdata[(eoff + lo) as usize];
+                let e_hi = fdata[(eoff + lo + 1u32) as usize];
+                let r = (energy - e_lo) / (e_hi - e_lo);
+                pick = select(xi_bin < r, lo + 1u32, lo);
+            }
+        }
+        let doff = u32::cast_from(idata[(doff_base + pick) as usize]);
+        let dlen = u32::cast_from(idata[(dlen_base + pick) as usize]);
+        let hist = idata[(hoff_base + pick) as usize];
+        out = sample_mu_bin(fdata, mu_off, cdf_off, pdf_off, doff, dlen, hist, xi_mu);
+    }
+    out
+}
+
+/// Test kernel: sample one μ per thread at the given (energy, xi_bin,
+/// xi_mu) triples. Lets the host drive a CPU-vs-GPU distribution A/B.
+#[cube(launch)]
+fn ce_sample_mu_kernel(
+    idata: &Array<i32>,
+    fdata: &Array<f64>,
+    energy: &Array<f64>,
+    xi_bin: &Array<f64>,
+    xi_mu: &Array<f64>,
+    out: &mut Array<f64>,
+) {
+    let tid = ABSOLUTE_POS;
+    if tid < out.len() {
+        out[tid] = sample_mu_at(idata, fdata, energy[tid], xi_bin[tid], xi_mu[tid]);
+    }
+}
+
+/// Sample μ on the GPU for one packed nuclide at the given inputs.
+pub fn sample_mu_gpu<R: Runtime>(
+    device: &R::Device,
+    packed: &PackedAngular,
+    energy: &[f64],
+    xi_bin: &[f64],
+    xi_mu: &[f64],
+) -> Vec<f64> {
+    let client = R::client(device);
+    let n = energy.len();
+    let idata_h = client.create_from_slice(i32::as_bytes(&packed.idata));
+    let fdata_h = client.create_from_slice(f64::as_bytes(&packed.fdata));
+    let e_h = client.create_from_slice(f64::as_bytes(energy));
+    let xb_h = client.create_from_slice(f64::as_bytes(xi_bin));
+    let xm_h = client.create_from_slice(f64::as_bytes(xi_mu));
+    let out_h = client.empty(n * core::mem::size_of::<f64>());
+    let threads = 64u32;
+    let blocks = n.div_ceil(threads as usize) as u32;
+    unsafe {
+        ce_sample_mu_kernel::launch::<R>(
+            &client,
+            CubeCount::Static(blocks, 1, 1),
+            CubeDim::new_1d(threads),
+            ArrayArg::from_raw_parts(idata_h, packed.idata.len()),
+            ArrayArg::from_raw_parts(fdata_h, packed.fdata.len()),
+            ArrayArg::from_raw_parts(e_h, n),
+            ArrayArg::from_raw_parts(xb_h, n),
+            ArrayArg::from_raw_parts(xm_h, n),
+            ArrayArg::from_raw_parts(out_h.clone(), n),
+        );
+    }
+    let bytes = client.read_one(out_h).expect("mu readback");
     f64::from_bytes(&bytes).to_vec()
 }
