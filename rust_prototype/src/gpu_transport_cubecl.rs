@@ -22,13 +22,16 @@
 //! `trace_step`, `reflect_dir`) mirror the `gr_*` functions in
 //! `geom_recursive.cu` and the validated renderer kernel.
 //!
-//! STATUS — blocked by tracel-ai/cubecl#1336. The kernel compiles to
-//! valid WGSL but faults at dispatch on NVIDIA/Vulkan: too much
-//! thread-private `Array` state (the depth-4 coord stacks + the region
-//! stack) trips a SPIR-V private-storage bug. Shrinking the state isn't
-//! workable for recursive geometry, so transport stays on the CUDA
-//! backend until the fix lands. Kernel + host harness are kept in-tree,
-//! ready to re-enable; the batch test is `#[ignore]`d.
+//! STATUS — runs on **CUDA**, blocked on **Vulkan** (tracel-ai/cubecl#1336).
+//! The same `#[cube]` source compiles through CubeCL's CUDA runtime and
+//! runs correctly (`cuda_const_xs_batch_runs`: 4096 histories, every one
+//! absorbs-or-leaks exactly once, ~7.3k fission sites all inside the
+//! sphere). On wgpu/Vulkan it compiles to valid WGSL but faults at
+//! dispatch — too much thread-private `Array` state (the depth-4 coord
+//! stacks + region stack) trips a SPIR-V private-storage bug, which is
+//! Vulkan/SPIR-V-only. Shrinking the state isn't workable for recursive
+//! geometry, so the cross-vendor (Vulkan/Metal) path waits on the
+//! upstream fix; the Vulkan batch test is `#[ignore]`d, the CUDA one runs.
 
 use cubecl::prelude::*;
 
@@ -1243,6 +1246,76 @@ mod tests {
         assert!(batch.n_fissions > 0, "no fissions recorded");
         assert!(!batch.fission_sites.is_empty(), "empty fission bank");
         // (diagnostic: event cap may leave some alive)
+        for (x, y, z) in &batch.fission_sites {
+            let r = (x * x + y * y + z * z).sqrt();
+            assert!(r <= 10.0 + 1e-6, "fission site outside sphere: r={r}");
+        }
+    }
+
+    /// Same kernel, but compiled through CubeCL's **CUDA** runtime
+    /// instead of wgpu/Vulkan. cubecl#1336 is SPIR-V-only, so the CUDA
+    /// path should run the identical #[cube] source without the
+    /// private-Array dispatch fault. Only built with `--features cuda`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_const_xs_batch_runs() {
+        let geom = fissile_sphere();
+        let tables = build_host_tables(&geom);
+        let mats = [ConstXs {
+            sigma_t: 0.5,
+            sigma_a: 0.2,
+            sigma_f: 0.15,
+            nu_bar: 2.5,
+        }];
+        let packed = pack_transport(&tables, &geom, &mats);
+
+        let n = 4096usize;
+        let mut pos = Vec::with_capacity(n);
+        let mut dir = Vec::with_capacity(n);
+        let mut seeds = Vec::with_capacity(n);
+        for i in 0..n {
+            pos.push((0.0, 0.0, 0.0));
+            let a = (i as f64) * 0.013;
+            dir.push((a.cos(), a.sin() * 0.5, a.sin() * 0.5));
+            seeds.push((
+                0x4d595df4d0f33173u64.wrapping_add((i as u64).wrapping_mul(2862933555777941757)),
+                1,
+            ));
+        }
+
+        let device = cubecl::cuda::CudaDevice::default();
+        let result = std::panic::catch_unwind(|| {
+            const_xs_transport::<cubecl::cuda::CudaRuntime>(
+                &device, &packed, &pos, &dir, &seeds, 1000, n * 4,
+            )
+        });
+        let batch = match result {
+            Ok(Ok(b)) => b,
+            Ok(Err(e)) => panic!("CUDA transport returned error: {e}"),
+            Err(_) => {
+                eprintln!("no usable CUDA device — skipping CUDA const-XS transport test");
+                return;
+            }
+        };
+
+        eprintln!(
+            "const-XS CUDA batch: coll={} abs={} fis={} leak={} surf={} bank={}",
+            batch.n_collisions,
+            batch.n_absorptions,
+            batch.n_fissions,
+            batch.n_leakage,
+            batch.n_surf_xings,
+            batch.fission_sites.len()
+        );
+
+        assert!(batch.n_collisions > 0, "no collisions recorded");
+        assert!(batch.n_fissions > 0, "no fissions recorded");
+        assert!(!batch.fission_sites.is_empty(), "empty fission bank");
+        assert_eq!(
+            batch.n_absorptions + batch.n_leakage,
+            n as u64,
+            "every history should absorb or leak exactly once"
+        );
         for (x, y, z) in &batch.fission_sites {
             let r = (x * x + y * y + z * z).sqrt();
             assert!(r <= 10.0 + 1e-6, "fission site outside sphere: r={r}");

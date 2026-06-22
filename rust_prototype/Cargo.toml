@@ -141,7 +141,10 @@ indicatif = "0.17"
 
 [features]
 default = []
-cuda = ["cudarc"]
+# `cuda` enables both the legacy cudarc/.cu backend AND CubeCL's CUDA
+# runtime (so the same #[cube] kernels can compile to CUDA C, not just
+# SPIR-V — this dodges the Vulkan-only private-Array bug cubecl#1336).
+cuda = ["cudarc", "cubecl/cuda"]
 preview = ["rust-mc-sim/preview", "dep:minifb"]
 # In-terminal cross-section viewer for `preview_scene --tui`. Pulls in
 # ratatui (+ its re-exported crossterm). Independent of `preview` — the

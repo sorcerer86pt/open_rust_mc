@@ -2993,8 +2993,8 @@ impl GpuRecursiveContext {
 #[cfg(test)]
 mod raycast_tests {
     use super::*;
-    use crate::geometry::CellId;
-    use crate::geometry::cell::{Cell, inside, intersect_all, outside};
+    use crate::geometry::{CellId, Vec3};
+    use crate::geometry::cell::{Cell, CellFill, inside, intersect_all, outside};
     use crate::geometry::surface::{BoundaryCondition, Surface};
 
     /// Background colour the kernel paints for pixel-row `py` of `h`
