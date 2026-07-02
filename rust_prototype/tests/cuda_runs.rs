@@ -274,6 +274,7 @@ fn run_case_cuda(
         }),
         buffers: std::cell::RefCell::new(None),
         refill: std::cell::RefCell::new(None),
+        nxn_mode: 0,
     };
     let _ = materials;
     let outcome = runner.run(&cfg);

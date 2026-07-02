@@ -29,6 +29,10 @@ pub mod gpu_random_ray;
 pub mod gpu_recursive;
 #[cfg(feature = "cuda")]
 pub mod gpu_transport;
+pub mod gpu_ce_cubecl;
+pub(crate) mod gpu_cubecl_geom;
+pub mod gpu_render;
+pub mod gpu_transport_cubecl;
 pub mod hardware_profile;
 pub mod hdf5_reader;
 pub mod kernel;

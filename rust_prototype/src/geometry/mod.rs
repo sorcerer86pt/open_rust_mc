@@ -11,6 +11,7 @@ pub mod aabb;
 pub mod bvh;
 pub mod cell;
 pub mod coord;
+pub mod flat;
 pub mod lattice;
 pub mod ray;
 #[cfg(test)]
