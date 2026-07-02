@@ -336,8 +336,16 @@ fn rx_interp(
         if e_hi > e_lo {
             if xs_lo > f64::new(0.0) {
                 if xs_hi > f64::new(0.0) {
-                    // log-log
-                    let f = (energy / e_lo).ln() / (e_hi / e_lo).ln();
+                    // log-log, clamped to [0, 1] like
+                    // `ReactionKernel::reconstruct_interp`'s caller does
+                    // (`log_frac.clamp(0.0, 1.0)` in xs_provider.rs) —
+                    // `idx` is itself clamped to the last valid bracket,
+                    // so an `energy` outside the nuclide's grid range
+                    // would otherwise extrapolate the power law instead
+                    // of holding the boundary value.
+                    let f_raw = (energy / e_lo).ln() / (e_hi / e_lo).ln();
+                    let f_hi = select(f_raw > f64::new(1.0), f64::new(1.0), f_raw);
+                    let f = select(f_hi < f64::new(0.0), f64::new(0.0), f_hi);
                     let ratio = xs_hi / xs_lo;
                     out = xs_lo * (f * ratio.ln()).exp();
                 } else {
@@ -1023,7 +1031,7 @@ fn fis_sample_energy(idata: &Array<i32>, fdata: &Array<f64>, e_in: f64, rng: &mu
             let pb_v = u32::cast_from(idata[F_PB_V_OFF]);
             let a = fis_lin_lin(fdata, pa_e, pa_v, pa_n, e_in);
             let b = fis_lin_lin(fdata, pb_e, pb_v, pb_n, e_in);
-            let mut acc = f64::new(2.0);
+            let mut acc = f64::new(0.0);
             let mut done = false;
             for _i in 0..128u32 {
                 if !done {
@@ -1035,17 +1043,22 @@ fn fis_sample_energy(idata: &Array<i32>, fdata: &Array<f64>, e_in: f64, rng: &mu
                     let w = -a * (xi1.ln() + c * c * xi3.ln());
                     let term = a * a * b / 4.0;
                     let e_out = w + term + (2.0 * xi4 - 1.0) * (a * a * b * w).sqrt();
+                    acc = e_out;
                     if e_out > f64::new(0.0) && e_out <= max_e {
-                        acc = select(e_out > f64::new(1e-5), e_out, f64::new(1e-5));
                         done = true;
                     }
                 }
             }
-            out = acc;
+            // Clamp into [1e-5, max_e]: a no-op for the accepted case
+            // (already inside this range); on exhaustion it clamps the
+            // last attempted draw, mirroring `WattLaw::sample`'s safety
+            // valve — not a fixed sentinel energy.
+            let clamped_hi = select(acc > max_e, max_e, acc);
+            out = select(clamped_hi > f64::new(1e-5), clamped_hi, f64::new(1e-5));
         } else {
             // Maxwell (law 2) or Evaporation (law 3): pa = θ table.
             let theta = fis_lin_lin(fdata, pa_e, pa_v, pa_n, e_in);
-            let mut acc = f64::new(2.0);
+            let mut acc = f64::new(0.0);
             let mut done = false;
             for _i in 0..128u32 {
                 if !done {
@@ -1057,13 +1070,16 @@ fn fis_sample_energy(idata: &Array<i32>, fdata: &Array<f64>, e_in: f64, rng: &mu
                         -theta * (xi1.ln() + (f64::new(1.5707963267948966) * xi2).cos() * (f64::new(1.5707963267948966) * xi2).cos() * xi3.ln()),
                         -theta * (xi1 * xi2).ln(),
                     );
+                    acc = e_out;
                     if e_out > f64::new(0.0) && e_out <= max_e {
-                        acc = select(e_out > f64::new(1e-5), e_out, f64::new(1e-5));
                         done = true;
                     }
                 }
             }
-            out = acc;
+            // Same exhaustion-clamp as the Watt branch above, mirroring
+            // `MaxwellLaw::sample_maxwell` / `sample_evaporation`.
+            let clamped_hi = select(acc > max_e, max_e, acc);
+            out = select(clamped_hi > f64::new(1e-5), clamped_hi, f64::new(1e-5));
         }
     }
     out
@@ -1429,7 +1445,10 @@ fn ce_macro_rx(
         let xs_hi = fdata[(base + idx + 1u32) as usize];
         if e_hi > e_lo {
             if xs_lo > f64::new(0.0) && xs_hi > f64::new(0.0) {
-                let f = (e / e_lo).ln() / (e_hi / e_lo).ln();
+                // Clamped log-log — see `rx_interp`'s matching comment.
+                let f_raw = (e / e_lo).ln() / (e_hi / e_lo).ln();
+                let f_hi = select(f_raw > f64::new(1.0), f64::new(1.0), f_raw);
+                let f = select(f_hi < f64::new(0.0), f64::new(0.0), f_hi);
                 out = xs_lo * (f * (xs_hi / xs_lo).ln()).exp();
             } else {
                 let frac = (e - e_lo) / (e_hi - e_lo);
@@ -1689,7 +1708,7 @@ fn fis_sample_energy_base(
             let pb_v = fbase + u32::cast_from(idata[(ibase + F_PB_V_OFF as u32) as usize]);
             let a = fis_lin_lin(fdata, pa_e, pa_v, pa_n, e_in);
             let b = fis_lin_lin(fdata, pb_e, pb_v, pb_n, e_in);
-            let mut acc = f64::new(2.0);
+            let mut acc = f64::new(0.0);
             let mut done = false;
             for _i in 0..128u32 {
                 if !done {
@@ -1701,16 +1720,19 @@ fn fis_sample_energy_base(
                     let w = -a * (xi1.ln() + c * c * xi3.ln());
                     let term = a * a * b / 4.0;
                     let e_out = w + term + (2.0 * xi4 - 1.0) * (a * a * b * w).sqrt();
+                    acc = e_out;
                     if e_out > f64::new(0.0) && e_out <= max_e {
-                        acc = select(e_out > f64::new(1e-5), e_out, f64::new(1e-5));
                         done = true;
                     }
                 }
             }
-            out = acc;
+            // Clamp into [1e-5, max_e] — see `fis_sample_energy`'s Watt
+            // branch for the rationale (mirrors `WattLaw::sample`).
+            let clamped_hi = select(acc > max_e, max_e, acc);
+            out = select(clamped_hi > f64::new(1e-5), clamped_hi, f64::new(1e-5));
         } else {
             let theta = fis_lin_lin(fdata, pa_e, pa_v, pa_n, e_in);
-            let mut acc = f64::new(2.0);
+            let mut acc = f64::new(0.0);
             let mut done = false;
             for _i in 0..128u32 {
                 if !done {
@@ -1719,13 +1741,16 @@ fn fis_sample_energy_base(
                     let xi3 = fmax_small(ce_uniform_f(rng));
                     let cc = (f64::new(1.5707963267948966) * xi2).cos();
                     let e_out = select(law == 2i32, -theta * (xi1.ln() + cc * cc * xi3.ln()), -theta * (xi1 * xi2).ln());
+                    acc = e_out;
                     if e_out > f64::new(0.0) && e_out <= max_e {
-                        acc = select(e_out > f64::new(1e-5), e_out, f64::new(1e-5));
                         done = true;
                     }
                 }
             }
-            out = acc;
+            // Same exhaustion-clamp as above, mirroring
+            // `MaxwellLaw::sample_maxwell` / `sample_evaporation`.
+            let clamped_hi = select(acc > max_e, max_e, acc);
+            out = select(clamped_hi > f64::new(1e-5), clamped_hi, f64::new(1e-5));
         }
     }
     out
