@@ -44,7 +44,12 @@
 use cubecl::prelude::*;
 
 use crate::geometry::Geometry;
-use crate::geometry::flat::{self, HostTables};
+use crate::geometry::flat::{
+    self, check_gpu_rotation_supported, HostTables, FILL_LATTICE, FILL_MATERIAL, FILL_UNIVERSE,
+    FILL_VOID, REGION_HALFSPACE_NEG, REGION_HALFSPACE_POS, SURF_CYL_X, SURF_CYL_Y, SURF_CYL_Z,
+    SURF_PLANE_GENERAL, SURF_PLANE_X, SURF_PLANE_Y, SURF_PLANE_Z, SURF_SPHERE,
+};
+use crate::gpu_cubecl_geom::{cell_contains, grid_dist, surf_dist, surf_eval, MAX_DEPTH, MAX_DEPTH_USIZE, SURF_STRIDE};
 
 // ── meta header layout (u32 slots) ──────────────────────────────────
 // Scalar counts + element-offsets locating each sub-array inside the
@@ -84,32 +89,9 @@ const M_OFF_ABSORB: usize = 34;
 
 const META_LEN: usize = 40;
 
-// Tag constants — mirror `geometry::flat` (single source of truth).
-const SURF_PLANE_X: i32 = 0;
-const SURF_PLANE_Y: i32 = 1;
-const SURF_PLANE_Z: i32 = 2;
-const SURF_SPHERE: i32 = 3;
-const SURF_CYL_Z: i32 = 4;
-const SURF_CYL_X: i32 = 5;
-const SURF_CYL_Y: i32 = 6;
-const SURF_PLANE_GENERAL: i32 = 7;
-
-const REGION_HALFSPACE_POS: i32 = 0;
-const REGION_HALFSPACE_NEG: i32 = 1;
-const REGION_INTERSECTION: i32 = 2;
-const REGION_UNION: i32 = 3;
-const REGION_COMPLEMENT: i32 = 4;
-
-const FILL_MATERIAL: i32 = 0;
-const FILL_VOID: i32 = 1;
-const FILL_UNIVERSE: i32 = 2;
-const FILL_LATTICE: i32 = 3;
-#[allow(dead_code)]
-const FILL_HEX_LATTICE: i32 = 4;
-
-const MAX_DEPTH: u32 = 4;
-const MAX_DEPTH_USIZE: usize = 4;
-const SURF_STRIDE: u32 = 8; // f64 per surface in surf_params
+// Tag constants come from `crate::geometry::flat` (single source of
+// truth) and `crate::gpu_cubecl_geom` (shared walk depth/stride) —
+// imported above, not redeclared.
 
 // ── cam header layout (f64 slots) ───────────────────────────────────
 
@@ -222,13 +204,19 @@ fn push_f64(blob: &mut Vec<f64>, src: &[f64]) -> u32 {
 /// `0.0` = perfectly clear (air / void), a small positive value (≈0.04)
 /// gives a translucent fluid the ray accumulates through. Opaque
 /// materials ignore it. Length must match `palette` / `opaque`.
+///
+/// Errors if `geom` uses a per-cell `Mat3` rotation, which this walk
+/// can't represent (hex lattices are a documented, non-silent v1
+/// limitation instead — see the module doc comment — so they're not
+/// rejected here).
 pub fn pack_scene(
     t: &HostTables,
     geom: &Geometry,
     palette: &[[u8; 3]],
     opaque: &[bool],
     absorb: &[f64],
-) -> PackedScene {
+) -> Result<PackedScene, String> {
+    check_gpu_rotation_supported(geom)?;
     let mut idata: Vec<i32> = Vec::new();
     let mut fdata: Vec<f64> = Vec::new();
     let mut meta = vec![0u32; META_LEN];
@@ -294,177 +282,22 @@ pub fn pack_scene(
         }
     }
 
-    PackedScene {
+    Ok(PackedScene {
         meta,
         idata,
         fdata,
         aabb_min: lo,
         aabb_max: hi,
-    }
+    })
 }
 
 // ── Device helpers ──────────────────────────────────────────────────
-
-/// Evaluate surface `s_idx` at local point — sign tells which halfspace.
-/// Mirrors `gr_surf_eval`.
-#[cube]
-fn surf_eval(idata: &Array<i32>, fdata: &Array<f64>, surf_params_off: u32, surf_type_off: u32, s_idx: u32, x: f64, y: f64, z: f64) -> f64 {
-    let t = idata[(surf_type_off + s_idx) as usize];
-    let p = (surf_params_off + s_idx * SURF_STRIDE) as usize;
-    let mut out = f64::new(1e30);
-    if t == SURF_PLANE_X {
-        out = x - fdata[p];
-    } else {
-        if t == SURF_PLANE_Y {
-            out = y - fdata[p];
-        } else {
-            if t == SURF_PLANE_Z {
-                out = z - fdata[p];
-            } else {
-                if t == SURF_SPHERE {
-                    let dx = x - fdata[p];
-                    let dy = y - fdata[p + 1];
-                    let dz = z - fdata[p + 2];
-                    out = dx * dx + dy * dy + dz * dz - fdata[p + 3] * fdata[p + 3];
-                } else {
-                    if t == SURF_CYL_Z {
-                        let dx = x - fdata[p];
-                        let dy = y - fdata[p + 1];
-                        out = dx * dx + dy * dy - fdata[p + 2] * fdata[p + 2];
-                    } else {
-                        if t == SURF_CYL_X {
-                            let dy = y - fdata[p];
-                            let dz = z - fdata[p + 1];
-                            out = dy * dy + dz * dz - fdata[p + 2] * fdata[p + 2];
-                        } else {
-                            if t == SURF_CYL_Y {
-                                let dx = x - fdata[p];
-                                let dz = z - fdata[p + 1];
-                                out = dx * dx + dz * dz - fdata[p + 2] * fdata[p + 2];
-                            } else {
-                                if t == SURF_PLANE_GENERAL {
-                                    out = fdata[p] * x + fdata[p + 1] * y + fdata[p + 2] * z - fdata[p + 3];
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Distance from `(px,py,pz)` along unit `(dx,dy,dz)` to surface
-/// `s_idx`; `1e30` for no forward hit. Mirrors `gr_surf_dist`.
-#[cube]
-fn surf_dist(
-    idata: &Array<i32>,
-    fdata: &Array<f64>,
-    surf_params_off: u32,
-    surf_type_off: u32,
-    s_idx: u32,
-    px: f64,
-    py: f64,
-    pz: f64,
-    dx: f64,
-    dy: f64,
-    dz: f64,
-) -> f64 {
-    let t = idata[(surf_type_off + s_idx) as usize];
-    let p = (surf_params_off + s_idx * SURF_STRIDE) as usize;
-    let big = f64::new(1e30);
-    let tol = f64::new(1e-12);
-    let mut out = big;
-
-    if t == SURF_PLANE_X {
-        out = dist_plane(px, dx, fdata[p], big, tol);
-    } else {
-        if t == SURF_PLANE_Y {
-            out = dist_plane(py, dy, fdata[p], big, tol);
-        } else {
-            if t == SURF_PLANE_Z {
-                out = dist_plane(pz, dz, fdata[p], big, tol);
-            } else {
-                if t == SURF_SPHERE {
-                    out = dist_sphere(px, py, pz, dx, dy, dz, fdata[p], fdata[p + 1], fdata[p + 2], fdata[p + 3], big, tol);
-                } else {
-                    if t == SURF_CYL_Z {
-                        out = dist_cyl(px, py, dx, dy, fdata[p], fdata[p + 1], fdata[p + 2], big, tol);
-                    } else {
-                        if t == SURF_CYL_X {
-                            out = dist_cyl(py, pz, dy, dz, fdata[p], fdata[p + 1], fdata[p + 2], big, tol);
-                        } else {
-                            if t == SURF_CYL_Y {
-                                out = dist_cyl(px, pz, dx, dz, fdata[p], fdata[p + 1], fdata[p + 2], big, tol);
-                            } else {
-                                if t == SURF_PLANE_GENERAL {
-                                    let denom = fdata[p] * dx + fdata[p + 1] * dy + fdata[p + 2] * dz;
-                                    if denom.abs() > f64::new(1e-30) {
-                                        let tv = (fdata[p + 3] - (fdata[p] * px + fdata[p + 1] * py + fdata[p + 2] * pz)) / denom;
-                                        out = select(tv > tol, tv, big);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-#[cube]
-fn dist_plane(p: f64, d: f64, x0: f64, big: f64, tol: f64) -> f64 {
-    let mut out = big;
-    if d.abs() > f64::new(1e-300) {
-        let t = (x0 - p) / d;
-        out = select(t > tol, t, big);
-    }
-    out
-}
-
-#[cube]
-fn dist_sphere(px: f64, py: f64, pz: f64, dx: f64, dy: f64, dz: f64, cx: f64, cy: f64, cz: f64, r: f64, big: f64, tol: f64) -> f64 {
-    let rx = px - cx;
-    let ry = py - cy;
-    let rz = pz - cz;
-    let a = dx * dx + dy * dy + dz * dz;
-    let b = 2.0 * (rx * dx + ry * dy + rz * dz);
-    let c = rx * rx + ry * ry + rz * rz - r * r;
-    let disc = b * b - 4.0 * a * c;
-    let mut out = big;
-    if disc >= f64::new(0.0) {
-        let sq = disc.sqrt();
-        let t1 = (-b - sq) / (2.0 * a);
-        let t2 = (-b + sq) / (2.0 * a);
-        let pick = select(t1 > tol, t1, t2);
-        out = select(pick > tol, pick, big);
-    }
-    out
-}
-
-#[cube]
-fn dist_cyl(p1: f64, p2: f64, d1: f64, d2: f64, c1: f64, c2: f64, r: f64, big: f64, tol: f64) -> f64 {
-    let r1 = p1 - c1;
-    let r2 = p2 - c2;
-    let a = d1 * d1 + d2 * d2;
-    let mut out = big;
-    if a > f64::new(1e-300) {
-        let b = 2.0 * (r1 * d1 + r2 * d2);
-        let c = r1 * r1 + r2 * r2 - r * r;
-        let disc = b * b - 4.0 * a * c;
-        if disc >= f64::new(0.0) {
-            let sq = disc.sqrt();
-            let t1 = (-b - sq) / (2.0 * a);
-            let t2 = (-b + sq) / (2.0 * a);
-            let pick = select(t1 > tol, t1, t2);
-            out = select(pick > tol, pick, big);
-        }
-    }
-    out
-}
+//
+// surf_eval / surf_dist / cell_contains / grid_dist are shared with
+// `gpu_transport_cubecl` and `gpu_ce_cubecl` via `crate::gpu_cubecl_geom`
+// (single copy — this used to carry its own `1e-30` PLANE_GENERAL
+// tolerance where the other two files had `1e-300`; the shared copy
+// has one value, not three to keep in sync).
 
 /// Outward (then camera-facing) normal of surface `s_idx` at local
 /// `(x,y,z)`. Mirrors `gr_surf_normal`. Returns components via a length-3
@@ -543,62 +376,6 @@ fn surf_normal(
         n[1] = f64::new(0.0);
         n[2] = f64::new(1.0);
     }
-}
-
-/// Postfix CSG stack-machine: is local point inside cell `ci`'s region?
-/// Evaluates surfaces on demand (no precomputed `evals`). Mirrors
-/// `gr_cell_contains`. Returns 1 for inside, 0 otherwise.
-#[cube]
-fn cell_contains(
-    idata: &Array<i32>,
-    fdata: &Array<f64>,
-    surf_params_off: u32,
-    surf_type_off: u32,
-    region_op_off: u32,
-    region_arg_off: u32,
-    r_off: u32,
-    r_len: u32,
-    x: f64,
-    y: f64,
-    z: f64,
-) -> u32 {
-    let mut stack = Array::<u32>::new(16usize);
-    let mut sp = 0usize;
-    for i in 0..r_len {
-        let op = idata[(region_op_off + r_off + i) as usize];
-        let arg = idata[(region_arg_off + r_off + i) as usize];
-        if op == REGION_HALFSPACE_POS {
-            let v = surf_eval(idata, fdata, surf_params_off, surf_type_off, u32::cast_from(arg), x, y, z);
-            stack[sp] = select(v > f64::new(0.0), 1u32, 0u32);
-            sp += 1;
-        } else {
-            if op == REGION_HALFSPACE_NEG {
-                let v = surf_eval(idata, fdata, surf_params_off, surf_type_off, u32::cast_from(arg), x, y, z);
-                stack[sp] = select(v < f64::new(0.0), 1u32, 0u32);
-                sp += 1;
-            } else {
-                if op == REGION_INTERSECTION {
-                    let b = stack[sp - 1];
-                    let a = stack[sp - 2];
-                    sp -= 1;
-                    stack[sp - 1] = select(a + b == 2u32, 1u32, 0u32);
-                } else {
-                    if op == REGION_UNION {
-                        let b = stack[sp - 1];
-                        let a = stack[sp - 2];
-                        sp -= 1;
-                        stack[sp - 1] = select(a + b > 0u32, 1u32, 0u32);
-                    } else {
-                        if op == REGION_COMPLEMENT {
-                            let a = stack[sp - 1];
-                            stack[sp - 1] = select(a == 0u32, 1u32, 0u32);
-                        }
-                    }
-                }
-            }
-        }
-    }
-    select(sp == 1usize, stack[0], 0u32)
 }
 
 // ── Kernel ──────────────────────────────────────────────────────────
@@ -1077,52 +854,6 @@ fn slab(o: f64, d: f64, lo: f64, hi: f64, tmin: &mut f64, tmax: &mut f64, miss: 
     }
 }
 
-/// Rect-lattice distance to next grid crossing along the ray. Mirrors
-/// `gr_lattice_distance_to_grid`.
-#[cube]
-fn grid_dist(
-    px: f64,
-    py: f64,
-    pz: f64,
-    dx: f64,
-    dy: f64,
-    dz: f64,
-    ox: f64,
-    oy: f64,
-    oz: f64,
-    pitx: f64,
-    pity: f64,
-    pitz: f64,
-    ix: i32,
-    iy: i32,
-    iz: i32,
-) -> f64 {
-    let big = f64::new(1e30);
-    let mut best = big;
-    best = grid_axis(px - ox, dx, pitx, ix, best);
-    best = grid_axis(py - oy, dy, pity, iy, best);
-    best = grid_axis(pz - oz, dz, pitz, iz, best);
-    best
-}
-
-#[cube]
-fn grid_axis(pos: f64, d: f64, pitch: f64, idx: i32, cur_best: f64) -> f64 {
-    let mut best = cur_best;
-    if d.abs() > f64::new(1e-300) {
-        let fwd = d > f64::new(0.0);
-        let target = select(fwd, f64::cast_from(idx + 1i32) * pitch, f64::cast_from(idx) * pitch);
-        let mut tt = (target - pos) / d;
-        if tt <= f64::new(0.0) {
-            let nxt = select(fwd, f64::cast_from(idx + 2i32) * pitch, f64::cast_from(idx - 1i32) * pitch);
-            tt = (nxt - pos) / d;
-        }
-        if tt > f64::new(0.0) && tt < best {
-            best = tt;
-        }
-    }
-    best
-}
-
 /// `max(x, 0)` without the `FloatOps`/`Ord` method ambiguity.
 #[cube]
 fn fmax0(x: f64) -> f64 {
@@ -1257,7 +988,7 @@ mod tests {
         let palette = [[200u8, 60, 60], [10, 10, 10]];
         let opaque = [true, false];
         let absorb = [0.0f64, 0.0];
-        let packed = pack_scene(&tables, &geom, &palette, &opaque, &absorb);
+        let packed = pack_scene(&tables, &geom, &palette, &opaque, &absorb).expect("pack_scene");
 
         let w = 96u32;
         let h = 96u32;

@@ -1471,7 +1471,8 @@ fn render_cubecl_to_png(args: &Args, out: &Path) {
         })
         .collect();
     let tables = build_host_tables(&geometry);
-    let packed = pack_scene(&tables, &geometry, &palette, &opaque, &absorb);
+    let packed = pack_scene(&tables, &geometry, &palette, &opaque, &absorb)
+        .expect("pack_scene (does this scene use an unsupported per-cell rotation?)");
 
     let target = [
         (packed.aabb_min[0] + packed.aabb_max[0]) * 0.5,

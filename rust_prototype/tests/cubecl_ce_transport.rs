@@ -98,7 +98,7 @@ fn cubecl_ce_transport_runs() {
             .map(|n| (n.xs_kernel_idx, n.atom_density))
             .collect(),
     }];
-    let scene = ce::pack_ce_full(&tables, &geom, &ce_nucs, &ang, &fis, &mats);
+    let scene = ce::pack_ce_full(&tables, &geom, &ce_nucs, &ang, &fis, &mats).expect("pack_ce_full");
     let mat_kt = vec![294.0 * 8.617333262e-5];
 
     // Source: isotropic at origin, fission-spectrum-ish 2 MeV.

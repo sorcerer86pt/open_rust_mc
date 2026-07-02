@@ -124,7 +124,7 @@ mod cuda_main {
 
         // Leg B — CubeCL on the CUDA runtime.
         let tables = build_host_tables(&geom);
-        let packed = cc::pack_transport(&tables, &geom, &cc_mats);
+        let packed = cc::pack_transport(&tables, &geom, &cc_mats).expect("cubecl pack_transport");
         let device = cubecl::cuda::CudaDevice::default();
         let t = Instant::now();
         let ccb = cc::const_xs_transport::<cubecl::cuda::CudaRuntime>(

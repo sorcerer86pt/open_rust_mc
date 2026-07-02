@@ -260,6 +260,75 @@ pub fn finite_aabb(lo: Vec3, hi: Vec3) -> ([f64; 3], [f64; 3]) {
     )
 }
 
+/// Reject per-cell `Mat3` rotation, which the flattened SoA walk
+/// (CubeCL renderer / transport, and the legacy CUDA recursive
+/// descent) cannot represent, instead of silently mis-transporting or
+/// mis-rendering it.
+///
+/// CPU recursive descent applies rotations in `CoordStack::local_pos`
+/// / `local_dir` (`geometry/coord.rs`, `geometry/ray.rs`); every GPU
+/// walk descends axis-aligned only and never applies a rotation
+/// matrix during cell entry.
+///
+/// Call this before packing/uploading a scene to any CubeCL backend.
+/// [`check_gpu_supported`] also calls this and additionally rejects
+/// hex lattices, for backends (transport) where a hex cell resolving
+/// as a silent leak would corrupt physics results — the renderer
+/// instead documents hex as a contained, non-silent v1 limitation
+/// (renders as background), so it calls this rotation-only check
+/// directly rather than `check_gpu_supported`.
+pub fn check_gpu_rotation_supported(geom: &Geometry) -> Result<(), String> {
+    if let Some((cell_idx, _)) = geom
+        .cells
+        .iter()
+        .enumerate()
+        .find(|(_, c)| c.rotation.is_some())
+    {
+        return Err(format!(
+            "GPU geometry walk does not support per-cell Mat3 \
+             rotations yet (cell index {cell_idx} has `rotation = \
+             Some(...)`). CPU recursive descent applies rotations in \
+             `CoordStack::local_pos / local_dir`; the GPU descent path \
+             has no equivalent. Use Runner.Cpu for this scene or \
+             remove the cell rotation."
+        ));
+    }
+    Ok(())
+}
+
+/// Reject geometry features the flattened SoA transport walk (CubeCL
+/// `gpu_transport_cubecl` / `gpu_ce_cubecl`) cannot represent, instead
+/// of silently mis-transporting them.
+///
+/// - **Per-cell `Mat3` rotation** — see [`check_gpu_rotation_supported`].
+/// - **`CellFill::HexLattice`**: the CubeCL walk (`gpu_cubecl_geom`)
+///   has no hex descent (only the legacy CUDA `.cu` `gr_find_cell`
+///   does); a hex cell would resolve as an immediate leak instead of
+///   the fill it names, silently under-transporting the source.
+///
+/// Call this before packing/uploading a scene to `pack_transport` /
+/// `pack_ce_full`.
+pub fn check_gpu_supported(geom: &Geometry) -> Result<(), String> {
+    check_gpu_rotation_supported(geom)?;
+    if let Some((cell_idx, _)) = geom
+        .cells
+        .iter()
+        .enumerate()
+        .find(|(_, c)| matches!(c.fill, CellFill::HexLattice(_)))
+    {
+        return Err(format!(
+            "GPU geometry walk does not support CellFill::HexLattice \
+             yet (cell index {cell_idx}). Only the legacy CUDA \
+             recursive descent (`gr_find_cell` in geom_recursive.cu) \
+             implements hex-lattice traversal; the CubeCL walk \
+             (gpu_cubecl_geom) would resolve this cell as an immediate \
+             leak. Use Runner.Cpu / the legacy CUDA backend for hex \
+             scenes."
+        ));
+    }
+    Ok(())
+}
+
 /// Flatten a whole `Geometry` into [`HostTables`]. Deterministic and
 /// side-effect-free — the shared entry point for every GPU backend.
 pub fn build_host_tables(geom: &Geometry) -> HostTables {
